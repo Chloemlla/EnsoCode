@@ -145,6 +145,10 @@ export type BrowserOp = (typeof BROWSER_OPS)[number];
 export const MEMORY_OPS = ['search', 'capture', 'crystallize'] as const;
 export type MemoryOp = (typeof MEMORY_OPS)[number];
 
+/** 桌面 computer 活在 Main，worker 只发 computer-invoke；guest JS 一次 run。 */
+export const COMPUTER_OPS = ['run'] as const;
+export type ComputerOp = (typeof COMPUTER_OPS)[number];
+
 /** 待审批请求（worker → 渲染层） */
 export interface ApprovalRequestInfo {
   requestId: string;
@@ -1090,6 +1094,14 @@ export type AgentCommand =
   | { type: 'workflow-stop'; identity: SessionIdentity; runId: string }
   | { type: 'subagent-stop'; identity: SessionIdentity; agentId: string }
   | {
+      type: 'computer-result';
+      identity: SessionIdentity | ChildSessionIdentity;
+      requestId: string;
+      ok: boolean;
+      result?: unknown;
+      error?: string;
+    }
+  | {
       type: 'rewind';
       identity: SessionIdentity;
       entryId?: string;
@@ -1569,6 +1581,14 @@ export type AgentWorkerEvent =
       identity: SessionIdentity | ChildSessionIdentity;
       seq: number;
       run: WorkflowRunSnapshot;
+    }
+  | {
+      type: 'computer-invoke';
+      identity: SessionIdentity | ChildSessionIdentity;
+      seq: number;
+      requestId: string;
+      op: ComputerOp;
+      params: unknown;
     }
   | { type: 'task-started'; identity: SessionIdentity; seq: number; task: BackgroundTaskInfo }
   | {
@@ -2827,7 +2847,8 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ? (value as unknown as AgentCommand)
         : null;
     case 'browser-result':
-    case 'memory-result': {
+    case 'memory-result':
+    case 'computer-result': {
       if (
         !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
         !parseAnySessionIdentity(value.identity) ||
@@ -3133,6 +3154,12 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
         MEMORY_OPS.includes(value.op as MemoryOp)
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    case 'computer-invoke':
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
+        isNonEmptyString(value.requestId) &&
+        COMPUTER_OPS.includes(value.op as ComputerOp)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'workspace-branch-context-consumed':

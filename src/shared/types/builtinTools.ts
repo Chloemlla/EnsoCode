@@ -56,14 +56,20 @@ export const BUILTIN_TOOLS: BuiltinToolInfo[] = [
     description:
       'Run JavaScript in an isolated sandbox that can call session tools. Intermediate reads and edits stay out of the chat; only the returned value is added to the conversation.',
   },
+  {
+    id: 'computer',
+    name: 'Computer',
+    description:
+      'Host desktop: list windows, screenshot, accessibility tree, and input. Default off. Not the built-in browser.',
+  },
 ];
 
 /**
  * 新会话/新安装默认关闭的内置工具。用户打开后从 disabledBuiltinTools 里去掉。
- * memory 默认关闭是产品决策：它依赖的 embedding 模型不随安装包内置，用户启用后才按需下载；
- * 未启用时也不创建 memory.db（见 main/services/memoryHost.ts 的懒开）。
+ * memory 默认关闭是产品决策：它依赖的 embedding 模型不随安装包内置。
+ * computer 默认关闭：桌面键鼠不可回滚，需显式打开并授予系统权限。
  */
-export const DEFAULT_DISABLED_BUILTIN_TOOLS = ['memory'] as const;
+export const DEFAULT_DISABLED_BUILTIN_TOOLS = ['memory', 'computer'] as const;
 
 export function effectiveSubagentAllowedModes(
   configured: unknown,

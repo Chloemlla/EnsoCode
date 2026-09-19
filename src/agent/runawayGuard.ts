@@ -87,6 +87,12 @@ export class RunawayGuard {
       this.poll = bump(this.poll, `${taskId}\0${fingerprint(result.text)}`);
       this.action = { key: '', count: 0 };
       this.result = { key: '', count: 0 };
+    } else if (toolName === 'computer') {
+      this.action = { key: '', count: 0 };
+      this.result = result.isError
+        ? { key: '', count: 0 }
+        : bump(this.result, fingerprint(result.text));
+      this.poll = { key: '', count: 0 };
     } else {
       this.action = bump(this.action, `${toolName}\0${fingerprint(args)}`);
       this.result = result.isError

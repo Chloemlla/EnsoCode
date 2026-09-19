@@ -20,7 +20,7 @@ describe('isWorkflowAvailable', () => {
 
 describe('effectiveDisabledBuiltinTools', () => {
   it('缺字段时用默认关闭列表：memory 默认关，其余全开', () => {
-    expect(effectiveDisabledBuiltinTools(undefined)).toEqual(['memory']);
+    expect(effectiveDisabledBuiltinTools(undefined)).toEqual(['memory', 'computer']);
     for (const id of DEFAULT_DISABLED_BUILTIN_TOOLS) {
       expect(
         BUILTIN_TOOLS.some((tool) => tool.id === id),

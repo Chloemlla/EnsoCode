@@ -1206,6 +1206,14 @@ const electronAPI = {
     },
   },
 
+  computer: {
+    capabilities: (): Promise<
+      { ok: true; capabilities: ComputerCapabilities } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_CAPABILITIES),
+    openPermissions: (kind: 'screen' | 'accessibility'): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_OPEN_PERMISSIONS, kind),
+  },
+
   workspaceSearch: {
     query: (request: WorkspaceSearchQueryRequest): Promise<WorkspaceSearchQueryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_SEARCH_QUERY, request),
@@ -1215,3 +1223,5 @@ const electronAPI = {
 export type ElectronAPI = typeof electronAPI;
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
+
+import type { ComputerCapabilities } from '@shared/computer/types';

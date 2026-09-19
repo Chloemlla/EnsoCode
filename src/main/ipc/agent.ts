@@ -75,6 +75,7 @@ import {
   rewindSession,
   sendAgentCommand,
   sendBrowserResultToSession,
+  sendComputerResultToSession,
   sendMemoryResultToSession,
   setAgentEventListener,
   setPinnedSessions,
@@ -95,6 +96,7 @@ import { AgentService } from '../services/agentService';
 import { pickBrowserFileRoot, setBrowserFileRootResolver } from '../services/browserFileRoot';
 import { browserHost } from '../services/browserHost';
 import { chatModelsRoot } from '../services/chatModels';
+import { computerHost } from '../services/computerHost';
 import { reloadConversation } from '../services/conversationReload';
 import { searchFiles } from '../services/fileSearch';
 import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
@@ -983,6 +985,7 @@ export function registerAgentHandlers(): void {
     if (workerEvent.type === 'parent-ended') {
       forgetParentToolProfile(workerEvent.identity.sessionId);
       void browserHost.closeForSession(workerEvent.identity.sessionId, { force: true });
+      computerHost.close(workerEvent.identity.sessionId);
       // 会话结束 / 闲置回收：从权威 jsonl 异步蒸馏长期记忆（开关、幂等、失败全部在 memoryHost 内收口）
       const sessionFile = agentSessionIndex.sessionFile(workerEvent.identity);
       if (sessionFile) {
@@ -1028,6 +1031,32 @@ export function registerAgentHandlers(): void {
         (result) => sendMemoryResultToSession(identity, requestId, { ok: true, result }),
         (error: unknown) =>
           sendMemoryResultToSession(identity, requestId, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+      );
+      return;
+    }
+    if (workerEvent.type === 'computer-invoke') {
+      const { identity, requestId, op, params } = workerEvent;
+      const conversation = sourceAuthority?.conversation(rootSessionId(identity));
+      const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
+      const projectId = project?.state === 'active' ? project.projectId : null;
+      const state = readSettingsState() ?? {};
+      const disabled = resolveDisabledBuiltinTools(state.disabledBuiltinTools, {
+        disabledBuiltinTools: projectDisabledBuiltinTools(state.projects, projectId ?? undefined),
+      });
+      if (disabled.includes('computer')) {
+        sendComputerResultToSession(identity, requestId, {
+          ok: false,
+          error: 'Computer tool is disabled',
+        });
+        return;
+      }
+      void computerHost.invoke(identity.sessionId, op, params).then(
+        (result) => sendComputerResultToSession(identity, requestId, { ok: true, result }),
+        (error: unknown) =>
+          sendComputerResultToSession(identity, requestId, {
             ok: false,
             error: error instanceof Error ? error.message : String(error),
           })

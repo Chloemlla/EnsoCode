@@ -51,6 +51,13 @@ export const globalShortcut = {
   unregisterAll: () => {},
 };
 
+export const nativeImage = {
+  createFromBuffer: (buf: Buffer) => ({
+    getSize: () => ({ width: 100, height: 50 }),
+    crop: () => ({ toPNG: () => buf }),
+  }),
+};
+
 export default {
   app,
   ipcMain,
@@ -65,4 +72,5 @@ export default {
   powerMonitor,
   powerSaveBlocker,
   globalShortcut,
+  nativeImage,
 };

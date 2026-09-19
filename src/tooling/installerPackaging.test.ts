@@ -118,4 +118,9 @@ describe('installer packaging', () => {
     expect(yml).toContain('!node_modules/@mariozechner/clipboard');
     expect(yml).toContain('src/tooling/stripPackagedNatives.mjs');
   });
+
+  it('mac dir/local builds keep hardened runtime entitlements for native modules', () => {
+    expect(yml).toContain('build/entitlements.mac.plist');
+    expect(yml).toContain('hardenedRuntime: true');
+  });
 });

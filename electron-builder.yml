@@ -76,6 +76,7 @@ asarUnpack:
   - node_modules/sqlite-vec-*/**
   # onnxruntime-node 的 .node 绑定与 bin/ 下的 ORT 动态库同样不能从 asar 内加载（onnx.ts 动态 require）
   - node_modules/onnxruntime-node/**/*.node
+  - node_modules/koffi/**/*.node
   - node_modules/onnxruntime-node/bin/**
   # node-datachannel 平台预编译；asar 内 dlopen 失败
   - node_modules/@node-datachannel/**/*.node
@@ -83,6 +84,8 @@ asarUnpack:
   - node_modules/@vscode/ripgrep/bin/**
 mac:
   category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
   # electron-builder 默认三项 + 麦克风
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist

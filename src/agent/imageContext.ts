@@ -54,9 +54,13 @@ function pathOfCall(call: ToolCallBlock | undefined): string | undefined {
 
 function placeholder(block: ImageBlock, source: string): { type: 'text'; text: string } {
   const mime = block.mimeType ?? 'image';
+  const recapture = /\bcomputer\b/i.test(source) || /screenshot/i.test(source);
+  const hint = recapture
+    ? 'already seen earlier; take a new screenshot if you need the pixels — click coordinates belong to the latest screenshot'
+    : 'already seen earlier in this conversation; re-read the file if you need it again';
   return {
     type: 'text',
-    text: `[image omitted from context: ${mime}${source ? `, ${source}` : ''} — already seen earlier in this conversation; re-read the file if you need it again]`,
+    text: `[image omitted from context: ${mime}${source ? `, ${source}` : ''} — ${hint}]`,
   };
 }
 

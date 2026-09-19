@@ -1,3 +1,5 @@
+import { computerPermissionGuideKind } from '@shared/computer/permissionGuide';
+import type { ComputerCapabilities } from '@shared/computer/types';
 import { BUILTIN_TOOLS, EDIT_MODES, type EditMode, isEditMode } from '@shared/types';
 import type { AgentMode } from '@shared/types/agent';
 import type { BrowserClearKind } from '@shared/types/browser';
@@ -10,15 +12,26 @@ import {
   ListTodo,
   type LucideIcon,
   MessageCircleQuestion,
+  Monitor,
   Search,
   Shrink,
   SquareTerminal,
+  TriangleAlert,
   Users,
   Workflow,
   Wrench,
 } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Select,
   SelectItem,
@@ -51,6 +64,7 @@ const TOOL_ICON: Record<string, LucideIcon> = {
   background_tasks: SquareTerminal,
   memory: Brain,
   isolated_sandbox: Box,
+  computer: Monitor,
 };
 
 function ToolRow({
@@ -117,6 +131,37 @@ export function BuiltinToolsSettings() {
     setCleared(kind);
     setTimeout(() => setCleared(null), 2000);
   };
+  const computerEnabled = !disabled.includes('computer');
+  const [capabilities, setCapabilities] = useState<ComputerCapabilities | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
+  useEffect(() => {
+    if (!computerEnabled) {
+      setCapabilities(null);
+      return;
+    }
+    let cancelled = false;
+    void window.electronAPI.computer.capabilities().then((result) => {
+      if (!cancelled && result.ok) setCapabilities(result.capabilities);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [computerEnabled]);
+  useEffect(() => {
+    if (!guideOpen) return;
+    let cancelled = false;
+    const load = () => {
+      void window.electronAPI.computer.capabilities().then((result) => {
+        if (!cancelled && result.ok) setCapabilities(result.capabilities);
+      });
+    };
+    load();
+    const id = window.setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [guideOpen]);
 
   return (
     <div className="space-y-6">
@@ -145,7 +190,10 @@ export function BuiltinToolsSettings() {
                 />
                 <Switch
                   checked={!disabled.includes(tool.id)}
-                  onCheckedChange={(checked) => toggle(tool.id, checked)}
+                  onCheckedChange={(checked) => {
+                    toggle(tool.id, checked);
+                    if (tool.id === 'computer' && checked) setGuideOpen(true);
+                  }}
                 />
               </>
             }
@@ -176,6 +224,50 @@ export function BuiltinToolsSettings() {
                 )}
               </div>
             ) : null}
+            {tool.id === 'computer' && computerEnabled ? (
+              <div className="space-y-2" data-settings-row="tools.computer">
+                <p className="text-muted-foreground text-xs">
+                  {t(
+                    'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode.'
+                  )}
+                </p>
+                {capabilities && (
+                  <p className="text-muted-foreground text-xs">
+                    {t(
+                      capabilities.capturePermission === 'granted'
+                        ? 'Capture: granted'
+                        : 'Capture: denied'
+                    )}
+                    {' · '}
+                    {t(
+                      capabilities.axPermission === 'granted'
+                        ? 'Input/AX: granted'
+                        : 'Input/AX: denied'
+                    )}
+                    {capabilities.detail ? ` · ${capabilities.detail}` : ''}
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setGuideOpen(true)}>
+                    {t('Show permission guide')}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void window.electronAPI.computer.openPermissions('screen')}
+                  >
+                    {t('Request Screen Recording')}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void window.electronAPI.computer.openPermissions('accessibility')}
+                  >
+                    {t('Request Accessibility')}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {tool.id === 'browser' ? (
               <div className="space-y-2">
                 <p className="text-muted-foreground text-xs">
@@ -200,6 +292,12 @@ export function BuiltinToolsSettings() {
             ) : null}
           </ToolRow>
         ))}
+
+        <ComputerPermissionGuideDialog
+          open={guideOpen}
+          capabilities={capabilities}
+          onOpenChange={setGuideOpen}
+        />
 
         <ToolRow
           icon={FoldVertical}
@@ -250,5 +348,87 @@ export function BuiltinToolsSettings() {
         />
       </div>
     </div>
+  );
+}
+
+function ComputerPermissionGuideDialog({
+  open,
+  capabilities,
+  onOpenChange,
+}: {
+  open: boolean;
+  capabilities: ComputerCapabilities | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const kind = capabilities ? computerPermissionGuideKind(capabilities) : null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md" zIndexLevel="nested">
+        <DialogHeader>
+          <DialogTitle>{t('Grant Computer permissions')}</DialogTitle>
+          <DialogDescription>
+            {kind === 'unsupported'
+              ? t('This platform cannot operate the desktop yet.')
+              : kind === 'ready'
+                ? t('Computer is ready. Start a new session to use it.')
+                : t(
+                    'The agent can screenshot windows and control the mouse and keyboard. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode. Only new sessions pick up the tool.'
+                  )}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-3">
+          {!capabilities && <p className="text-muted-foreground text-sm">{t('Loading…')}</p>}
+          {kind === 'needs-permission' && (
+            <div className="flex gap-2 rounded-md border border-destructive/32 bg-destructive/8 p-3 text-sm">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+              <p>
+                {t(
+                  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode.'
+                )}
+              </p>
+            </div>
+          )}
+          {capabilities && kind !== 'unsupported' && (
+            <div className="space-y-2">
+              <p className="text-muted-foreground text-xs">
+                {t(
+                  capabilities.capturePermission === 'granted'
+                    ? 'Capture: granted'
+                    : 'Capture: denied'
+                )}
+                {' · '}
+                {t(
+                  capabilities.axPermission === 'granted' ? 'Input/AX: granted' : 'Input/AX: denied'
+                )}
+                {capabilities.detail ? ` · ${capabilities.detail}` : ''}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void window.electronAPI.computer.openPermissions('screen')}
+                >
+                  {t('Request Screen Recording')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void window.electronAPI.computer.openPermissions('accessibility')}
+                >
+                  {t('Request Accessibility')}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogPanel>
+        <DialogFooter className="sm:justify-end">
+          <Button size="sm" onClick={() => onOpenChange(false)}>
+            {t('Done')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

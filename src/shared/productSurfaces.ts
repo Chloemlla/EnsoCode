@@ -503,6 +503,11 @@ export const PRODUCT_SURFACE_INVENTORY = {
     kind: 'action',
     label: 'Search and capture long-term memory',
   },
+  'coding-tools.computer': {
+    domain: 'coding-tools',
+    kind: 'action',
+    label: 'Use host desktop computer',
+  },
 } as const satisfies Record<string, ProductSurfaceInventoryItem>;
 
 export type ProductSurfaceId = keyof typeof PRODUCT_SURFACE_INVENTORY;

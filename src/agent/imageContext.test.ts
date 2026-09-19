@@ -99,6 +99,20 @@ describe('pruneHistoricalImages', () => {
     expect(texts(out[2])[0]).toContain('image/jpeg');
   });
 
+  it('computer 截图占位不叫人 re-read file，提示重新截图', () => {
+    const messages: ContextMessage[] = [
+      user(text('点一下')),
+      assistant([{ id: 'c1', name: 'computer', args: { code: 'await desktop.screenshot()' } }]),
+      toolResult('c1', 'computer', img('SHOT')),
+      user(text('继续')),
+    ];
+    const out = pruneHistoricalImages(messages);
+    expect(images(out[2])).toHaveLength(0);
+    expect(texts(out[2])[0]).toContain('computer');
+    expect(texts(out[2])[0]).not.toMatch(/re-read the file/);
+    expect(texts(out[2])[0]).toMatch(/screenshot/i);
+  });
+
   it('脏输入不崩：content 是字符串或缺失的消息原样通过', () => {
     const messages: ContextMessage[] = [
       { role: 'user', content: 'plain' },
