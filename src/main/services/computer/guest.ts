@@ -7,8 +7,10 @@ import { COORDINATE_SAFE_MAX_HEIGHT, COORDINATE_SAFE_MAX_WIDTH } from '@shared/c
 import { isReadOnlyAllowed } from '@shared/computer/readOnly';
 import type { ComputerRunResult, ComputerScreenshot } from '@shared/computer/types';
 import { JSException, type JSValueHandle, QuickJS } from 'quickjs-wasi';
+import { describeAxOutcome } from './axStatus';
 import type { DesktopBackend, PointerOptions } from './backend';
 import { cropPngAround } from './clickCrop';
+import { resolveMacKey } from './macKey';
 import { normalizeScrollDelta } from './scrollDelta';
 import { matchWindow, resolveWindow } from './windowMatch';
 
@@ -142,7 +144,7 @@ function win(info) {
     ...info,
     screenshot(opts) { return host('screenshot', { target: id, silent: !!(opts && opts.silent) }); },
     ax(opts) { return host('ax', { target: id, ...(opts || {}) }); },
-    find(query) { return host('find', { target: id, ...(query || {}) }).then((xs) => xs.map(el)); },
+    find(query) { return host('find', { target: id, ...(query || {}) }).then((xs) => (Array.isArray(xs) ? xs : []).map(el)); },
     ref(reference) { return host('ref', { ref: String(reference) }).then(el); },
     click(x, y, opts) { return host('click', { target: id, x, y, ...(opts || {}) }); },
     doubleClick(x, y, opts) { return host('click', { target: id, x, y, count: 2, ...(opts || {}) }); },
@@ -160,7 +162,7 @@ function win(info) {
   };
 }
 globalThis.desktop = {
-  windows(filter) { return host('windows', filter || {}).then((xs) => xs.map(win)); },
+  windows(filter) { return host('windows', filter || {}).then((xs) => (Array.isArray(xs) ? xs : []).map(win)); },
   async window(idOrFilter) { return win(await host('window', idOrFilter)); },
   async focusedWindow() { return win(await host('focusedWindow', {})); },
   async focused() { return win(await host('focusedWindow', {})); },
@@ -172,10 +174,10 @@ globalThis.desktop = {
   press(chord, opts) { return host('press', { target: 'desktop', chord, ...(opts || {}) }); },
   elementAt(x, y) { return host('elementAt', { x, y }).then((n) => n ? el(n) : { axUnavailable: true, message: 'AX unavailable on this target' }); },
   focusedElement() { return host('focusedElement', {}).then((n) => n ? el(n) : { axUnavailable: true, message: 'AX unavailable on this target' }); },
-  clipboard: {
+  clipboard: Object.assign(function clipboard() { return globalThis.desktop.clipboard; }, {
     read() { return host('clipboard.read', {}); },
     write(text) { return host('clipboard.write', { text: String(text) }); },
-  },
+  }),
 };
 globalThis.assert = (cond, message) => {
   if (!cond) throw new Error(message || 'assertion failed');
@@ -476,6 +478,11 @@ export async function runComputerGuest(input: {
             ok: true,
             target: String(args.target ?? ''),
             keys,
+            mapped: keys.map((key) => {
+              const resolved = resolveMacKey(key);
+              return { key, code: resolved.code ?? null, modifier: resolved.modifier };
+            }),
+            unmapped: keys.filter((key) => resolveMacKey(key).code === undefined),
             delivery: pointerOpts(args)?.delivery ?? 'foreground',
           };
         }
@@ -491,14 +498,36 @@ export async function runComputerGuest(input: {
           return raisedWindow ? { ...raisedWindow, focused: true } : { id: raised, focused: true };
         }
         case 'ax': {
-          const nodes = await input.backend.axSnapshot(String(args.target ?? ''), {
-            maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
-            all: args.all === true,
-          });
-          return (
-            formatAxTree(nodes) ||
-            'AX tree empty — this app does not expose accessibility; use screenshot coordinates. click(x,y) uses the latest screenshot pixels.'
-          );
+          try {
+            const nodes = await input.backend.axSnapshot(String(args.target ?? ''), {
+              maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
+              all: args.all === true,
+            });
+            return (
+              formatAxTree(nodes) || describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 })
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const name = error instanceof Error ? error.name : '';
+            if (
+              name === 'PermissionError' ||
+              message === 'AX_TCC_DENIED' ||
+              message.includes('Accessibility is denied')
+            ) {
+              return describeAxOutcome({ trusted: false, status: -25211, nodeCount: 0 });
+            }
+            if (message === 'AX_TIMEOUT') {
+              return describeAxOutcome({ trusted: true, status: -25204, nodeCount: 0 });
+            }
+            if (message.startsWith('AX_STATUS_')) {
+              return describeAxOutcome({
+                trusted: true,
+                status: Number(message.slice(10)) || -1,
+                nodeCount: 0,
+              });
+            }
+            throw error;
+          }
         }
         case 'find':
           return input.backend.axQuery(String(args.target ?? ''), {

@@ -11,11 +11,16 @@ import type {
   ComputerPermissionState,
   ComputerWindowInfo,
 } from '@shared/computer/types';
-import { clipboard, desktopCapturer, screen, systemPreferences } from 'electron';
+import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
+import { isAxPressUnsupported } from './axJob';
+import { AX_SNAPSHOT_BUDGET_MS, AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadMacosNative, type MacosNative } from './macosNative';
+import { preflightScreenCaptureAccess } from './screenCaptureAccess';
+import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
 
-function capturePermission(): ComputerPermissionState {
+async function capturePermission(): Promise<ComputerPermissionState> {
+  if (await preflightScreenCaptureAccess()) return 'granted';
   const status = systemPreferences.getMediaAccessStatus('screen');
   if (status === 'granted') return 'granted';
   if (status === 'denied' || status === 'restricted') return 'denied';
@@ -38,7 +43,7 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async capabilities(): Promise<ComputerCapabilities> {
     const native = await this.nativeOrNull();
-    const capture = capturePermission();
+    const capture = await capturePermission();
     const ax = axPermission();
     return {
       platform: 'darwin',
@@ -52,7 +57,7 @@ export class MacosDesktopBackend implements DesktopBackend {
       axPermission: ax,
       detail:
         capture === 'denied' || ax === 'denied'
-          ? 'Grant Screen Recording and Accessibility to this process, then restart. pnpm dev appears as Electron.'
+          ? 'Grant Screen Recording and Accessibility to EnsoCode, then restart the app.'
           : native
             ? undefined
             : 'Native desktop bridge unavailable; screenshots still work.',
@@ -93,7 +98,7 @@ export class MacosDesktopBackend implements DesktopBackend {
   }
 
   async capture(target: string, maxWidth: number, maxHeight: number): Promise<CaptureBytes> {
-    if (capturePermission() === 'denied') {
+    if ((await capturePermission()) === 'denied') {
       throw new PermissionError(
         'capture',
         'Screen Recording is denied. Enable it for EnsoCode in System Settings.'
@@ -104,16 +109,27 @@ export class MacosDesktopBackend implements DesktopBackend {
       types: [...types],
       thumbnailSize: { width: maxWidth, height: maxHeight },
     });
-    const source =
-      target === 'desktop'
-        ? sources[0]
-        : sources.find((item) => item.id === target || item.id.endsWith(`:${target}:0`));
-    if (!source) throw new ComputerError('window-not-found', `window '${target}' not found`);
-    const image = source.thumbnail;
+    if (target === 'desktop') {
+      const source = sources[0];
+      if (!source) throw new ComputerError('window-not-found', `window '${target}' not found`);
+      return this.captureFromImage(source.thumbnail, target, maxWidth, maxHeight);
+    }
+    const source = findCapturerWindowSource(sources, target);
+    if (source) return this.captureFromImage(source.thumbnail, target, maxWidth, maxHeight);
+    return this.captureWindowViaDisplay(target, maxWidth, maxHeight);
+  }
+  private async captureFromImage(
+    image: NativeImage,
+    target: string,
+    maxWidth: number,
+    maxHeight: number,
+    windowInfo?: ComputerWindowInfo
+  ): Promise<CaptureBytes> {
     const size = image.getSize();
     const png = image.toPNG();
-    const windows = await this.windows();
-    const info = windows.find((window) => window.id === target || source.id.includes(window.id));
+    const info =
+      windowInfo ??
+      (await this.windows()).find((window) => window.id === target || target.includes(window.id));
     const scaled = scaleCaptureSize(size.width, size.height, maxWidth, maxHeight);
     const display = screen.getPrimaryDisplay().bounds;
     const rect = captureSourceRect({
@@ -133,6 +149,44 @@ export class MacosDesktopBackend implements DesktopBackend {
       originY: rect.originY,
       target,
     };
+  }
+
+  private async captureWindowViaDisplay(
+    target: string,
+    maxWidth: number,
+    maxHeight: number
+  ): Promise<CaptureBytes> {
+    const info = (await this.windows()).find((window) => window.id === target);
+    if (!info) throw new ComputerError('window-not-found', `window '${target}' not found`);
+    const display = screen.getDisplayMatching({
+      x: Math.round(info.x),
+      y: Math.round(info.y),
+      width: Math.max(1, Math.round(info.width)),
+      height: Math.max(1, Math.round(info.height)),
+    });
+    const bounds = display.bounds;
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: bounds.width, height: bounds.height },
+    });
+    const screenSource =
+      sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
+    if (!screenSource) throw new ComputerError('window-not-found', `window '${target}' not found`);
+    const thumb = screenSource.thumbnail.getSize();
+    const crop = thumbnailCropForWindow({
+      window: info,
+      display: bounds,
+      thumbnailWidth: thumb.width,
+      thumbnailHeight: thumb.height,
+    });
+    if (!crop) throw new ComputerError('window-not-found', `window '${target}' not found`);
+    return this.captureFromImage(
+      screenSource.thumbnail.crop(crop),
+      target,
+      maxWidth,
+      maxHeight,
+      info
+    );
   }
 
   private async requireNative(kind: 'input' | 'ax'): Promise<MacosNative> {
@@ -214,7 +268,15 @@ export class MacosDesktopBackend implements DesktopBackend {
   async axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }) {
     const native = await this.requireNative('ax');
     const generation = this.registry.beginSnapshot(target);
-    const nodes = await native.axSnapshot(target, opts?.maxDepth ?? 12);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const nodes = await Promise.race([
+      native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH)),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('AX_TIMEOUT')), AX_SNAPSHOT_BUDGET_MS);
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
     const attach = (node: AxTreeNode): AxTreeNode => {
       const ref = this.registry.register(target, generation, node.ref);
       return {
@@ -265,7 +327,11 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async axChildren(ref: string) {
     const native = await this.requireNative('ax');
-    return native.axChildren(this.registry.resolve(ref));
+    const children = await native.axChildren(this.registry.resolve(ref));
+    return children.map((child) => ({
+      ...child,
+      ref: this.registry.adopt(ref, child.ref),
+    }));
   }
 
   async axParent(ref: string) {
@@ -289,7 +355,19 @@ export class MacosDesktopBackend implements DesktopBackend {
   }
 
   async axClick(ref: string) {
-    await this.axPerform(ref, 'press');
+    try {
+      await this.axPerform(ref, 'press');
+    } catch (error) {
+      if (!isAxPressUnsupported(error)) throw error;
+      const bounds = (await this.axNode(ref)).bounds;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) throw error;
+      await this.click(
+        this.registry.targetOf(ref),
+        bounds.x + bounds.width / 2,
+        bounds.y + bounds.height / 2,
+        { delivery: 'foreground' }
+      );
+    }
   }
 
   async clipboardRead() {

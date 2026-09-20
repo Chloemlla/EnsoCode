@@ -186,12 +186,22 @@ export function pruneHistoricalImages(messages: ContextMessage[]): ContextMessag
     }
   }
 
+  const computerHits: number[] = [];
+  for (let i = 0; i < lastUserIndex; i++) {
+    const m = messages[i];
+    if (m?.role !== 'toolResult' || !hasImage(m)) continue;
+    const call = typeof m.toolCallId === 'string' ? calls.get(m.toolCallId) : undefined;
+    if ((m.toolName ?? call?.name) === 'computer') computerHits.push(i);
+  }
+  const keepComputer = new Set(computerHits.slice(-1));
+
   let out: ContextMessage[] | undefined;
   for (let i = 0; i < lastUserIndex; i++) {
     const m = messages[i];
     if (!m || !hasImage(m)) continue;
     let replaced: ContextMessage | undefined;
     if (m.role === 'toolResult') {
+      if (keepComputer.has(i)) continue;
       const call = typeof m.toolCallId === 'string' ? calls.get(m.toolCallId) : undefined;
       const tool = m.toolName ?? call?.name ?? 'tool';
       const path = pathOfCall(call);

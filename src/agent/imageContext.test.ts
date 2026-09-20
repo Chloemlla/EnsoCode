@@ -104,6 +104,8 @@ describe('pruneHistoricalImages', () => {
       user(text('点一下')),
       assistant([{ id: 'c1', name: 'computer', args: { code: 'await desktop.screenshot()' } }]),
       toolResult('c1', 'computer', img('SHOT')),
+      assistant([{ id: 'c0', name: 'computer', args: { code: 'await desktop.screenshot()' } }]),
+      toolResult('c0', 'computer', img('OLDER')),
       user(text('继续')),
     ];
     const out = pruneHistoricalImages(messages);
@@ -111,6 +113,21 @@ describe('pruneHistoricalImages', () => {
     expect(texts(out[2])[0]).toContain('computer');
     expect(texts(out[2])[0]).not.toMatch(/re-read the file/);
     expect(texts(out[2])[0]).toMatch(/screenshot/i);
+    expect(images(out[4])).toHaveLength(1);
+  });
+
+  it('历史轮保留最近一张 computer 截图', () => {
+    const messages: ContextMessage[] = [
+      user(text('点')),
+      assistant([{ id: 'c1', name: 'computer', args: { code: 'await desktop.screenshot()' } }]),
+      toolResult('c1', 'computer', img('OLD')),
+      user(text('再点')),
+      assistant([{ id: 'c2', name: 'computer', args: { code: 'await desktop.screenshot()' } }]),
+      toolResult('c2', 'computer', img('NEW')),
+    ];
+    const out = pruneHistoricalImages(messages);
+    expect(images(out[2])).toHaveLength(1);
+    expect(images(out[5])).toHaveLength(1);
   });
 
   it('脏输入不崩：content 是字符串或缺失的消息原样通过', () => {

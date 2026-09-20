@@ -1348,14 +1348,12 @@ export const zhTranslations: Record<string, string> = {
   Accessibility: '辅助功能',
   'Open Screen Recording settings': '打开屏幕录制设置',
   'Open Accessibility settings': '打开辅助功能设置',
-  'Request Screen Recording': '申请屏幕录制',
-  'Request Accessibility': '申请辅助功能',
-  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode.':
-    '电脑操控需要屏幕录制才能截窗，需要辅助功能才能读无障碍树或点击。请点申请，让系统把当前进程加进列表，然后重启。pnpm dev 显示为 Electron，不是 EnsoCode。',
+  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.':
+    '电脑操控需要屏幕录制才能截窗，需要辅助功能才能读无障碍树或点击。请把这两项授权给 EnsoCode，然后重启应用。',
   'Grant Computer permissions': '授权电脑操控权限',
   'Show permission guide': '打开权限引导',
-  'The agent can screenshot windows and control the mouse and keyboard. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode. Only new sessions pick up the tool.':
-    'Agent 可以截取窗口并控制键鼠。请点申请，让系统把当前进程加进列表，然后重启。pnpm dev 显示为 Electron，不是 EnsoCode。只有新会话会拿到这个工具。',
+  'The agent can screenshot windows and control the mouse and keyboard. Grant Screen Recording and Accessibility to EnsoCode, then restart. Only new sessions pick up the tool.':
+    'Agent 可以截取窗口并控制键鼠。请把屏幕录制和辅助功能授权给 EnsoCode，然后重启。只有新会话会拿到这个工具。',
   'Computer is ready. Start a new session to use it.': '电脑操控已就绪。开一个新会话即可使用。',
   'Capture: granted': '截屏:已授权',
   'Capture: denied': '截屏:未授权',

@@ -1,8 +1,14 @@
 import { execFile } from 'node:child_process';
 import type { AxTreeNode } from '@shared/computer/axTree';
 import type { ComputerWindowInfo } from '@shared/computer/types';
+import { AX_SNAPSHOT_BUDGET_MS } from './axWalkBudget';
+import type { AxWorkerRequest } from './axWorkerClient';
+import { createAxWorkerClient, spawnAxWorkerThread } from './axWorkerClient';
+import axWorkerPath from './axWorkerThread?modulePath';
 import type { PointerOptions } from './backend';
 import { decodeCfNumberAsFloat64, kCFNumberFloat64Type } from './cfNumber';
+import { macKeyForAsciiChar, splitMacChord, splitTypeSegments } from './macKey';
+import { isListedCgWindowLayer } from './windowSource';
 
 export interface MacosNative {
   windows(): Promise<ComputerWindowInfo[]>;
@@ -37,6 +43,8 @@ interface KoffiApi {
     func: (name: string, ret: string, args: unknown[]) => (...args: unknown[]) => unknown;
   };
   struct(name: string, fields: Record<string, string>): unknown;
+  pointer(ref: unknown, count?: number): unknown;
+  out(type: unknown): unknown;
 }
 
 async function load(): Promise<MacosNative | null> {
@@ -46,6 +54,7 @@ async function load(): Promise<MacosNative | null> {
   const ax = koffi.load(
     '/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices'
   );
+  const carbon = koffi.load('/System/Library/Frameworks/Carbon.framework/Carbon');
 
   const CGPoint = koffi.struct('CGPoint', { x: 'double', y: 'double' });
   const CGEventCreateMouseEvent = cg.func('CGEventCreateMouseEvent', 'void *', [
@@ -56,11 +65,26 @@ async function load(): Promise<MacosNative | null> {
   ]);
   const CGEventPost = cg.func('CGEventPost', 'void', ['uint32', 'void *']);
   const CFRelease = cf.func('CFRelease', 'void', ['void *']);
+  const TISCopyCurrentKeyboardInputSource = carbon.func(
+    'TISCopyCurrentKeyboardInputSource',
+    'void *',
+    []
+  );
+  const TISCopyCurrentASCIICapableKeyboardLayoutInputSource = carbon.func(
+    'TISCopyCurrentASCIICapableKeyboardLayoutInputSource',
+    'void *',
+    []
+  );
+  const TISSelectInputSource = carbon.func('TISSelectInputSource', 'int32', ['void *']);
+  const TISCopyInputSourceForLanguage = carbon.func('TISCopyInputSourceForLanguage', 'void *', [
+    'void *',
+  ]);
   const CGEventCreateKeyboardEvent = cg.func('CGEventCreateKeyboardEvent', 'void *', [
     'void *',
     'uint16',
     'bool',
   ]);
+  const CGEventSetFlags = cg.func('CGEventSetFlags', 'void', ['void *', 'uint64']);
   const CGEventKeyboardSetUnicodeString = cg.func('CGEventKeyboardSetUnicodeString', 'void', [
     'void *',
     'ulong',
@@ -98,23 +122,13 @@ async function load(): Promise<MacosNative | null> {
   const CFNumberGetTypeID = cf.func('CFNumberGetTypeID', 'ulong', []);
   const CFDictionaryGetTypeID = cf.func('CFDictionaryGetTypeID', 'ulong', []);
   const AXUIElementCreateApplication = ax.func('AXUIElementCreateApplication', 'void *', ['int']);
+  const axRefOut = koffi.out(koffi.pointer('void', 2));
   const AXUIElementCopyAttributeValue = ax.func('AXUIElementCopyAttributeValue', 'int', [
     'void *',
     'void *',
-    'void **',
+    axRefOut,
   ]);
   const AXUIElementPerformAction = ax.func('AXUIElementPerformAction', 'int', ['void *', 'void *']);
-  const AXUIElementSetAttributeValue = ax.func('AXUIElementSetAttributeValue', 'int', [
-    'void *',
-    'void *',
-    'void *',
-  ]);
-  const AXUIElementCopyElementAtPosition = ax.func('AXUIElementCopyElementAtPosition', 'int', [
-    'void *',
-    'float',
-    'float',
-    'void **',
-  ]);
   const kCFStringEncodingUTF8 = 0x08000100;
 
   const cfString = (value: string) => CFStringCreateWithCString(null, value, kCFStringEncodingUTF8);
@@ -159,68 +173,11 @@ async function load(): Promise<MacosNative | null> {
     CFRelease(event);
   };
 
-  const handles = new Map<string, unknown>();
-  let nextHandle = 1;
-  const retain = (element: unknown): string => {
-    const id = `ax${nextHandle++}`;
-    handles.set(id, element);
-    return id;
-  };
-
-  const readAxString = (element: unknown, name: string): string => {
-    const attr = cfString(name);
-    const out = [null];
-    try {
-      if (AXUIElementCopyAttributeValue(element, attr, out) !== 0) return '';
-      const value = out[0];
-      const text = readString(value);
-      if (value) CFRelease(value);
-      return text;
-    } finally {
-      CFRelease(attr);
-    }
-  };
-
-  const readAxChildren = (element: unknown): unknown[] => {
-    const attr = cfString('AXChildren');
-    const out = [null];
-    try {
-      if (AXUIElementCopyAttributeValue(element, attr, out) !== 0 || !out[0]) return [];
-      const array = out[0];
-      const count = Number(CFArrayGetCount(array));
-      const children: unknown[] = [];
-      for (let i = 0; i < count; i++) children.push(CFArrayGetValueAtIndex(array, i));
-      CFRelease(array);
-      return children;
-    } finally {
-      CFRelease(attr);
-    }
-  };
-
-  const describe = (element: unknown): AxTreeNode => {
-    const handle = retain(element);
-    return {
-      ref: handle,
-      role: readAxString(element, 'AXRole') || 'unknown',
-      title: readAxString(element, 'AXTitle') || undefined,
-      value: readAxString(element, 'AXValue') || undefined,
-      description: readAxString(element, 'AXDescription') || undefined,
-    };
-  };
-
-  const walk = (element: unknown, depth: number, maxDepth: number): AxTreeNode => {
-    const node = describe(element);
-    if (depth >= maxDepth) return node;
-    node.children = readAxChildren(element)
-      .slice(0, 80)
-      .map((child) => walk(child, depth + 1, maxDepth));
-    return node;
-  };
-
   const windowPid = async (target: string): Promise<{ pid: number; windowId: number }> => {
     const windows = await listWindows();
     const found = windows.find((window) => window.id === target);
     if (!found) throw new Error(`window '${target}' not found`);
+    if (!found.pid) throw new Error(`window '${target}' has no pid`);
     return { pid: found.pid, windowId: Number(found.id) };
   };
 
@@ -238,7 +195,7 @@ async function load(): Promise<MacosNative | null> {
         if (!dict || CFGetTypeID(dict) !== CFDictionaryGetTypeID()) continue;
         const bounds = dictGet(dict, 'kCGWindowBounds');
         const layer = readNumber(dictGet(dict, 'kCGWindowLayer'));
-        if (layer !== 0) continue;
+        if (!isListedCgWindowLayer(layer)) continue;
         const id = String(Math.round(readNumber(dictGet(dict, 'kCGWindowNumber'))));
         windows.push({
           id,
@@ -270,71 +227,60 @@ async function load(): Promise<MacosNative | null> {
     }
   };
 
-  const keyCode = (key: string): number => {
-    const map: Record<string, number> = {
-      a: 0,
-      s: 1,
-      d: 2,
-      f: 3,
-      h: 4,
-      g: 5,
-      z: 6,
-      x: 7,
-      c: 8,
-      v: 9,
-      b: 11,
-      q: 12,
-      w: 13,
-      e: 14,
-      r: 15,
-      y: 16,
-      t: 17,
-      '1': 18,
-      '2': 19,
-      '3': 20,
-      '4': 21,
-      '6': 22,
-      '5': 23,
-      equal: 24,
-      '9': 25,
-      '7': 26,
-      minus: 27,
-      '8': 28,
-      '0': 29,
-      o: 31,
-      u: 32,
-      i: 34,
-      p: 35,
-      enter: 36,
-      return: 36,
-      l: 37,
-      j: 38,
-      k: 40,
-      ';': 41,
-      n: 45,
-      m: 46,
-      tab: 48,
-      space: 49,
-      escape: 53,
-      esc: 53,
-      cmd: 55,
-      command: 55,
-      shift: 56,
-      option: 58,
-      alt: 58,
-      control: 59,
-      ctrl: 59,
-      delete: 51,
-      backspace: 51,
-    };
-    return map[key.toLowerCase()] ?? 0;
-  };
-
-  const postKey = (code: number, down: boolean) => {
+  const postKey = (code: number, down: boolean, flags = 0) => {
     const event = CGEventCreateKeyboardEvent(null, code, down);
     if (!event) throw new Error('CGEventCreateKeyboardEvent failed');
+    CGEventSetFlags(event, flags);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
+  };
+
+  const postUnicodeChar = (char: string) => {
+    const buf = Buffer.from(char, 'utf16le');
+    const units = buf.length / 2;
+    if (units === 0) return;
+    const down = CGEventCreateKeyboardEvent(null, 0, true);
+    if (!down) throw new Error('CGEventCreateKeyboardEvent failed');
+    CGEventKeyboardSetUnicodeString(down, units, buf);
+    CGEventPost(kCGHIDEventTap, down);
+    CFRelease(down);
+    const up = CGEventCreateKeyboardEvent(null, 0, false);
+    if (!up) throw new Error('CGEventCreateKeyboardEvent failed');
+    CGEventKeyboardSetUnicodeString(up, units, buf);
+    CGEventPost(kCGHIDEventTap, up);
+    CFRelease(up);
+  };
+
+  const withEnglishLayout = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    const current = TISCopyCurrentKeyboardInputSource();
+    const lang = cfString('en');
+    let english = TISCopyInputSourceForLanguage(lang);
+    CFRelease(lang);
+    if (!english) english = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+    try {
+      if (english) {
+        TISSelectInputSource(english);
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
+      const result = await fn();
+      if (english) await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      return result;
+    } finally {
+      if (current) TISSelectInputSource(current);
+      if (english) CFRelease(english);
+      if (current) CFRelease(current);
+    }
+  };
+
+  let axClient: ReturnType<typeof createAxWorkerClient> | undefined;
+  const axCall = async (request: AxWorkerRequest) => {
+    if (!axClient) {
+      axClient = createAxWorkerClient({
+        timeoutMs: AX_SNAPSHOT_BUDGET_MS,
+        spawn: () => spawnAxWorkerThread(axWorkerPath),
+      });
+    }
+    return axClient.call(request);
   };
 
   return {
@@ -363,26 +309,35 @@ async function load(): Promise<MacosNative | null> {
       CFRelease(event);
     },
     async typeText(text) {
-      for (const char of text) {
-        const buf = Buffer.from(char, 'utf16le');
-        const units = buf.length / 2;
-        if (units === 0) continue;
-        const down = CGEventCreateKeyboardEvent(null, 0, true);
-        if (!down) throw new Error('CGEventCreateKeyboardEvent failed');
-        CGEventKeyboardSetUnicodeString(down, units, buf);
-        CGEventPost(kCGHIDEventTap, down);
-        CFRelease(down);
-        const up = CGEventCreateKeyboardEvent(null, 0, false);
-        if (!up) throw new Error('CGEventCreateKeyboardEvent failed');
-        CGEventKeyboardSetUnicodeString(up, units, buf);
-        CGEventPost(kCGHIDEventTap, up);
-        CFRelease(up);
+      for (const segment of splitTypeSegments(text)) {
+        if (segment.kind === 'ascii') {
+          await withEnglishLayout(() => {
+            for (const char of segment.text) {
+              const mapped = macKeyForAsciiChar(char);
+              if (mapped) {
+                postKey(mapped.code, true, mapped.flags);
+                postKey(mapped.code, false, mapped.flags);
+              } else {
+                postUnicodeChar(char);
+              }
+            }
+          });
+        } else {
+          for (const char of segment.text) postUnicodeChar(char);
+        }
       }
     },
     async keyChord(keys) {
-      const codes = keys.map(keyCode);
-      for (const code of codes) postKey(code, true);
-      for (const code of [...codes].reverse()) postKey(code, false);
+      const chord = splitMacChord(keys);
+      if (chord.modifiers.length + chord.keys.length === 0) throw new Error('unmapped key chord');
+      await withEnglishLayout(() => {
+        for (const code of chord.modifiers) postKey(code, true, chord.flags);
+        for (const code of chord.keys) {
+          postKey(code, true, chord.flags);
+          postKey(code, false, chord.flags);
+        }
+        for (const code of [...chord.modifiers].reverse()) postKey(code, false, 0);
+      });
     },
     async raise(windowId) {
       const { pid } = await windowPid(windowId);
@@ -419,87 +374,34 @@ async function load(): Promise<MacosNative | null> {
     },
     async axSnapshot(target, maxDepth) {
       const { pid } = await windowPid(target);
-      const app = AXUIElementCreateApplication(pid);
-      if (!app) throw new Error('AXUIElementCreateApplication failed');
-      const windowsAttr = cfString('AXWindows');
-      const out = [null];
-      AXUIElementCopyAttributeValue(app, windowsAttr, out);
-      CFRelease(windowsAttr);
-      const array = out[0];
-      if (!array) {
-        CFRelease(app);
-        return [];
-      }
-      const count = Number(CFArrayGetCount(array));
-      const nodes: AxTreeNode[] = [];
-      for (let i = 0; i < Math.min(count, 8); i++) {
-        nodes.push(walk(CFArrayGetValueAtIndex(array, i), 0, maxDepth));
-      }
-      CFRelease(array);
-      CFRelease(app);
-      return nodes;
+      return (await axCall({ op: 'snapshot', pid, maxDepth })) as AxTreeNode[];
     },
     async axElementAt(x, y) {
-      const sys = AXUIElementCreateApplication(0);
-      const out = [null];
-      if (AXUIElementCopyElementAtPosition(sys, x, y, out) !== 0 || !out[0]) {
-        CFRelease(sys);
-        return null;
-      }
-      const node = describe(out[0]);
-      CFRelease(sys);
-      return node;
+      return (await axCall({ op: 'elementAt', x, y })) as AxTreeNode | null;
     },
     async axFocused() {
-      return null;
+      return (await axCall({ op: 'focused' })) as AxTreeNode | null;
     },
     async axNode(handle) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      return describe(element);
+      return (await axCall({ op: 'node', handle })) as AxTreeNode;
     },
     async axAttributes(handle) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      const node = describe(element);
-      return [
-        ['role', node.role],
-        ...(node.title ? [['title', node.title] as [string, string]] : []),
-      ];
+      return (await axCall({ op: 'attributes', handle })) as Array<[string, string]>;
     },
     async axChildren(handle) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      return readAxChildren(element).map(describe);
+      return (await axCall({ op: 'children', handle })) as AxTreeNode[];
     },
     async axParent() {
       return null;
     },
     async axPerform(handle, action) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      const attr = cfString(
-        action.startsWith('AX') ? action : `AX${action[0].toUpperCase()}${action.slice(1)}`
-      );
-      const status = AXUIElementPerformAction(element, attr);
-      CFRelease(attr);
-      if (status !== 0) throw new Error(`AX action ${action} failed (${status})`);
+      await axCall({ op: 'perform', handle, action });
     },
     async axSetValue(handle, value) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      const attr = cfString('AXValue');
-      const cfValue = cfString(value);
-      AXUIElementSetAttributeValue(element, attr, cfValue);
-      CFRelease(attr);
-      CFRelease(cfValue);
+      await axCall({ op: 'setValue', handle, value });
     },
     async axFocus(handle) {
-      const element = handles.get(handle);
-      if (!element) throw new Error(`${handle} expired; re-run ax()/find()`);
-      const attr = cfString('AXRaise');
-      AXUIElementPerformAction(element, attr);
-      CFRelease(attr);
+      await axCall({ op: 'focus', handle });
     },
   };
 }

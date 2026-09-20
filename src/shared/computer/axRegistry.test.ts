@@ -29,4 +29,14 @@ describe('AxRegistry', () => {
     expect(() => registry.resolve('e999')).toThrow(/expired/);
     expect(() => registry.resolve('nope')).toThrow(StaleRefError);
   });
+
+  it('children 从父节点 adopt，得到 eN 而不是裸 handle', () => {
+    const registry = new AxRegistry<string>();
+    const g = registry.beginSnapshot('w1');
+    const parent = registry.register('w1', g, 'ax1');
+    const child = registry.adopt(parent, 'ax99');
+    expect(child).toMatch(/^e\d+$/);
+    expect(registry.resolve(child)).toBe('ax99');
+    expect(registry.targetOf(child)).toBe('w1');
+  });
 });

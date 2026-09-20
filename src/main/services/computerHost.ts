@@ -1,19 +1,18 @@
 import { normalizeComputerParams } from '@shared/computer/params';
 import type { ComputerCapabilities, ComputerRunResult } from '@shared/computer/types';
 import type { ComputerOp } from '@shared/types/agent';
-import { desktopCapturer, shell, systemPreferences } from 'electron';
 import type { DesktopBackend } from './computer/backend';
 import {
   type ComputerGuestSession,
   createComputerGuestSession,
   runComputerGuest,
 } from './computer/guest';
-import { promptComputerPermission } from './computer/permissionPrompt';
+import { openMacPrivacySettings } from './computer/macPrivacySettings';
 import { createDesktopBackend } from './computer/platform';
-import { requestScreenCaptureAccess } from './computer/screenCaptureAccess';
 
 interface SessionState {
   guest: ComputerGuestSession;
+  backend: DesktopBackend;
   running?: AbortController;
 }
 
@@ -33,15 +32,16 @@ export class ComputerHost {
     const existing = this.sessions.get(sessionId);
     existing?.running?.abort();
     const guest = existing?.guest ?? createComputerGuestSession();
+    const backend = existing?.backend ?? this.backendFactory();
     const running = new AbortController();
-    this.sessions.set(sessionId, { guest, running });
+    this.sessions.set(sessionId, { guest, backend, running });
     try {
       return await runComputerGuest({
         code: normalized.code,
         readOnly: normalized.readOnly,
         timeoutMs: normalized.timeoutSec * 1000,
         signal: running.signal,
-        backend: this.backendFactory(),
+        backend,
         session: guest,
       });
     } finally {
@@ -57,39 +57,12 @@ export class ComputerHost {
   async openPermissionSettings(
     kind: 'screen' | 'accessibility'
   ): Promise<{ ok: boolean; error?: string }> {
-    const url =
-      kind === 'screen'
-        ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
-        : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
-    await promptComputerPermission(kind, {
-      requestScreen: async () => {
-        if (await requestScreenCaptureAccess()) return true;
-        try {
-          await desktopCapturer.getSources({
-            types: ['screen'],
-            thumbnailSize: { width: 1, height: 1 },
-          });
-        } catch {
-          // getSources can throw before TCC is recorded
-        }
-        try {
-          return systemPreferences.getMediaAccessStatus('screen') === 'granted';
-        } catch {
-          return false;
-        }
-      },
-      requestAx: (prompt) => {
-        try {
-          return systemPreferences.isTrustedAccessibilityClient(prompt);
-        } catch {
-          return false;
-        }
-      },
-      openSettings: () => {
-        void shell.openExternal(url).catch(() => {});
-      },
-    });
-    return { ok: true };
+    try {
+      await openMacPrivacySettings(kind);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   close(sessionId: string): void {

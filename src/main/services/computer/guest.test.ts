@@ -129,7 +129,19 @@ describe('runComputerGuest', () => {
       backend,
       readOnly: true,
     });
-    expect(String(result.returnValue)).toMatch(/AX tree empty/);
+    expect(String(result.returnValue)).toMatch(/ax-empty/);
+  });
+
+  it('AX 超时返回 ax-timeout，而不是一直挂起', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.axSnapshot = async () => {
+      throw new Error('AX_TIMEOUT');
+    };
+    const { result } = await run(`const win = await desktop.window('w1'); return await win.ax()`, {
+      backend,
+      readOnly: true,
+    });
+    expect(String(result.returnValue)).toMatch(/timeout/);
   });
 
   it('clipboard 是对象，raise 后 window() 的 focused 仍为 true', async () => {
@@ -138,6 +150,7 @@ describe('runComputerGuest', () => {
     const { result } = await run(
       `
       await desktop.clipboard.write('hi');
+      await desktop.clipboard().write('via-call');
       const win = await desktop.window('w1');
       const raised = await win.raise();
       const again = await desktop.window('w1');
@@ -149,7 +162,7 @@ describe('runComputerGuest', () => {
       const pressed = await win.press('Escape');
       return {
         clipType: typeof desktop.clipboard,
-        read: await desktop.clipboard.read(),
+        read: await desktop.clipboard().read(),
         focused: raised.focused,
         againFocused: again.focused,
         clicked,
@@ -162,8 +175,8 @@ describe('runComputerGuest', () => {
       { backend }
     );
     expect(result.returnValue).toMatchObject({
-      clipType: 'object',
-      read: 'hi',
+      clipType: 'function',
+      read: 'via-call',
       focused: true,
       againFocused: true,
       clicked: expect.objectContaining({

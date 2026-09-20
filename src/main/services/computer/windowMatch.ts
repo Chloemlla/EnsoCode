@@ -15,21 +15,26 @@ const APP_ALIASES: Record<string, readonly string[]> = {
 function needle(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim().toLocaleLowerCase() : undefined;
 }
-
-function textMatches(haystack: string, raw: string): boolean {
+function textMatches(haystack: string, raw: string, loose = false): boolean {
   const h = haystack.toLocaleLowerCase();
   const n = raw.toLocaleLowerCase();
-  if (h.includes(n) || n.includes(h)) return true;
+  if (!h || !n) return false;
+  if (h.includes(n)) return true;
+  if (loose && n.includes(h)) return true;
+  if (!loose) return false;
   return (APP_ALIASES[n] ?? []).some((alias) => h.includes(alias) || alias.includes(h));
 }
 
 export function matchWindow(window: ComputerWindowInfo, filter: Record<string, unknown>): boolean {
   const app = needle(filter.app);
-  const title = needle(filter.title);
   const any = needle(filter.name) ?? needle(filter.query);
-  if (app && !textMatches(window.app, app)) return false;
-  if (title && !textMatches(window.title, title)) return false;
-  if (any && !textMatches(window.app, any) && !textMatches(window.title, any)) return false;
+  if (app && !textMatches(window.app, app, true)) return false;
+  if (typeof filter.title === 'string') {
+    if (!filter.title.trim()) {
+      if (window.title.trim() !== '') return false;
+    } else if (!textMatches(window.title, filter.title)) return false;
+  }
+  if (any && !textMatches(window.app, any, true) && !textMatches(window.title, any)) return false;
   return true;
 }
 

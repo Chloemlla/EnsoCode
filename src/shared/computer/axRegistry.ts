@@ -32,6 +32,13 @@ export class AxRegistry<T> {
     return `e${id}`;
   }
 
+  adopt(parentRef: string, handle: T): string {
+    const parentId = parseRefId(parentRef);
+    const parent = parentId === null ? undefined : this.entries.get(parentId);
+    if (!parent) throw new StaleRefError(parentRef);
+    return this.register(parent.targetKey, parent.generation, handle);
+  }
+
   resolve(reference: string): T {
     const id = parseRefId(reference);
     const entry = id === null ? undefined : this.entries.get(id);

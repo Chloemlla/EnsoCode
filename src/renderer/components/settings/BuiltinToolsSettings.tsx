@@ -228,7 +228,7 @@ export function BuiltinToolsSettings() {
               <div className="space-y-2" data-settings-row="tools.computer">
                 <p className="text-muted-foreground text-xs">
                   {t(
-                    'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode.'
+                    'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.'
                   )}
                 </p>
                 {capabilities && (
@@ -256,14 +256,16 @@ export function BuiltinToolsSettings() {
                     size="sm"
                     onClick={() => void window.electronAPI.computer.openPermissions('screen')}
                   >
-                    {t('Request Screen Recording')}
+                    {t('Open Screen Recording settings')}
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void window.electronAPI.computer.openPermissions('accessibility')}
+                    onClick={() =>
+                      void window.electronAPI.computer.openPermissions('accessibility')
+                    }
                   >
-                    {t('Request Accessibility')}
+                    {t('Open Accessibility settings')}
                   </Button>
                 </div>
               </div>
@@ -374,7 +376,7 @@ function ComputerPermissionGuideDialog({
               : kind === 'ready'
                 ? t('Computer is ready. Start a new session to use it.')
                 : t(
-                    'The agent can screenshot windows and control the mouse and keyboard. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode. Only new sessions pick up the tool.'
+                    'The agent can screenshot windows and control the mouse and keyboard. Grant Screen Recording and Accessibility to EnsoCode, then restart. Only new sessions pick up the tool.'
                   )}
           </DialogDescription>
         </DialogHeader>
@@ -385,7 +387,7 @@ function ComputerPermissionGuideDialog({
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
               <p>
                 {t(
-                  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Click Request so macOS adds this process, then restart. pnpm dev appears as Electron, not EnsoCode.'
+                  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.'
                 )}
               </p>
             </div>
@@ -410,14 +412,14 @@ function ComputerPermissionGuideDialog({
                   size="sm"
                   onClick={() => void window.electronAPI.computer.openPermissions('screen')}
                 >
-                  {t('Request Screen Recording')}
+                  {t('Open Screen Recording settings')}
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => void window.electronAPI.computer.openPermissions('accessibility')}
                 >
-                  {t('Request Accessibility')}
+                  {t('Open Accessibility settings')}
                 </Button>
               </div>
             </div>

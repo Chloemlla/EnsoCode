@@ -58,6 +58,15 @@ export const nativeImage = {
   }),
 };
 
+export const utilityProcess = {
+  fork: () => ({
+    postMessage: () => {},
+    kill: () => true,
+    on: () => {},
+    once: () => {},
+  }),
+};
+
 export default {
   app,
   ipcMain,
@@ -73,4 +82,5 @@ export default {
   powerSaveBlocker,
   globalShortcut,
   nativeImage,
+  utilityProcess,
 };

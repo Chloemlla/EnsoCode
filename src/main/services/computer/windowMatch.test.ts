@@ -53,4 +53,53 @@ describe('windowMatch', () => {
   it('完全对不上才算没匹配', () => {
     expect(resolveWindow([safari], { app: 'WeChat' })).toBeUndefined();
   });
+
+  it('空标题窗口不能靠 title 命中', () => {
+    const remote: ComputerWindowInfo = {
+      id: '138',
+      app: 'UU远程',
+      title: '',
+      focused: true,
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    const textedit: ComputerWindowInfo = {
+      id: '12',
+      app: '文本编辑',
+      title: 'ime-test.txt',
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    expect(matchWindow(remote, { title: 'ime-test.txt' })).toBe(false);
+    expect(resolveWindow([remote, textedit], { title: 'ime-test.txt' })?.id).toBe('12');
+  });
+
+  it('title 空串只匹配空标题，不会落到有标题的窗口', () => {
+    const remote: ComputerWindowInfo = {
+      id: '138',
+      app: 'UU远程',
+      title: '',
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    const textedit: ComputerWindowInfo = {
+      id: '12',
+      app: '文本编辑',
+      title: 'ime-test.txt',
+      focused: true,
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    expect(matchWindow(textedit, { title: '' })).toBe(false);
+    expect(matchWindow(remote, { title: '' })).toBe(true);
+    expect(resolveWindow([textedit, remote], { title: '' })?.id).toBe('138');
+  });
 });

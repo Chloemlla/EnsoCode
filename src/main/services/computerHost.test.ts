@@ -9,15 +9,30 @@ vi.mock('electron', () => ({
     getMediaAccessStatus: vi.fn(() => 'granted'),
     isTrustedAccessibilityClient: vi.fn(() => true),
   },
+  utilityProcess: {
+    fork: () => ({
+      postMessage: () => {},
+      kill: () => true,
+      on: () => {},
+      once: () => {},
+    }),
+  },
 }));
 
-import { desktopCapturer, shell, systemPreferences } from 'electron';
-import { FakeDesktopBackend } from './computer/fakeBackend';
-import { ComputerHost } from './computerHost';
+vi.mock('./computer/axWorkerThread?modulePath', () => ({ default: '/tmp/ax-worker.js' }));
 
 vi.mock('./computer/screenCaptureAccess', () => ({
   requestScreenCaptureAccess: vi.fn(async () => false),
 }));
+
+vi.mock('./computer/macPrivacySettings', () => ({
+  openMacPrivacySettings: vi.fn(async () => {}),
+}));
+
+import { desktopCapturer, systemPreferences } from 'electron';
+import { FakeDesktopBackend } from './computer/fakeBackend';
+import { openMacPrivacySettings } from './computer/macPrivacySettings';
+import { ComputerHost } from './computerHost';
 
 describe('ComputerHost', () => {
   beforeEach(() => {
@@ -42,32 +57,40 @@ describe('ComputerHost', () => {
     ).rejects.toThrow(/screenshot/);
   });
 
+  it('同一 session 跨 invoke 复用 backend，ax ref 仍可点', async () => {
+    let created = 0;
+    const host = new ComputerHost(() => {
+      created += 1;
+      return new FakeDesktopBackend();
+    });
+    const first = await host.invoke('s1', 'run', {
+      code: 'const win = await desktop.window("w1"); return await win.ax();',
+    });
+    expect(String(first.returnValue ?? first.text)).toMatch(/\[ref=e1\]/);
+    await expect(
+      host.invoke('s1', 'run', {
+        code: 'const win = await desktop.window("w1"); const el = await win.ref("e1"); await el.click(); return "ok";',
+      })
+    ).resolves.toMatchObject({ returnValue: 'ok' });
+    expect(created).toBe(1);
+  });
+
   it('缺 code 拒绝', async () => {
     const host = new ComputerHost(() => new FakeDesktopBackend());
     await expect(host.invoke('s1', 'run', {})).rejects.toThrow(/code/);
   });
 
-  it('打开辅助功能设置时向当前进程弹出 TCC', async () => {
+  it('打开辅助功能设置不弹阻塞 TCC', async () => {
     const host = new ComputerHost(() => new FakeDesktopBackend());
-    vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockReturnValue(false);
     await host.openPermissionSettings('accessibility');
-    expect(systemPreferences.isTrustedAccessibilityClient).toHaveBeenCalledWith(true);
-    expect(shell.openExternal).toHaveBeenCalled();
+    expect(systemPreferences.isTrustedAccessibilityClient).not.toHaveBeenCalled();
+    expect(openMacPrivacySettings).toHaveBeenCalledWith('accessibility');
   });
 
-  it('辅助功能已授权则不打开系统设置', async () => {
+  it('打开屏幕录制设置不阻塞在截屏 TCC', async () => {
     const host = new ComputerHost(() => new FakeDesktopBackend());
-    vi.mocked(systemPreferences.isTrustedAccessibilityClient).mockReturnValue(true);
-    await host.openPermissionSettings('accessibility');
-    expect(systemPreferences.isTrustedAccessibilityClient).toHaveBeenCalledWith(true);
-    expect(shell.openExternal).not.toHaveBeenCalled();
-  });
-
-  it('打开屏幕录制设置时触发当前进程的截屏 TCC', async () => {
-    const host = new ComputerHost(() => new FakeDesktopBackend());
-    vi.mocked(systemPreferences.getMediaAccessStatus).mockReturnValue('denied');
     await host.openPermissionSettings('screen');
-    expect(desktopCapturer.getSources).toHaveBeenCalled();
-    expect(shell.openExternal).toHaveBeenCalled();
+    expect(desktopCapturer.getSources).not.toHaveBeenCalled();
+    expect(openMacPrivacySettings).toHaveBeenCalledWith('screen');
   });
 });
