@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createAxWorkerClient, spawnAxWorkerThread, wrapUtilityProcess } from './axWorkerClient';
+import {
+  createAxWorkerClient,
+  spawnAxWorker,
+  spawnAxWorkerThread,
+  wrapUtilityProcess,
+} from './axWorkerClient';
 
 const { FakeWorker, workers } = vi.hoisted(() => {
   const workers: Array<{ filename: string }> = [];
@@ -95,6 +100,21 @@ describe('wrapUtilityProcess', () => {
     expect(posted).toEqual([]);
     handlers.get('spawn')?.();
     expect(posted).toEqual([{ id: '1', op: 'focused' }]);
+  });
+});
+
+describe('spawnAxWorker', () => {
+  it('优先 fork utilityProcess，koffi 崩了不带上 Electron', () => {
+    const fork = vi.fn(() => ({
+      postMessage: () => {},
+      kill: () => true,
+      on: () => {},
+      once: (event: string, handler: () => void) => {
+        if (event === 'spawn') handler();
+      },
+    }));
+    spawnAxWorker('/tmp/ax-worker.js', fork);
+    expect(fork).toHaveBeenCalledWith('/tmp/ax-worker.js');
   });
 });
 

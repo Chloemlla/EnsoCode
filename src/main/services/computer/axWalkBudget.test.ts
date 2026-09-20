@@ -3,9 +3,13 @@ import {
   AX_SNAPSHOT_BUDGET_MS,
   AX_SNAPSHOT_DEFAULT_DEPTH,
   AX_SNAPSHOT_MAX_NODES,
+  AX_WORKER_TIMEOUT_MS,
   axCollectVisibleText,
   axFillEmptyRowTitle,
+  axKeepPartialOnTimeout,
   axNextDepth,
+  axNodeMatchesQuery,
+  axQueryShouldExpand,
   axRowTitleFromCells,
   axShouldExpand,
   axWalkDecision,
@@ -15,13 +19,19 @@ describe('axWalkDecision', () => {
   it('默认只走根 + 一层有意义节点，并限制节点和时间', () => {
     expect(AX_SNAPSHOT_DEFAULT_DEPTH).toBe(1);
     expect(AX_SNAPSHOT_MAX_NODES).toBe(80);
-    expect(AX_SNAPSHOT_BUDGET_MS).toBe(2500);
+    expect(AX_SNAPSHOT_BUDGET_MS).toBe(1800);
+    expect(AX_WORKER_TIMEOUT_MS).toBeGreaterThan(AX_SNAPSHOT_BUDGET_MS);
   });
 
   it('超时和节点预算分开', () => {
     expect(axWalkDecision({ startedAt: 0, nodeCount: 1, now: 2500 })).toBe('timeout');
     expect(axWalkDecision({ startedAt: 0, nodeCount: 80, now: 10 })).toBe('budget');
     expect(axWalkDecision({ startedAt: 0, nodeCount: 2, now: 10 })).toBe('continue');
+  });
+
+  it('超时时若已有节点则保留部分树', () => {
+    expect(axKeepPartialOnTimeout(0)).toBe(false);
+    expect(axKeepPartialOnTimeout(3)).toBe(true);
   });
 });
 
@@ -73,5 +83,27 @@ describe('empty AXRow labels', () => {
     expect(axCollectVisibleText(row)).toEqual(['外观']);
     axFillEmptyRowTitle(row);
     expect(row.title).toBe('外观');
+  });
+});
+
+describe('axNodeMatchesQuery', () => {
+  it('按 description 命中外观深色按钮', () => {
+    expect(
+      axNodeMatchesQuery({ role: 'AXButton', description: '深色' }, { description: '深色' })
+    ).toBe(true);
+    expect(
+      axNodeMatchesQuery({ role: 'AXButton', description: '浅色' }, { description: '深色' })
+    ).toBe(false);
+    expect(
+      axNodeMatchesQuery({ role: 'AXRadioButton', title: '浅色' }, { description: '浅色' })
+    ).toBe(true);
+  });
+
+  it('find 不钻进侧栏 Outline/Row', () => {
+    expect(axQueryShouldExpand('AXOutline')).toBe(false);
+    expect(axQueryShouldExpand('AXRow')).toBe(false);
+    expect(axQueryShouldExpand('AXList')).toBe(true);
+    expect(axQueryShouldExpand('AXGroup')).toBe(true);
+    expect(axQueryShouldExpand('AXButton')).toBe(true);
   });
 });

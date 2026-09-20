@@ -115,10 +115,13 @@ export function createComputerTool(invoker: ComputerInvoker): ToolDefinition {
       'computer: persistent JS against the host desktop (desktop/wait/assert). Prefer AX [ref=eN] over pixels. Default off. Not the browser tool.',
     promptGuidelines: [
       'Every desktop/win/el call returns a Promise; await it. Do not probe with Object.keys.',
+      'Keep a whole UI task in one computer() call with several awaited steps; do not round-trip the main model for each click.',
       'Prefer await win.getState() after actions; then win.ref("eN"). Empty AXRow labels mean use pixels.',
+      'win.ax()/getState() default to a diff vs the previous tree; pass { diff: false } for the full tree.',
       'click(x,y) is in the last full window/desktop screenshot of that target. The 96px crop is a receipt, not a new clickSpace.',
       'On macOS, click/type/press default to delivery:"foreground".',
       'await desktop.windows() / focused(); desktop.app("系统设置", { pane: "外观" }) opens that Settings pane.',
+      'After Appearance opens, await win.find({ description: "深色" }) then el.click(); do not full-tree ax() on Settings content.',
       'desktop.app("访达") launches if needed; desktop.window("微信") matches localized names; do not use osascript.',
       'Screenshot the same target before click(x,y). New ax() invalidates older refs (StaleRef).',
       'Input actions wait for UI to settle; extra wait() only for slow loads.',

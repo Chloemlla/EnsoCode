@@ -16,7 +16,7 @@ import type {
 import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
 import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
-import { AX_SNAPSHOT_BUDGET_MS, AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
+import { AX_SNAPSHOT_DEFAULT_DEPTH, AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadMacosNative, type MacosNative } from './macosNative';
 import { preflightScreenCaptureAccess } from './screenCaptureAccess';
@@ -277,7 +277,7 @@ export class MacosDesktopBackend implements DesktopBackend {
     const nodes = await Promise.race([
       native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH)),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('AX_TIMEOUT')), AX_SNAPSHOT_BUDGET_MS);
+        timer = setTimeout(() => reject(new Error('AX_TIMEOUT')), AX_WORKER_TIMEOUT_MS);
       }),
     ]).finally(() => {
       if (timer) clearTimeout(timer);
@@ -295,18 +295,27 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async axQuery(
     target: string,
-    query: { role?: string; title?: string; value?: string; limit?: number }
+    query: {
+      role?: string;
+      title?: string;
+      value?: string;
+      description?: string;
+      limit?: number;
+    }
   ) {
-    const nodes = flatten(await this.axSnapshot(target));
-    return nodes
-      .filter(
-        (node) =>
-          (!query.role || node.role === query.role) &&
-          (!query.title ||
-            node.title?.toLocaleLowerCase().includes(query.title.toLocaleLowerCase())) &&
-          (!query.value || node.value?.includes(query.value))
-      )
-      .slice(0, query.limit ?? 20);
+    const native = await this.requireNative('ax');
+    const generation = this.registry.beginSnapshot(target);
+    try {
+      const nodes = await native.axQuery(target, query);
+      return nodes.map((node) => ({
+        ...node,
+        ref: this.registry.register(target, generation, node.ref),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'AX_TIMEOUT') return [];
+      throw error;
+    }
   }
 
   async axElementAt(screenX: number, screenY: number) {
@@ -390,8 +399,4 @@ export class MacosDesktopBackend implements DesktopBackend {
     const paneUrl = opts?.pane ? resolveSettingsPaneUrl(opts.pane) : undefined;
     await execFileAsync('open', paneUrl ? [paneUrl] : resolveOpenArgs(name), { timeout: 15_000 });
   }
-}
-
-function flatten(nodes: AxTreeNode[]): AxTreeNode[] {
-  return nodes.flatMap((node) => [node, ...flatten(node.children ?? [])]);
 }

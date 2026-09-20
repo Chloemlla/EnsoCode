@@ -3,6 +3,10 @@ import type { AxWorkerRequest } from './axWorkerClient';
 
 export type AxJobBridge = {
   snapshot(pid: number, maxDepth: number): Promise<AxTreeNode[]>;
+  query(
+    pid: number,
+    query: { role?: string; title?: string; value?: string; description?: string; limit?: number }
+  ): Promise<AxTreeNode[]>;
   elementAt(x: number, y: number): Promise<AxTreeNode | null>;
   focused(): Promise<AxTreeNode | null>;
   node(handle: string): Promise<AxTreeNode>;
@@ -17,6 +21,8 @@ export async function dispatchAxJob(ax: AxJobBridge, request: AxWorkerRequest): 
   switch (request.op) {
     case 'snapshot':
       return ax.snapshot(request.pid, request.maxDepth);
+    case 'query':
+      return ax.query(request.pid, request);
     case 'elementAt':
       return ax.elementAt(request.x, request.y);
     case 'focused':

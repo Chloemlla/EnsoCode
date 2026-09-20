@@ -6,7 +6,10 @@ import {
   AX_MESSAGING_TIMEOUT_SEC,
   AX_SNAPSHOT_MAX_CHILDREN,
   axFillEmptyRowTitle,
+  axKeepPartialOnTimeout,
   axNextDepth,
+  axNodeMatchesQuery,
+  axQueryShouldExpand,
   axRowTitleFromCells,
   axShouldExpand,
   axWalkDecision,
@@ -170,6 +173,13 @@ async function load(): Promise<AxJobBridge> {
     description: readAxString(element, 'AXDescription') || undefined,
     bounds: readAxBounds(element),
   });
+  const describeLite = (element: unknown, handle?: string): AxTreeNode => ({
+    ref: handle ?? retain(element),
+    role: readAxString(element, 'AXRole') || 'unknown',
+    title: readAxString(element, 'AXTitle') || undefined,
+    value: readAxString(element, 'AXValue') || undefined,
+    description: readAxString(element, 'AXDescription') || undefined,
+  });
   const readCellTexts = (element: unknown): string[] => {
     const texts: string[] = [];
     const walk = (el: unknown, depth: number) => {
@@ -201,7 +211,7 @@ async function load(): Promise<AxJobBridge> {
     counter: { nodes: number }
   ): Promise<AxTreeNode> => {
     if (axWalkDecision({ startedAt, nodeCount: counter.nodes }) === 'timeout') {
-      throw new Error('AX_TIMEOUT');
+      if (!axKeepPartialOnTimeout(counter.nodes)) throw new Error('AX_TIMEOUT');
     }
     counter.nodes += 1;
     const node = describe(element);
@@ -214,12 +224,13 @@ async function load(): Promise<AxJobBridge> {
     }
     if (counter.nodes % 4 === 0) await yieldTurn();
     if (axWalkDecision({ startedAt, nodeCount: counter.nodes }) === 'timeout') {
-      throw new Error('AX_TIMEOUT');
+      fillRowTitle(node, element);
+      return node;
     }
     const children: AxTreeNode[] = [];
     for (const child of readAxChildren(element).slice(0, AX_SNAPSHOT_MAX_CHILDREN)) {
       const next = axWalkDecision({ startedAt, nodeCount: counter.nodes });
-      if (next === 'timeout') throw new Error('AX_TIMEOUT');
+      if (next === 'timeout') break;
       if (next === 'budget') break;
       children.push(await walk(child, axNextDepth(node.role, depth), maxDepth, startedAt, counter));
     }
@@ -279,7 +290,10 @@ async function load(): Promise<AxJobBridge> {
         const nodes: AxTreeNode[] = [];
         for (const element of roots.slice(0, 8)) {
           const next = axWalkDecision({ startedAt, nodeCount: counter.nodes });
-          if (next === 'timeout') throw new Error('AX_TIMEOUT');
+          if (next === 'timeout') {
+            if (!axKeepPartialOnTimeout(counter.nodes)) throw new Error('AX_TIMEOUT');
+            break;
+          }
           if (next === 'budget') break;
           nodes.push(await walk(element, 0, maxDepth, startedAt, counter));
         }
@@ -299,6 +313,55 @@ async function load(): Promise<AxJobBridge> {
           }
         }
         return nodes;
+      } finally {
+        for (const ref of toRelease) CFRelease(ref);
+        CFRelease(app);
+      }
+    },
+    async query(pid, query) {
+      const app = AXUIElementCreateApplication(pid);
+      if (!app) throw new Error('AXUIElementCreateApplication failed');
+      AXUIElementSetMessagingTimeout(app, AX_MESSAGING_TIMEOUT_SEC);
+      const toRelease: unknown[] = [];
+      const copyArray = (name: string): unknown[] => {
+        const attr = cfString(name);
+        const out = [null];
+        AXUIElementCopyAttributeValue(app, attr, out);
+        CFRelease(attr);
+        const array = out[0];
+        if (!isLikelyCfPointer(array)) return [];
+        const values = takeOwnedRefs(
+          Number(CFArrayGetCount(array)),
+          (i) => CFArrayGetValueAtIndex(array, i),
+          (item) => {
+            CFRetain(item);
+            toRelease.push(item);
+          }
+        );
+        CFRelease(array);
+        return values;
+      };
+      try {
+        const queue = [...copyArray('AXWindows'), ...copyArray('AXChildren')].filter(
+          (element) => readAxString(element, 'AXRole') !== 'AXMenuBar'
+        );
+        const found: AxTreeNode[] = [];
+        const limit = query.limit ?? 20;
+        const startedAt = Date.now();
+        const counter = { nodes: 0 };
+        while (queue.length > 0 && found.length < limit) {
+          if (axWalkDecision({ startedAt, nodeCount: counter.nodes }) !== 'continue') break;
+          const element = queue.shift();
+          if (!element) break;
+          counter.nodes += 1;
+          const node = describeLite(element);
+          if (axNodeMatchesQuery(node, query)) found.push(node);
+          if (found.length >= limit) break;
+          if (axQueryShouldExpand(node.role)) {
+            queue.push(...readAxChildren(element).slice(0, AX_SNAPSHOT_MAX_CHILDREN));
+          }
+        }
+        return found;
       } finally {
         for (const ref of toRelease) CFRelease(ref);
         CFRelease(app);

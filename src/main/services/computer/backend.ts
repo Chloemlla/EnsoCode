@@ -50,7 +50,13 @@ export interface DesktopBackend {
   axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }): Promise<AxTreeNode[]>;
   axQuery(
     target: string,
-    query: { role?: string; title?: string; value?: string; limit?: number }
+    query: {
+      role?: string;
+      title?: string;
+      value?: string;
+      description?: string;
+      limit?: number;
+    }
   ): Promise<AxTreeNode[]>;
   axElementAt(screenX: number, screenY: number): Promise<AxTreeNode | null>;
   axFocused(): Promise<AxTreeNode | null>;

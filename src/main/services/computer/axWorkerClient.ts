@@ -1,8 +1,20 @@
+import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
-import { AX_SNAPSHOT_BUDGET_MS } from './axWalkBudget';
+import { AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
+
+const require = createRequire(import.meta.url);
 
 export type AxWorkerRequest =
   | { op: 'snapshot'; pid: number; maxDepth: number }
+  | {
+      op: 'query';
+      pid: number;
+      role?: string;
+      title?: string;
+      value?: string;
+      description?: string;
+      limit: number;
+    }
   | { op: 'elementAt'; x: number; y: number }
   | { op: 'focused' }
   | { op: 'node'; handle: string }
@@ -64,8 +76,41 @@ export function spawnAxWorkerThread(filename: string): AxWorkerHandle {
   };
 }
 
+export type AxUtilityFork = (
+  filename: string
+) => Parameters<typeof wrapUtilityProcess>[0] | undefined;
+
+function defaultUtilityFork(filename: string): ReturnType<AxUtilityFork> {
+  try {
+    const electron = require('electron') as {
+      utilityProcess?: {
+        fork: (
+          path: string,
+          args?: string[],
+          opts?: object
+        ) => Parameters<typeof wrapUtilityProcess>[0];
+      };
+    };
+    if (typeof electron.utilityProcess?.fork === 'function') {
+      return electron.utilityProcess.fork(filename, [], { serviceName: 'enso-ax-worker' });
+    }
+  } catch {
+    // tests / no electron
+  }
+  return undefined;
+}
+
+export function spawnAxWorker(
+  filename: string,
+  fork: AxUtilityFork = defaultUtilityFork
+): AxWorkerHandle {
+  const child = fork(filename);
+  if (child) return wrapUtilityProcess(child);
+  return spawnAxWorkerThread(filename);
+}
+
 export function createAxWorkerClient(opts: { timeoutMs?: number; spawn: () => AxWorkerHandle }) {
-  const timeoutMs = opts.timeoutMs ?? AX_SNAPSHOT_BUDGET_MS;
+  const timeoutMs = opts.timeoutMs ?? AX_WORKER_TIMEOUT_MS;
   let worker: AxWorkerHandle | undefined;
   let seq = 0;
   const pending = new Map<

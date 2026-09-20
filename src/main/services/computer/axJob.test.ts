@@ -5,6 +5,7 @@ import { axPressFallbackMessage, dispatchAxJob, isAxPressUnsupported } from './a
 function fakeBridge(overrides: Partial<AxJobBridge> = {}): AxJobBridge {
   return {
     snapshot: async () => [{ ref: 'ax1', role: 'AXRow', title: 'CodeSigningHelper 43326' }],
+    query: async () => [],
     elementAt: async () => null,
     focused: async () => null,
     node: async (handle) => ({ ref: handle, role: 'AXRow', title: 'CodeSigningHelper 43326' }),

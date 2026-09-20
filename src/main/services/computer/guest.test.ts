@@ -248,6 +248,28 @@ describe('runComputerGuest', () => {
     expect(result.screenshots).toHaveLength(1);
   });
 
+  it('getState 并行截图和 AX', async () => {
+    const backend = new FakeDesktopBackend();
+    const order: string[] = [];
+    const capture = backend.capture.bind(backend);
+    const axSnapshot = backend.axSnapshot.bind(backend);
+    backend.capture = async (...args) => {
+      order.push('cap-start');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      order.push('cap-end');
+      return capture(...args);
+    };
+    backend.axSnapshot = async (...args) => {
+      order.push('ax-start');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      order.push('ax-end');
+      return axSnapshot(...args);
+    };
+    await run(`const win = await desktop.window('w1'); return await win.getState()`, { backend });
+    expect(order.indexOf('ax-start')).toBeLessThan(order.indexOf('cap-end'));
+    expect(order.indexOf('cap-start')).toBeLessThan(order.indexOf('ax-end'));
+  });
+
   it('desktop.app 已有窗口不 launch', async () => {
     const backend = new FakeDesktopBackend();
     const { result } = await run(`return (await desktop.app('Safari')).id`, { backend });
@@ -321,5 +343,41 @@ describe('runComputerGuest', () => {
     });
     setTimeout(() => ac.abort(), 20);
     await expect(pending).rejects.toThrow(/abort/);
+  });
+
+  it('第二次 ax 默认 diff，结构相同则 unchanged', async () => {
+    const session = createComputerGuestSession();
+    const backend = new FakeDesktopBackend();
+    const once = (code: string) =>
+      runComputerGuest({
+        code,
+        readOnly: false,
+        timeoutMs: 10_000,
+        backend,
+        session,
+        settleMs: 0,
+      });
+    const first = await once('const win = await desktop.window("w1"); return await win.ax()');
+    expect(String(first.returnValue)).toMatch(/\[ref=e/);
+    const second = await once('const win = await desktop.window("w1"); return await win.ax()');
+    expect(String(second.returnValue)).toBe('(ax unchanged)');
+  });
+
+  it('find description 深色不必整树', async () => {
+    const { result } = await run(`
+      const win = await desktop.window('w1');
+      const hits = await win.find({ description: '深色' });
+      return hits[0]?.description;
+    `);
+    expect(result.returnValue).toBe('深色');
+  });
+
+  it('find description 也能命中 title=浅色', async () => {
+    const { result } = await run(`
+      const win = await desktop.window('w1');
+      const hits = await win.find({ description: '浅色' });
+      return hits[0]?.title;
+    `);
+    expect(result.returnValue).toBe('浅色');
   });
 });

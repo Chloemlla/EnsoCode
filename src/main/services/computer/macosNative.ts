@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import type { AxTreeNode } from '@shared/computer/axTree';
 import type { ComputerWindowInfo } from '@shared/computer/types';
-import { AX_SNAPSHOT_BUDGET_MS } from './axWalkBudget';
+import { AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
 import type { AxWorkerRequest } from './axWorkerClient';
-import { createAxWorkerClient, spawnAxWorkerThread } from './axWorkerClient';
+import { createAxWorkerClient, spawnAxWorker } from './axWorkerClient';
 import axWorkerPath from './axWorkerThread?modulePath';
 import type { PointerOptions } from './backend';
 import { decodeCfNumberAsFloat64, kCFNumberFloat64Type } from './cfNumber';
@@ -20,6 +20,10 @@ export interface MacosNative {
   keyChord(keys: string[]): Promise<void>;
   raise(windowId: string): Promise<void>;
   axSnapshot(target: string, maxDepth: number): Promise<AxTreeNode[]>;
+  axQuery(
+    target: string,
+    query: { role?: string; title?: string; value?: string; description?: string; limit?: number }
+  ): Promise<AxTreeNode[]>;
   axElementAt(x: number, y: number): Promise<AxTreeNode | null>;
   axFocused(): Promise<AxTreeNode | null>;
   axNode(handle: string): Promise<AxTreeNode>;
@@ -276,8 +280,8 @@ async function load(): Promise<MacosNative | null> {
   const axCall = async (request: AxWorkerRequest) => {
     if (!axClient) {
       axClient = createAxWorkerClient({
-        timeoutMs: AX_SNAPSHOT_BUDGET_MS,
-        spawn: () => spawnAxWorkerThread(axWorkerPath),
+        timeoutMs: AX_WORKER_TIMEOUT_MS,
+        spawn: () => spawnAxWorker(axWorkerPath),
       });
     }
     return axClient.call(request);
@@ -375,6 +379,18 @@ async function load(): Promise<MacosNative | null> {
     async axSnapshot(target, maxDepth) {
       const { pid } = await windowPid(target);
       return (await axCall({ op: 'snapshot', pid, maxDepth })) as AxTreeNode[];
+    },
+    async axQuery(target, query) {
+      const { pid } = await windowPid(target);
+      return (await axCall({
+        op: 'query',
+        pid,
+        limit: query.limit ?? 20,
+        ...(query.role ? { role: query.role } : {}),
+        ...(query.title ? { title: query.title } : {}),
+        ...(query.value ? { value: query.value } : {}),
+        ...(query.description ? { description: query.description } : {}),
+      })) as AxTreeNode[];
     },
     async axElementAt(x, y) {
       return (await axCall({ op: 'elementAt', x, y })) as AxTreeNode | null;

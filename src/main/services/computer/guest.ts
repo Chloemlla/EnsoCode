@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { formatAxTree } from '@shared/computer/axTree';
+import { formatAxTree, formatAxTreeDiff } from '@shared/computer/axTree';
 import { ReadOnlyError } from '@shared/computer/errors';
 import { type CaptureFrame, mapScreenshotPoint, pixelFingerprint } from '@shared/computer/frame';
 import { COORDINATE_SAFE_MAX_HEIGHT, COORDINATE_SAFE_MAX_WIDTH } from '@shared/computer/params';
@@ -11,6 +11,7 @@ import { describeAxOutcome } from './axStatus';
 import type { DesktopBackend, PointerOptions } from './backend';
 import { cropPngAround } from './clickCrop';
 import { resolveMacKey } from './macKey';
+import { isProtectedAuthText, PROTECTED_SETTING_MESSAGE } from './protectedSetting';
 import { normalizeScrollDelta } from './scrollDelta';
 import { matchWindow, resolveWindow } from './windowMatch';
 
@@ -34,10 +35,40 @@ export interface ComputerGuestSession {
   frames: Map<string, CaptureFrame>;
   lastHash: Map<string, string>;
   lastFocusedId?: string;
+  vm?: QuickJS;
+  primed?: boolean;
+  host?: GuestHostBridge;
+  clock?: GuestClock;
+  lastAx?: Map<string, string>;
+}
+
+interface GuestHostBridge {
+  queue: HostCall[];
+  nextId: number;
+}
+
+interface GuestClock {
+  timeoutMs: number;
+  signal?: AbortSignal;
+  started: number;
+  pausedMs: number;
+  pauseStarted: number;
+  hostInflight: number;
 }
 
 export function createComputerGuestSession(): ComputerGuestSession {
   return { frames: new Map(), lastHash: new Map() };
+}
+
+export function disposeComputerGuestVm(session: ComputerGuestSession): void {
+  try {
+    session.vm?.dispose();
+  } catch {
+    // ignore
+  }
+  session.vm = undefined;
+  session.primed = false;
+  session.host = undefined;
 }
 
 function jsonClone(value: unknown): unknown {
@@ -75,7 +106,7 @@ function applyFocus<T extends { id: string; focused?: boolean }>(
   return windows.map((window) => ({ ...window, focused: window.id === lastFocusedId }));
 }
 
-export const DEFAULT_SETTLE_MS = 500;
+export const DEFAULT_SETTLE_MS = 120;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -186,7 +217,7 @@ function win(info) {
     screenshot(opts) { return host('screenshot', { target: id, silent: !!(opts && opts.silent) }); },
     getState(opts) { return host('getState', { target: id, ...(opts || {}) }); },
     ax(opts) { return host('ax', { target: id, ...(opts || {}) }); },
-    find(query) { return host('find', { target: id, ...(query || {}) }).then((xs) => (Array.isArray(xs) ? xs : []).map(el)); },
+    find(query) { const q = typeof query === 'string' ? { description: query } : (query || {}); return host('find', { target: id, ...q }).then((xs) => (Array.isArray(xs) ? xs : []).map(el)); },
     ref(reference) { return host('ref', { ref: String(reference) }).then(el); },
     click(x, y, opts) { return host('click', { target: id, x, y, ...(opts || {}) }); },
     doubleClick(x, y, opts) { return host('click', { target: id, x, y, count: 2, ...(opts || {}) }); },
@@ -254,20 +285,24 @@ export async function runComputerGuest(input: {
   settleMs?: number;
   sleep?: (ms: number) => Promise<void>;
   occupancy?: { beginSynthetic(): void; endSynthetic(): void };
+  persistVm?: boolean;
 }): Promise<ComputerRunResult> {
   const screenshots: ComputerScreenshot[] = [];
   const logs: string[] = [];
-  const queue: HostCall[] = [];
-  let nextId = 0;
-  const started = performance.now();
-  let pausedMs = 0;
-  let pauseStarted = 0;
-  let hostInflight = 0;
-  const elapsed = () =>
-    performance.now() -
-    started -
-    pausedMs -
-    (pauseStarted === 0 ? 0 : performance.now() - pauseStarted);
+  const session = input.session;
+  session.host ??= { queue: [], nextId: 0 };
+  session.host.queue.length = 0;
+  session.host.nextId = 0;
+  const queue = session.host.queue;
+  const clock: GuestClock = {
+    timeoutMs: input.timeoutMs,
+    signal: input.signal,
+    started: performance.now(),
+    pausedMs: 0,
+    pauseStarted: 0,
+    hostInflight: 0,
+  };
+  session.clock = clock;
 
   const settleMs = input.settleMs ?? DEFAULT_SETTLE_MS;
   const sleep = input.sleep ?? defaultSleep;
@@ -290,41 +325,56 @@ export async function runComputerGuest(input: {
     if (isProtectedAuthText(blob)) throw new Error(PROTECTED_SETTING_MESSAGE);
   };
 
-  const vm = await QuickJS.create({
-    wasm: await loadQuickJsWasm(),
-    memoryLimit: 32 * 1024 * 1024,
-    interruptHandler: () => elapsed() > input.timeoutMs || Boolean(input.signal?.aborted),
-  });
+  const vm =
+    input.persistVm && session.vm
+      ? session.vm
+      : await QuickJS.create({
+          wasm: await loadQuickJsWasm(),
+          memoryLimit: 32 * 1024 * 1024,
+          interruptHandler: () => {
+            const c = session.clock;
+            if (!c) return true;
+            const now = performance.now();
+            const ran =
+              now - c.started - c.pausedMs - (c.pauseStarted === 0 ? 0 : now - c.pauseStarted);
+            return ran > c.timeoutMs || Boolean(c.signal?.aborted);
+          },
+        });
+  if (input.persistVm) session.vm = vm;
 
   const pause = () => {
-    if (hostInflight++ === 0) pauseStarted = performance.now();
+    if (clock.hostInflight++ === 0) clock.pauseStarted = performance.now();
   };
   const resume = () => {
-    if (hostInflight === 0) return;
-    hostInflight -= 1;
-    if (hostInflight > 0) return;
-    if (pauseStarted === 0) return;
-    pausedMs += performance.now() - pauseStarted;
-    pauseStarted = 0;
+    if (clock.hostInflight === 0) return;
+    clock.hostInflight -= 1;
+    if (clock.hostInflight > 0) return;
+    if (clock.pauseStarted === 0) return;
+    clock.pausedMs += performance.now() - clock.pauseStarted;
+    clock.pauseStarted = 0;
   };
 
   const capabilities = await input.backend.capabilities();
 
   try {
-    vm.newFunction('__ensoHost', (methodHandle: JSValueHandle, argsHandle: JSValueHandle) => {
-      const method = methodHandle.toString();
-      let args: unknown = {};
-      try {
-        args = JSON.parse(argsHandle.toString()) as unknown;
-      } catch {
-        args = {};
-      }
-      const id = String(++nextId);
-      queue.push({ id, method, args });
-      return vm.newString(id);
-    }).consume((handle) => vm.global.setProp('__ensoHost', handle));
-
-    vm.evalCode(PRELUDE, 'enso-computer:prelude.js').dispose();
+    if (!session.primed) {
+      vm.newFunction('__ensoHost', (methodHandle: JSValueHandle, argsHandle: JSValueHandle) => {
+        const method = methodHandle.toString();
+        let args: unknown = {};
+        try {
+          args = JSON.parse(argsHandle.toString()) as unknown;
+        } catch {
+          args = {};
+        }
+        const id = String(++session.host!.nextId);
+        session.host!.queue.push({ id, method, args });
+        return vm.newString(id);
+      }).consume((handle) => vm.global.setProp('__ensoHost', handle));
+      vm.evalCode(PRELUDE, 'enso-computer:prelude.js').dispose();
+      session.primed = true;
+    } else {
+      vm.evalCode('if (globalThis.__ensoWaiters) globalThis.__ensoWaiters.clear();').dispose();
+    }
     const resultHandle = vm.evalCode(`(async () => {\n${input.code}\n})()`, 'enso-computer.js');
     const done = vm.resolvePromise(resultHandle);
     let settled: Awaited<typeof done> | undefined;
@@ -449,8 +499,7 @@ export async function runComputerGuest(input: {
           };
         }
         case 'getState': {
-          const shot = await dispatch('screenshot', raw);
-          const ax = await dispatch('ax', raw);
+          const [shot, ax] = await Promise.all([dispatch('screenshot', raw), dispatch('ax', raw)]);
           return { ...asRecord(shot), ax };
         }
         case 'click':
@@ -625,7 +674,12 @@ export async function runComputerGuest(input: {
             const text =
               formatAxTree(nodes) || describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 });
             await throwIfProtected(text);
-            return text;
+            const target = String(args.target ?? '');
+            const disableDiff = args.diff === false || args.disableDiff === true;
+            session.lastAx ??= new Map();
+            const prev = session.lastAx.get(target);
+            session.lastAx.set(target, text);
+            return !disableDiff && prev ? formatAxTreeDiff(prev, text) : text;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const name = error instanceof Error ? error.name : '';
@@ -654,6 +708,7 @@ export async function runComputerGuest(input: {
             role: typeof args.role === 'string' ? args.role : undefined,
             title: typeof args.title === 'string' ? args.title : undefined,
             value: typeof args.value === 'string' ? args.value : undefined,
+            description: typeof args.description === 'string' ? args.description : undefined,
             limit: typeof args.limit === 'number' ? args.limit : undefined,
           });
         case 'ref':
@@ -754,8 +809,11 @@ export async function runComputerGuest(input: {
       capabilities,
     };
   } finally {
-    vm.dispose();
+    if (!input.persistVm) {
+      vm.dispose();
+      session.vm = undefined;
+      session.primed = false;
+      session.host = undefined;
+    }
   }
 }
-
-import { isProtectedAuthText, PROTECTED_SETTING_MESSAGE } from './protectedSetting';

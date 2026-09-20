@@ -5,6 +5,7 @@ import type { DesktopBackend } from './computer/backend';
 import {
   type ComputerGuestSession,
   createComputerGuestSession,
+  disposeComputerGuestVm,
   runComputerGuest,
 } from './computer/guest';
 import { openMacPrivacySettings } from './computer/macPrivacySettings';
@@ -51,6 +52,7 @@ export class ComputerHost {
         backend,
         session: guest,
         occupancy: occupying ? this.occupancy : undefined,
+        persistVm: true,
       });
     } finally {
       if (occupancyGen !== undefined) this.occupancy?.stop(occupancyGen);
@@ -77,6 +79,7 @@ export class ComputerHost {
   close(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     session?.running?.abort();
+    if (session) disposeComputerGuestVm(session.guest);
     this.sessions.delete(sessionId);
   }
 }

@@ -91,6 +91,14 @@ describe('ComputerHost', () => {
     expect(created).toBe(1);
   });
 
+  it('同一 session 跨 invoke 保留 JS 堆', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    await host.invoke('s1', 'run', { code: 'globalThis.mark = 7; return mark' });
+    const second = await host.invoke('s1', 'run', { code: 'return globalThis.mark' });
+    expect(second.returnValue).toBe(7);
+    host.close('s1');
+  });
+
   it('缺 code 拒绝', async () => {
     const host = new ComputerHost(() => new FakeDesktopBackend());
     await expect(host.invoke('s1', 'run', {})).rejects.toThrow(/code/);

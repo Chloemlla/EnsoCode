@@ -2,8 +2,9 @@ import { parentPort } from 'node:worker_threads';
 import { performAxJob } from './axNative';
 import type { AxWorkerJob } from './axWorkerClient';
 
-if (!parentPort) throw new Error('ax worker missing parentPort');
-const port = parentPort;
+const port =
+  parentPort ?? (process as NodeJS.Process & { parentPort?: typeof parentPort }).parentPort;
+if (!port) throw new Error('ax worker missing parentPort');
 
 port.on('message', async (job: AxWorkerJob) => {
   try {

@@ -1,4 +1,6 @@
-export const AX_SNAPSHOT_BUDGET_MS = 2500;
+export const AX_SNAPSHOT_BUDGET_MS = 1800;
+/** 比走树预算宽一截，让部分树能 postMessage 回来，而不是和走树同时被 kill。 */
+export const AX_WORKER_TIMEOUT_MS = 2800;
 export const AX_SNAPSHOT_MAX_NODES = 80;
 export const AX_SNAPSHOT_DEFAULT_DEPTH = 1;
 export const AX_SNAPSHOT_MAX_CHILDREN = 24;
@@ -12,6 +14,37 @@ export function axWalkDecision(input: {
   if ((input.now ?? Date.now()) - input.startedAt >= AX_SNAPSHOT_BUDGET_MS) return 'timeout';
   if (input.nodeCount >= AX_SNAPSHOT_MAX_NODES) return 'budget';
   return 'continue';
+}
+
+export function axKeepPartialOnTimeout(nodeCount: number): boolean {
+  return nodeCount > 0;
+}
+
+export function axNodeMatchesQuery(
+  node: { role?: string; title?: string; value?: string; description?: string },
+  query: { role?: string; title?: string; value?: string; description?: string }
+): boolean {
+  if (!(query.role || query.title || query.value || query.description)) return false;
+  if (query.role && node.role !== query.role) return false;
+  if (query.title && !node.title?.toLocaleLowerCase().includes(query.title.toLocaleLowerCase())) {
+    return false;
+  }
+  if (query.value && !node.value?.includes(query.value)) return false;
+  if (query.description) {
+    const needle = query.description.toLocaleLowerCase();
+    const blob = [node.title, node.value, node.description]
+      .filter(Boolean)
+      .join('\n')
+      .toLocaleLowerCase();
+    if (!blob.includes(needle)) return false;
+  }
+  return true;
+}
+
+const AX_QUERY_SKIP_EXPAND = new Set(['AXOutline', 'AXRow', 'AXCell', 'AXMenuBar']);
+
+export function axQueryShouldExpand(role: string): boolean {
+  return !AX_QUERY_SKIP_EXPAND.has(role);
 }
 
 const AX_PASSTHROUGH_ROLES = new Set([

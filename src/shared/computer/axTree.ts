@@ -33,3 +33,52 @@ export function formatAxTree(nodes: AxTreeNode[], indent = 0): string {
   }
   return lines.join('\n');
 }
+
+export function axLineKey(line: string): string {
+  return line.replace(/ \[ref=e\d+\]/g, '');
+}
+
+export function formatAxTreeDiff(previous: string, current: string): string {
+  const prev = previous.split('\n').filter((line) => line.length > 0);
+  const curr = current.split('\n').filter((line) => line.length > 0);
+  const prevKeys = prev.map(axLineKey);
+  const currKeys = curr.map(axLineKey);
+  if (prevKeys.join('\n') === currKeys.join('\n')) return '(ax unchanged)';
+  const n = prev.length;
+  const m = curr.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () =>
+    Array.from({ length: m + 1 }, () => 0)
+  );
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] =
+        prevKeys[i] === currKeys[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (prevKeys[i] === currKeys[j]) {
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push(`- ${prev[i]}`);
+      i += 1;
+    } else {
+      out.push(`+ ${curr[j]}`);
+      j += 1;
+    }
+  }
+  while (i < n) {
+    out.push(`- ${prev[i]}`);
+    i += 1;
+  }
+  while (j < m) {
+    out.push(`+ ${curr[j]}`);
+    j += 1;
+  }
+  if (out.length === 0) return '(ax unchanged)';
+  if (out.length > curr.length) return current;
+  return `(ax diff; ${n} → ${m} lines)\n${out.join('\n')}`;
+}

@@ -104,11 +104,27 @@ export class FakeDesktopBackend implements DesktopBackend {
       bounds: { x: 10, y: 10, width: 40, height: 16 },
     };
     button.ref = this.registry.register(target, generation, button);
+    const dark: AxTreeNode = {
+      ref: '',
+      role: 'AXButton',
+      description: '深色',
+      actions: ['press'],
+      bounds: { x: 80, y: 10, width: 40, height: 16 },
+    };
+    dark.ref = this.registry.register(target, generation, dark);
+    const light: AxTreeNode = {
+      ref: '',
+      role: 'AXRadioButton',
+      title: '浅色',
+      actions: ['press'],
+      bounds: { x: 40, y: 10, width: 40, height: 16 },
+    };
+    light.ref = this.registry.register(target, generation, light);
     const windowNode: AxTreeNode = {
       ref: '',
       role: 'window',
       title: 'Settings',
-      children: [button],
+      children: [button, dark, light],
     };
     windowNode.ref = this.registry.register(target, generation, windowNode);
     return [windowNode];
@@ -118,14 +134,12 @@ export class FakeDesktopBackend implements DesktopBackend {
     return this.snapshot(target);
   }
 
-  async axQuery(target: string, query: { role?: string; title?: string; limit?: number }) {
-    const nodes = flatten(this.snapshot(target));
-    return nodes
-      .filter(
-        (node) =>
-          (!query.role || node.role === query.role) &&
-          (!query.title || node.title?.includes(query.title))
-      )
+  async axQuery(
+    target: string,
+    query: { role?: string; title?: string; value?: string; description?: string; limit?: number }
+  ) {
+    return flatten(this.snapshot(target))
+      .filter((node) => axNodeMatchesQuery(node, query))
       .slice(0, query.limit ?? 20);
   }
 
@@ -181,3 +195,5 @@ export class FakeDesktopBackend implements DesktopBackend {
 function flatten(nodes: AxTreeNode[]): AxTreeNode[] {
   return nodes.flatMap((node) => [node, ...flatten(node.children ?? [])]);
 }
+
+import { axNodeMatchesQuery } from './axWalkBudget';
