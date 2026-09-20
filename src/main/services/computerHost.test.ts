@@ -4,6 +4,21 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn(async () => {}) },
   desktopCapturer: { getSources: vi.fn(async () => []) },
   screen: { getAllDisplays: () => [] },
+  app: { getName: () => 'EnsoCode', getLocale: () => 'en' },
+  globalShortcut: { register: vi.fn(() => true), unregister: vi.fn() },
+  BrowserWindow: class {
+    setBounds() {}
+    setAlwaysOnTop() {}
+    setVisibleOnAllWorkspaces() {}
+    setIgnoreMouseEvents() {}
+    setContentProtection() {}
+    showInactive() {}
+    hide() {}
+    isDestroyed() {
+      return false;
+    }
+    loadURL() {}
+  },
   clipboard: { readText: () => '', writeText: () => {} },
   systemPreferences: {
     getMediaAccessStatus: vi.fn(() => 'granted'),
@@ -32,6 +47,7 @@ vi.mock('./computer/macPrivacySettings', () => ({
 import { desktopCapturer, systemPreferences } from 'electron';
 import { FakeDesktopBackend } from './computer/fakeBackend';
 import { openMacPrivacySettings } from './computer/macPrivacySettings';
+import { ComputerOccupancy } from './computer/occupancy';
 import { ComputerHost } from './computerHost';
 
 describe('ComputerHost', () => {
@@ -92,5 +108,44 @@ describe('ComputerHost', () => {
     await host.openPermissionSettings('screen');
     expect(desktopCapturer.getSources).not.toHaveBeenCalled();
     expect(openMacPrivacySettings).toHaveBeenCalledWith('screen');
+  });
+
+  it('非只读占用桌面，Esc 中止等待', async () => {
+    const events: string[] = [];
+    let esc = () => {};
+    const occupancy = new ComputerOccupancy({
+      show: () => events.push('show'),
+      hide: () => events.push('hide'),
+      registerEsc: (handler) => {
+        esc = handler;
+        return () => {};
+      },
+      pollMs: 0,
+    });
+    const host = new ComputerHost(() => new FakeDesktopBackend(), occupancy);
+    const pending = host.invoke('s1', 'run', {
+      code: 'await wait(8000); return 1',
+      timeout: 10,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    esc();
+    await expect(pending).rejects.toThrow(/abort/);
+    expect(events).toEqual(['show', 'hide']);
+  });
+
+  it('read_only 不占用桌面', async () => {
+    const events: string[] = [];
+    const occupancy = new ComputerOccupancy({
+      show: () => events.push('show'),
+      hide: () => events.push('hide'),
+      registerEsc: () => () => {},
+      pollMs: 0,
+    });
+    const host = new ComputerHost(() => new FakeDesktopBackend(), occupancy);
+    await host.invoke('s1', 'run', {
+      code: 'return 1',
+      read_only: true,
+    });
+    expect(events).toEqual([]);
   });
 });

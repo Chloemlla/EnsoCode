@@ -75,6 +75,47 @@ function applyFocus<T extends { id: string; focused?: boolean }>(
   return windows.map((window) => ({ ...window, focused: window.id === lastFocusedId }));
 }
 
+export const DEFAULT_SETTLE_MS = 500;
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function abortableDelay(
+  ms: number,
+  signal: AbortSignal | undefined,
+  sleep: (ms: number) => Promise<void>
+): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new Error('Computer action aborted'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onAbort = () => finish(new Error('Computer action aborted'));
+    signal?.addEventListener('abort', onAbort);
+    void sleep(ms).then(
+      () => finish(),
+      (error) => finish(error instanceof Error ? error : new Error(String(error)))
+    );
+  });
+}
+
+function appLaunchName(raw: unknown): string {
+  if (typeof raw === 'string') return raw.trim();
+  const record = asRecord(raw);
+  for (const key of ['app', 'name', 'query'] as const) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 async function probePixels(
   backend: DesktopBackend,
   session: ComputerGuestSession,
@@ -143,6 +184,7 @@ function win(info) {
   return {
     ...info,
     screenshot(opts) { return host('screenshot', { target: id, silent: !!(opts && opts.silent) }); },
+    getState(opts) { return host('getState', { target: id, ...(opts || {}) }); },
     ax(opts) { return host('ax', { target: id, ...(opts || {}) }); },
     find(query) { return host('find', { target: id, ...(query || {}) }).then((xs) => (Array.isArray(xs) ? xs : []).map(el)); },
     ref(reference) { return host('ref', { ref: String(reference) }).then(el); },
@@ -164,6 +206,7 @@ function win(info) {
 globalThis.desktop = {
   windows(filter) { return host('windows', filter || {}).then((xs) => (Array.isArray(xs) ? xs : []).map(win)); },
   async window(idOrFilter) { return win(await host('window', idOrFilter)); },
+  async app(idOrFilter, opts) { return win(await host('app', { ...(typeof idOrFilter === 'string' ? { app: idOrFilter } : (idOrFilter || {})), ...(opts || {}) })); },
   async focusedWindow() { return win(await host('focusedWindow', {})); },
   async focused() { return win(await host('focusedWindow', {})); },
   displays() { return host('displays', {}); },
@@ -208,6 +251,9 @@ export async function runComputerGuest(input: {
   signal?: AbortSignal;
   backend: DesktopBackend;
   session: ComputerGuestSession;
+  settleMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  occupancy?: { beginSynthetic(): void; endSynthetic(): void };
 }): Promise<ComputerRunResult> {
   const screenshots: ComputerScreenshot[] = [];
   const logs: string[] = [];
@@ -222,6 +268,27 @@ export async function runComputerGuest(input: {
     started -
     pausedMs -
     (pauseStarted === 0 ? 0 : performance.now() - pauseStarted);
+
+  const settleMs = input.settleMs ?? DEFAULT_SETTLE_MS;
+  const sleep = input.sleep ?? defaultSleep;
+  const settle = async () => {
+    if (settleMs > 0) await abortableDelay(settleMs, input.signal, sleep);
+  };
+  const withSynthetic = async <T>(fn: () => Promise<T>): Promise<T> => {
+    input.occupancy?.beginSynthetic();
+    try {
+      return await fn();
+    } finally {
+      input.occupancy?.endSynthetic();
+    }
+  };
+  const throwIfProtected = async (axText?: string) => {
+    const listed = await input.backend.windows();
+    const blob = [axText ?? '', ...listed.map((window) => `${window.app}\n${window.title}`)].join(
+      '\n'
+    );
+    if (isProtectedAuthText(blob)) throw new Error(PROTECTED_SETTING_MESSAGE);
+  };
 
   const vm = await QuickJS.create({
     wasm: await loadQuickJsWasm(),
@@ -314,6 +381,32 @@ export async function runComputerGuest(input: {
           if (!focused) throw new Error('no focused window');
           return focused;
         }
+        case 'app': {
+          const name = appLaunchName(raw);
+          if (!name) throw new Error('app requires a name');
+          const find = async () => {
+            const all = await input.backend.windows();
+            const found = resolveWindow(all, { app: name });
+            return found ? applyFocus([found], input.session.lastFocusedId)[0] : undefined;
+          };
+          const existing = await find();
+          const pane = typeof args.pane === 'string' ? args.pane.trim() : '';
+          if (existing && !pane) return existing;
+          if (input.readOnly) throw new ReadOnlyError('app');
+          await input.backend.launchApp(name, pane ? { pane } : undefined);
+          const deadline = Date.now() + 8_000;
+          while (true) {
+            if (input.signal?.aborted) throw new Error('Computer action aborted');
+            const opened = await find();
+            if (opened) {
+              await settle();
+              return opened;
+            }
+            if (Date.now() >= deadline) throw new Error(`app '${name}' did not open a window`);
+            await abortableDelay(200, input.signal, sleep);
+          }
+          throw new Error(`app '${name}' did not open a window`);
+        }
         case 'screenshot': {
           const target = typeof args.target === 'string' ? args.target : 'desktop';
           const silent = args.silent === true;
@@ -355,6 +448,11 @@ export async function runComputerGuest(input: {
             target,
           };
         }
+        case 'getState': {
+          const shot = await dispatch('screenshot', raw);
+          const ax = await dispatch('ax', raw);
+          return { ...asRecord(shot), ax };
+        }
         case 'click':
         case 'move': {
           const target = String(args.target ?? '');
@@ -366,8 +464,15 @@ export async function runComputerGuest(input: {
           );
           const opts = pointerOpts(args);
           if (method === 'move')
-            await input.backend.move(target, mapped.screenX, mapped.screenY, opts);
-          else await input.backend.click(target, mapped.screenX, mapped.screenY, opts);
+            await withSynthetic(() =>
+              input.backend.move(target, mapped.screenX, mapped.screenY, opts)
+            );
+          else
+            await withSynthetic(() =>
+              input.backend.click(target, mapped.screenX, mapped.screenY, opts)
+            );
+          if (method === 'click') await settle();
+          if (method === 'click') await throwIfProtected();
           const probe =
             method === 'click' ? await probePixels(input.backend, input.session, target) : {};
           const { png, ...hashProbe } = probe;
@@ -393,6 +498,7 @@ export async function runComputerGuest(input: {
             screenX: mapped.screenX,
             screenY: mapped.screenY,
             delivery: opts?.delivery ?? 'foreground',
+            clickSpace: target,
             hashNote: 'afterHash is immediate; next screenshot() is the current frame',
             ...hashProbe,
           };
@@ -409,11 +515,14 @@ export async function runComputerGuest(input: {
               Number(record.y)
             );
           });
-          await input.backend.drag(
-            target,
-            mapped.map((point) => ({ x: point.screenX, y: point.screenY })),
-            pointerOpts(args)
+          await withSynthetic(() =>
+            input.backend.drag(
+              target,
+              mapped.map((point) => ({ x: point.screenX, y: point.screenY })),
+              pointerOpts(args)
+            )
           );
+          await settle();
           return { ok: true };
         }
         case 'scroll': {
@@ -425,14 +534,17 @@ export async function runComputerGuest(input: {
             Number(args.y)
           );
           const delta = normalizeScrollDelta(args);
-          await input.backend.scroll(
-            target,
-            mapped.screenX,
-            mapped.screenY,
-            delta.dx,
-            delta.dy,
-            pointerOpts(args)
+          await withSynthetic(() =>
+            input.backend.scroll(
+              target,
+              mapped.screenX,
+              mapped.screenY,
+              delta.dx,
+              delta.dy,
+              pointerOpts(args)
+            )
           );
+          await settle();
           const probe = await probePixels(input.backend, input.session, target);
           const { png: _png, ...hashProbe } = probe;
           return {
@@ -450,11 +562,14 @@ export async function runComputerGuest(input: {
           };
         }
         case 'type':
-          await input.backend.typeText(
-            String(args.target ?? ''),
-            String(args.text ?? ''),
-            pointerOpts(args)
+          await withSynthetic(() =>
+            input.backend.typeText(
+              String(args.target ?? ''),
+              String(args.text ?? ''),
+              pointerOpts(args)
+            )
           );
+          await settle();
           return {
             ok: true,
             target: String(args.target ?? ''),
@@ -473,7 +588,10 @@ export async function runComputerGuest(input: {
               : Array.isArray(chord)
                 ? chord.filter((key): key is string => typeof key === 'string')
                 : [];
-          await input.backend.keyChord(String(args.target ?? ''), keys, pointerOpts(args));
+          await withSynthetic(() =>
+            input.backend.keyChord(String(args.target ?? ''), keys, pointerOpts(args))
+          );
+          await settle();
           return {
             ok: true,
             target: String(args.target ?? ''),
@@ -490,6 +608,7 @@ export async function runComputerGuest(input: {
           const raised = String(args.target ?? '');
           await input.backend.raise(raised);
           input.session.lastFocusedId = raised;
+          await settle();
           const raisedWindows = await input.backend.windows();
           const raisedWindow =
             raisedWindows.find((window) => window.id === raised) ??
@@ -503,9 +622,10 @@ export async function runComputerGuest(input: {
               maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
               all: args.all === true,
             });
-            return (
-              formatAxTree(nodes) || describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 })
-            );
+            const text =
+              formatAxTree(nodes) || describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 });
+            await throwIfProtected(text);
+            return text;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const name = error instanceof Error ? error.name : '';
@@ -556,15 +676,22 @@ export async function runComputerGuest(input: {
           return input.backend.axParent(String(args.ref ?? ''));
         case 'axPerform':
           await input.backend.axPerform(String(args.ref ?? ''), String(args.action ?? 'press'));
+          await settle();
           return { ok: true };
         case 'axSetValue':
           await input.backend.axSetValue(String(args.ref ?? ''), String(args.value ?? ''));
+          await settle();
           return { ok: true };
         case 'axFocus':
           await input.backend.axFocus(String(args.ref ?? ''));
+          await settle();
           return { ok: true };
         case 'axClick':
-          await input.backend.axClick(String(args.ref ?? ''), pointerOpts(args));
+          await withSynthetic(() =>
+            input.backend.axClick(String(args.ref ?? ''), pointerOpts(args))
+          );
+          await settle();
+          await throwIfProtected();
           return { ok: true };
         case 'clipboard.read':
           return input.backend.clipboardRead();
@@ -573,7 +700,7 @@ export async function runComputerGuest(input: {
           return { ok: true };
         case 'wait': {
           const ms = Math.min(Math.max(Number(args.ms) || 0, 0), 60_000);
-          if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+          if (ms > 0) await abortableDelay(ms, input.signal, sleep);
           return { ok: true };
         }
         default:
@@ -630,3 +757,5 @@ export async function runComputerGuest(input: {
     vm.dispose();
   }
 }
+
+import { isProtectedAuthText, PROTECTED_SETTING_MESSAGE } from './protectedSetting';

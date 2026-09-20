@@ -7,6 +7,8 @@ export const READ_ONLY_ALLOWED = new Set([
   'capabilities',
   'screenshot',
   'ax',
+  'getState',
+  'app',
   'find',
   'ref',
   'elementAt',

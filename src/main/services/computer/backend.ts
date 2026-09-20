@@ -46,6 +46,7 @@ export interface DesktopBackend {
   typeText(target: string, text: string, opts?: PointerOptions): Promise<void>;
   keyChord(target: string, keys: string[], opts?: PointerOptions): Promise<void>;
   raise(windowId: string): Promise<void>;
+  launchApp(name: string, opts?: { pane?: string }): Promise<void>;
   axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }): Promise<AxTreeNode[]>;
   axQuery(
     target: string,

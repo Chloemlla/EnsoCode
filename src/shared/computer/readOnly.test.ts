@@ -7,6 +7,8 @@ describe('isReadOnlyAllowed', () => {
     expect(isReadOnlyAllowed('screenshot')).toBe(true);
     expect(isReadOnlyAllowed('ax')).toBe(true);
     expect(isReadOnlyAllowed('clipboard.read')).toBe(true);
+    expect(isReadOnlyAllowed('getState')).toBe(true);
+    expect(isReadOnlyAllowed('app')).toBe(true);
     expect(isReadOnlyAllowed('click')).toBe(false);
     expect(isReadOnlyAllowed('type')).toBe(false);
     expect(isReadOnlyAllowed('press')).toBe(false);

@@ -102,4 +102,43 @@ describe('windowMatch', () => {
     expect(matchWindow(remote, { title: '' })).toBe(true);
     expect(resolveWindow([textedit, remote], { title: '' })?.id).toBe('138');
   });
+
+  it('访达/活动监视器别名命中英文进程名', () => {
+    const finder: ComputerWindowInfo = {
+      id: 'f1',
+      app: 'Finder',
+      title: '',
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    const monitor: ComputerWindowInfo = {
+      id: 'm1',
+      app: 'Activity Monitor',
+      title: 'CPU',
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    expect(matchWindow(finder, { app: '访达' })).toBe(true);
+    expect(matchWindow(monitor, { app: '活动监视器' })).toBe(true);
+    expect(resolveWindow([finder], '访达')?.id).toBe('f1');
+  });
+
+  it('系统设置别名命中 System Settings', () => {
+    const settings: ComputerWindowInfo = {
+      id: 's1',
+      app: '系统设置',
+      title: '',
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    };
+    expect(matchWindow(settings, { app: 'System Settings' })).toBe(true);
+    expect(matchWindow(settings, { app: '系统设置' })).toBe(true);
+    expect(resolveWindow([settings], 'System Settings')?.id).toBe('s1');
+  });
 });

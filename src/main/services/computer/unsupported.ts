@@ -50,6 +50,9 @@ export class UnsupportedDesktopBackend implements DesktopBackend {
   async raise(): Promise<never> {
     return this.click();
   }
+  async launchApp(_name: string, _opts?: { pane?: string }): Promise<never> {
+    return this.click();
+  }
   async axSnapshot(): Promise<never> {
     throw new ComputerError('unsupported', 'Accessibility is not available on this platform');
   }

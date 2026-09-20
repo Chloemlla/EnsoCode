@@ -40,3 +40,7 @@ export function isAxPressUnsupported(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\bfailed \(-25206\)/.test(message);
 }
+
+export function axPressFallbackMessage(role: string, ref: string): string {
+  return `AX press unsupported (-25206) on ${role} [${ref}]; no clickable bounds. Click the screenshot or a labeled descendant.`;
+}

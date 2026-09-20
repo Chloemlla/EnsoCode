@@ -10,6 +10,7 @@ async function run(code: string, opts: { readOnly?: boolean; backend?: FakeDeskt
     timeoutMs: 10_000,
     backend,
     session: createComputerGuestSession(),
+    settleMs: 0,
   });
   return { result, backend };
 }
@@ -36,11 +37,11 @@ describe('runComputerGuest', () => {
 
   it('截图后才能点，坐标按缩放映回源尺寸', async () => {
     const backend = new FakeDesktopBackend();
-    await run(
+    const { result } = await run(
       `
         const win = await desktop.window('w1');
         await win.screenshot();
-        await win.click(10, 5);
+        return await win.click(10, 5);
       `,
       { backend }
     );
@@ -50,6 +51,7 @@ describe('runComputerGuest', () => {
       y: 10,
       delivery: 'foreground',
     });
+    expect(result.returnValue).toMatchObject({ clickSpace: 'w1', x: 10, y: 5 });
   });
 
   it('未截图就 click 抛 FrameError', async () => {
@@ -206,5 +208,118 @@ describe('runComputerGuest', () => {
       target: 'w1',
     });
     expect(result.screenshots).toEqual([]);
+  });
+
+  it('click/axClick 后自动 settle，ax 和 screenshot 不会', async () => {
+    const sleeps: number[] = [];
+    const backend = new FakeDesktopBackend();
+    await runComputerGuest({
+      code: `
+        const win = await desktop.window('w1');
+        await win.ax();
+        await win.screenshot();
+        await win.click(10, 5);
+        const el = await win.ref('e1');
+        await el.click();
+      `,
+      readOnly: false,
+      timeoutMs: 10_000,
+      backend,
+      session: createComputerGuestSession(),
+      settleMs: 400,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(sleeps).toEqual([400, 400]);
+  });
+
+  it('getState 一次返回 AX 文本和截图', async () => {
+    const { result } = await run(
+      `const win = await desktop.window('w1'); return await win.getState()`
+    );
+    expect(result.returnValue).toMatchObject({
+      width: 100,
+      height: 50,
+      scale: 2,
+      target: 'w1',
+    });
+    expect(String((result.returnValue as { ax: string }).ax)).toMatch(/\[ref=e/);
+    expect(result.screenshots).toHaveLength(1);
+  });
+
+  it('desktop.app 已有窗口不 launch', async () => {
+    const backend = new FakeDesktopBackend();
+    const { result } = await run(`return (await desktop.app('Safari')).id`, { backend });
+    expect(result.returnValue).toBe('w1');
+    expect(backend.launches).toEqual([]);
+  });
+
+  it('desktop.app 没有窗口则 launch 再返回', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList = [];
+    const { result } = await run(`return (await desktop.app('Finder')).id`, { backend });
+    expect(result.returnValue).toBe('launched');
+    expect(backend.launches).toEqual(['Finder']);
+  });
+
+  it('desktop.app pane 传给 launchApp', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList = [];
+    await run(`await desktop.app('系统设置', { pane: '外观' })`, { backend });
+    expect(backend.launches).toEqual(['系统设置']);
+    expect(backend.panes).toEqual(['外观']);
+  });
+
+  it('鉴权框停手，不再继续点', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList = [
+      {
+        id: 'auth',
+        app: '系统设置',
+        title: '锁屏正在尝试修改系统设置',
+        pid: 1,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        focused: true,
+      },
+    ];
+    await expect(
+      run(
+        `
+          const win = await desktop.window('auth');
+          await win.screenshot();
+          await win.click(10, 5);
+        `,
+        { backend }
+      )
+    ).rejects.toThrow(/Touch ID or a password/);
+  });
+
+  it('read_only 下 app 只解析已有窗口', async () => {
+    const { result } = await run(`return (await desktop.app('Safari')).id`, { readOnly: true });
+    expect(result.returnValue).toBe('w1');
+    const backend = new FakeDesktopBackend();
+    backend.windowsList = [];
+    await expect(run(`await desktop.app('Finder')`, { readOnly: true, backend })).rejects.toThrow(
+      /read-only/
+    );
+  });
+
+  it('wait 可被 abort 打断', async () => {
+    const ac = new AbortController();
+    const pending = runComputerGuest({
+      code: 'await wait(8000); return 1',
+      readOnly: false,
+      timeoutMs: 10_000,
+      backend: new FakeDesktopBackend(),
+      session: createComputerGuestSession(),
+      settleMs: 0,
+      signal: ac.signal,
+    });
+    setTimeout(() => ac.abort(), 20);
+    await expect(pending).rejects.toThrow(/abort/);
   });
 });

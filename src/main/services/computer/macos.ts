@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { AxRegistry } from '@shared/computer/axRegistry';
 import type { AxTreeNode } from '@shared/computer/axTree';
 import {
@@ -12,12 +14,15 @@ import type {
   ComputerWindowInfo,
 } from '@shared/computer/types';
 import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
-import { isAxPressUnsupported } from './axJob';
+import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
+import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
 import { AX_SNAPSHOT_BUDGET_MS, AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadMacosNative, type MacosNative } from './macosNative';
 import { preflightScreenCaptureAccess } from './screenCaptureAccess';
 import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
+
+const execFileAsync = promisify(execFile);
 
 async function capturePermission(): Promise<ComputerPermissionState> {
   if (await preflightScreenCaptureAccess()) return 'granted';
@@ -359,8 +364,11 @@ export class MacosDesktopBackend implements DesktopBackend {
       await this.axPerform(ref, 'press');
     } catch (error) {
       if (!isAxPressUnsupported(error)) throw error;
-      const bounds = (await this.axNode(ref)).bounds;
-      if (!bounds || bounds.width <= 0 || bounds.height <= 0) throw error;
+      const node = await this.axNode(ref);
+      const bounds = node.bounds;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        throw new Error(axPressFallbackMessage(node.role, ref));
+      }
       await this.click(
         this.registry.targetOf(ref),
         bounds.x + bounds.width / 2,
@@ -376,6 +384,11 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async clipboardWrite(text: string) {
     clipboard.writeText(text);
+  }
+
+  async launchApp(name: string, opts?: { pane?: string }): Promise<void> {
+    const paneUrl = opts?.pane ? resolveSettingsPaneUrl(opts.pane) : undefined;
+    await execFileAsync('open', paneUrl ? [paneUrl] : resolveOpenArgs(name), { timeout: 15_000 });
   }
 }
 

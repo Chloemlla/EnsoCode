@@ -5,6 +5,7 @@ import { collectAxRoots } from './axRoots';
 import {
   AX_MESSAGING_TIMEOUT_SEC,
   AX_SNAPSHOT_MAX_CHILDREN,
+  axFillEmptyRowTitle,
   axNextDepth,
   axRowTitleFromCells,
   axShouldExpand,
@@ -171,19 +172,19 @@ async function load(): Promise<AxJobBridge> {
   });
   const readCellTexts = (element: unknown): string[] => {
     const texts: string[] = [];
-    for (const child of readAxChildren(element).slice(0, 8)) {
-      const title = readAxString(child, 'AXTitle');
-      const value = readAxString(child, 'AXValue');
-      if (title) texts.push(title);
-      else if (value) texts.push(value);
-      else {
-        const nested = readAxChildren(child)[0];
-        if (nested) {
-          const nestedText = readAxString(nested, 'AXTitle') || readAxString(nested, 'AXValue');
-          if (nestedText) texts.push(nestedText);
-        }
+    const walk = (el: unknown, depth: number) => {
+      if (depth > 3) return;
+      for (const child of readAxChildren(el).slice(0, 8)) {
+        const title = readAxString(child, 'AXTitle');
+        const value = readAxString(child, 'AXValue');
+        const desc = readAxString(child, 'AXDescription');
+        if (title) texts.push(title);
+        if (value) texts.push(value);
+        if (desc) texts.push(desc);
+        walk(child, depth + 1);
       }
-    }
+    };
+    walk(element, 0);
     return texts;
   };
   const fillRowTitle = (node: AxTreeNode, element: unknown) => {
@@ -223,6 +224,7 @@ async function load(): Promise<AxJobBridge> {
       children.push(await walk(child, axNextDepth(node.role, depth), maxDepth, startedAt, counter));
     }
     node.children = children;
+    axFillEmptyRowTitle(node);
     return node;
   };
 
@@ -280,6 +282,21 @@ async function load(): Promise<AxJobBridge> {
           if (next === 'timeout') throw new Error('AX_TIMEOUT');
           if (next === 'budget') break;
           nodes.push(await walk(element, 0, maxDepth, startedAt, counter));
+        }
+        const focused = copyOne('AXFocusedUIElement').values[0];
+        if (focused) {
+          const role = readAxString(focused, 'AXRole');
+          if (
+            role === 'AXMenu' ||
+            role === 'AXSheet' ||
+            role === 'AXDialog' ||
+            role === 'AXPopover'
+          ) {
+            const next = axWalkDecision({ startedAt, nodeCount: counter.nodes });
+            if (next === 'continue') {
+              nodes.push(await walk(focused, 0, maxDepth, startedAt, counter));
+            }
+          }
         }
         return nodes;
       } finally {

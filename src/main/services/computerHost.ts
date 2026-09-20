@@ -8,6 +8,8 @@ import {
   runComputerGuest,
 } from './computer/guest';
 import { openMacPrivacySettings } from './computer/macPrivacySettings';
+import { ComputerOccupancy } from './computer/occupancy';
+import { createElectronOccupancyDeps } from './computer/occupancyOverlay';
 import { createDesktopBackend } from './computer/platform';
 
 interface SessionState {
@@ -19,7 +21,10 @@ interface SessionState {
 export class ComputerHost {
   private readonly sessions = new Map<string, SessionState>();
 
-  constructor(private backendFactory: () => DesktopBackend) {}
+  constructor(
+    private backendFactory: () => DesktopBackend,
+    private occupancy?: ComputerOccupancy
+  ) {}
 
   setBackendFactory(factory: () => DesktopBackend): void {
     this.backendFactory = factory;
@@ -35,6 +40,8 @@ export class ComputerHost {
     const backend = existing?.backend ?? this.backendFactory();
     const running = new AbortController();
     this.sessions.set(sessionId, { guest, backend, running });
+    const occupying = Boolean(this.occupancy) && !normalized.readOnly;
+    const occupancyGen = occupying ? this.occupancy?.start(() => running.abort()) : undefined;
     try {
       return await runComputerGuest({
         code: normalized.code,
@@ -43,8 +50,10 @@ export class ComputerHost {
         signal: running.signal,
         backend,
         session: guest,
+        occupancy: occupying ? this.occupancy : undefined,
       });
     } finally {
+      if (occupancyGen !== undefined) this.occupancy?.stop(occupancyGen);
       const current = this.sessions.get(sessionId);
       if (current?.running === running) current.running = undefined;
     }
@@ -74,4 +83,4 @@ export class ComputerHost {
 
 export const computerHost = new ComputerHost(() => {
   return createDesktopBackend();
-});
+}, new ComputerOccupancy(createElectronOccupancyDeps()));

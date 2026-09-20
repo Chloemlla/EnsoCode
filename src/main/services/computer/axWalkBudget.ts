@@ -24,7 +24,14 @@ const AX_PASSTHROUGH_ROLES = new Set([
   'AXDialog',
 ]);
 
-const AX_FORCE_EXPAND_ROLES = new Set(['AXOutline', 'AXTable', 'AXList', 'AXMenu']);
+const AX_FORCE_EXPAND_ROLES = new Set([
+  'AXOutline',
+  'AXTable',
+  'AXList',
+  'AXMenu',
+  'AXPopUpButton',
+  'AXMenuButton',
+]);
 
 export function axNextDepth(role: string, depth: number): number {
   return AX_PASSTHROUGH_ROLES.has(role) ? depth : depth + 1;
@@ -46,4 +53,49 @@ export function axRowTitleFromCells(
     .filter(Boolean)
     .join(' ');
   return text || undefined;
+}
+
+export function axCollectVisibleText(node: {
+  title?: string;
+  value?: string;
+  description?: string;
+  children?: Array<{
+    title?: string;
+    value?: string;
+    description?: string;
+    children?: unknown[];
+  }>;
+}): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (item: typeof node, depth: number) => {
+    if (depth > 4) return;
+    for (const part of [item.title, item.value, item.description]) {
+      const text = part?.trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      out.push(text);
+    }
+    for (const child of item.children ?? []) walk(child as typeof node, depth + 1);
+  };
+  walk(node, 0);
+  return out;
+}
+
+export function axFillEmptyRowTitle(node: {
+  role?: string;
+  title?: string;
+  value?: string;
+  description?: string;
+  children?: Array<{
+    title?: string;
+    value?: string;
+    description?: string;
+    children?: unknown[];
+  }>;
+}): void {
+  if (node.role !== 'AXRow' && node.role !== 'AXCell') return;
+  if (node.title || node.value) return;
+  const text = axCollectVisibleText(node).join(' ');
+  if (text) node.title = text;
 }

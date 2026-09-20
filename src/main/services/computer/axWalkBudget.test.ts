@@ -3,6 +3,8 @@ import {
   AX_SNAPSHOT_BUDGET_MS,
   AX_SNAPSHOT_DEFAULT_DEPTH,
   AX_SNAPSHOT_MAX_NODES,
+  axCollectVisibleText,
+  axFillEmptyRowTitle,
   axNextDepth,
   axRowTitleFromCells,
   axShouldExpand,
@@ -33,6 +35,8 @@ describe('ax walk depth', () => {
     expect(axShouldExpand('AXGroup', 1, 1)).toBe(true);
     expect(axShouldExpand('AXOutline', 1, 1)).toBe(true);
     expect(axShouldExpand('AXTable', 1, 1)).toBe(true);
+    expect(axShouldExpand('AXPopUpButton', 2, 1)).toBe(true);
+    expect(axShouldExpand('AXMenuButton', 2, 1)).toBe(true);
     expect(axShouldExpand('AXButton', 1, 1)).toBe(false);
     expect(axShouldExpand('AXRow', 2, 1)).toBe(false);
     expect(axShouldExpand('AXSheet', 1, 1)).toBe(true);
@@ -44,5 +48,30 @@ describe('ax walk depth', () => {
       'EnsoCode 12.3 482'
     );
     expect(axRowTitleFromCells('已有', undefined, ['EnsoCode'])).toBeUndefined();
+  });
+});
+
+describe('empty AXRow labels', () => {
+  it('从嵌套 StaticText 抽出侧栏可见字', () => {
+    const row = {
+      ref: 'e9',
+      role: 'AXRow',
+      children: [
+        {
+          ref: 'e10',
+          role: 'AXCell',
+          children: [
+            {
+              ref: 'e11',
+              role: 'AXGroup',
+              children: [{ ref: 'e12', role: 'AXStaticText', value: '外观' }],
+            },
+          ],
+        },
+      ],
+    };
+    expect(axCollectVisibleText(row)).toEqual(['外观']);
+    axFillEmptyRowTitle(row);
+    expect(row.title).toBe('外观');
   });
 });

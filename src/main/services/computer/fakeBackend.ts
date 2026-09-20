@@ -10,6 +10,8 @@ const PNG = Buffer.from(
 
 export class FakeDesktopBackend implements DesktopBackend {
   readonly clicks: Array<{ target: string; x: number; y: number; delivery?: string }> = [];
+  readonly launches: string[] = [];
+  readonly panes: string[] = [];
   clipboard = '';
   private readonly registry = new AxRegistry<AxTreeNode>();
   windowsList: ComputerWindowInfo[] = [
@@ -71,6 +73,26 @@ export class FakeDesktopBackend implements DesktopBackend {
   async typeText() {}
   async keyChord() {}
   async raise() {}
+
+  async launchApp(name: string, opts?: { pane?: string }) {
+    this.launches.push(name);
+    if (opts?.pane) this.panes.push(opts.pane);
+    if (this.windowsList.length === 0) {
+      this.windowsList = [
+        {
+          id: 'launched',
+          app: name,
+          title: '',
+          pid: 9,
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
+          focused: true,
+        },
+      ];
+    }
+  }
 
   private snapshot(target: string): AxTreeNode[] {
     const generation = this.registry.beginSnapshot(target);

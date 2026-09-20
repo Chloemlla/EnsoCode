@@ -1,15 +1,21 @@
 import type { ComputerWindowInfo } from '@shared/computer/types';
+import { appLaunchAliases } from './appLaunch';
 
 const APP_ALIASES: Record<string, readonly string[]> = {
   wechat: ['微信', 'weixin'],
   weixin: ['微信', 'wechat'],
   微信: ['wechat', 'weixin'],
+  finder: ['访达'],
+  访达: ['finder'],
+  'activity monitor': ['活动监视器'],
+  活动监视器: ['activity monitor'],
   chrome: ['google chrome'],
   'google chrome': ['chrome'],
   code: ['visual studio code', 'vscode', 'cursor'],
   vscode: ['visual studio code', 'code'],
   'visual studio code': ['code', 'vscode'],
   'vs code': ['visual studio code', 'code', 'vscode'],
+  ...appLaunchAliases(),
 };
 
 function needle(value: unknown): string | undefined {

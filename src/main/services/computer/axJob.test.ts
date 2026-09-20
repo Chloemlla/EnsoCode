@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AxJobBridge } from './axJob';
-import { dispatchAxJob, isAxPressUnsupported } from './axJob';
+import { axPressFallbackMessage, dispatchAxJob, isAxPressUnsupported } from './axJob';
 
 function fakeBridge(overrides: Partial<AxJobBridge> = {}): AxJobBridge {
   return {
@@ -43,5 +43,7 @@ describe('isAxPressUnsupported', () => {
   it('AXRow 的 -25206 可以退回坐标点击', () => {
     expect(isAxPressUnsupported(new Error('AX action press failed (-25206)'))).toBe(true);
     expect(isAxPressUnsupported(new Error('ax1 expired; re-run ax()/find()'))).toBe(false);
+    expect(axPressFallbackMessage('AXRow', 'e12')).toMatch(/-25206/);
+    expect(axPressFallbackMessage('AXRow', 'e12')).toMatch(/no clickable bounds/);
   });
 });
