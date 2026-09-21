@@ -12,7 +12,17 @@ import { isListedCgWindowLayer } from './windowSource';
 
 export interface MacosNative {
   windows(): Promise<ComputerWindowInfo[]>;
-  click(x: number, y: number, opts?: PointerOptions): Promise<void>;
+  click(x: number, y: number, opts?: PointerOptions & { pid?: number }): Promise<void>;
+  skyClick(input: {
+    screenX: number;
+    screenY: number;
+    windowX: number;
+    windowY: number;
+    windowId: number;
+    pid: number;
+    alreadyFront?: boolean;
+    count?: number;
+  }): Promise<void>;
   move(x: number, y: number): Promise<void>;
   drag(points: Array<{ x: number; y: number }>): Promise<void>;
   scroll(x: number, y: number, dx: number, dy: number): Promise<void>;
@@ -68,6 +78,7 @@ async function load(): Promise<MacosNative | null> {
     'uint32',
   ]);
   const CGEventPost = cg.func('CGEventPost', 'void', ['uint32', 'void *']);
+  const CGEventPostToPid = cg.func('CGEventPostToPid', 'void', ['int32', 'void *']);
   const CFRelease = cf.func('CFRelease', 'void', ['void *']);
   const TISCopyCurrentKeyboardInputSource = carbon.func(
     'TISCopyCurrentKeyboardInputSource',
@@ -170,10 +181,11 @@ async function load(): Promise<MacosNative | null> {
   const kCGMouseButtonLeft = 0;
   const kCGEventLeftMouseDragged = 6;
 
-  const postMouse = (type: number, x: number, y: number) => {
+  const postMouse = (type: number, x: number, y: number, pid?: number) => {
     const event = CGEventCreateMouseEvent(null, type, { x, y }, kCGMouseButtonLeft);
     if (!event) throw new Error('CGEventCreateMouseEvent failed');
-    CGEventPost(kCGHIDEventTap, event);
+    if (typeof pid === 'number' && pid > 0) CGEventPostToPid(pid, event);
+    else CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
   };
 
@@ -289,10 +301,68 @@ async function load(): Promise<MacosNative | null> {
 
   return {
     windows: listWindows,
-    async click(x, y) {
-      postMouse(kCGEventMouseMoved, x, y);
-      postMouse(kCGEventLeftMouseDown, x, y);
-      postMouse(kCGEventLeftMouseUp, x, y);
+    async click(x, y, opts) {
+      const pid = typeof opts?.pid === 'number' && opts.pid > 0 ? opts.pid : undefined;
+      postMouse(kCGEventMouseMoved, x, y, pid);
+      postMouse(kCGEventLeftMouseDown, x, y, pid);
+      postMouse(kCGEventLeftMouseUp, x, y, pid);
+    },
+    async skyClick(input) {
+      if (!sky) throw new Error(SKY_CLICK_UNAVAILABLE);
+      const count = input.count ?? 1;
+      const recipe = skyClickEventRecipe(count);
+      const psn = Buffer.alloc(8);
+      if (!input.alreadyFront) {
+        const status = Number(sky.getProcessForPID(input.pid, psn));
+        if (status !== 0) throw new Error(`${SKY_CLICK_UNAVAILABLE}: PSN ${status}`);
+        const activate = Buffer.from(skyLightActivationRecord(input.windowId, true));
+        const activateStatus = Number(sky.postEventRecord(psn, activate));
+        if (activateStatus !== 0) throw new Error(`${SKY_CLICK_UNAVAILABLE}: focus ${activateStatus}`);
+        await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      }
+      const clickGroupId = Date.now() % 1_000_000_000;
+      try {
+        for (const step of recipe) {
+          const screen =
+            step.pointKind === 'target'
+              ? { x: input.screenX, y: input.screenY }
+              : { x: -1, y: -1 };
+          const windowPoint =
+            step.pointKind === 'target'
+              ? { x: input.windowX, y: input.windowY }
+              : { x: -1, y: -1 };
+          const event = CGEventCreateMouseEvent(
+            null,
+            skyClickCgEventType(step.kind),
+            screen,
+            kCGMouseButtonLeft
+          );
+          if (!event) throw new Error('CGEventCreateMouseEvent failed');
+          sky.setIntegerField(event, 0, step.phase);
+          sky.setIntegerField(event, 1, step.clickState);
+          sky.setIntegerField(event, 3, 0);
+          sky.setIntegerField(event, 7, 3);
+          sky.setIntegerField(event, 40, input.pid);
+          sky.setIntegerField(event, 51, input.windowId);
+          sky.setIntegerField(event, 58, clickGroupId);
+          sky.setIntegerField(event, 91, input.windowId);
+          sky.setIntegerField(event, 92, input.windowId);
+          sky.setWindowLocation(event, windowPoint.x, windowPoint.y);
+          sky.postToPid(input.pid, event);
+          CGEventPostToPid(input.pid, event);
+          CFRelease(event);
+          if (step.delayAfterMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, step.delayAfterMs));
+          }
+        }
+      } finally {
+        if (!input.alreadyFront) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 100));
+          const deactivate = Buffer.from(skyLightActivationRecord(input.windowId, false));
+          sky.postEventRecord(psn, deactivate);
+          await new Promise<void>((resolve) => setTimeout(resolve, 40));
+        }
+      }
     },
     async move(x, y) {
       postMouse(kCGEventMouseMoved, x, y);
@@ -421,3 +491,46 @@ async function load(): Promise<MacosNative | null> {
     },
   };
 }
+
+  let sky: {
+    postToPid: (pid: number, event: unknown) => void;
+    setIntegerField: (event: unknown, field: number, value: number) => void;
+    setWindowLocation: (event: unknown, x: number, y: number) => void;
+    postEventRecord: (psn: unknown, record: unknown) => number;
+    getProcessForPID: (pid: number, psn: unknown) => number;
+  } | null = null;
+  try {
+    const sl = koffi.load('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight');
+    sky = {
+      postToPid: sl.func('SLEventPostToPid', 'void', ['int32', 'void *']) as (
+        pid: number,
+        event: unknown
+      ) => void,
+      setIntegerField: sl.func('SLEventSetIntegerValueField', 'void', [
+        'void *',
+        'uint32',
+        'int64',
+      ]) as (event: unknown, field: number, value: number) => void,
+      setWindowLocation: sl.func('CGEventSetWindowLocation', 'void', [
+        'void *',
+        'double',
+        'double',
+      ]) as (event: unknown, x: number, y: number) => void,
+      postEventRecord: sl.func('SLPSPostEventRecordTo', 'int32', ['void *', 'void *']) as (
+        psn: unknown,
+        record: unknown
+      ) => number,
+      getProcessForPID: carbon.func('GetProcessForPID', 'int32', ['int32', 'void *']) as (
+        pid: number,
+        psn: unknown
+      ) => number,
+    };
+  } catch {
+    sky = null;
+  }
+import {
+  SKY_CLICK_UNAVAILABLE,
+  skyClickCgEventType,
+  skyClickEventRecipe,
+  skyLightActivationRecord,
+} from './skyClick';

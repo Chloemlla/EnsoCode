@@ -11,6 +11,25 @@ export interface AxTreeNode {
   bounds?: { x: number; y: number; width: number; height: number };
 }
 
+const AX_EMPTY_WRAPPER_ROLES = new Set(['AXGroup', 'AXUnknown', 'AXGenericElement']);
+
+export function axIsEmptyWrapper(node: AxTreeNode): boolean {
+  return AX_EMPTY_WRAPPER_ROLES.has(node.role) && !node.title && !node.value && !node.description;
+}
+
+export function axFlattenEmptyWrappers(nodes: AxTreeNode[]): AxTreeNode[] {
+  const out: AxTreeNode[] = [];
+  for (const node of nodes) {
+    const children = node.children ? axFlattenEmptyWrappers(node.children) : undefined;
+    if (axIsEmptyWrapper(node)) {
+      out.push(...(children ?? []));
+      continue;
+    }
+    out.push(children ? { ...node, children } : node);
+  }
+  return out;
+}
+
 function attr(label: string, value: string | undefined): string {
   if (!value) return '';
   return ` ${label}=${JSON.stringify(value)}`;
@@ -20,7 +39,7 @@ function attr(label: string, value: string | undefined): string {
 export function formatAxTree(nodes: AxTreeNode[], indent = 0): string {
   const pad = '  '.repeat(indent);
   const lines: string[] = [];
-  for (const node of nodes) {
+  for (const node of indent === 0 ? axFlattenEmptyWrappers(nodes) : nodes) {
     const flags = [node.enabled === false ? ' disabled' : '', node.focused ? ' focused' : ''].join(
       ''
     );

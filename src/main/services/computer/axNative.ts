@@ -5,6 +5,7 @@ import { collectAxRoots } from './axRoots';
 import {
   AX_MESSAGING_TIMEOUT_SEC,
   AX_SNAPSHOT_MAX_CHILDREN,
+  axChildTraversalAttributes,
   axFillEmptyRowTitle,
   axKeepPartialOnTimeout,
   axNextDepth,
@@ -122,23 +123,44 @@ async function load(): Promise<AxJobBridge> {
   };
   const readAxChildren = (element: unknown): unknown[] => {
     if (!isLikelyCfPointer(element)) return [];
-    const attr = cfString('AXChildren');
-    const out = [null];
-    try {
-      if (AXUIElementCopyAttributeValue(element, attr, out) !== 0 || !out[0]) return [];
-      const array = out[0];
-      const children = takeOwnedRefs(
-        Number(CFArrayGetCount(array)),
-        (i) => CFArrayGetValueAtIndex(array, i),
-        (item) => {
-          CFRetain(item);
-        }
-      );
-      CFRelease(array);
-      return children;
-    } finally {
-      CFRelease(attr);
+    const copyAttr = (name: string): unknown[] => {
+      const attr = cfString(name);
+      const out = [null];
+      try {
+        if (AXUIElementCopyAttributeValue(element, attr, out) !== 0 || !out[0]) return [];
+        const array = out[0];
+        const children = takeOwnedRefs(
+          Number(CFArrayGetCount(array)),
+          (i) => CFArrayGetValueAtIndex(array, i),
+          (item) => {
+            CFRetain(item);
+          }
+        );
+        CFRelease(array);
+        return children;
+      } finally {
+        CFRelease(attr);
+      }
+    };
+    const role = readAxString(element, 'AXRole');
+    const rows = copyAttr('AXRows');
+    const visible = copyAttr('AXVisibleChildren');
+    const seen = new Set<unknown>();
+    const children: unknown[] = [];
+    for (const name of axChildTraversalAttributes({
+      role,
+      hasRows: rows.length > 0,
+      hasVisibleChildren: visible.length > 0,
+    })) {
+      const values =
+        name === 'AXRows' ? rows : name === 'AXVisibleChildren' ? visible : copyAttr(name);
+      for (const child of values) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        children.push(child);
+      }
     }
+    return children;
   };
   const readAxCgPair = (
     element: unknown,

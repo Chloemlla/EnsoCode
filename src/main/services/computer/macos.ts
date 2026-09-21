@@ -18,7 +18,9 @@ import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
 import { AX_SNAPSHOT_DEFAULT_DEPTH, AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
+import { resolveClickRoute } from './clickRoute';
 import { loadMacosNative, type MacosNative } from './macosNative';
+import { isSkyClickUnavailable, skyClickLocalPoint } from './skyClick';
 import { preflightScreenCaptureAccess } from './screenCaptureAccess';
 import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
 
@@ -211,12 +213,36 @@ export class MacosDesktopBackend implements DesktopBackend {
   async click(_target: string, screenX: number, screenY: number, opts?: PointerOptions) {
     const native = await this.requireNative('input');
     const delivery = opts?.delivery ?? 'background';
-    if (delivery === 'background') {
+    const window = (await this.windows()).find((item) => item.id === _target);
+    const pid = window?.pid;
+    const windowId = window ? Number(window.id) : undefined;
+    const route = resolveClickRoute({ delivery, pid, windowId });
+    if (route === 'unavailable') {
       throw new BackgroundUnavailableError(
         'macOS pixel click cannot target a window in background'
       );
     }
-    await native.click(screenX, screenY, opts);
+    if (route === 'skyClick' && window && pid) {
+      const local = skyClickLocalPoint({ x: screenX, y: screenY }, window);
+      try {
+        await native.skyClick({
+          screenX,
+          screenY,
+          windowX: local.x,
+          windowY: local.y,
+          windowId: Number(window.id),
+          pid,
+          alreadyFront: window.focused === true,
+          count: (opts?.count ?? 1) >= 2 ? 2 : 1,
+        });
+        return;
+      } catch (error) {
+        if (!isSkyClickUnavailable(error)) throw error;
+        await native.click(screenX, screenY, { ...opts, pid });
+        return;
+      }
+    }
+    await native.click(screenX, screenY, route === 'postToPid' ? { ...opts, pid } : opts);
   }
 
   async move(_target: string, screenX: number, screenY: number, opts?: PointerOptions) {
@@ -400,3 +426,4 @@ export class MacosDesktopBackend implements DesktopBackend {
     await execFileAsync('open', paneUrl ? [paneUrl] : resolveOpenArgs(name), { timeout: 15_000 });
   }
 }
+import { resolveClickRoute } from './clickRoute';

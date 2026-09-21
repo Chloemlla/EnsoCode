@@ -5,6 +5,7 @@ import {
   AX_SNAPSHOT_MAX_NODES,
   AX_WORKER_TIMEOUT_MS,
   axCollectVisibleText,
+  axChildTraversalAttributes,
   axFillEmptyRowTitle,
   axKeepPartialOnTimeout,
   axNextDepth,
@@ -105,5 +106,28 @@ describe('axNodeMatchesQuery', () => {
     expect(axQueryShouldExpand('AXList')).toBe(true);
     expect(axQueryShouldExpand('AXGroup')).toBe(true);
     expect(axQueryShouldExpand('AXButton')).toBe(true);
+  });
+});
+
+describe('axChildTraversalAttributes', () => {
+  it('普通 Group 会读 AXChildren 和 AXContents', () => {
+    expect(axChildTraversalAttributes({ role: 'AXGroup' })).toEqual([
+      'AXChildren',
+      'AXRows',
+      'AXContents',
+      'AXVisibleChildren',
+    ]);
+  });
+
+  it('Outline 有 Rows 时不重复扫 AXChildren', () => {
+    expect(
+      axChildTraversalAttributes({ role: 'AXOutline', hasRows: true })
+    ).toEqual(['AXRows', 'AXContents', 'AXVisibleChildren']);
+  });
+
+  it('List 有 VisibleChildren 时以可见子节点为主', () => {
+    expect(
+      axChildTraversalAttributes({ role: 'AXList', hasVisibleChildren: true })
+    ).toEqual(['AXRows', 'AXContents', 'AXVisibleChildren']);
   });
 });

@@ -14,6 +14,25 @@ describe('formatAxTree', () => {
     expect(text).toContain('window [ref=e1] title="Settings"');
     expect(text).toContain('button [ref=e2] title="Save" focused actions=press');
   });
+
+  it('空 AXGroup 包装层压掉，子按钮提到上一层', () => {
+    const text = formatAxTree([
+      {
+        ref: 'e1',
+        role: 'AXWindow',
+        title: '外观',
+        children: [
+          {
+            ref: 'e2',
+            role: 'AXGroup',
+            children: [{ ref: 'e3', role: 'AXRadioButton', title: '浅色' }],
+          },
+        ],
+      },
+    ]);
+    expect(text).not.toContain('AXGroup');
+    expect(text).toContain('AXRadioButton [ref=e3] title="浅色"');
+  });
 });
 
 describe('formatAxTreeDiff', () => {

@@ -47,6 +47,22 @@ export function axQueryShouldExpand(role: string): boolean {
   return !AX_QUERY_SKIP_EXPAND.has(role);
 }
 
+const AX_ROWS_PRIMARY_ROLES = new Set(['AXOutline', 'AXList', 'AXTable', 'AXBrowser']);
+
+export function axChildTraversalAttributes(input: {
+  role?: string;
+  hasRows?: boolean;
+  hasVisibleChildren?: boolean;
+}): string[] {
+  const attributes: string[] = [];
+  const skipChildren =
+    (Boolean(input.hasRows) && AX_ROWS_PRIMARY_ROLES.has(input.role ?? '')) ||
+    (Boolean(input.hasVisibleChildren) && input.role === 'AXList');
+  if (!skipChildren) attributes.push('AXChildren');
+  attributes.push('AXRows', 'AXContents', 'AXVisibleChildren');
+  return attributes;
+}
+
 const AX_PASSTHROUGH_ROLES = new Set([
   'AXGroup',
   'AXSplitGroup',
