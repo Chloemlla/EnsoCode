@@ -1,4 +1,5 @@
 import { isBtwIsolationPrompt } from '@shared/btw';
+import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
 import type { AgentSessionCustomEntry, TodoItem, TurnPerf } from '@shared/types/agent';
 import { parseWorkflowPresetMessage } from '@shared/workflowPresetMessage';
 import {
@@ -8,13 +9,14 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Circle,
   CircleAlert,
-  CircleDot,
+  ClipboardCheck,
+  ClipboardList,
   Copy,
   FilePlus,
   FileText,
   FolderOpen,
+  FoldVertical,
   GitBranch,
   GitCompare,
   Globe,
@@ -46,13 +48,17 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from '@/components/ui/popover';
 import { type TFunction, useI18n } from '@/i18n';
 import { diffCacheKey } from '@/lib/diffCacheKey';
+import { parseMcpToolName } from '@/lib/mcpToolName';
 import { addSidePanelChanges } from '@/lib/sidePanelDock';
 import { stripAnsi } from '@/lib/terminalText';
+import { TOOL_LABEL_KEYS, toolLabel } from '@/lib/toolLabels';
 import { cn } from '@/lib/utils';
 import { useSessionsStore } from '@/stores/sessions';
 import {
+  canShowConversationFork,
   canShowConversationRewind,
   resolveRewindConfirm,
+  userIndexFromEndForTurnKey,
 } from '@/stores/sessions/conversationRewind';
 import { formatDuration, formatTokens } from '@/stores/sessions/stats';
 import {
@@ -78,6 +84,7 @@ import { RtkToolStatsBar } from './RtkToolStatsBar';
 import { SlashChip, slashChipClass, splitSlashCommand } from './SlashChip';
 import { StepNode, type StepNodeState } from './StepNode';
 import { TerminalOutput } from './TerminalOutput';
+import { TodoList } from './TodoBar';
 import { ZoomableImage } from './ZoomableImage';
 
 const perfEqual = (a?: TurnPerf, b?: TurnPerf): boolean =>
@@ -150,7 +157,9 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.agentMeta === b.agentMeta &&
         a.source === b.source &&
         a.nestedPending === b.nestedPending &&
-        a.rtk === b.rtk
+        a.rtk === b.rtk &&
+        a.plan?.title === b.plan?.title &&
+        a.plan?.text === b.plan?.text
       );
     case 'tool-group':
       return (
@@ -163,7 +172,8 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.stats.others === b.stats.others &&
         a.exploring === b.exploring &&
         a.activity?.thinking === b.activity?.thinking &&
-        a.activity?.workedMs === b.activity?.workedMs
+        a.activity?.workedMs === b.activity?.workedMs &&
+        a.explore?.goal === b.explore?.goal
       );
     case 'error':
       return b.kind === 'error' && a.text === b.text;
@@ -213,6 +223,23 @@ function WorkspaceMigratedBanner({ note }: { note: string }) {
     </div>
   );
 }
+/** Plan 状态提示：worker 前置在用户消息之前，渲染成系统事件行 */
+function PlanNoteBanner({ note }: { note: PlanNoteKind }) {
+  const { t } = useI18n();
+  return (
+    <div className="flex w-full items-start gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
+      <ClipboardList className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span className="min-w-0">
+        {note === 'on'
+          ? t('Plan mode on: read-only research, then a plan for your approval')
+          : note === 'off'
+            ? t('Plan mode off')
+            : t('Context compacted: the approved plan was attached again')}
+      </span>
+    </div>
+  );
+}
+
 /** 主 agent 发给 coworker 的消息包裹 */
 const MAIN_AGENT_BLOCK =
   /^<message-from-main-agent>\n?([\s\S]*?)\n?<\/message-from-main-agent>\s*$/;
@@ -430,6 +457,43 @@ function UserText({
   activeNth?: number;
 }) {
   const { t } = useI18n();
+  const planPrefix = splitPlanPrefix(text);
+  if (planPrefix.note) {
+    const remainder = planPrefix.rest.trim();
+    return (
+      <div className="flex w-full flex-col items-end gap-1.5">
+        <PlanNoteBanner note={planPrefix.note} />
+        {remainder && <UserText text={remainder} searchQuery={searchQuery} activeNth={activeNth} />}
+      </div>
+    );
+  }
+  const planMessage = parsePlanMessage(text);
+  if (planMessage?.kind === 'approved') {
+    return (
+      <div className="flex w-full items-start gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
+        <ClipboardCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0">
+          {t('Plan approved, executing')}
+          <span className="ml-1.5 text-foreground">{planMessage.title}</span>
+        </span>
+      </div>
+    );
+  }
+  if (planMessage?.kind === 'feedback') {
+    return (
+      <div className={cn(USER_BUBBLE, 'whitespace-pre-wrap')}>
+        <p className="mb-1 flex items-center gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+          <ClipboardList className="h-3 w-3" />
+          {t('Plan feedback')}
+        </p>
+        <InlineMentionText
+          text={planMessage.feedback}
+          searchQuery={searchQuery}
+          activeNth={activeNth}
+        />
+      </div>
+    );
+  }
   const workflowPreset = parseWorkflowPresetMessage(text);
   if (workflowPreset) return <WorkflowPresetInvocation preset={workflowPreset} />;
   const refs = splitMentionRefs(text);
@@ -767,33 +831,6 @@ export function RetryTurnButton() {
   );
 }
 
-function userIndexFromEndAt(conversation: { messages: { role: string }[] }, messageIndex: number) {
-  if (conversation.messages[messageIndex]?.role !== 'user') return null;
-  // 从末尾数的 user 序号:worker 侧与 jsonl 分支按尾部对齐(容忍 compaction)
-  return conversation.messages.slice(messageIndex + 1).filter((message) => message.role === 'user')
-    .length;
-}
-
-function userIndexFromEndForTurn(
-  conversation: { messages: { role: string }[] },
-  messageIndex: number
-) {
-  for (let i = messageIndex; i >= 0; i--) {
-    if (conversation.messages[i]?.role === 'user') return userIndexFromEndAt(conversation, i);
-  }
-  return null;
-}
-
-function canActOnDisplayedSession(
-  state: ReturnType<typeof useSessionsStore.getState>,
-  host: ReturnType<typeof useChatHost>,
-  statusOk: (status: string) => boolean
-) {
-  if (host && !host.canRewind) return false;
-  const conversation = displayedConversation(state);
-  return Boolean(conversation?.started && !conversation.spawning && statusOk(conversation.status));
-}
-
 /** 回退：failed 也可；未 ready 的 spawning / 冷会话走 store 唤醒，不在这里强行显示不安全入口 */
 function canRewindDisplayedSession(
   state: ReturnType<typeof useSessionsStore.getState>,
@@ -802,26 +839,16 @@ function canRewindDisplayedSession(
   return canShowConversationRewind(displayedConversation(state), host);
 }
 
-function canForkDisplayedSession(
-  state: ReturnType<typeof useSessionsStore.getState>,
-  host: ReturnType<typeof useChatHost>
-) {
-  if (host?.canFork === false) return false;
-  return canActOnDisplayedSession(state, host, (status) => status === 'idle');
-}
-
 const userActionClass =
   'flex items-center gap-1 text-[11px] text-muted-foreground transition-opacity hover:text-foreground';
 
-/** 分叉入口：与回退并列；仅 idle 且已 spawn 的 root 显示 */
+/** 分叉入口：与回退并列；idle 的 root 显示，冷会话点击时由 store 先唤醒 */
 function ForkButton({ messageIndex }: { messageIndex: number }) {
   const { t } = useI18n();
   const host = useChatHost();
-  const canFork = useSessionsStore((state) => {
-    if (!canForkDisplayedSession(state, host)) return false;
-    const conversation = displayedConversation(state);
-    return Boolean(conversation && !conversation.parentId && !conversation.historyOnly);
-  });
+  const canFork = useSessionsStore((state) =>
+    canShowConversationFork(displayedConversation(state), host)
+  );
   if (!canFork) return null;
   return (
     <button
@@ -832,7 +859,7 @@ function ForkButton({ messageIndex }: { messageIndex: number }) {
         const state = useSessionsStore.getState();
         const conversation = displayedConversation(state);
         if (!conversation) return;
-        const userIndexFromEnd = userIndexFromEndForTurn(conversation, messageIndex);
+        const userIndexFromEnd = userIndexFromEndForTurnKey(conversation, messageIndex);
         if (userIndexFromEnd === null) return;
         void state.forkFromMessage(conversation.id, userIndexFromEnd);
       }}
@@ -1291,22 +1318,34 @@ function ToolGroupRow({
       activityParts.push(t('{{count}} thinking steps', { count: activity.thinking }));
     if (item.count > 0) activityParts.push(t('{{count}} tool calls', { count: item.count }));
   }
-  const label = activity
-    ? activity.workedMs > 0
-      ? t('Worked for {{duration}}', { duration: formatDuration(activity.workedMs) })
-      : t('Activity')
-    : compact
-      ? item.exploring
-        ? t('Exploring')
-        : t('Explored')
-      : t('{{count}} tool calls', { count: item.count });
+  const explore = item.explore;
+  const label = explore
+    ? toolLabel('explore_fold', t)
+    : activity
+      ? activity.workedMs > 0
+        ? t('Worked for {{duration}}', { duration: formatDuration(activity.workedMs) })
+        : t('Activity')
+      : compact
+        ? item.exploring
+          ? t('Exploring')
+          : t('Explored')
+        : t('{{count}} tool calls', { count: item.count });
+  const detail = explore
+    ? [explore.goal, t('{{count}} tool calls', { count: item.count })].filter(Boolean)
+    : activity
+      ? activityParts
+      : compact
+        ? explored
+        : parts;
   return (
     <button
       type="button"
       onClick={() => onToggle?.(item.key)}
+      title={explore?.goal}
+      data-explore-head={explore ? '' : undefined}
       className="group/step flex min-h-[30px] w-full items-center gap-2 rounded-lg pr-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
     >
-      <StepNode icon={Layers} state={item.exploring ? 'running' : 'ok'} />
+      <StepNode icon={explore ? FoldVertical : Layers} state={item.exploring ? 'running' : 'ok'} />
       {item.exploring ? (
         <span className="t-shimmer shrink-0 font-medium" data-text={label}>
           {label}
@@ -1314,9 +1353,7 @@ function ToolGroupRow({
       ) : (
         <span className="shrink-0 font-medium text-foreground/90">{label}</span>
       )}
-      <span className="min-w-0 flex-1 truncate">
-        {(activity ? activityParts : compact ? explored : parts).join(' · ')}
-      </span>
+      <span className="min-w-0 flex-1 truncate">{detail.join(' · ')}</span>
       <ChevronRight
         className={cn('h-3 w-3 shrink-0 transition-transform', item.expanded && 'rotate-90')}
       />
@@ -1496,6 +1533,8 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const hasWrite = Boolean(item.writeContent);
   const hasFileChanges = Boolean(item.fileChanges && item.fileChanges.length > 0);
   const sandbox = item.name === 'exec' ? parseSandboxOutput(item.output) : null;
+  const labelKey = TOOL_LABEL_KEYS[item.name];
+  const mcp = parseMcpToolName(item.name);
   const headerSummary =
     item.nestedPending && item.state === 'running'
       ? `${item.summary} · ${item.nestedPending} pending`
@@ -1522,6 +1561,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
 
   if (item.todos) return <TodoRow todos={item.todos} />;
   if (item.name.startsWith('goal_')) return <GoalSignalRow item={item} />;
+  if (item.plan && item.state !== 'error') return <PlanRow plan={item.plan} />;
 
   return (
     <div data-tool-style={compact ? 'compact' : 'full'}>
@@ -1537,11 +1577,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
         >
           <ToolNode name={item.name} state={item.state} />
           <span className={cn('shrink-0', compact ? 'text-foreground/80' : 'font-medium')}>
-            {item.name === 'exec'
-              ? t('Isolated sandbox')
-              : item.name === 'apply_patch'
-                ? t('Apply patch')
-                : item.name}
+            {labelKey ? t(labelKey) : (mcp?.tool ?? item.name)}
           </span>
           <span
             className={cn(
@@ -1599,6 +1635,11 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
       {expanded && expandable && (
         // 展开内容收进与工具名对齐的卡片，左侧留给时间线竖线
         <div className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card shadow-xs">
+          {mcp && (
+            <div className="truncate border-b border-border/60 px-3 py-1 font-mono text-[10px] text-muted-foreground">
+              {mcp.server}.{mcp.tool}
+            </div>
+          )}
           {hasDiff && item.edits && (
             <ToolContentScroller follow={item.state === 'running'}>
               <EditDiff path={item.summary} blocks={item.edits} />
@@ -1706,6 +1747,35 @@ function GoalSignalRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }>
 }
 
 /** todo 清单行：进度摘要 + ✓/●/○ 列表；清单即产物，恒展开 */
+function PlanRow({ plan }: { plan: { title: string; text: string } }) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full min-w-0 items-center gap-2 text-left text-xs"
+      >
+        <ClipboardList className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium text-muted-foreground">{t('Plan')}</span>
+        <span className="min-w-0 flex-1 truncate">{plan.title}</span>
+        <ChevronRight
+          className={cn(
+            'h-3 w-3 shrink-0 text-muted-foreground transition-transform',
+            expanded && 'rotate-90'
+          )}
+        />
+      </button>
+      {expanded && (
+        <div className="mt-2 border-border/60 border-t pt-2 text-sm">
+          <Markdown text={plan.text} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TodoRow({ todos }: { todos: TodoItem[] }) {
   const { t } = useI18n();
   const done = todos.filter((todo) => todo.status === 'completed').length;
@@ -1718,30 +1788,7 @@ function TodoRow({ todos }: { todos: TodoItem[] }) {
           {done}/{todos.length}
         </span>
       </div>
-      <ul className="space-y-0.5 text-xs">
-        {todos.map((todo) => (
-          <li key={todo.content} className="flex items-start gap-1.5">
-            {todo.status === 'completed' ? (
-              <Check className="mt-0.5 h-3 w-3 shrink-0 text-green-600 dark:text-green-500" />
-            ) : todo.status === 'in_progress' ? (
-              <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-blue-500" />
-            ) : (
-              <Circle className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground/50" />
-            )}
-            <span
-              className={cn(
-                todo.status === 'completed'
-                  ? 'text-muted-foreground line-through'
-                  : todo.status === 'in_progress'
-                    ? 'font-medium'
-                    : 'text-muted-foreground'
-              )}
-            >
-              {todo.content}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <TodoList todos={todos} />
     </div>
   );
 }

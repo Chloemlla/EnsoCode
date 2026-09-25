@@ -76,6 +76,20 @@ export function isReservedAgentTypeName(value: string): boolean {
   );
 }
 
+/** typeKey → 展示名；未知 custom id 回落为 'custom'，旧版纯名字原样返回。 */
+export function agentTypeDisplayName(
+  value: string,
+  customAgentTypes: readonly Pick<AgentTypeEntry, 'id' | 'name'>[]
+): string {
+  if (value === ENSO_AGENT_TYPE_KEY) return 'Enso';
+  if (value.startsWith('builtin:')) return value.slice('builtin:'.length);
+  if (value.startsWith('custom:')) {
+    const id = value.slice('custom:'.length);
+    return customAgentTypes.find((entry) => entry.id === id)?.name.trim() || 'custom';
+  }
+  return value;
+}
+
 export function parseAgentTypeKey(value: unknown): AgentTypeKey | null {
   if (value === ENSO_AGENT_TYPE_KEY) return ENSO_AGENT_TYPE_KEY;
   if (typeof value !== 'string') return null;

@@ -127,6 +127,7 @@ function session(options: Record<string, unknown>) {
     navigateTree: vi.fn(async () => ({ cancelled: false })),
     isStreaming: false,
     isRetrying: false,
+    isCompacting: false,
   };
   mocks.sessions.push(value);
   return value;
@@ -694,8 +695,9 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       return undefined;
     });
     supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'follow up' });
-    await settle();
-    expect(parentSession.prompt).toHaveBeenCalledWith('follow up', undefined);
+    await vi.waitFor(() =>
+      expect(parentSession.prompt).toHaveBeenCalledWith('follow up', undefined)
+    );
     expect(parentSession.steer).not.toHaveBeenCalled();
   });
 
@@ -732,6 +734,105 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  async function spawnParent() {
+    const events: AgentWorkerEvent[] = [];
+    const supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
+    });
+    supervisor.handleCommand({ type: 'spawn-parent', identity: parent, cwd: '/workspace', model });
+    await waitFor(events, 'parent-ready');
+    return { events, supervisor, piSession: mocks.sessions[0] as ReturnType<typeof session> };
+  }
+
+  /** 受控压缩：waitForIdle 挂到 finish() 才空闲，模拟 pi 的 isIdle 口径 */
+  function holdCompaction(piSession: ReturnType<typeof session>, streaming = false) {
+    const idle = Promise.withResolvers<undefined>();
+    piSession.isCompacting = true;
+    piSession.isStreaming = streaming;
+    piSession.waitForIdle = vi.fn(() =>
+      piSession.isCompacting || piSession.isStreaming ? idle.promise : Promise.resolve(undefined)
+    );
+    return () => {
+      piSession.isCompacting = false;
+      piSession.isStreaming = false;
+      idle.resolve(undefined);
+    };
+  }
+
+  it('轮次收束后压缩进行中收到 prompt：等压完再按新轮 prompt，不报错', async () => {
+    const { events, supervisor, piSession } = await spawnParent();
+    const finish = holdCompaction(piSession);
+    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+    await settle();
+    expect(piSession.prompt).not.toHaveBeenCalled();
+
+    finish();
+    await vi.waitFor(() => expect(piSession.prompt).toHaveBeenCalledWith('queued', undefined));
+    expect(events.some((event) => event.type === 'turn-failed')).toBe(false);
+  });
+
+  it('pi 自动压缩超过僵尸时限：继续等压完，不按僵尸轮失败', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { events, supervisor, piSession } = await spawnParent();
+      const finish = holdCompaction(piSession, true);
+      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(events.some((event) => event.type === 'turn-failed')).toBe(false);
+      expect(piSession.prompt).not.toHaveBeenCalled();
+
+      finish();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(piSession.prompt).toHaveBeenCalledWith('queued', undefined);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('空闲后下一个宏任务才启动的记忆压缩：新轮让一拍复查，等压完再发', async () => {
+    const { supervisor, piSession } = await spawnParent();
+    const idle = Promise.withResolvers<undefined>();
+    piSession.isStreaming = true;
+    piSession.waitForIdle = vi.fn(async () => {
+      if (piSession.isCompacting) return idle.promise;
+      // agent_settled：扩展用 setTimeout(0) 延后触发压缩，空闲等待者先被唤醒
+      piSession.isStreaming = false;
+      setTimeout(() => {
+        piSession.isCompacting = true;
+      }, 0);
+      return undefined;
+    });
+    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'after abort' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(piSession.prompt).not.toHaveBeenCalled();
+
+    piSession.isCompacting = false;
+    idle.resolve(undefined);
+    await vi.waitFor(() => expect(piSession.prompt).toHaveBeenCalledWith('after abort', undefined));
+  });
+
+  it('重试倒计时中 abort：pi 不再发 agent_end，按失败收口并放弃排队压缩', async () => {
+    const { events, supervisor, piSession } = await spawnParent();
+    piSession.emit({ type: 'agent_start' });
+    supervisor.handleCommand({ type: 'compact', identity: parent });
+    await settle();
+    piSession.isRetrying = true;
+    events.length = 0;
+
+    supervisor.handleCommand({ type: 'abort', identity: parent });
+    await settle();
+
+    expect(piSession.abort).toHaveBeenCalled();
+    expect(events.some((event) => event.type === 'turn-failed')).toBe(true);
+    expect(
+      events.some(
+        (event) => event.type === 'compaction' && event.state === 'end' && event.abandoned
+      )
+    ).toBe(true);
   });
 
   describe('乐观回显投递回执 delivery-settled', () => {

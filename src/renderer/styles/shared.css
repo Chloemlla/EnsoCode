@@ -130,6 +130,28 @@
   .t-acc-reveal { animation: none !important; }
 }
 
+/* ── 探后折叠组：收拢从折前跨度缩回（配对时组头落位），展开子行错峰揭示 ── */
+@keyframes t-fold-collapse {
+  from { min-height: var(--fold-from); }
+  to   { min-height: 0; }
+}
+[data-fold-collapse] {
+  animation: t-fold-collapse var(--duration-slow) var(--ease-smooth-out);
+}
+[data-fold-collapse='pair'] [data-explore-head] {
+  animation: t-acc-reveal var(--acc-expand) var(--acc-ease);
+}
+.t-fold-reveal {
+  animation: t-acc-reveal var(--acc-expand) var(--acc-ease) backwards;
+  animation-delay: calc(min(var(--fold-i), 8) * var(--duration-stagger));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-fold-collapse],
+  [data-fold-collapse] [data-explore-head],
+  .t-fold-reveal { animation: none !important; }
+}
+
 /* ── Streaming text (30) — 流式新增的块级元素柔化落地 ────────── */
 @keyframes t-stream-in {
   from { opacity: 0; filter: blur(var(--stream-blur)); }

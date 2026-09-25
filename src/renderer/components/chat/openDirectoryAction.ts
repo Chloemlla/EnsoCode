@@ -8,7 +8,7 @@ export function openDirectoryLabel(platform: string): string {
 }
 
 export async function openDirectoryFromMenu(
-  request: { projectId: string; conversationId?: string },
+  request: { projectId: string; conversationId?: string; appId?: string },
   t: TFunction
 ): Promise<void> {
   try {

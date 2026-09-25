@@ -30,6 +30,13 @@ import {
 } from '@shared/modelCatalog';
 import { resolveOauthCatalogModel } from '@shared/oauthCatalog';
 import { ensureAccountProvider } from '@shared/piAccounts';
+import {
+  EMPTY_PLAN_STATE,
+  PLAN_ENTRY_TYPE,
+  parsePlanMessage,
+  splitPlanPrefix,
+  withPlanNote,
+} from '@shared/planMode';
 import { resolvePiProviderBaseUrl } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
@@ -121,6 +128,7 @@ import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { ParentNotifier } from './notify';
 import { withOpenAIResponsesRouting } from './openaiResponsesRouting';
+import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
 import { projectMessage } from './projection';
 import { applyWorkerProxyEnv } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
@@ -169,7 +177,7 @@ import {
   titleRejectReason,
   titleSummaryTimeoutMs,
 } from './titleSummary';
-import { createTodoTool } from './todo';
+import { createTodoTool, TodoStaleReminder } from './todo';
 import { decorateSessionTools } from './toolDecorators';
 import { ToolOutputBudget } from './toolOutputBudget';
 import { BrowserInvoker, createBrowserTools, withNavigateApproval } from './tools/browser';
@@ -269,6 +277,8 @@ interface ManagedSession {
   parentId?: string;
   coworkerName?: string;
   pendingRole?: string;
+  /** 仅父会话：Plan 模式状态机（设置里关闭时缺省） */
+  plan?: PlanController;
   /** 下一条 prompt 产生的 user 消息的投递回执；id 为 null 表示该投递无乐观回显 */
   promptDelivery?: { id: string | null };
   /** 已入 pi steer 队列、尚未上屏的投递回执，与 pi 队列同序 */
@@ -978,7 +988,8 @@ export class SessionSupervisor {
           command.editMode,
           command.rolePrompt,
           command.systemPrompt,
-          command.rtkEnabled
+          command.rtkEnabled,
+          command.planMode
         );
         return;
       case 'spawn-child':
@@ -1061,6 +1072,7 @@ export class SessionSupervisor {
       }
       case 'prompt': {
         const managed = this.must(command.identity);
+        managed.plan?.supersede();
         const images = command.images?.map((image) => ({ type: 'image' as const, ...image }));
         if (await this.interruptRetryIfAny(managed)) {
           this.promptFresh(managed, command.text, images, command.deliveryId);
@@ -1070,13 +1082,10 @@ export class SessionSupervisor {
           await this.steerTracked(managed, command.text, images, command.deliveryId);
           return;
         }
-        // 投影已 idle 但 pi 仍 isStreaming：要么 agent_end 尚未回流，要么是 abort 后工具不响应
-        // 信号的僵尸轮。steer 进僵尸轮永远无人投递（无 loading、无回复、无报错），
-        // 故限时等空闲后走新轮；超时按失败收口，绝不静默。
-        if (
-          managed.session.isStreaming &&
-          !(await waitIdleBounded(managed.session, ZOMBIE_TURN_WAIT_MS))
-        ) {
+        // 投影已 idle 但 pi 仍忙：压缩中（pi 拒收 prompt）不限时等压完；仍 streaming 要么
+        // agent_end 尚未回流，要么是 abort 后工具不响应信号的僵尸轮——steer 进僵尸轮永远
+        // 无人投递，故限时等空闲后走新轮；超时按失败收口，绝不静默。
+        if (!(await waitPromptable(managed.session, ZOMBIE_TURN_WAIT_MS))) {
           this.failTurn(
             managed,
             'The previous turn is still running and could not be interrupted. Please retry, or reopen the conversation to reset the session.',
@@ -1089,6 +1098,7 @@ export class SessionSupervisor {
       }
       case 'steer': {
         const managed = this.must(command.identity);
+        managed.plan?.supersede();
         const images = command.images?.map((image) => ({ type: 'image' as const, ...image }));
         // 重试倒计时期间 renderer 看到的仍是 running 会发 steer：此时没有活轮可插，
         // 语义是用户接管——打断重试，改为新轮 prompt
@@ -1163,6 +1173,19 @@ export class SessionSupervisor {
       case 'set-approval-mode':
         this.must(command.identity).gate.mode = command.mode;
         return;
+      case 'set-plan-mode':
+        this.must(command.identity).plan?.setActive(command.active);
+        return;
+      case 'plan-respond': {
+        const managed = this.must(command.identity);
+        const plan = managed.plan;
+        if (!plan) return;
+        const result = plan.respond(command.planId, command.action, command.feedback);
+        // 过期决策：重发当前状态让渲染层对齐
+        if (!result) this.emitPlanState(managed);
+        else if (result.prompt) this.promptFresh(managed, result.prompt);
+        return;
+      }
       case 'set-approval-reviewer':
         this.approvalReviewer = command.model;
         return;
@@ -1332,13 +1355,13 @@ export class SessionSupervisor {
             )
           : [];
         this.replaceMessagesAfterRewind(managed);
+        managed.plan?.refresh();
+        const editorText = planFreeEditorText(result.editorText || fallbackEditorText);
         this.options.emit({
           type: 'rewind-done',
           identity: managed.identity,
           seq: ++managed.seq,
-          ...(!result.cancelled && (result.editorText || fallbackEditorText)
-            ? { editorText: result.editorText || fallbackEditorText }
-            : {}),
+          ...(!result.cancelled && editorText ? { editorText } : {}),
           ...(!result.cancelled && editorImages.length > 0 ? { editorImages } : {}),
         });
         if (command.restoreFiles) {
@@ -1355,6 +1378,9 @@ export class SessionSupervisor {
       }
       case 'abort': {
         const managed = this.must(command.identity);
+        // 重试倒计时中 pi 只发 auto_retry_end、不再有 agent_end：须按取消重试同口径收口，
+        // 否则 renderer 的中断标记吞掉下一轮收束（队列不再泵），排队压缩永远停在 queued
+        const retrying = managed.session.isRetrying;
         managed.gate.cancelAll();
         managed.asks.cancelAll();
         cancelContinuousMemory(managed.session.sessionManager);
@@ -1365,8 +1391,12 @@ export class SessionSupervisor {
         // 立即收口投影：不 await session.abort()（内部 waitForIdle 会一直等到工具/流
         // 真正结束，工具不响应 signal 时永远等不到，UI 就卡在 running 上）。
         // 中断信号发出即视为本轮终止，后续 agent_end 回流由 status 守卫幂等吸收。
-        managed.status = 'idle';
-        this.emitStatus(managed);
+        if (retrying) {
+          this.failTurn(managed, managed.lastRetryError ?? 'Auto-retry cancelled.');
+        } else {
+          managed.status = 'idle';
+          this.emitStatus(managed);
+        }
         void managed.session.abort().catch(() => {});
         return;
       }
@@ -1404,7 +1434,8 @@ export class SessionSupervisor {
     requestedEditMode?: EditMode,
     rolePrompt?: string,
     systemPrompt?: string,
-    rtkEnabled = true
+    rtkEnabled = true,
+    planMode?: boolean
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -1538,6 +1569,8 @@ export class SessionSupervisor {
       const pending = takePendingReminders();
       return pending.map((text) => `<background-task-update>\n${text}\n</background-task-update>`);
     });
+    const todoReminder = new TodoStaleReminder();
+    reminders.register('todo-stale', () => todoReminder.take(), -1);
     const runaway = new RunawayGuard();
     const budget = new ToolOutputBudget({
       rootDir: path.join(this.options.sessionDir, 'tool-output', sessionId),
@@ -1939,7 +1972,7 @@ export class SessionSupervisor {
         ? createBrowserTools(browser).map((tool) => withNavigateApproval(gate, tool))
         : []),
       ...(memory ? createMemoryTools(memory, { language: memoryLanguage }) : []),
-      ...(toolEnabled('todo') ? [createTodoTool()] : []),
+      ...(toolEnabled('todo') ? [createTodoTool((todos) => todoReminder.update(todos))] : []),
       ...(toolEnabled('ask_user') ? [createAskTool(askManager)] : []),
       ...(toolEnabled('subagent') ? [unifiedSubagentTool] : []),
       ...(toolEnabled('workflow') && toolEnabled('subagent')
@@ -1983,10 +2016,23 @@ export class SessionSupervisor {
           })
         : []),
     ];
-    catalogRef.current = sessionTools;
+    // Plan 工具门包在父会话工具最外层（exec 沙盒经 catalog 调用同样受限）；目录跨模式不变
+    const planRef: { current?: PlanController } = {};
+    const planHost = {
+      state: () => planRef.current?.state() ?? EMPTY_PLAN_STATE,
+      submit: (doc: Parameters<PlanController['submit']>[0]) => planRef.current?.submit(doc),
+    };
+    const readonlyAgentTypes = new Set(
+      agentTypes.filter((type) => type.tools === 'readonly').map((type) => type.name)
+    );
+    const catalogTools = toolEnabled('plan')
+      ? sessionTools.map((tool) => withPlanGate(tool, { host: planHost, readonlyAgentTypes }))
+      : sessionTools;
+    catalogRef.current = catalogTools;
     const customTools = decorateSessionTools(
       [
-        ...sessionTools,
+        ...catalogTools,
+        ...(toolEnabled('plan') ? [createSubmitPlanTool(planHost, randomUUID)] : []),
         ...(toolEnabled('isolated_sandbox')
           ? [
               createIsolatedSandboxTool({
@@ -2032,6 +2078,20 @@ export class SessionSupervisor {
     if (rolePrompt && !resumeFile) managedRef.pendingRole = rolePrompt;
     managedRef.browser = browser;
     managedRef.memory = memory;
+    if (toolEnabled('plan')) {
+      const managed = managedRef;
+      const plan = new PlanController(
+        {
+          branch: () => session.sessionManager.getBranch(),
+          append: (entry) => session.sessionManager.appendCustomEntry(PLAN_ENTRY_TYPE, entry),
+        },
+        () => this.emitPlanState(managed)
+      );
+      planRef.current = plan;
+      managed.plan = plan;
+      if (planMode !== undefined) plan.setActive(planMode);
+      else this.emitPlanState(managed);
+    }
     this.options.emit({
       type: 'parent-ready',
       identity,
@@ -2812,7 +2872,10 @@ export class SessionSupervisor {
         this.rebaseContextUsage(managed);
         managed.compaction = undefined;
         // 锚点必须在对齐之后取：否则摘要消息未入列，与 guest 事件口径 maxIndex+1 差 1
-        if (!event.errorMessage) managed.compactionNoticeAt = managed.messages.length;
+        if (!event.errorMessage) {
+          managed.compactionNoticeAt = managed.messages.length;
+          managed.plan?.compacted();
+        }
         this.emitSessionMeta(managed);
         this.options.emit({
           type: 'compaction',
@@ -2856,6 +2919,7 @@ export class SessionSupervisor {
         managed.currentTurnId = undefined;
         managed.status = 'idle';
         this.emitStatus(managed);
+        managed.plan?.turnSettled();
         managed.contextUsage.setPendingSnapshot(undefined);
         this.emitSessionMeta(managed);
         // 本轮摘要随 turn-completed 下发：renderer 冷会话没有正文，只能由 worker 切
@@ -3078,7 +3142,7 @@ export class SessionSupervisor {
   ): Promise<void> {
     const slot = { id: deliveryId ?? null };
     managed.promptDelivery = slot;
-    return managed.session.prompt(text, options).finally(() => {
+    return managed.session.prompt(withPendingPlanNote(managed, text), options).finally(() => {
       if (managed.promptDelivery === slot) managed.promptDelivery = undefined;
     });
   }
@@ -3092,10 +3156,12 @@ export class SessionSupervisor {
     const slot = { id: deliveryId ?? null };
     managed.steerDeliveries ??= [];
     managed.steerDeliveries.push(slot);
-    return managed.session.steer(text, images).catch((error: unknown) => {
-      managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
-      throw error;
-    });
+    return managed.session
+      .steer(withPendingPlanNote(managed, text), images)
+      .catch((error: unknown) => {
+        managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+        throw error;
+      });
   }
 
   private takeDelivery(managed: ManagedSession): string | null {
@@ -3330,6 +3396,16 @@ export class SessionSupervisor {
     managed.contextUsage.stampSettledAnchor(anchor, nonMessage.current);
   }
 
+  private emitPlanState(managed: ManagedSession): void {
+    if (!managed.plan) return;
+    this.options.emit({
+      type: 'plan-state',
+      identity: managed.identity,
+      seq: ++managed.seq,
+      state: managed.plan.state(),
+    });
+  }
+
   private emitSessionMeta(managed: ManagedSession): void {
     const contextWindow = positiveContextWindow(managed.session.model);
     let occupancy: ReturnType<typeof collectContextOccupancy> | undefined;
@@ -3396,6 +3472,7 @@ export class SessionSupervisor {
         ...(managed.compactionNoticeAt !== undefined
           ? { compactionNoticeAt: managed.compactionNoticeAt }
           : {}),
+        ...(managed.plan ? { planState: managed.plan.state() } : {}),
       };
     });
   }
@@ -3722,6 +3799,31 @@ export function waitIdleBounded(
     session.waitForIdle().then(done, done);
   });
 }
+
+/**
+ * 等 pi 可以起新轮；false = 僵尸轮超时。压缩不计入僵尸时限。记忆扩展在 agent_settled 后
+ * 下一个宏任务才启动压缩，等过之后须让一拍再复查，否则新轮先起、随即被压缩的 abort 打断。
+ */
+export async function waitPromptable(
+  session: Pick<AgentSession, 'waitForIdle' | 'isStreaming' | 'isCompacting'>,
+  zombieMs: number
+): Promise<boolean> {
+  let waited = false;
+  for (;;) {
+    if (session.isCompacting) {
+      await session.waitForIdle();
+    } else if (session.isStreaming) {
+      if (!(await waitIdleBounded(session, zombieMs)) && !session.isCompacting) return false;
+    } else if (waited) {
+      waited = false;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      continue;
+    } else {
+      return true;
+    }
+    waited = true;
+  }
+}
 /** 异步通知里的摘要上限;全文经 coworker report 取 */
 const NOTIFY_SUMMARY_LIMIT = 1500;
 /** 一轮结束回父的摘要尾句：阻塞/非阻塞两条路径共用，按验收结果决定是否继续 */
@@ -3753,6 +3855,19 @@ export function runGateCommand(cwd: string, gate: string, executor?: SshExecutor
       }
     );
   });
+}
+
+/** 回退回填输入框：去掉 Plan 提示前缀；批准消息不回填，修改意见只回填意见原文 */
+function planFreeEditorText(text: string): string {
+  const rest = splitPlanPrefix(text).rest;
+  const message = parsePlanMessage(rest);
+  return message ? (message.kind === 'feedback' ? message.feedback : '') : rest;
+}
+
+/** Plan 状态变化后的一次性提示，随下一条进入模型的用户消息前置 */
+function withPendingPlanNote(managed: { plan?: PlanController }, text: string): string {
+  const note = managed.plan?.takeNote();
+  return note ? withPlanNote(note, text) : text;
 }
 
 /** coworker 首条消息前缀注入角色提示,消费一次 */

@@ -612,6 +612,7 @@ export function spawnSession(
     ...(skillPaths.length > 0 ? { skillPaths } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
     ...(request.approvalMode ? { approvalMode: request.approvalMode } : {}),
+    ...(request.planMode !== undefined ? { planMode: request.planMode } : {}),
     ...(approvalReviewerConfig ? { approvalReviewer: approvalReviewerConfig } : {}),
     ...(agentTypes.length > 0 ? { agentTypes } : {}),
     ...(subagentModels.length > 0 ? { subagentModels } : {}),

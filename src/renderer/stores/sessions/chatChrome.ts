@@ -40,6 +40,7 @@ export interface ChatChrome {
   subagents: Conversation['subagents'];
   queuedMessages: Conversation['queuedMessages'];
   goal: Conversation['goal'];
+  planState: Conversation['planState'];
   rewinding?: boolean;
   restoringFiles?: boolean;
   childLockedProfileId?: string;
@@ -105,6 +106,7 @@ export function selectChatChrome(state: SessionsSlice): ChatChrome | null {
     subagents: displayed.subagents,
     queuedMessages: displayed.queuedMessages,
     goal: displayed.goal,
+    planState: displayed.planState,
     rewinding: displayed.rewinding,
     restoringFiles: displayed.restoringFiles,
     childLockedProfileId: displayed.child?.lockedProfileId,

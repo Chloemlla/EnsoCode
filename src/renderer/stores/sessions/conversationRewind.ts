@@ -22,6 +22,10 @@ export interface RewindHost {
   canRewind: boolean;
 }
 
+export interface ForkHost extends RewindHost {
+  canFork?: boolean;
+}
+
 export function canWakeConversationForRewind(conversation: ConversationRewindView): boolean {
   return (
     !conversation.started &&
@@ -45,6 +49,18 @@ export function canShowConversationRewind(
   if (conversation.spawning || conversation.status === 'running') return false;
   if (conversation.rewinding || conversation.restoringFiles) return false;
   if (conversation.started) return true;
+  return canWakeConversationForRewind(conversation);
+}
+
+/** 分支入口：热主会话需 idle 且非 spawning；未激活的冷主会话由 store 先唤醒再分叉 */
+export function canShowConversationFork(
+  conversation: ConversationRewindView | null | undefined,
+  host?: ForkHost | null
+): boolean {
+  if (host && (!host.canRewind || host.canFork === false)) return false;
+  if (!conversation || conversation.parentId || conversation.historyOnly) return false;
+  if (conversation.status !== 'idle') return false;
+  if (conversation.started) return !conversation.spawning;
   return canWakeConversationForRewind(conversation);
 }
 
@@ -108,6 +124,21 @@ export function userIndexFromEndForTimelineKey(
   if (localIndex < 0 || conversation.messages[localIndex]?.role !== 'user') return null;
   return conversation.messages.slice(localIndex + 1).filter((message) => message.role === 'user')
     .length;
+}
+
+/** 轮末行 key（绝对下标）回溯到本轮 user，再从末尾计数 */
+export function userIndexFromEndForTurnKey(
+  conversation: { messages: readonly { role: string }[]; historyBaseIndex?: number },
+  absIndex: number
+): number | null {
+  if (!Number.isInteger(absIndex)) return null;
+  const base = conversation.historyBaseIndex ?? 0;
+  for (let i = absIndex; i >= base; i--) {
+    if (conversation.messages[i - base]?.role === 'user') {
+      return userIndexFromEndForTimelineKey(conversation, i);
+    }
+  }
+  return null;
 }
 
 /** 回退到倒数第 N+1 条 user：保留它之前的消息（不含该 user）。对不上返回 null。 */

@@ -28,6 +28,7 @@ import type {
 import {
   APPROVAL_MODES,
   isDeliveryId,
+  parseAgentCommand,
   parseConversationAuthorityRequest,
   parseCreateConversationAuthorityRequest,
   parseTitleSummaryInput,
@@ -311,6 +312,7 @@ function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
     'disabledTools',
     'presetId',
     'approvalMode',
+    'planMode',
   ]);
   if (
     Object.keys(request).some((key) => !allowed.has(key)) ||
@@ -329,7 +331,8 @@ function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
         request.disabledTools.some((id) => typeof id !== 'string'))) ||
     (request.presetId !== undefined && typeof request.presetId !== 'string') ||
     (request.approvalMode !== undefined &&
-      !APPROVAL_MODES.includes(request.approvalMode as ApprovalMode))
+      !APPROVAL_MODES.includes(request.approvalMode as ApprovalMode)) ||
+    (request.planMode !== undefined && typeof request.planMode !== 'boolean')
   ) {
     return null;
   }
@@ -1501,6 +1504,41 @@ export function registerAgentHandlers(): void {
         mode as ApprovalMode,
         await readStoredOauthCredentialKeys()
       );
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_SET_PLAN_MODE,
+    (_event, sessionId: unknown, active: unknown): AgentActionResult => {
+      const identity = exactIdentity(sessionId);
+      const command = identity && parseAgentCommand({ type: 'set-plan-mode', identity, active });
+      if (!command) return { ok: false, error: 'invalid plan mode or stale generation' };
+      return sendAgentCommand(command);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_PLAN_RESPOND,
+    (_event, sessionId: unknown, response: unknown): AgentActionResult => {
+      const identity = exactIdentity(sessionId);
+      const record =
+        response && typeof response === 'object' ? (response as Record<string, unknown>) : null;
+      const command =
+        identity &&
+        record &&
+        parseAgentCommand({
+          type: 'plan-respond',
+          identity,
+          planId: record.planId,
+          action: record.action,
+          ...(record.feedback !== undefined ? { feedback: record.feedback } : {}),
+        });
+      if (
+        !command ||
+        Object.keys(record ?? {}).some((key) => !['planId', 'action', 'feedback'].includes(key))
+      )
+        return { ok: false, error: 'invalid plan response or stale generation' };
+      return sendAgentCommand(command);
     }
   );
 

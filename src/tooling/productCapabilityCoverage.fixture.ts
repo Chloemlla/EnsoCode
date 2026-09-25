@@ -74,6 +74,7 @@ export const SETTINGS_DATA_COVERAGE = {
   collapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
+  pinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   chatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
   notifyMainAgentOnly: excluded(
     'Desktop/phone completion notification preference; not an Enso capability.'
@@ -191,6 +192,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   setCollapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
+  setPinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   setChatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
   setNotifyMainAgentOnly: excluded(
     'Desktop/phone completion notification preference; not an Enso capability.'
@@ -417,6 +419,12 @@ export const IPC_PRODUCT_COVERAGE = {
   AGENT_SET_REASONING: surfaces('conversations.set-reasoning'),
   AGENT_APPROVAL_RESPOND: surfaces('conversations.approval.respond'),
   AGENT_SET_APPROVAL_MODE: surfaces('conversations.set-approval-mode'),
+  AGENT_SET_PLAN_MODE: excluded(
+    'Desktop composer Plan toggle; only restricts tools further, never grants execution rights.'
+  ),
+  AGENT_PLAN_RESPOND: excluded(
+    'Desktop plan review bar decision (approve/revise/discard/finish) for the pending plan of this conversation.'
+  ),
   NOTIFICATION_FOCUS_SESSION: surfaces('window.focus-conversation-notification'),
   NOTIFICATION_ACTIVE_SESSION: excluded(
     'Renderer reports the currently viewed conversation id so Main can suppress redundant system notifications; no execution rights.'
@@ -478,6 +486,7 @@ export const IPC_PRODUCT_COVERAGE = {
   DIALOG_SELECT_DIRECTORY: surfaces('projects.add'),
   PROJECTS_GET_RECENT: surfaces('projects.recent'),
   PROJECTS_REVEAL: surfaces('projects.list'),
+  PROJECTS_OPEN_IN_APPS: surfaces('projects.list'),
   FILES_SEARCH: surfaces('conversations.file-mention.attach'),
   FILES_READ: excluded('Internal bounded file reader used by reviewed UI flows.'),
   GIT_DIFF_HEAD: excluded('Internal git working-tree reader for the Changes panel.'),

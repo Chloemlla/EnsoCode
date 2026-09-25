@@ -5,6 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
+  '@earendil-works/pi-coding-agent@0.87.1':
+    hash: 83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867
+    path: patches/@earendil-works__pi-coding-agent@0.87.1.patch
   '@rahularya01/pi-cursor@1.4.38':
     hash: d0eae472c453f3d0466fb4b330a6137b37cb2913f5221d1850a1efcd94f54627
     path: patches/@rahularya01__pi-cursor@1.4.38.patch
@@ -24,7 +27,7 @@ importers:
         version: 0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
         specifier: 0.87.1
-        version: 0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
+        version: 0.87.1(patch_hash=83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
       '@earendil-works/pi-tui':
         specifier: 0.87.1
         version: 0.87.1
@@ -39,7 +42,7 @@ importers:
         version: 1.30.0(zod@4.4.3)
       '@rahularya01/pi-cursor':
         specifier: 1.4.38
-        version: 1.4.38(patch_hash=d0eae472c453f3d0466fb4b330a6137b37cb2913f5221d1850a1efcd94f54627)(@earendil-works/pi-ai@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))(@earendil-works/pi-coding-agent@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))
+        version: 1.4.38(patch_hash=d0eae472c453f3d0466fb4b330a6137b37cb2913f5221d1850a1efcd94f54627)(@earendil-works/pi-ai@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))(@earendil-works/pi-coding-agent@0.87.1(patch_hash=83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))
       '@vscode/ripgrep':
         specifier: 1.17.0
         version: 1.17.0
@@ -6128,7 +6131,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)':
+  '@earendil-works/pi-coding-agent@0.87.1(patch_hash=83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)':
     dependencies:
       '@earendil-works/chord': 0.87.1
       '@earendil-works/pi-agent-core': 0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
@@ -6892,11 +6895,11 @@ snapshots:
 
   '@protobufjs/utf8@1.1.2': {}
 
-  '@rahularya01/pi-cursor@1.4.38(patch_hash=d0eae472c453f3d0466fb4b330a6137b37cb2913f5221d1850a1efcd94f54627)(@earendil-works/pi-ai@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))(@earendil-works/pi-coding-agent@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))':
+  '@rahularya01/pi-cursor@1.4.38(patch_hash=d0eae472c453f3d0466fb4b330a6137b37cb2913f5221d1850a1efcd94f54627)(@earendil-works/pi-ai@0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))(@earendil-works/pi-coding-agent@0.87.1(patch_hash=83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3))':
     dependencies:
       '@bufbuild/protobuf': 2.13.0
       '@earendil-works/pi-ai': 0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
-      '@earendil-works/pi-coding-agent': 0.87.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
+      '@earendil-works/pi-coding-agent': 0.87.1(patch_hash=83d06bcc5e0cdf3b6e36fdad2af1629750c7d7beed21415c5b460f854af2a867)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.3)(zod@4.4.3)
 
   '@reflink/reflink-darwin-arm64@0.1.19':
     optional: true

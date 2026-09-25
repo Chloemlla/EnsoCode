@@ -8,7 +8,7 @@ import {
 
 export const BTW_SNAPSHOT_LIMIT = 40;
 export const BTW_TITLE_MAX_CHARS = 32;
-export const BTW_DISABLED_TOOLS = ['subagent', 'coworker', 'workflow'] as const;
+export const BTW_DISABLED_TOOLS = ['subagent', 'coworker', 'workflow', 'plan'] as const;
 
 export type BtwMode = 'contextual' | 'tangent';
 

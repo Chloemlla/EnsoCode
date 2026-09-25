@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   sessionWorktree: vi.fn(),
   statSync: vi.fn(),
   openPath: vi.fn(),
+  listApps: vi.fn(),
+  openInApp: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -46,6 +48,9 @@ vi.mock('./agent', () => ({
 }));
 vi.mock('./worktree', () => ({ sessionWorktree: mocks.sessionWorktree }));
 vi.mock('../services/recentProjects', () => ({ getRecentProjects: () => [] }));
+vi.mock('../services/openInApps', () => ({
+  openInApps: { list: mocks.listApps, open: mocks.openInApp },
+}));
 
 import { IPC_CHANNELS } from '@shared/types';
 import { registerProjectHandlers } from './projects';
@@ -75,6 +80,10 @@ describe('project authority IPC', () => {
     mocks.sessionWorktree.mockReset();
     mocks.statSync.mockReset().mockReturnValue({ isDirectory: () => true });
     mocks.openPath.mockReset().mockResolvedValue('');
+    mocks.listApps
+      .mockReset()
+      .mockResolvedValue([{ id: 'vscode', name: 'VS Code', kind: 'editor' }]);
+    mocks.openInApp.mockReset().mockResolvedValue({ ok: true });
     registerProjectHandlers();
   });
 
@@ -326,6 +335,59 @@ describe('project authority IPC', () => {
       ok: false,
       error: 'Failed to open path',
     });
+  });
+
+  it('open-in 应用列表只对主窗口开放', async () => {
+    const list = mocks.handlers.get(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS)!;
+    await expect(list(event(2))).resolves.toEqual([]);
+    expect(mocks.listApps).not.toHaveBeenCalled();
+    await expect(list(event(1))).resolves.toEqual([
+      { id: 'vscode', name: 'VS Code', kind: 'editor' },
+    ]);
+  });
+
+  it('reveal 带 appId 时用指定应用打开 Main 推导的工作目录', async () => {
+    const reveal = mocks.handlers.get(IPC_CHANNELS.PROJECTS_REVEAL)!;
+    mocks.sessionWorktree.mockReturnValue({
+      conversationId: 'conversation-1',
+      projectId: 'project-1',
+      repoPath: '/repo/enso',
+      path: '/worktrees/conversation-1',
+    });
+    await expect(
+      reveal(event(1), {
+        projectId: 'project-1',
+        conversationId: 'conversation-1',
+        appId: 'vscode',
+      })
+    ).resolves.toEqual({ ok: true });
+    expect(mocks.openInApp).toHaveBeenCalledWith('vscode', '/worktrees/conversation-1');
+    expect(mocks.openPath).not.toHaveBeenCalled();
+  });
+
+  it('reveal 透传应用启动失败', async () => {
+    const reveal = mocks.handlers.get(IPC_CHANNELS.PROJECTS_REVEAL)!;
+    mocks.openInApp.mockResolvedValue({ ok: false, error: 'unavailable' });
+    await expect(reveal(event(1), { projectId: 'project-1', appId: 'ghost' })).resolves.toEqual({
+      ok: false,
+      error: 'unavailable',
+    });
+  });
+
+  it('reveal 对非法 appId 返回 invalid，ssh 项目返回 unsupported', async () => {
+    const reveal = mocks.handlers.get(IPC_CHANNELS.PROJECTS_REVEAL)!;
+    for (const appId of [42, '', null]) {
+      await expect(reveal(event(1), { projectId: 'project-1', appId })).resolves.toEqual({
+        ok: false,
+        error: 'invalid',
+      });
+    }
+    mocks.project.mockReturnValue({ state: 'active', kind: 'ssh', canonicalPath: '/remote' });
+    await expect(reveal(event(1), { projectId: 'project-1', appId: 'vscode' })).resolves.toEqual({
+      ok: false,
+      error: 'unsupported',
+    });
+    expect(mocks.openInApp).not.toHaveBeenCalled();
   });
 
   it('removeProject 被拒绝时不清理任何文件', () => {

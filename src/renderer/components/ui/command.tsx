@@ -102,23 +102,27 @@ function Command({
 function CommandInput({
   className,
   placeholder = undefined,
+  endAddon,
   ...props
-}: React.ComponentProps<typeof AutocompleteInput>) {
+}: React.ComponentProps<typeof AutocompleteInput> & { endAddon?: React.ReactNode }) {
   const { inputRef } = React.useContext(CommandInputContext);
 
   return (
-    <div className="px-2.5 py-1.5">
-      <AutocompleteInput
-        className={cn(
-          'border-transparent! bg-transparent! shadow-none before:hidden has-focus-visible:ring-0',
-          className
-        )}
-        placeholder={placeholder}
-        ref={inputRef}
-        size="lg"
-        startAddon={<SearchIcon />}
-        {...props}
-      />
+    <div className="flex items-center gap-2 px-2.5 py-1.5">
+      <div className="min-w-0 flex-1">
+        <AutocompleteInput
+          className={cn(
+            'border-transparent! bg-transparent! shadow-none before:hidden has-focus-visible:ring-0',
+            className
+          )}
+          placeholder={placeholder}
+          ref={inputRef}
+          size="lg"
+          startAddon={<SearchIcon />}
+          {...props}
+        />
+      </div>
+      {endAddon}
     </div>
   );
 }

@@ -347,11 +347,11 @@ export default function App() {
             <AlertDialogClose render={<Button variant="outline" size="sm" />}>
               {t('Cancel')}
             </AlertDialogClose>
-            <Button variant="destructive" size="sm" onClick={() => respondClose('quit')}>
-              {t('Exit')}
-            </Button>
             <Button size="sm" onClick={() => respondClose('tray')}>
               {t('Minimize to tray')}
+            </Button>
+            <Button variant="destructive" size="sm" onClick={() => respondClose('quit')}>
+              {t('Exit')}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

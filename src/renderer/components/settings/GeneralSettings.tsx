@@ -107,6 +107,8 @@ function SidePanelSection() {
   const setAutoCollapseTurns = useSettingsStore((s) => s.setAutoCollapseTurns);
   const collapseCompletedActivity = useSettingsStore((s) => s.collapseCompletedActivity);
   const setCollapseCompletedActivity = useSettingsStore((s) => s.setCollapseCompletedActivity);
+  const pinUnfinishedTodos = useSettingsStore((s) => s.pinUnfinishedTodos);
+  const setPinUnfinishedTodos = useSettingsStore((s) => s.setPinUnfinishedTodos);
   const generationStallTimeoutMin = useSettingsStore((s) => s.generationStallTimeoutMin);
   const setGenerationStallTimeoutMin = useSettingsStore((s) => s.setGenerationStallTimeoutMin);
   return (
@@ -164,6 +166,15 @@ function SidePanelSection() {
         )}
         checked={collapseCompletedActivity}
         onChange={setCollapseCompletedActivity}
+      />
+      <SwitchRow
+        rowId="general.pinUnfinishedTodos"
+        title={t('Pin unfinished todos')}
+        description={t(
+          'Keep the latest todo list above the input while it has unfinished items, so it does not scroll away with the timeline'
+        )}
+        checked={pinUnfinishedTodos}
+        onChange={setPinUnfinishedTodos}
       />
       <div
         className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5"

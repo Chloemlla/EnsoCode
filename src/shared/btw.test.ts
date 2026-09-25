@@ -220,8 +220,14 @@ describe('lastAssistantText', () => {
 
 describe('btwDisabledTools', () => {
   it('强制关闭 subagent 与 coworker，并保留已有禁用', () => {
-    expect(btwDisabledTools(['memory'])).toEqual(['memory', 'subagent', 'coworker', 'workflow']);
-    expect(btwDisabledTools(['coworker'])).toEqual(['coworker', 'subagent', 'workflow']);
+    expect(btwDisabledTools(['memory'])).toEqual([
+      'memory',
+      'subagent',
+      'coworker',
+      'workflow',
+      'plan',
+    ]);
+    expect(btwDisabledTools(['coworker'])).toEqual(['coworker', 'subagent', 'workflow', 'plan']);
   });
 });
 

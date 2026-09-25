@@ -124,7 +124,17 @@ const agentRelease = vi.fn(async (_id: string) => ({ ok: true }));
 const btwSpawn = vi.fn(async () => ({ ok: true }));
 const btwDispose = vi.fn(async () => ({ ok: true }));
 const agentRewind = vi.fn(async () => ({ ok: true }));
+const agentFork = vi.fn(async (_sourceId: string, _targetId: string, _anchor: unknown) => ({
+  ok: true,
+}));
 const requestSnapshot = vi.fn(async () => ({ ok: true }));
+const agentSetPlanMode = vi.fn(
+  async (_id: string, _active: boolean) =>
+    ({ ok: true }) as {
+      ok: boolean;
+      error?: string;
+    }
+);
 
 vi.stubGlobal('navigator', { language: 'en-US' });
 vi.stubGlobal('document', {
@@ -169,7 +179,9 @@ vi.stubGlobal('window', {
       abort: agentAbort,
       release: agentRelease,
       rewind: agentRewind,
+      fork: agentFork,
       steer: vi.fn(async () => ({ ok: true })),
+      setPlanMode: agentSetPlanMode,
     },
     btw: {
       spawn: btwSpawn,
@@ -1272,6 +1284,29 @@ describe('typed Agent child projection', () => {
         sessionsModule.useSessionsStore.getState().conversations[child.sessionId].lastModelId
       ).toBe('claude-opus-5');
     });
+
+    it('worker 回流的 coworker-update 不带 mode 时保留 Main 预约的 task / coworker 模式', () => {
+      const reserved = reserve(1);
+      if (reserved.type !== 'child-reserved') throw new Error('expected reservation');
+      onAgentEvent?.({ ...reserved, metadata: { ...reserved.metadata, mode: 'task' } });
+      const child = childIdentity(1);
+      onAgentEvent?.({
+        type: 'coworker-update',
+        identity: child.parent,
+        seq: 2,
+        coworker: {
+          id: child.sessionId,
+          child: { ...reserved.metadata },
+          name: child.instanceName,
+          agentType: child.typeKey,
+          status: 'running',
+          createdAt: 1,
+        },
+      });
+      expect(
+        sessionsModule.useSessionsStore.getState().conversations[child.sessionId].child?.mode
+      ).toBe('task');
+    });
   });
 
   describe('手动雇佣委托 Main dispatch', () => {
@@ -2286,6 +2321,45 @@ describe('typed Agent child projection', () => {
     expect(
       sessionsModule.useSessionsStore.getState().conversations.parent.compaction
     ).toBeUndefined();
+  });
+
+  it('压缩结束时已有投递在途（worker 等压完才起轮）：不再泵下一条', async () => {
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        parent: {
+          ...state.conversations.parent,
+          started: true,
+          status: 'idle' as const,
+          generation: 'pg1',
+          compaction: 'running',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'text', text: 'in flight' }],
+              timestamp: 1,
+              optimistic: true,
+              deliveryId: 'd1',
+            },
+          ],
+          queuedMessages: [{ id: 'q2', text: 'next' }],
+        },
+      },
+    }));
+    agentPrompt.mockClear();
+
+    onAgentEvent?.({
+      type: 'compaction',
+      identity: { sessionId: 'parent', generation: 'pg1' },
+      seq: 1,
+      state: 'end',
+    });
+    await Promise.resolve();
+
+    expect(agentPrompt).not.toHaveBeenCalled();
+    expect(sessionsModule.useSessionsStore.getState().conversations.parent.queuedMessages).toEqual([
+      { id: 'q2', text: 'next' },
+    ]);
   });
 
   it('轮次结束时压缩仍在排队则不投递，等压缩结束再发', async () => {
@@ -4097,6 +4171,73 @@ describe('rewind 在 failed 状态放行、running 仍拦截', () => {
     expect(agentSpawn).not.toHaveBeenCalled();
     expect(agentRewind).not.toHaveBeenCalled();
   });
+
+  it('冷加载主会话分支：先 resume，含该会话 snapshot 后才 fork', async () => {
+    enableRewindResumeModel();
+    agentFork.mockClear();
+    let finishSpawn: ((value: { ok: true }) => void) | undefined;
+    agentSpawn.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSpawn = resolve;
+        })
+    );
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        parent: {
+          ...state.conversations.parent,
+          started: false,
+          spawning: false,
+          status: 'idle' as const,
+          sessionFile: '/tmp/cold.jsonl',
+          lastProviderId: 'p1',
+          lastModelId: 'm1',
+        },
+      },
+    }));
+    nextConversationId = 'forked';
+    const forked = sessionsModule.useSessionsStore.getState().forkFromMessage('parent', 1);
+    await vi.waitFor(() =>
+      expect(agentSpawn).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'parent', resumeFile: '/tmp/cold.jsonl' })
+      )
+    );
+    finishSpawn?.({ ok: true });
+    await vi.waitFor(() =>
+      expect(sessionsModule.useSessionsStore.getState().conversations.parent.started).toBe(true)
+    );
+    expect(agentFork).not.toHaveBeenCalled();
+    emitRewindSnapshot();
+    await expect(forked).resolves.toBe('forked');
+    expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { userIndexFromEnd: 1 });
+  });
+
+  it('冷会话 resume 失败不 fork、不建分支会话', async () => {
+    enableRewindResumeModel();
+    agentFork.mockClear();
+    agentSpawn.mockResolvedValueOnce({ ok: false });
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        parent: {
+          ...state.conversations.parent,
+          started: false,
+          spawning: false,
+          status: 'idle' as const,
+          sessionFile: '/tmp/cold.jsonl',
+          lastProviderId: 'p1',
+          lastModelId: 'm1',
+        },
+      },
+    }));
+    nextConversationId = 'forked';
+    await expect(
+      sessionsModule.useSessionsStore.getState().forkFromMessage('parent', 0)
+    ).resolves.toBe(null);
+    expect(agentFork).not.toHaveBeenCalled();
+    expect(sessionsModule.useSessionsStore.getState().conversations.forked).toBeUndefined();
+  });
 });
 
 describe('btw session send', () => {
@@ -4239,5 +4380,72 @@ describe('btw session send', () => {
     expect(messages?.some((message) => message.optimistic)).toBe(false);
     expect(messages?.some((message) => message.role === 'assistant')).toBe(true);
     expect(JSON.stringify(messages)).toContain('用的是 bash');
+  });
+});
+
+describe('Plan 模式', () => {
+  beforeAll(async () => {
+    settingsModule ??= await import('../settings');
+    sessionsModule ??= await import('./index');
+  });
+
+  beforeEach(async () => {
+    nextConversationId = 'plan-parent';
+    sourceProjection = {
+      projects: [
+        { projectId: 'project', canonicalPath: '/workspace', state: 'active', version: 1 },
+      ],
+      conversations: [],
+    };
+    sessionsModule.useSessionsStore.setState({
+      conversations: {},
+      order: [],
+      activeId: null,
+      pendingAgentPrefill: undefined,
+    });
+    settingsModule.useSettingsStore.setState({
+      projects: [{ id: 'project', name: 'Project', path: '/workspace' }],
+    });
+    await seedParent();
+    agentSpawn.mockClear();
+    agentPrompt.mockClear();
+    agentSetPlanMode.mockClear();
+  });
+
+  const conv = () => sessionsModule.useSessionsStore.getState().conversations['plan-parent'];
+  const target = { providerId: 'provider-1', modelId: 'model-1', cwd: '/workspace' };
+
+  it('未启动时 /plan 正文：开启 Plan 随 spawn 下发，正文照常发送', async () => {
+    await sessionsModule.useSessionsStore.getState().send('/plan 帮我重构登录', target);
+    expect(conv()?.planState?.active).toBe(true);
+    expect(agentSetPlanMode).not.toHaveBeenCalled();
+    expect(agentSpawn).toHaveBeenCalledWith(expect.objectContaining({ planMode: true }));
+    expect(agentPrompt).toHaveBeenCalledWith(
+      'plan-parent',
+      '帮我重构登录',
+      undefined,
+      expect.anything()
+    );
+  });
+
+  it('已启动时 /plan off 即时下发且不发消息；下发失败回滚', async () => {
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        'plan-parent': {
+          ...state.conversations['plan-parent'],
+          started: true,
+          planState: { active: true, resolutions: {} },
+        },
+      },
+    }));
+    await sessionsModule.useSessionsStore.getState().send('/plan off', target);
+    expect(agentSetPlanMode).toHaveBeenCalledWith('plan-parent', false);
+    expect(agentPrompt).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(conv()?.planState?.active).toBe(false));
+
+    agentSetPlanMode.mockResolvedValueOnce({ ok: false, error: 'stale' });
+    sessionsModule.useSessionsStore.getState().setPlanMode('plan-parent', true);
+    await vi.waitFor(() => expect(conv()?.planState?.active).toBe(false));
   });
 });

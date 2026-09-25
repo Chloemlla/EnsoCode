@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canShowConversationFork,
   canShowConversationRewind,
   canWakeConversationForRewind,
   extractRewindDraft,
@@ -8,6 +9,7 @@ import {
   rewindWorkerPhase,
   shouldSendRewindCommand,
   userIndexFromEndForTimelineKey,
+  userIndexFromEndForTurnKey,
 } from './conversationRewind';
 
 const root = (overrides: Record<string, unknown> = {}) => ({
@@ -86,6 +88,36 @@ describe('canWakeConversationForRewind', () => {
     expect(canWakeConversationForRewind(root({ spawning: true }))).toBe(false);
     expect(canWakeConversationForRewind(root({ worktreeMissing: true }))).toBe(false);
     expect(canWakeConversationForRewind(root({ workspaceMigrating: true }))).toBe(false);
+  });
+});
+
+describe('canShowConversationFork', () => {
+  it('已 spawn 主会话仅 idle 且非 spawning 显示', () => {
+    expect(canShowConversationFork(root({ started: true }))).toBe(true);
+    expect(canShowConversationFork(root({ started: true, spawning: true }))).toBe(false);
+    expect(canShowConversationFork(root({ started: true, status: 'running' }))).toBe(false);
+    expect(canShowConversationFork(root({ started: true, status: 'failed' }))).toBe(false);
+  });
+
+  it('未激活的冷主会话（有 jsonl）显示分支', () => {
+    expect(canShowConversationFork(root())).toBe(true);
+  });
+
+  it('草稿、coworker、historyOnly、工作区不可用、failed 冷会话不显示', () => {
+    expect(canShowConversationFork(null)).toBe(false);
+    expect(canShowConversationFork(root({ sessionFile: undefined }))).toBe(false);
+    expect(canShowConversationFork(root({ parentId: 'parent' }))).toBe(false);
+    expect(canShowConversationFork(root({ started: true, parentId: 'parent' }))).toBe(false);
+    expect(canShowConversationFork(root({ historyOnly: true }))).toBe(false);
+    expect(canShowConversationFork(root({ worktreeMissing: true }))).toBe(false);
+    expect(canShowConversationFork(root({ workspaceMigrating: true }))).toBe(false);
+    expect(canShowConversationFork(root({ status: 'failed' }))).toBe(false);
+  });
+
+  it('宿主关闭分叉或回退时不显示', () => {
+    expect(canShowConversationFork(root(), { canRewind: true, canFork: false })).toBe(false);
+    expect(canShowConversationFork(root(), { canRewind: false })).toBe(false);
+    expect(canShowConversationFork(root(), { canRewind: true })).toBe(true);
   });
 });
 
@@ -183,6 +215,25 @@ describe('userIndexFromEndForTimelineKey', () => {
     expect(userIndexFromEndForTimelineKey({ messages }, 1)).toBe(null);
     expect(userIndexFromEndForTimelineKey({ messages }, Number.NaN)).toBe(null);
     expect(userIndexFromEndForTimelineKey({ messages }, 1.5)).toBe(null);
+  });
+});
+
+describe('userIndexFromEndForTurnKey', () => {
+  it('从轮末行 key 回溯到本轮 user，按 historyBaseIndex 换算', () => {
+    const tail = {
+      messages: [{ role: 'user' }, { role: 'assistant' }, { role: 'user' }, { role: 'assistant' }],
+      historyBaseIndex: 40,
+    };
+    expect(userIndexFromEndForTurnKey(tail, 41)).toBe(1);
+    expect(userIndexFromEndForTurnKey(tail, 43)).toBe(0);
+    expect(userIndexFromEndForTurnKey({ messages: tail.messages }, 3)).toBe(0);
+  });
+
+  it('本轮 user 在尾窗之外或 key 非法返回 null', () => {
+    const tail = { messages: [{ role: 'assistant' }], historyBaseIndex: 40 };
+    expect(userIndexFromEndForTurnKey(tail, 40)).toBe(null);
+    expect(userIndexFromEndForTurnKey(tail, 3)).toBe(null);
+    expect(userIndexFromEndForTurnKey(tail, Number.NaN)).toBe(null);
   });
 });
 

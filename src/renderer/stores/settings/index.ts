@@ -148,7 +148,8 @@ const initialState = {
   expandLiveEdits: true,
   expandLiveReasoning: true,
   autoCollapseTurns: false,
-  collapseCompletedActivity: false,
+  collapseCompletedActivity: true,
+  pinUnfinishedTodos: true,
   chatWide: false,
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
@@ -306,6 +307,7 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoCollapseTurns: (autoCollapseTurns) => set({ autoCollapseTurns }),
       setCollapseCompletedActivity: (collapseCompletedActivity) =>
         set({ collapseCompletedActivity }),
+      setPinUnfinishedTodos: (pinUnfinishedTodos) => set({ pinUnfinishedTodos }),
       setChatWide: (chatWide) => {
         document.documentElement.classList.toggle('enso-chat-wide', chatWide);
         set({ chatWide });

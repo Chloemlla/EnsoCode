@@ -97,6 +97,45 @@ function inScope(doc: WorkspaceSearchDoc, options: WorkspaceSearchOptions): bool
   return true;
 }
 
+/** 按与 fieldMatches 相同的规则切出命中段：拉丁词按词首前缀，中文按子串。 */
+export function highlightWorkspaceMatches(
+  text: string,
+  query: string
+): Array<{ text: string; match: boolean }> {
+  const lower = text.toLowerCase();
+  const tokens = queryTokens(query);
+  if (tokens.length === 0 || lower.length !== text.length) return [{ text, match: false }];
+  const ranges: Array<[number, number]> = [];
+  for (const token of tokens) {
+    if (isCjkToken(token)) {
+      for (let index = lower.indexOf(token); index >= 0; index = lower.indexOf(token, index + 1)) {
+        ranges.push([index, index + token.length]);
+      }
+      continue;
+    }
+    for (const match of lower.matchAll(TOKEN_RE)) {
+      if (match.index !== undefined && match[0].startsWith(token)) {
+        ranges.push([match.index, match.index + token.length]);
+      }
+    }
+  }
+  if (ranges.length === 0) return [{ text, match: false }];
+  ranges.sort((a, b) => a[0] - b[0]);
+  const parts: Array<{ text: string; match: boolean }> = [];
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (end <= cursor) continue;
+    const from = Math.max(start, cursor);
+    if (from > cursor) parts.push({ text: text.slice(cursor, from), match: false });
+    const last = parts.at(-1);
+    if (last?.match && from === cursor) last.text += text.slice(from, end);
+    else parts.push({ text: text.slice(from, end), match: true });
+    cursor = end;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor), match: false });
+  return parts;
+}
+
 function firstMatchIndex(text: string, tokens: string[]): number {
   const lower = text.toLowerCase();
   let best = -1;

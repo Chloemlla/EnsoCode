@@ -1,3 +1,4 @@
+import { projectDisplayName } from '@shared/projectName';
 import type { BrowserSearchTab, SettingsSearchEntry } from '@shared/searchAnything';
 import {
   buildSettingsCatalog,
@@ -5,27 +6,51 @@ import {
   searchBrowserTabs,
   searchSettingsEntries,
 } from '@shared/searchAnything';
+import type { SettingsCategory } from '@shared/settingsDeepLink';
 import type { WorkspaceSearchHit, WorkspaceSearchScope } from '@shared/workspaceSearch';
 import {
   cycleWorkspaceSearchScope,
+  highlightWorkspaceMatches,
   mergeWorkspaceHits,
   searchWorkspace,
 } from '@shared/workspaceSearch';
-import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState } from 'react';
+import {
+  Bot,
+  Globe,
+  type LucideIcon,
+  MessageCircle,
+  Plus,
+  Settings as SettingsIcon,
+  Zap,
+} from 'lucide-react';
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import { requestOpenChatFind } from '@/components/chat/ChatFindBar';
+import { Badge } from '@/components/ui/badge';
 import {
   Command,
   CommandDialog,
   CommandDialogPopup,
   CommandEmpty,
+  CommandFooter,
   CommandGroup,
   CommandGroupLabel,
   CommandInput,
   CommandItem,
   CommandList,
+  CommandPanel,
+  CommandShortcut,
 } from '@/components/ui/command';
+import { Kbd, KbdGroup } from '@/components/ui/kbd';
 import { useI18n } from '@/i18n';
+import { effectiveKeybindings, formatBinding } from '@/lib/keybindings';
 import { addSidePanelBrowser } from '@/lib/sidePanelDock';
+import { formatRelativeTime } from '@/lib/time';
 import {
   conversationActivityAt,
   conversationToSearchDoc,
@@ -37,6 +62,83 @@ import { useSettingsStore } from '@/stores/settings';
 
 const NO_HITS: WorkspaceSearchHit[] = [];
 
+const SCOPE_LABELS: Record<WorkspaceSearchScope, string> = {
+  project: 'This project',
+  all: 'All projects',
+  'all-including-archived': 'Include archived',
+};
+
+const SETTINGS_CATEGORY_LABELS: Record<SettingsCategory, string> = {
+  general: 'General',
+  shortcuts: 'Shortcuts',
+  appearance: 'Appearance',
+  providers: 'Model Providers',
+  skills: 'Skills',
+  mcp: 'MCP Servers',
+  instructions: 'Instruction Files',
+  presets: 'Presets',
+  agents: 'Agent types',
+  workflows: 'Workflows',
+  tools: 'Built-in tools',
+  memory: 'Memory',
+  phone: 'Devices',
+  ssh: 'SSH',
+  usage: 'Usage',
+};
+
+function Highlighted({ text, query }: { text: string; query: string }) {
+  let offset = 0;
+  return highlightWorkspaceMatches(text, query).map((part) => {
+    const key = offset;
+    offset += part.text.length;
+    return part.match ? (
+      <mark key={key} className="rounded-[3px] bg-brand/14 text-foreground">
+        {part.text}
+      </mark>
+    ) : (
+      <span key={key}>{part.text}</span>
+    );
+  });
+}
+
+function ResultRow({
+  icon: Icon,
+  title,
+  badges,
+  detail,
+  meta,
+}: {
+  icon: LucideIcon;
+  title: ReactNode;
+  badges?: ReactNode;
+  detail?: ReactNode;
+  meta?: ReactNode;
+}) {
+  return (
+    <>
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate">{title}</span>
+          {badges}
+        </div>
+        {detail && <p className="truncate text-muted-foreground text-xs">{detail}</p>}
+      </div>
+      {meta && (
+        <span className="max-w-48 shrink-0 truncate text-muted-foreground text-xs">{meta}</span>
+      )}
+    </>
+  );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
 export function WorkspaceSearchDialog({
   open,
   onOpenChange,
@@ -44,7 +146,7 @@ export function WorkspaceSearchDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [query, setQuery] = useState('');
   const [scope, setScope] = useState<WorkspaceSearchScope>('all');
   // 冷结果带上发起时的查询键，查询变化后旧结果立即失效，不混进新查询
@@ -58,6 +160,7 @@ export function WorkspaceSearchDialog({
   const skills = useSettingsStore((state) => state.skills);
   const mcpServers = useSettingsStore((state) => state.mcpServers);
   const instructions = useSettingsStore((state) => state.instructions);
+  const keybindings = useSettingsStore((state) => state.keybindings);
   const currentProjectId =
     (activeId ? conversations[activeId]?.projectId : undefined) ?? projects[0]?.id ?? '';
   const trimmed = query.trim();
@@ -255,185 +358,278 @@ export function WorkspaceSearchDialog({
     setScope((current) => cycleWorkspaceSearchScope(current, event.shiftKey));
   };
 
-  const conversationScope = (
-    <div
-      className="ml-auto flex gap-0.5"
-      data-search-scope="conversation"
-      onPointerDown={(event) => event.stopPropagation()}
+  const bindings = effectiveKeybindings(keybindings);
+  const now = Date.now();
+  const projectNameOf = (projectId: string) => {
+    const project = projects.find((item) => item.id === projectId);
+    return project ? projectDisplayName(project) : '';
+  };
+  const metaOf = (projectId: string, at?: number) =>
+    [projectNameOf(projectId), at ? formatRelativeTime(at, locale, now) : '']
+      .filter(Boolean)
+      .join(' · ');
+  const statusBadges = (current?: boolean, archived?: boolean) => (
+    <>
+      {current && (
+        <Badge size="sm" className="bg-brand/10 text-brand">
+          {t('Current')}
+        </Badge>
+      )}
+      {archived && (
+        <Badge variant="outline" size="sm">
+          {t('Archived')}
+        </Badge>
+      )}
+    </>
+  );
+
+  const hitRow = (hit: WorkspaceSearchHit) => {
+    const conversation = conversations[hit.conversationId];
+    const parentId = hit.parentConversationId ?? conversation?.parentId;
+    let icon: LucideIcon = MessageCircle;
+    if (parentId) icon = conversation?.child?.mode === 'task' ? Zap : Bot;
+    const title =
+      hit.title ||
+      conversation?.child?.agentInstanceName ||
+      conversation?.coworkerName ||
+      t('New conversation');
+    const parentTitle = parentId
+      ? conversations[parentId]?.title || t('New conversation')
+      : undefined;
+    const detail =
+      hit.field === 'body' || hit.field === 'tool' || hit.field === 'id'
+        ? hit.snippet.replace(/\s+/g, ' ').trim()
+        : '';
+    return (
+      <ResultRow
+        icon={icon}
+        title={
+          <>
+            {parentTitle && <span className="text-muted-foreground">{parentTitle} › </span>}
+            <Highlighted text={title} query={query} />
+          </>
+        }
+        badges={statusBadges(hit.isCurrent, hit.archived)}
+        detail={detail && <Highlighted text={detail} query={query} />}
+        meta={metaOf(
+          hit.projectId,
+          conversation ? conversationActivityAt(conversation) : undefined
+        )}
+      />
+    );
+  };
+
+  const browserItem = (tab: BrowserSearchTab, key: string) => (
+    <CommandItem key={key} value={key} className="gap-2.5" onClick={() => openBrowser(tab)}>
+      <ResultRow
+        icon={Globe}
+        title={<Highlighted text={tab.title || tab.url} query={query} />}
+        meta={hostOf(tab.url)}
+      />
+    </CommandItem>
+  );
+
+  const scopeChip = (
+    <button
+      type="button"
+      tabIndex={-1}
+      data-search-scope={scope}
+      title={t('Switch scope')}
+      className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-accent hover:text-foreground"
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setScope((current) => cycleWorkspaceSearchScope(current, event.shiftKey));
+      }}
     >
-      {(
-        [
-          ['project', 'This project'],
-          ['all', 'All projects'],
-          ['all-including-archived', 'Include archived'],
-        ] as const
-      ).map(([value, label]) => (
-        <button
-          key={value}
-          type="button"
-          tabIndex={-1}
-          className={`rounded-md px-1.5 py-0.5 text-[10px] ${
-            scope === value ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'
-          }`}
-          onPointerDown={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setScope(value);
-          }}
-        >
-          {t(label)}
-        </button>
-      ))}
-    </div>
+      {t(SCOPE_LABELS[scope])}
+      <Kbd className="h-4 min-w-4 text-[10px]">⇥</Kbd>
+    </button>
   );
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
-      <CommandDialogPopup onKeyDown={closeOnEscape}>
+      <CommandDialogPopup
+        className="max-h-[min(36rem,calc(100vh-6rem))] max-w-2xl"
+        onKeyDown={closeOnEscape}
+      >
         <Command>
           <CommandInput
-            placeholder={t('Search anything...')}
+            placeholder={t('Search conversations, browser tabs, settings…')}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={onInputKeyDown}
+            endAddon={scopeChip}
           />
-          <CommandList>
-            {empty && <CommandEmpty>{t('No matching results')}</CommandEmpty>}
-            {!trimmed && (
-              <>
-                <CommandGroup>
-                  <CommandGroupLabel className="flex items-center gap-2">
-                    {t('Recent')}
-                    {conversationScope}
-                  </CommandGroupLabel>
-                  {recent.map((conversation) => (
+          <CommandPanel>
+            {empty && (
+              <CommandEmpty>
+                {t('No matching results')}
+                {scope !== 'all-including-archived' && (
+                  <span className="mt-2 flex items-center justify-center gap-1.5 text-xs">
+                    <Kbd>⇥</Kbd>
+                    {t(scope === 'project' ? 'Search all projects' : 'Include archived')}
+                  </span>
+                )}
+              </CommandEmpty>
+            )}
+            <CommandList>
+              {!trimmed && (
+                <>
+                  {recent.length > 0 && (
+                    <CommandGroup>
+                      <CommandGroupLabel>{t('Recent')}</CommandGroupLabel>
+                      {recent.map((conversation) => (
+                        <CommandItem
+                          key={conversation.id}
+                          value={`recent-${conversation.id}`}
+                          className="gap-2.5"
+                          onClick={() =>
+                            openHit({
+                              conversationId: conversation.id,
+                              field: 'title',
+                              snippet: conversation.title,
+                            })
+                          }
+                        >
+                          <ResultRow
+                            icon={MessageCircle}
+                            title={conversation.title || t('New conversation')}
+                            badges={statusBadges(
+                              conversation.id === activeId,
+                              conversation.archived
+                            )}
+                            meta={metaOf(
+                              conversation.projectId,
+                              conversationActivityAt(conversation)
+                            )}
+                          />
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  )}
+                  {recentBrowsers.length > 0 && (
+                    <CommandGroup>
+                      <CommandGroupLabel>{t('Browser')}</CommandGroupLabel>
+                      {recentBrowsers.map((tab) => browserItem(tab, `recent-browser-${tab.tabId}`))}
+                    </CommandGroup>
+                  )}
+                  <CommandGroup>
+                    <CommandGroupLabel>{t('Actions')}</CommandGroupLabel>
                     <CommandItem
-                      key={conversation.id}
-                      value={`recent-${conversation.id}`}
-                      onClick={() =>
-                        openHit({
-                          conversationId: conversation.id,
-                          field: 'title',
-                          snippet: conversation.title,
-                        })
-                      }
+                      value="new-conversation"
+                      className="gap-2.5"
+                      onClick={() => {
+                        if (currentProjectId)
+                          void useSessionsStore.getState().newConversation(currentProjectId);
+                        onOpenChange(false);
+                      }}
                     >
-                      <span className="truncate">{conversation.title}</span>
+                      <ResultRow
+                        icon={Plus}
+                        title={
+                          <>
+                            {t('New conversation')}
+                            {projectNameOf(currentProjectId) && (
+                              <span className="text-muted-foreground">
+                                {' · '}
+                                {projectNameOf(currentProjectId)}
+                              </span>
+                            )}
+                          </>
+                        }
+                      />
+                      <CommandShortcut>
+                        {formatBinding(bindings['new-conversation'])}
+                      </CommandShortcut>
+                    </CommandItem>
+                    <CommandItem
+                      value="open-settings"
+                      className="gap-2.5"
+                      onClick={() => {
+                        void window.electronAPI.window.openSettings();
+                        onOpenChange(false);
+                      }}
+                    >
+                      <ResultRow icon={SettingsIcon} title={t('Open settings')} />
+                      <CommandShortcut>{formatBinding(bindings['open-settings'])}</CommandShortcut>
+                    </CommandItem>
+                  </CommandGroup>
+                </>
+              )}
+              {trimmed.length > 0 && hits.length > 0 && (
+                <CommandGroup>
+                  <CommandGroupLabel>{t('Conversations')}</CommandGroupLabel>
+                  {hits.map((hit) => (
+                    <CommandItem
+                      key={`${hit.conversationId}-${hit.field}`}
+                      value={`conv-${hit.conversationId}-${hit.field}`}
+                      className="gap-2.5"
+                      onClick={() => openHit(hit)}
+                    >
+                      {hitRow(hit)}
                     </CommandItem>
                   ))}
                 </CommandGroup>
-                {recentBrowsers.length > 0 && (
-                  <CommandGroup>
-                    <CommandGroupLabel>{t('Browser')}</CommandGroupLabel>
-                    {recentBrowsers.map((tab) => (
-                      <CommandItem
-                        key={`recent-browser-${tab.tabId}`}
-                        value={`recent-browser-${tab.tabId}`}
-                        onClick={() => openBrowser(tab)}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <span className="truncate text-sm">{tab.title || tab.url}</span>
-                          <p className="truncate text-xs text-muted-foreground">{tab.url}</p>
-                        </div>
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                )}
+              )}
+              {trimmed.length > 0 && browserHits.length > 0 && (
                 <CommandGroup>
-                  <CommandGroupLabel>{t('Actions')}</CommandGroupLabel>
-                  <CommandItem
-                    value="new-conversation"
-                    onClick={() => {
-                      if (currentProjectId)
-                        void useSessionsStore.getState().newConversation(currentProjectId);
-                      onOpenChange(false);
-                    }}
-                  >
-                    {t('New conversation')}
-                  </CommandItem>
-                  <CommandItem
-                    value="open-settings"
-                    onClick={() => {
-                      void window.electronAPI.window.openSettings();
-                      onOpenChange(false);
-                    }}
-                  >
-                    {t('Open settings')}
-                  </CommandItem>
+                  <CommandGroupLabel>{t('Browser')}</CommandGroupLabel>
+                  {browserHits.map((tab) => browserItem(tab, `browser-${tab.tabId}`))}
                 </CommandGroup>
-              </>
-            )}
-            {trimmed.length > 0 && (
-              <CommandGroup>
-                <CommandGroupLabel className="flex items-center gap-2">
-                  {t('Conversations')}
-                  {conversationScope}
-                </CommandGroupLabel>
-                {hits.map((hit) => (
-                  <CommandItem
-                    key={`${hit.conversationId}-${hit.field}`}
-                    value={`conv-${hit.conversationId}-${hit.field}`}
-                    onClick={() => openHit(hit)}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-sm">{hit.title}</span>
-                        {hit.isCurrent && (
-                          <span className="shrink-0 text-[10px] text-muted-foreground">
-                            {t('Current')}
-                          </span>
+              )}
+              {trimmed.length > 0 && settingsHits.length > 0 && (
+                <CommandGroup>
+                  <CommandGroupLabel>{t('Settings')}</CommandGroupLabel>
+                  {settingsHits.map((entry) => (
+                    <CommandItem
+                      key={entry.id}
+                      value={`settings-${entry.id}`}
+                      className="gap-2.5"
+                      onClick={() => openSetting(entry)}
+                    >
+                      <ResultRow
+                        icon={SettingsIcon}
+                        title={<Highlighted text={t(entry.title)} query={query} />}
+                        detail={
+                          entry.description && (
+                            <Highlighted text={t(entry.description)} query={query} />
+                          )
+                        }
+                        meta={t(
+                          SETTINGS_CATEGORY_LABELS[entry.category as SettingsCategory] ??
+                            entry.category
                         )}
-                        {hit.archived && (
-                          <span className="shrink-0 text-[10px] text-muted-foreground">
-                            {t('Archived')}
-                          </span>
-                        )}
-                      </div>
-                      <p className="truncate text-xs text-muted-foreground">{hit.snippet}</p>
-                    </div>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            )}
-            {trimmed.length > 0 && browserHits.length > 0 && (
-              <CommandGroup>
-                <CommandGroupLabel>{t('Browser')}</CommandGroupLabel>
-                {browserHits.map((tab) => (
-                  <CommandItem
-                    key={`browser-${tab.tabId}`}
-                    value={`browser-${tab.tabId}`}
-                    onClick={() => openBrowser(tab)}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <span className="truncate text-sm">{tab.title || tab.url}</span>
-                      <p className="truncate text-xs text-muted-foreground">{tab.url}</p>
-                    </div>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            )}
-            {trimmed.length > 0 && settingsHits.length > 0 && (
-              <CommandGroup>
-                <CommandGroupLabel>{t('Settings')}</CommandGroupLabel>
-                {settingsHits.map((entry) => (
-                  <CommandItem
-                    key={entry.id}
-                    value={`settings-${entry.id}`}
-                    onClick={() => openSetting(entry)}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <span className="truncate text-sm">{t(entry.title)}</span>
-                      {entry.description && (
-                        <p className="truncate text-xs text-muted-foreground">
-                          {t(entry.description)}
-                        </p>
-                      )}
-                    </div>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            )}
-          </CommandList>
+                      />
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
+            </CommandList>
+          </CommandPanel>
+          <CommandFooter>
+            <div className="flex items-center gap-4">
+              <span className="flex items-center gap-1.5">
+                <KbdGroup>
+                  <Kbd>↑</Kbd>
+                  <Kbd>↓</Kbd>
+                </KbdGroup>
+                {t('Navigate')}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Kbd>↵</Kbd>
+                {t('Open')}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Kbd>⇥</Kbd>
+                {t('Switch scope')}
+              </span>
+            </div>
+            <span className="flex items-center gap-1.5">
+              <Kbd>esc</Kbd>
+              {t('Close')}
+            </span>
+          </CommandFooter>
         </Command>
       </CommandDialogPopup>
     </CommandDialog>

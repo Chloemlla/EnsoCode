@@ -27,6 +27,10 @@ pi SDK（AgentSession）**内置瞬态错误自动重试**（指数退避），�
   末条瞬态错误消息（pi 稍后也会从自身状态删掉它重发）。
 - `auto_retry_start` → 投影 `turn-retry` 事件（renderer/phone 显示横幅）；
   `auto_retry_end(success:false)` 且仍 running → failTurn 收口。
+- 用户 `abort` 落在重试倒计时（`session.isRetrying`）里：abort 先把投影置 idle，
+  上面的 running 守卫会吞掉 `auto_retry_end`，于是既无 turn-completed 也无 turn-failed——
+  renderer 的 `abortRequested` 会吞掉下一轮收束（队列不再泵），排队压缩停在 queued
+  令后续发送全部入队。abort 须先取 `isRetrying`，为 true 时直接 failTurn 收口。
 - 终态错误轮（末条 assistant `stopReason === 'error'`）发 `turn-failed`
   而非 `turn-completed`。
 - **回放与实时统一在渲染层解决**：`buildTimeline` 两条规则——错误项后面

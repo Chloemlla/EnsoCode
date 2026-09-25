@@ -202,6 +202,7 @@ describe('buildSettingsCatalog', () => {
     'general.expandLiveReasoning',
     'general.autoCollapseTurns',
     'general.collapseCompletedActivity',
+    'general.pinUnfinishedTodos',
     'general.notifyMainAgentOnly',
     'general.smartCompactEnabled',
     'general.generationStallTimeout',

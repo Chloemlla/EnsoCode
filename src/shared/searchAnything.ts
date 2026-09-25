@@ -168,6 +168,11 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     title: 'Collapse activity after reply',
   },
   {
+    id: 'general.pinUnfinishedTodos',
+    category: 'general',
+    title: 'Pin unfinished todos',
+  },
+  {
     id: 'general.notifyMainAgentOnly',
     category: 'general',
     title: 'Notify only for the main agent',

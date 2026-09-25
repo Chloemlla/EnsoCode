@@ -8,6 +8,12 @@ import {
   resolveChatReasoning,
   scopedDefaultModels,
 } from '@shared/defaultModel';
+import {
+  EMPTY_PLAN_STATE,
+  type PlanRespondAction,
+  planPhase,
+  splitPlanPrefix,
+} from '@shared/planMode';
 import { isContinuationTurn } from '@shared/titleContinuation';
 import type {
   ApprovalMode,
@@ -402,6 +408,15 @@ interface SessionsState {
   setModel(id: string, providerId: string, modelId: string): void;
   /** 设置审批档位；已 spawn 的会话即时下发 */
   setApprovalMode(id: string, mode: ApprovalMode): void;
+  /** 开关 Plan 模式；已 spawn 即时下发，否则随下次 spawn 生效 */
+  setPlanMode(id: string, active: boolean): void;
+  /** 审批条决策；状态以 worker 回流的 plan-state 为准 */
+  respondPlan(
+    id: string,
+    planId: string,
+    action: PlanRespondAction,
+    feedback?: string
+  ): Promise<string | null>;
   abort(conversationId?: string): Promise<void>;
   /** 切换聊天区 tab（undefined = 主会话） */
   selectTab(parentId: string, tabId?: string): void;
@@ -453,11 +468,13 @@ function toQueuedMessage(message: ProjectedMessage): QueuedMessage {
 
 function userMessageRawText(message: ProjectedMessage): string {
   if (message.role !== 'user') return '';
-  return message.content
-    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
-    .map((part) => part.text)
-    .join(' ')
-    .trim();
+  return splitPlanPrefix(
+    message.content
+      .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+      .map((part) => part.text)
+      .join(' ')
+      .trim()
+  ).rest;
 }
 
 function truncateTitle(text: string): string {
@@ -501,6 +518,47 @@ export const useSessionsStore = create<SessionsState>()(
        */
       const pendingTitleBaselines = new Map<string, string>();
       const rewindInFlight = new Set<string>();
+      const forkWakeInFlight = new Set<string>();
+
+      /** 唤醒后等该会话 worker 真正 ready（spawn ack 后 spawning 仍在，需等其 snapshot） */
+      function waitForWorkerReady(
+        conversationId: string,
+        sessionFile: string | undefined
+      ): Promise<'ready' | 'failed'> {
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = (next: 'ready' | 'failed') => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(next);
+          };
+          const check = () => {
+            const next = rewindWorkerPhase(get().conversations[conversationId], sessionFile);
+            if (next !== 'wait') finish(next);
+          };
+          const unsubscribe = useSessionsStore.subscribe(check);
+          const timer = setTimeout(() => finish('failed'), 30_000);
+          check();
+        });
+      }
+
+      /** 冷主会话分叉前先 resume；fork 需要源会话的活 generation */
+      async function wakeForFork(conversationId: string): Promise<boolean> {
+        const conversation = get().conversations[conversationId];
+        if (!conversation || conversation.started) return true;
+        if (!canWakeConversationForRewind(conversation) || forkWakeInFlight.has(conversationId)) {
+          return false;
+        }
+        forkWakeInFlight.add(conversationId);
+        try {
+          await get().resumeConversation(conversationId);
+          return (await waitForWorkerReady(conversationId, conversation.sessionFile)) === 'ready';
+        } finally {
+          forkWakeInFlight.delete(conversationId);
+        }
+      }
 
       const rewindDraftGuard = new Map<string, string>();
       /** 回退目标的绝对保留长度；回退中快照超过这个长度视为未截断的旧会话 */
@@ -1199,7 +1257,11 @@ export const useSessionsStore = create<SessionsState>()(
                     ...(metadata
                       ? {
                           generation: metadata.childGeneration,
-                          child: metadata,
+                          // worker 回流的 metadata 不带 mode，沿用 Main 预约时的权威值
+                          child:
+                            metadata.mode || !existing.child?.mode
+                              ? metadata
+                              : { ...metadata, mode: existing.child.mode },
                           agentType: metadata.agentTypeKey,
                         }
                       : {}),
@@ -1336,6 +1398,8 @@ export const useSessionsStore = create<SessionsState>()(
               set((state) => patch(state, id, { abortRequested: false }));
               return;
             }
+            // 已有投递在途（worker 等压完才起轮）：再泵就是并发 prompt，交给那一轮收束时泵
+            if (get().conversations[id]?.messages.some((message) => message.optimistic)) return;
             flushQueue(id);
             continueGoal(id);
           }
@@ -1649,6 +1713,9 @@ export const useSessionsStore = create<SessionsState>()(
           return;
         if (goal?.status !== 'active') return;
         if ((conversation.queuedMessages ?? []).length > 0) return;
+        // 规划与待审期间不自动推进：计划需要用户审批
+        const phase = planPhase(conversation.planState);
+        if (phase === 'planning' || phase === 'awaiting_review') return;
         if (
           (conversation.pendingApprovals ?? []).length > 0 ||
           (conversation.pendingAsks ?? []).length > 0 ||
@@ -2837,6 +2904,18 @@ export const useSessionsStore = create<SessionsState>()(
             get().compact(id, compactCommand.instructions);
             return null;
           }
+          // /plan 应用级命令：开关 Plan 模式；带正文则开启后照常发送
+          const planMatch = /^\/plan(?:\s+([\s\S]+))?$/.exec(text.trim());
+          if (planMatch && !conversation.parentId && !conversation.btwParentId) {
+            const arg = planMatch[1]?.trim();
+            if (arg === 'off') {
+              get().setPlanMode(id, false);
+              return null;
+            }
+            get().setPlanMode(id, true);
+            if (!arg) return null;
+            text = arg;
+          }
           // /goal 应用级命令:设定/暂停/继续/清除会话目标,不发给 agent
           const goalMatch = /^\/goal(?:\s+([\s\S]+))?$/.exec(text.trim());
           let spawnTitle: string | undefined;
@@ -2961,6 +3040,9 @@ export const useSessionsStore = create<SessionsState>()(
                   loadLocalSkills: useSettingsStore.getState().loadLocalSkills,
                   presetId: conversation.presetId,
                   approvalMode: conversation.approvalMode ?? 'full',
+                  ...(get().conversations[id]?.planState
+                    ? { planMode: get().conversations[id]?.planState?.active }
+                    : {}),
                 });
             if (!result.ok) {
               // 与 deliver 失败同口径：收回回显、原文退回输入框，不留“看起来发出去了”的假象
@@ -3075,6 +3157,7 @@ export const useSessionsStore = create<SessionsState>()(
             loadLocalSkills: settings.loadLocalSkills,
             presetId: conversation.presetId,
             approvalMode: conversation.approvalMode ?? 'full',
+            ...(conversation.planState ? { planMode: conversation.planState.active } : {}),
           });
           set((state) =>
             result.ok
@@ -3267,6 +3350,30 @@ export const useSessionsStore = create<SessionsState>()(
               }
             });
           }
+        },
+
+        setPlanMode(id, active) {
+          const conversation = get().conversations[id];
+          if (!conversation || conversation.parentId || conversation.btwParentId) return;
+          const previous = conversation.planState;
+          set((state) =>
+            patch(state, id, { planState: { ...(previous ?? EMPTY_PLAN_STATE), active } })
+          );
+          if (!conversation.started) return;
+          void window.electronAPI.agent.setPlanMode(id, active).then((result) => {
+            if (result && !result.ok) set((state) => patch(state, id, { planState: previous }));
+          });
+        },
+
+        async respondPlan(id, planId, action, feedback) {
+          if (!get().conversations[id]?.started) await get().resumeConversation(id);
+          if (!get().conversations[id]?.started) return 'session is not running';
+          const result = await window.electronAPI.agent.respondPlan(id, {
+            planId,
+            action,
+            ...(feedback ? { feedback } : {}),
+          });
+          return result.ok ? null : (result.error ?? 'plan response failed');
         },
 
         async abort(conversationId) {
@@ -3475,23 +3582,7 @@ export const useSessionsStore = create<SessionsState>()(
               if (!get().conversations[conversationId]?.started) {
                 await get().resumeConversation(conversationId);
               }
-              const phase = await new Promise<'ready' | 'failed'>((resolve) => {
-                let settled = false;
-                const finish = (next: 'ready' | 'failed') => {
-                  if (settled) return;
-                  settled = true;
-                  clearTimeout(timer);
-                  unsubscribe();
-                  resolve(next);
-                };
-                const check = () => {
-                  const next = rewindWorkerPhase(get().conversations[conversationId], sessionFile);
-                  if (next !== 'wait') finish(next);
-                };
-                const unsubscribe = useSessionsStore.subscribe(check);
-                const timer = setTimeout(() => finish('failed'), 30_000);
-                check();
-              });
+              const phase = await waitForWorkerReady(conversationId, sessionFile);
               const after = get().conversations[conversationId];
               if (
                 phase === 'ready' &&
@@ -3523,10 +3614,12 @@ export const useSessionsStore = create<SessionsState>()(
         },
 
         async forkFromMessage(conversationId, userIndexFromEnd) {
+          if (!(await wakeForFork(conversationId))) return null;
           return forkConversation(get, set, conversationId, { userIndexFromEnd });
         },
 
         async forkFromEntry(conversationId, entryId) {
+          if (!(await wakeForFork(conversationId))) return null;
           return forkConversation(get, set, conversationId, { entryId });
         },
 

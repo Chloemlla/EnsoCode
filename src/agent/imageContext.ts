@@ -101,9 +101,50 @@ function ensureTextBeforeToolCalls(message: ContextMessage): ContextMessage {
   return { ...message, content: next };
 }
 
-/** context 钩子入口：图片占位 + 补齐会让 xAI/Responses 重放崩掉的残缺块。 */
+/** 会被 convertToLlm 变成 user 消息、从而截断工具调用链的角色。 */
+function closesToolTurn(message: ContextMessage): boolean {
+  if (message.role === 'bashExecution') return message.excludeFromContext !== true;
+  return ['user', 'custom', 'branchSummary', 'compactionSummary'].includes(message.role);
+}
+
+/**
+ * 丢弃不能配对到前一条有效 assistant toolCall 的 toolResult。
+ * 配对规则对齐 pi transformMessages：error/aborted assistant 整条跳过、system 透明、user 类消息截断；
+ * 孤儿结果进 OpenAI 兼容接口就是持续 400。
+ */
+export function dropUnpairedToolResults(messages: ContextMessage[]): ContextMessage[] {
+  let pending = new Set<string>();
+  let out: ContextMessage[] | undefined;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === 'assistant') {
+      const skipped = message.stopReason === 'error' || message.stopReason === 'aborted';
+      pending = new Set(
+        skipped || !Array.isArray(message.content)
+          ? []
+          : message.content.flatMap((b) =>
+              isToolCall(b) && typeof b.id === 'string' ? [b.id] : []
+            )
+      );
+    } else if (message.role === 'toolResult') {
+      if (typeof message.toolCallId === 'string' && pending.delete(message.toolCallId)) {
+        out?.push(message);
+        continue;
+      }
+      out ??= messages.slice(0, i);
+      continue;
+    } else if (closesToolTurn(message)) {
+      pending = new Set();
+    }
+    out?.push(message);
+  }
+  return out ?? messages;
+}
+
+/** context 钩子入口：孤儿 toolResult 丢弃 + 图片占位 + 补齐会让 xAI/Responses 重放崩掉的残缺块。 */
 export function sanitizeContextMessages(messages: ContextMessage[]): ContextMessage[] {
-  const pruned = pruneHistoricalImages(messages);
+  const pruned = pruneHistoricalImages(dropUnpairedToolResults(messages));
   let out: ContextMessage[] | undefined;
   for (let i = 0; i < pruned.length; i++) {
     const message = pruned[i];

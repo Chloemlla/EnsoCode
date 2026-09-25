@@ -1,0 +1,25 @@
+diff --git a/dist/core/agent-session.js b/dist/core/agent-session.js
+index 36fdb31c121d1121cebc51c6f0d61d09cf07bae0..6f29d78b246e6193f05c970c009f93a09d344507 100644
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -665,7 +665,19 @@ export class AgentSession {
+         return undefined;
+     }
+     _omitRecoveryAttempt(message, toolResults = []) {
+-        const targets = [message, ...toolResults];
++        // Enso patch: callers may omit toolResults (prompt-time check); orphaned results break OpenAI-compatible replay.
++        const callIds = new Set(Array.isArray(message.content) ? message.content.filter((block) => block.type === "toolCall").map((block) => block.id) : []);
++        const pairedResults = [];
++        const state = this.agent.state.messages;
++        const start = callIds.size > 0 ? state.indexOf(message) : -1;
++        for (let i = start < 0 ? state.length : start + 1; i < state.length; i++) {
++            const next = state[i];
++            if (next.role === "assistant" || next.role === "user")
++                break;
++            if (next.role === "toolResult" && callIds.has(next.toolCallId) && !toolResults.includes(next))
++                pairedResults.push(next);
++        }
++        const targets = [message, ...toolResults, ...pairedResults];
+         const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
+         const unresolvedProjectedTarget = targets.some((target, index) => targetIds[index] === undefined && this.agent.state.messages.includes(target));
+         if (unresolvedProjectedTarget) {

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useI18n } from '@/i18n';
+import { parseMcpToolName } from '@/lib/mcpToolName';
 import { stripAnsi } from '@/lib/terminalText';
 import { cn } from '@/lib/utils';
 import { formatDuration } from '@/stores/sessions/stats';
@@ -295,6 +296,7 @@ export function AgentActivityView({ activity }: { activity: SubagentActivity }) 
     );
   }
   const summary = summarizeSubagentToolArgs(activity.toolName, activity.argumentsText);
+  const mcp = parseMcpToolName(activity.toolName);
   const contentId = `subagent-tool-${activity.id.replace(/[^A-Za-z0-9_-]/g, '-')}`;
   return (
     <section className="border-b border-border/40 last:border-b-0">
@@ -306,7 +308,9 @@ export function AgentActivityView({ activity }: { activity: SubagentActivity }) 
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs transition-colors hover:bg-muted/50"
       >
         <SubagentToolIcon toolName={activity.toolName} />
-        <span className="shrink-0 font-medium text-foreground/80">{activity.toolName}</span>
+        <span className="shrink-0 font-medium text-foreground/80">
+          {mcp?.tool ?? activity.toolName}
+        </span>
         {summary && (
           <span
             className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
@@ -327,6 +331,11 @@ export function AgentActivityView({ activity }: { activity: SubagentActivity }) 
       </button>
       {expanded && (
         <div id={contentId} className="ml-5 border-border/50 border-l pb-2 pl-2.5">
+          {mcp && (
+            <div className="mb-1 truncate font-mono text-[10px] text-muted-foreground/70">
+              {mcp.server}.{mcp.tool}
+            </div>
+          )}
           <div className="text-[10px] text-muted-foreground/70">{t('Arguments')}</div>
           <pre className="max-h-28 overflow-auto font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground/80">
             {stripAnsi(activity.argumentsText)}

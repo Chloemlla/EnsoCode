@@ -139,6 +139,8 @@ export const IPC_CHANNELS = {
   AGENT_SET_REASONING: 'agent:set-reasoning',
   AGENT_APPROVAL_RESPOND: 'agent:approval-respond',
   AGENT_SET_APPROVAL_MODE: 'agent:set-approval-mode',
+  AGENT_SET_PLAN_MODE: 'agent:set-plan-mode',
+  AGENT_PLAN_RESPOND: 'agent:plan-respond',
   NOTIFICATION_FOCUS_SESSION: 'notification:focus-session',
   /** renderer → main：上报当前正在查看的会话，供系统通知抑制判断 */
   NOTIFICATION_ACTIVE_SESSION: 'notification:active-session',
@@ -197,8 +199,10 @@ export const IPC_CHANNELS = {
 
   // Recent projects from local apps
   PROJECTS_GET_RECENT: 'projects:get-recent',
-  /** 在系统文件管理器里打开项目根目录或会话 worktree（仅本地项目） */
+  /** 在系统文件管理器或指定 appId 的应用里打开项目根目录或会话 worktree（仅本地项目） */
   PROJECTS_REVEAL: 'projects:reveal',
+  /** 列出本机已安装、可打开项目目录的编辑器 / 终端 */
+  PROJECTS_OPEN_IN_APPS: 'projects:open-in-apps',
 
   // SSH connection profiles (settings + add-project picker)
   SSH_CONNECTIONS_LIST: 'ssh-connections:list',

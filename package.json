@@ -137,7 +137,8 @@
       "better-sqlite3"
     ],
     "patchedDependencies": {
-      "@rahularya01/pi-cursor@1.4.38": "patches/@rahularya01__pi-cursor@1.4.38.patch"
+      "@rahularya01/pi-cursor@1.4.38": "patches/@rahularya01__pi-cursor@1.4.38.patch",
+      "@earendil-works/pi-coding-agent@0.87.1": "patches/@earendil-works__pi-coding-agent@0.87.1.patch"
     }
   },
   "optionalDependencies": {

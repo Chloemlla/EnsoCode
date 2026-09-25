@@ -74,6 +74,8 @@ interface ComposerProps {
   isolated?: boolean;
   /** 覆盖默认「Type @ …」占位；slash / locked / agent 文案仍优先 */
   placeholder?: string;
+  /** Plan 模式：边框提示当前只读规划 */
+  planMode?: boolean;
 }
 
 interface ComposerDraft {
@@ -106,6 +108,7 @@ export function Composer({
   onAbort,
   isolated = false,
   placeholder: placeholderText,
+  planMode = false,
 }: ComposerProps) {
   const { t } = useI18n();
   const keybindings = useSettingsStore((s) => s.keybindings);
@@ -583,7 +586,7 @@ export function Composer({
         className={cn(
           'rounded-2xl border bg-background shadow-float transition-[border-color,box-shadow] duration-200 focus-within:border-brand/45 focus-within:ring-3 focus-within:ring-brand/12',
           (dragging || dndOver) && 'border-brand/50 bg-brand/5',
-          agentRecipient && 'border-primary/35 shadow-primary/5'
+          (agentRecipient || planMode) && 'border-primary/35 shadow-primary/5'
         )}
         onDragOver={(event) => {
           if (event.dataTransfer.types.includes('Files')) {

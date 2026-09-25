@@ -40,6 +40,7 @@ import type {
   TreeNodeDto,
   TreeQuery,
 } from '@shared/memory/graphDto';
+import type { PlanRespondAction } from '@shared/planMode';
 import type { BrowserSearchTab } from '@shared/searchAnything';
 import type { SettingsDeepLink } from '@shared/settingsDeepLink';
 import type {
@@ -73,6 +74,7 @@ import type {
   OauthAccountUsage,
   OauthCodexImportResult,
   OauthProviderInfo,
+  OpenInApp,
   PairCatalogPayload,
   PairCreatedSession,
   PairQueueAction,
@@ -405,12 +407,14 @@ const electronAPI = {
   projects: {
     /** 从本机编辑器 / 编程应用读取最近打开的目录 */
     getRecent: (): Promise<RecentProject[]> => ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GET_RECENT),
-    /** 在系统文件管理器里打开项目或会话的实际工作目录；ssh 项目返回 unsupported */
+    /** 在系统文件管理器（或 appId 指定的应用）里打开项目或会话的实际工作目录；ssh 项目返回 unsupported */
     reveal: (request: {
       projectId: string;
       conversationId?: string;
+      appId?: string;
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_REVEAL, request),
+    openInApps: (): Promise<OpenInApp[]> => ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS),
   },
 
   git: {
@@ -644,6 +648,13 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_APPROVAL_RESPOND, sessionId, requestId, decision),
     setApprovalMode: (sessionId: string, mode: ApprovalMode): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_APPROVAL_MODE, sessionId, mode),
+    setPlanMode: (sessionId: string, active: boolean): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_PLAN_MODE, sessionId, active),
+    respondPlan: (
+      sessionId: string,
+      response: { planId: string; action: PlanRespondAction; feedback?: string }
+    ): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_PLAN_RESPOND, sessionId, response),
     stopTask: (sessionId: string, taskId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_TASK_STOP, sessionId, taskId),
     stopSubagent: (sessionId: string, agentId: string): Promise<AgentActionResult> =>

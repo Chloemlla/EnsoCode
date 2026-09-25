@@ -21,6 +21,13 @@ import {
 import { type CompactStrategy, parseCompactStrategy } from '../compactStrategy';
 import type { DefaultModelRef } from '../defaultModel';
 import { parseMaxActiveCoworkers } from '../maxActiveCoworkers';
+import {
+  PLAN_FEEDBACK_MAX,
+  PLAN_RESPOND_ACTIONS,
+  type PlanRespondAction,
+  type PlanState,
+  parsePlanState,
+} from '../planMode';
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSmartCompactMode } from '../smartCompactMode';
@@ -944,6 +951,8 @@ export type AgentCommand =
       rolePrompt?: string;
       /** 仅普通 parent：替换 pi 默认提示词开头的角色段落，其余运行时内容保留 */
       systemPrompt?: string;
+      /** 期望的 Plan 模式；与会话 jsonl 折叠结果不同时由 worker 追加切换条目 */
+      planMode?: boolean;
     }
   | {
       type: 'spawn-child';
@@ -1011,6 +1020,14 @@ export type AgentCommand =
       decision: ApprovalDecision;
     }
   | { type: 'set-approval-mode'; identity: SessionIdentity; mode: ApprovalMode }
+  | { type: 'set-plan-mode'; identity: SessionIdentity; active: boolean }
+  | {
+      type: 'plan-respond';
+      identity: SessionIdentity;
+      planId: string;
+      action: PlanRespondAction;
+      feedback?: string;
+    }
   | { type: 'set-approval-reviewer'; model?: SpawnModelConfig }
   | { type: 'set-max-active-coworkers'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
@@ -1219,6 +1236,8 @@ export interface SessionSnapshot {
   safeJournal?: SafeJournalProjection;
   /** 压缩进度：重连/刷新后重建投影用（compaction 是瞬时事件，不重放） */
   compaction?: 'queued' | 'running';
+  /** 仅父会话：Plan 模式折叠结果（jsonl 权威的投影） */
+  planState?: PlanState;
   /** 压完提示的锚点，**绝对消息 index** 口径（压完那刻 messages.length），不随 baseIndex 平移 */
   compactionNoticeAt?: number;
 }
@@ -1257,6 +1276,7 @@ export interface AgentSpawnRequest {
   disabledTools?: string[];
   presetId?: string;
   approvalMode?: ApprovalMode;
+  planMode?: boolean;
 }
 
 export interface AgentActionResult {
@@ -1499,6 +1519,7 @@ export type AgentWorkerEvent =
       kind: 'complete' | 'blocked' | 'wait';
       note: string;
     }
+  | { type: 'plan-state'; identity: SessionIdentity; seq: number; state: PlanState }
   | {
       type: 'workflow-status';
       identity: SessionIdentity | ChildSessionIdentity;
@@ -2392,6 +2413,7 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
       'customEntries',
       'compaction',
       'compactionNoticeAt',
+      'planState',
     ]) ||
     !parseAnySessionIdentity(value.identity) ||
     (value.status !== 'idle' && value.status !== 'running' && value.status !== 'failed') ||
@@ -2405,6 +2427,7 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
         typeof command.description !== 'string'
     ) ||
     (value.child !== undefined && parseChildConversationMetadata(value.child) === null) ||
+    (value.planState !== undefined && parsePlanState(value.planState) === null) ||
     (value.safeJournal !== undefined && parseSafeJournalProjection(value.safeJournal) === null) ||
     (value.customEntries !== undefined &&
       (!Array.isArray(value.customEntries) ||
@@ -2472,6 +2495,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'remote',
           'rolePrompt',
           'systemPrompt',
+          'planMode',
         ]) ||
         !parseSessionIdentity(value.identity) ||
         typeof value.cwd !== 'string' ||
@@ -2479,6 +2503,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
         (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
         (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
+        (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
         (value.windowsLocalShell !== undefined &&
           !(WINDOWS_LOCAL_SHELLS as readonly string[]).includes(
             value.windowsLocalShell as string
@@ -2663,6 +2688,21 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'identity', 'mode']) &&
         parseAnySessionIdentity(value.identity) &&
         APPROVAL_MODES.includes(value.mode as ApprovalMode)
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-plan-mode':
+      return hasExactKeys(value, ['type', 'identity', 'active']) &&
+        parseSessionIdentity(value.identity) &&
+        typeof value.active === 'boolean'
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'plan-respond':
+      return hasOnlyKeys(value, ['type', 'identity', 'planId', 'action', 'feedback']) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.planId) &&
+        PLAN_RESPOND_ACTIONS.includes(value.action as PlanRespondAction) &&
+        (value.feedback === undefined ||
+          (typeof value.feedback === 'string' && value.feedback.length <= PLAN_FEEDBACK_MAX))
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-approval-reviewer':
@@ -3098,6 +3138,12 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         typeof value.note === 'string'
         ? (value as unknown as AgentWorkerEvent)
         : null;
+    case 'plan-state': {
+      const state = parsePlanState(value.state);
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'state']) && state
+        ? ({ ...value, state } as unknown as AgentWorkerEvent)
+        : null;
+    }
     case 'workflow-status': {
       const run = parseWorkflowRunSnapshot(value.run);
       return hasExactKeys(value, ['type', 'identity', 'seq', 'run']) && run

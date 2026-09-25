@@ -8,6 +8,7 @@ import {
   parseSelectProjectAuthorityRequest,
 } from '@shared/types/agent';
 import { app, ipcMain, shell } from 'electron';
+import { openInApps } from '../services/openInApps';
 import { getRecentProjects } from '../services/recentProjects';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
@@ -18,17 +19,23 @@ import { sessionWorktree } from './worktree';
 
 function parseRevealRequest(
   request: unknown
-): { projectId: string; conversationId?: string } | null {
+): { projectId: string; conversationId?: string; appId?: string } | null {
   if (!request || typeof request !== 'object' || Array.isArray(request)) return null;
   const projectId = (request as { projectId?: unknown }).projectId;
   const conversationId = (request as { conversationId?: unknown }).conversationId;
+  const appId = (request as { appId?: unknown }).appId;
   if (typeof projectId !== 'string' || projectId.length === 0) return null;
   if (
     conversationId !== undefined &&
     (typeof conversationId !== 'string' || conversationId.length === 0)
   )
     return null;
-  return { projectId, ...(typeof conversationId === 'string' ? { conversationId } : {}) };
+  if (appId !== undefined && (typeof appId !== 'string' || appId.length === 0)) return null;
+  return {
+    projectId,
+    ...(typeof conversationId === 'string' ? { conversationId } : {}),
+    ...(typeof appId === 'string' ? { appId } : {}),
+  };
 }
 
 function isDirectory(value: string): boolean {
@@ -86,6 +93,7 @@ export function registerProjectHandlers(): void {
         }
       }
       if (!isDirectory(cwd)) return { ok: false, error: 'unavailable' };
+      if (parsed.appId) return openInApps.open(parsed.appId, cwd);
       try {
         const failure = await shell.openPath(cwd);
         return failure ? { ok: false, error: failure } : { ok: true };
@@ -96,6 +104,10 @@ export function registerProjectHandlers(): void {
         };
       }
     }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS, async (event) =>
+    isMainWebContents(event.sender.id) ? openInApps.list() : []
   );
 
   ipcMain.handle(IPC_CHANNELS.SOURCE_PROJECT_CREATE, async (event, request: unknown) => {

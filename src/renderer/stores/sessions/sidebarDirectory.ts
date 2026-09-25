@@ -47,7 +47,7 @@ type Source = {
   pendingCapabilityAsks?: readonly unknown[];
   coworkerIds?: readonly string[];
   coworkerName?: string;
-  child?: { agentInstanceName?: string };
+  child?: { agentInstanceName?: string; mode?: 'task' | 'coworker' };
   subagents?: readonly { status: string }[];
   parentId?: string;
   sessionFile?: string;
@@ -188,6 +188,7 @@ export interface CoworkerTabConversation {
   pendingCapabilityAskCount: number;
   coworkerName?: string;
   child?: { agentInstanceName?: string };
+  mode: 'task' | 'coworker';
   reloading: boolean;
 }
 
@@ -209,7 +210,7 @@ export function selectCoworkerTabConversations(
   if (!parent) return EMPTY_COWORKER_TABS;
   const cached = cachedCoworkerTabs.get(parent);
   if (cached?.source === conversations) return cached.value;
-  const next = (parent.coworkerIds ?? []).flatMap((id) => {
+  const next = (parent.coworkerIds ?? []).flatMap((id): CoworkerTabConversation[] => {
     const conversation = conversations[id];
     return conversation
       ? [
@@ -225,6 +226,7 @@ export function selectCoworkerTabConversations(
             child: conversation.child?.agentInstanceName
               ? { agentInstanceName: conversation.child.agentInstanceName }
               : undefined,
+            mode: conversation.child?.mode === 'task' ? 'task' : 'coworker',
             reloading: conversation.reloading === true,
           },
         ]

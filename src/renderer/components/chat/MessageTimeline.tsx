@@ -1,5 +1,5 @@
 import { ArrowDown, LoaderCircle } from 'lucide-react';
-import type { ReactNode, Ref } from 'react';
+import type { CSSProperties, ReactNode, Ref } from 'react';
 import {
   Component,
   memo,
@@ -24,6 +24,7 @@ import {
 } from '@/stores/sessions/timeline';
 import { useSettingsStore } from '@/stores/settings';
 import { EnsoMark } from './EnsoMark';
+import { diffFoldMotion, EMPTY_FOLD_MOTION } from './foldMotion';
 import { ChatSearchHighlightContext } from './highlightQuery';
 import { NavRail } from './NavRail';
 import {
@@ -48,6 +49,9 @@ const REPLY_ROW_KINDS: ReadonlySet<TimelineItem['kind']> = new Set([
   'tool',
   'tool-group',
 ]);
+
+/** 探后折叠组动效窗口：超过后行重挂（虚拟化滚回）不再重播 */
+const FOLD_MOTION_MS = 1000;
 
 /** 空状态容器：挂载后播放错峰入场（texts-reveal，rAF 后加 is-shown 触发过渡） */
 function EmptyReveal({ className, children }: { className?: string; children: ReactNode }) {
@@ -220,6 +224,27 @@ export function MessageTimeline({
       turnOverrides,
     ]
   );
+  // 探后折叠组动效：渲染期读上一帧 DOM 量折前跨度（提交后旧行已卸载）
+  const foldMotionRef = useRef({
+    state: EMPTY_FOLD_MOTION,
+    collapse: new Map<string, { at: number; height: number; pair: boolean }>(),
+    reveal: new Map<string, number>(),
+  });
+  const foldChildren = useMemo(() => {
+    const motion = foldMotionRef.current;
+    const row = (key: string) =>
+      scrollerRef.current?.querySelector(`[data-nav-key="${CSS.escape(key)}"]`);
+    const diff = diffFoldMotion(motion.state, folded, (from, to) => {
+      const top = row(from)?.getBoundingClientRect().top;
+      const bottom = row(to)?.getBoundingClientRect().bottom;
+      return top === undefined || bottom === undefined ? 0 : bottom - top;
+    });
+    const now = Date.now();
+    motion.state = diff.next;
+    for (const { key, ...rest } of diff.collapses) motion.collapse.set(key, { at: now, ...rest });
+    for (const key of diff.expands) motion.reveal.set(key, now);
+    return diff.children;
+  }, [folded]);
   // 原点必须用折叠后的行。未折叠的 key 还在，但 Virtuoso 的 data 已经把它们收进组里。
   const rowAnchor = useRef<TimelineRowAnchor | null>(null);
   const rowEpoch = useRef(0);
@@ -452,6 +477,12 @@ export function MessageTimeline({
     const replyHead =
       prev?.kind === 'user' && !prev.collapsed && REPLY_ROW_KINDS.has(item.kind) ? prev : undefined;
     const step = isToolStepRow(item);
+    const now = Date.now();
+    const collapse = foldMotionRef.current.collapse.get(item.key);
+    const folding = collapse && now - collapse.at < FOLD_MOTION_MS ? collapse : undefined;
+    const child = foldChildren.get(item.key);
+    const revealAt = child && foldMotionRef.current.reveal.get(child.group);
+    const revealing = child && revealAt !== undefined && now - revealAt < FOLD_MOTION_MS;
     return (
       <div
         key={item.key}
@@ -459,10 +490,19 @@ export function MessageTimeline({
         data-reply-head={replyHead ? '' : undefined}
         data-step-prev={step && prev && isToolStepRow(prev) ? '' : undefined}
         data-step-next={step && next && isToolStepRow(next) ? '' : undefined}
+        data-fold-collapse={folding ? (folding.pair ? 'pair' : 'toggle') : undefined}
+        style={
+          folding
+            ? ({ '--fold-from': `${folding.height}px` } as CSSProperties)
+            : revealing
+              ? ({ '--fold-i': child.index } as CSSProperties)
+              : undefined
+        }
         className={cn(
           CHAT_COL,
           rowGap(item, index),
           step && 'enso-step-row',
+          revealing && 't-fold-reveal',
           '[overflow-wrap:anywhere]'
         )}
       >

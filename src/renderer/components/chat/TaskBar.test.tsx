@@ -80,4 +80,17 @@ describe('AgentActivityView', () => {
     expect(html).toContain('aria-label="running"');
     expect(html).toContain('title="AgentActivityView"');
   });
+
+  it('MCP 工具折叠行只显示工具名，不带 mcp__server__ 前缀', () => {
+    const html = renderActivity({
+      id: 'mcp-1',
+      type: 'tool',
+      toolName: 'mcp__fast-context__fast_context_search',
+      argumentsText: '{"query":"tool row"}',
+      status: 'done',
+    });
+
+    expect(html).toContain('>fast_context_search<');
+    expect(html).not.toContain('mcp__fast-context');
+  });
 });

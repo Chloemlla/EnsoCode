@@ -139,6 +139,7 @@ export interface ConfigSyncState {
   expandLiveReasoning?: boolean;
   autoCollapseTurns?: boolean;
   collapseCompletedActivity?: boolean;
+  pinUnfinishedTodos?: boolean;
   chatWide?: boolean;
   notifyMainAgentOnly?: boolean;
   maxActiveCoworkers?: number;

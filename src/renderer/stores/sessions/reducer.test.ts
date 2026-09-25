@@ -1599,3 +1599,53 @@ describe('snapshot running clocks', () => {
     expect(rewindTruncatedNeedsSnapshotResync(40, 10, false)).toBe(true);
   });
 });
+
+describe('Plan 模式投影', () => {
+  const planState = { active: true, resolutions: {} };
+
+  it('plan-state 事件写入投影，过期 seq 丢弃', () => {
+    const next = applyAgentEvent(base, 's1', {
+      type: 'plan-state',
+      identity: identity(),
+      seq: 2,
+      state: planState,
+    });
+    expect(next.planState).toEqual(planState);
+    const stale = applyAgentEvent(next, 's1', {
+      type: 'plan-state',
+      identity: identity(),
+      seq: 1,
+      state: { active: false, resolutions: {} },
+    });
+    expect(stale.planState).toEqual(planState);
+  });
+
+  it('快照带 planState 时覆盖投影', () => {
+    const next = applyAgentEvent(base, 's1', {
+      type: 'snapshot',
+      sessions: [{ ...snapshot(), planState }],
+    });
+    expect(next.planState).toEqual(planState);
+  });
+
+  it('Plan 提示前缀的 user upsert 消费同文乐观回显', () => {
+    const withEcho: SessionProjection = {
+      ...base,
+      messages: [{ role: 'user', content: [{ type: 'text', text: '帮我重构' }], optimistic: true }],
+    };
+    const next = applyAgentEvent(withEcho, 's1', {
+      type: 'message-upsert',
+      identity: identity(),
+      seq: 1,
+      index: 0,
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: '<plan-mode>\nPlan mode is ON.\n</plan-mode>\n\n帮我重构' },
+        ],
+      },
+    });
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]?.optimistic).toBeUndefined();
+  });
+});

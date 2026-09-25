@@ -2,6 +2,7 @@ import type { ApprovalDecision, ApprovalKind, ApprovalRequestInfo } from '@share
 import { FileEdit, FilePlus, Plug, ShieldAlert, TerminalSquare } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useI18n } from '@/i18n';
+import { toolLabel } from '@/lib/toolLabels';
 import { codeToHtml } from './snippetHighlighter';
 
 const KIND_ICONS = {
@@ -73,8 +74,8 @@ export function ApprovalBar({ approvals, onRespond, allowSession = true }: Appro
           <Icon className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate font-mono">
             {(active.toolCallId?.split(':').length ?? 0) >= 3
-              ? `${t('Isolated sandbox')} › ${active.tool}`
-              : active.tool}
+              ? `${t('Isolated sandbox')} › ${toolLabel(active.tool, t)}`
+              : toolLabel(active.tool, t)}
           </span>
         </span>
         {approvals.length > 1 && (

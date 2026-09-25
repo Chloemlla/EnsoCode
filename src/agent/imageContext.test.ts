@@ -144,4 +144,66 @@ describe('sanitizeContextMessages', () => {
     ];
     expect(sanitizeContextMessages(messages)).toBe(messages);
   });
+
+  // 真实场景：pi prompt 前的 overflow 恢复只 context_edit 掉 length 截断的 assistant，
+  // 它的 toolResult 留在投影里，OpenAI 兼容接口每轮都 400
+  // "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
+  it('发起调用的 assistant 已不在上下文时丢弃孤儿 toolResult', () => {
+    const messages: ContextMessage[] = [
+      user(text('写个大文件')),
+      toolResult('call_1', 'write', text('not executed: output token limit')),
+      { role: 'system', content: 'sys' },
+      user(text('继续')),
+    ];
+    expect(sanitizeContextMessages(messages).map((m) => m.role)).toEqual([
+      'user',
+      'system',
+      'user',
+    ]);
+  });
+
+  it('error/aborted assistant 会被 pi 整条跳过，其 toolCall 不算配对', () => {
+    const messages: ContextMessage[] = [
+      user(text('go')),
+      { ...assistant([{ id: 'c1', name: 'ls' }]), stopReason: 'aborted' },
+      toolResult('c1', 'ls', text('x')),
+      user(text('again')),
+    ];
+    expect(sanitizeContextMessages(messages).map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+    ]);
+  });
+
+  it('用户消息插在调用和结果之间时，之后的结果不再配对', () => {
+    const messages: ContextMessage[] = [
+      user(text('go')),
+      assistant([{ id: 'c1', name: 'ls' }]),
+      { role: 'custom', content: 'notice' },
+      toolResult('c1', 'ls', text('x')),
+      user(text('again')),
+    ];
+    expect(sanitizeContextMessages(messages).map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'custom',
+      'user',
+    ]);
+  });
+
+  it('system 夹在调用与结果之间、多结果乱序时保持原数组引用', () => {
+    const messages: ContextMessage[] = [
+      user(text('go')),
+      assistant([
+        { id: 'c1', name: 'ls' },
+        { id: 'c2', name: 'ls' },
+      ]),
+      { role: 'system', content: 'sys' },
+      toolResult('c2', 'ls', text('b')),
+      toolResult('c1', 'ls', text('a')),
+      user(text('next')),
+    ];
+    expect(sanitizeContextMessages(messages)).toBe(messages);
+  });
 });

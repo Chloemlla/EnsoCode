@@ -128,6 +128,20 @@ describe('selectCoworkerTabConversations', () => {
     expect(running[0]).toMatchObject({ id: 'child', title: 'worker', status: 'running' });
   });
 
+  it('tab 携带子会话的 task / coworker 模式', () => {
+    const parent = conv('parent', { coworkerIds: ['task', 'coworker', 'legacy'] });
+    const tabs = selectCoworkerTabConversations(
+      {
+        parent,
+        task: conv('task', { parentId: 'parent', child: { mode: 'task' } }),
+        coworker: conv('coworker', { parentId: 'parent', child: { mode: 'coworker' } }),
+        legacy: conv('legacy', { parentId: 'parent' }),
+      },
+      'parent'
+    );
+    expect(tabs.map((tab) => tab.mode)).toEqual(['task', 'coworker', 'coworker']);
+  });
+
   it('按父会话隔离缓存，交错订阅不会挤掉稳定引用', () => {
     const parentA = conv('parent-a', { coworkerIds: ['child-a'] });
     const childA = conv('child-a', { parentId: 'parent-a', status: undefined });

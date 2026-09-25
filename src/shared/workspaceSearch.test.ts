@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   cycleWorkspaceSearchScope,
+  highlightWorkspaceMatches,
   mergeWorkspaceHits,
   searchWorkspace,
   WORKSPACE_SEARCH_RESULT_LIMIT,
@@ -321,5 +322,37 @@ describe('cycleWorkspaceSearchScope', () => {
   it('Shift+Tab 反向', () => {
     expect(cycleWorkspaceSearchScope('project', true)).toBe('all-including-archived');
     expect(cycleWorkspaceSearchScope('all', true)).toBe('project');
+  });
+});
+
+describe('highlightWorkspaceMatches', () => {
+  const marked = (text: string, query: string) =>
+    highlightWorkspaceMatches(text, query)
+      .map((part) => (part.match ? `[${part.text}]` : part.text))
+      .join('');
+
+  it('按词首前缀大小写不敏感高亮，与搜索命中规则一致', () => {
+    expect(marked('Cart discount logic', 'cart DIS')).toBe('[Cart] [dis]count logic');
+  });
+
+  it('不高亮词中间的片段', () => {
+    expect(marked('recart discount', 'cart count')).toBe('recart discount');
+  });
+
+  it('同一个词出现多次时全部高亮', () => {
+    expect(marked('fix cart, then cart-test', 'cart')).toBe('fix [cart], then [cart]-test');
+  });
+
+  it('中文按子串高亮', () => {
+    expect(marked('修复购物车折扣逻辑', '折扣')).toBe('修复购物车[折扣]逻辑');
+  });
+
+  it('重叠的查询词合并为一段', () => {
+    expect(marked('cart', 'ca cart')).toBe('[cart]');
+  });
+
+  it('空查询或无命中返回原文', () => {
+    expect(highlightWorkspaceMatches('Cart', '  ')).toEqual([{ text: 'Cart', match: false }]);
+    expect(highlightWorkspaceMatches('Cart', 'zzz')).toEqual([{ text: 'Cart', match: false }]);
   });
 });

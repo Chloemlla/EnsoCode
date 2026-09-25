@@ -1103,14 +1103,6 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                                       )}
                                     </span>
                                   </button>
-                                  {projectPinned && (
-                                    <span
-                                      className="flex shrink-0 items-center justify-center rounded p-1 group-hover:hidden"
-                                      aria-hidden
-                                    >
-                                      <Pin className="h-3.5 w-3.5 text-muted-foreground/70" />
-                                    </span>
-                                  )}
                                   <button
                                     type="button"
                                     onClick={() => togglePinProject(project.id)}
@@ -1133,6 +1125,15 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                                     <MessageSquarePlus className="h-3.5 w-3.5" />
                                   </button>
                                   <ProjectOverflowMenu actions={projectActions} />
+                                  {/* 置顶标记放最右：左侧透明操作位仍占宽，放在它们前面会悬在行中间 */}
+                                  {projectPinned && (
+                                    <span
+                                      className="flex shrink-0 items-center justify-center rounded p-1 group-hover:hidden"
+                                      aria-hidden
+                                    >
+                                      <Pin className="h-3.5 w-3.5 text-muted-foreground/70" />
+                                    </span>
+                                  )}
                                 </div>
                                 <AnimatePresence initial={false}>
                                   {!folded && (

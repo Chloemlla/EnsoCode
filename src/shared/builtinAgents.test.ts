@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  agentTypeDisplayName,
   buildAgentTypeRegistrySnapshot,
   ENSO_AGENT_TYPE_KEY,
   ENSO_LOCKED_PROFILE,
@@ -12,6 +13,23 @@ import {
 } from './builtinAgents';
 
 const CUSTOM_ID = '11111111-1111-4111-8111-111111111111';
+
+describe('agentTypeDisplayName', () => {
+  const custom = [{ id: CUSTOM_ID, name: '  reviewer-x ' }];
+
+  it('maps type keys to human-readable names', () => {
+    expect(agentTypeDisplayName(`custom:${CUSTOM_ID}`, custom)).toBe('reviewer-x');
+    expect(agentTypeDisplayName('builtin:scout', custom)).toBe('scout');
+    expect(agentTypeDisplayName(ENSO_AGENT_TYPE_KEY, custom)).toBe('Enso');
+  });
+
+  it('keeps legacy plain names and falls back for unknown custom ids', () => {
+    expect(agentTypeDisplayName('worker', custom)).toBe('worker');
+    expect(agentTypeDisplayName('custom:22222222-2222-4222-8222-222222222222', custom)).toBe(
+      'custom'
+    );
+  });
+});
 
 describe('AgentType registry and locked Enso profile', () => {
   it('Enso 固定 locked/non-disableable/no override 并精确三 tools', () => {

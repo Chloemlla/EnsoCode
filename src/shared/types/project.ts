@@ -48,3 +48,12 @@ export interface RecentProject {
   displayPath: string;
   sourceName: string;
 }
+
+/** 本机已安装、可用于打开项目目录的编辑器 / 终端（id 是注册表标识，不是路径） */
+export interface OpenInApp {
+  id: string;
+  name: string;
+  kind: 'editor' | 'terminal';
+  /** PNG data URL */
+  icon?: string;
+}
