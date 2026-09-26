@@ -15,6 +15,7 @@ import { projectNameFromPath } from '@shared/projectName';
 import { applyIncomingProviders } from '@shared/providerIdentity';
 import { normalizeProxyMode, type ProxyMode } from '@shared/proxy';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
+import { DEFAULT_SSH_TIMEOUT_SECONDS, normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import {
   DEFAULT_STATUS_LINE_SEGMENTS,
   normalizeStatusLineSegments,
@@ -153,6 +154,7 @@ const initialState = {
   chatWide: false,
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
+  sshTimeoutSeconds: DEFAULT_SSH_TIMEOUT_SECONDS,
   generationStallTimeoutMin: 0,
   autoArchiveIdleDays: DEFAULT_AUTO_ARCHIVE_IDLE_DAYS,
   autoArchiveMergedWorktrees: false,
@@ -315,6 +317,8 @@ export const useSettingsStore = create<SettingsState>()(
       setNotifyMainAgentOnly: (notifyMainAgentOnly) => set({ notifyMainAgentOnly }),
       setMaxActiveCoworkers: (value) =>
         set({ maxActiveCoworkers: normalizeMaxActiveCoworkers(value) }),
+      setSshTimeoutSeconds: (value) =>
+        set({ sshTimeoutSeconds: normalizeSshTimeoutSeconds(value) }),
       setGenerationStallTimeoutMin: (minutes) =>
         set({
           generationStallTimeoutMin: Number.isFinite(minutes)
@@ -944,6 +948,10 @@ export const useSettingsStore = create<SettingsState>()(
         const maxActiveCoworkers = normalizeMaxActiveCoworkers(s.maxActiveCoworkers);
         if (maxActiveCoworkers !== s.maxActiveCoworkers) {
           useSettingsStore.setState({ maxActiveCoworkers });
+        }
+        const sshTimeoutSeconds = normalizeSshTimeoutSeconds(s.sshTimeoutSeconds);
+        if (sshTimeoutSeconds !== s.sshTimeoutSeconds) {
+          useSettingsStore.setState({ sshTimeoutSeconds });
         }
         const autoArchiveIdleDays = normalizeAutoArchiveIdleDays(s.autoArchiveIdleDays);
         if (autoArchiveIdleDays !== s.autoArchiveIdleDays) {

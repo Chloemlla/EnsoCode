@@ -22,6 +22,9 @@ import {
 } from '@/components/ui/select';
 import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
+import { useSettingsStore } from '@/stores/settings';
+
+const SSH_TIMEOUT_OPTIONS = [10, 15, 30, 60, 120, 300];
 
 export function SshSettings() {
   const { t } = useI18n();
@@ -195,6 +198,7 @@ export function SshSettings() {
           </li>
         ))}
       </ul>
+      <SshTimeoutRow />
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
@@ -281,6 +285,43 @@ export function SshSettings() {
         onTrust={() => void trustHost()}
         onDismiss={() => !trusting && setHostKey(null)}
       />
+    </div>
+  );
+}
+
+function SshTimeoutRow() {
+  const { t } = useI18n();
+  const sshTimeoutSeconds = useSettingsStore((state) => state.sshTimeoutSeconds);
+  const setSshTimeoutSeconds = useSettingsStore((state) => state.setSshTimeoutSeconds);
+  return (
+    <div
+      className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5"
+      data-settings-row="ssh.timeout"
+    >
+      <div className="min-w-0">
+        <p className="text-sm">{t('SSH timeout')}</p>
+        <p className="text-xs text-muted-foreground">
+          {t(
+            'Time limit for connection tests, loading remote AGENTS.md, remote folder browsing and file panel actions. Agent tool commands are not affected.'
+          )}
+        </p>
+      </div>
+      <Select
+        items={Object.fromEntries(SSH_TIMEOUT_OPTIONS.map((value) => [String(value), `${value}s`]))}
+        value={String(sshTimeoutSeconds)}
+        onValueChange={(value) => setSshTimeoutSeconds(Number(value))}
+      >
+        <SelectTrigger className="w-24">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectPopup>
+          {SSH_TIMEOUT_OPTIONS.map((value) => (
+            <SelectItem key={value} value={String(value)}>
+              {`${value}s`}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
     </div>
   );
 }

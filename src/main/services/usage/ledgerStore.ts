@@ -1,8 +1,18 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadUsageProjectAliases } from './aliases';
-import { type ParsedSession, parseSessionJsonl } from './parseSession';
+import { loadParsedSession, usageCacheDir } from './parseCache';
+import { coerceParsedSession, type ParsedSession } from './parseSession';
 import { applyUsageProjectAliases } from './projectLabel';
+
+interface LedgerEntry {
+  mtimeMs: number;
+  size: number;
+  session: ParsedSession | null;
+}
+
+/** 账本文件按 mtime/size 复用，避免每次打开用量页都重读全部快照 */
+const ledgerMemory = new Map<string, LedgerEntry>();
 
 export function usageLedgerDir(sessionDir: string): string {
   return path.join(path.dirname(sessionDir), 'usage-ledger');
@@ -18,18 +28,14 @@ export async function writeLedgerSnapshot(
 ): Promise<void> {
   const dir = usageLedgerDir(sessionDir);
   await mkdir(dir, { recursive: true });
-  await writeFile(snapshotPath(dir, parsed.sessionId), JSON.stringify(parsed), 'utf8');
+  const target = snapshotPath(dir, parsed.sessionId);
+  await writeFile(target, JSON.stringify(parsed), 'utf8');
+  ledgerMemory.delete(target);
 }
 
 /** 一轮结束后把当前 jsonl 的用量快照写入账本（覆盖该 sessionId）。文件缺失则忽略。 */
 export async function ingestSessionJsonl(sessionDir: string, sessionFile: string): Promise<void> {
-  let text: string;
-  try {
-    text = await readFile(sessionFile, 'utf8');
-  } catch {
-    return;
-  }
-  const parsed = parseSessionJsonl(text);
+  const parsed = await loadParsedSession(sessionFile, usageCacheDir(sessionDir));
   if (parsed) {
     await writeLedgerSnapshot(
       sessionDir,
@@ -46,23 +52,38 @@ export async function loadLedger(sessionDir: string): Promise<ParsedSession[]> {
   } catch {
     return [];
   }
+  const files = new Set(names.map((name) => path.join(dir, name)));
+  for (const file of ledgerMemory.keys()) {
+    if (path.dirname(file) === dir && !files.has(file)) ledgerMemory.delete(file);
+  }
   const sessions: ParsedSession[] = [];
-  for (const name of names) {
-    try {
-      const raw = JSON.parse(await readFile(path.join(dir, name), 'utf8')) as unknown;
-      if (!raw || typeof raw !== 'object') continue;
-      const value = raw as Partial<ParsedSession>;
-      if (typeof value.sessionId !== 'string' || !Array.isArray(value.records)) continue;
-      sessions.push({
-        sessionId: value.sessionId,
-        project: typeof value.project === 'string' ? value.project : '',
-        ...(typeof value.cwd === 'string' && value.cwd ? { cwd: value.cwd } : {}),
-        records: value.records,
-        spans: Array.isArray(value.spans) ? value.spans : [],
-        activeMs: typeof value.activeMs === 'number' ? value.activeMs : 0,
-        userMessages: typeof value.userMessages === 'number' ? value.userMessages : 0,
-      });
-    } catch {}
+  for (const file of files) {
+    const session = await loadLedgerFile(file);
+    if (session) sessions.push(session);
   }
   return sessions;
+}
+
+async function loadLedgerFile(file: string): Promise<ParsedSession | null> {
+  let mtimeMs: number;
+  let size: number;
+  try {
+    ({ mtimeMs, size } = await stat(file));
+  } catch {
+    return null;
+  }
+  const hit = ledgerMemory.get(file);
+  if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.session;
+  let text: string;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+  let session: ParsedSession | null = null;
+  try {
+    session = coerceParsedSession(JSON.parse(text));
+  } catch {}
+  ledgerMemory.set(file, { mtimeMs, size, session });
+  return session;
 }

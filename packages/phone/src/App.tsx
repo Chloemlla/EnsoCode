@@ -545,6 +545,8 @@ export function App() {
         queued={withoutQueuedIds(entry?.queued, queueEchoes, activeId ?? '')}
         echoes={queueEchoes}
         goal={entry?.goal}
+        context={entry?.context}
+        usageTotals={entry?.usageTotals}
         slashCommands={entry?.slashCommands}
         onSend={(text, images) => {
           if (!activeId) return;

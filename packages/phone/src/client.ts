@@ -44,11 +44,13 @@ import {
   type SyncState,
   type SyncTracking,
 } from '@shared/pair/syncProjection';
+import { normalizeTimelinePrefs } from '@shared/pair/timelinePrefs';
 import { type PhoneCacheData, type PhoneCacheStore, phoneCache } from './sessionCache';
 import {
   setCompactReadOnlyTools,
   setExpandLiveEdits,
   setTerminalAppearance,
+  setTimelinePrefs,
 } from './stubs/settings-store';
 import { setHostTheme } from './theme';
 
@@ -428,6 +430,7 @@ export class PairClient {
         setHostTheme(payload.theme);
         setCompactReadOnlyTools(payload.compactReadOnlyTools !== false);
         setExpandLiveEdits(payload.expandLiveEdits !== false);
+        setTimelinePrefs(normalizeTimelinePrefs(payload));
         break;
       case 'agent-event':
         this.acceptAgentEvent(payload.event as Record<string, unknown>, payload.cursor);

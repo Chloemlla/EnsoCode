@@ -10,6 +10,7 @@ import {
   shouldAutoExpandAppliedFileChanges,
   shouldPrefetchOlderHistory,
   shouldShowToolOutputAfterFileChanges,
+  summarizeSandboxCalls,
   type TimelineItem,
   terminalErrorText,
   thinkingRowExpanded,
@@ -734,6 +735,18 @@ describe('buildTimeline', () => {
         { name: 'ls', ok: true },
       ],
     });
+  });
+
+  it('exec 调用按工具名首次出现顺序计数', () => {
+    expect(
+      summarizeSandboxCalls([
+        { name: 'grep', ok: true },
+        { name: 'read', ok: true },
+        { name: 'grep', ok: false },
+        { name: 'grep', ok: true },
+      ])
+    ).toBe('grep ×3 read ×1');
+    expect(summarizeSandboxCalls([])).toBe('');
   });
 
   it('Hashline edit 从头部提取路径并从 toolResult 生成 edits', () => {
@@ -1806,6 +1819,25 @@ describe('foldTimeline', () => {
     const folded = foldTimeline(items, true, new Set(), { compact: true });
     expect(folded.map((i) => i.kind)).toEqual(['tool-group']);
     expect((folded[0] as Extract<TimelineItem, { kind: 'tool-group' }>).exploring).toBe(true);
+  });
+
+  it('compact：运行中的尾段在两次调用之间仍标 exploring，被后续内容隔开或结束后才落定', () => {
+    const items = [
+      userItem('u0'),
+      toolItem('a1', 'read'),
+      toolItem('a2', 'grep'),
+      toolItem('a3', 'ls'),
+    ];
+    const exploring = (list: TimelineItem[], running: boolean) =>
+      (
+        foldTimeline(list, running, new Set(), { compact: true }).find(
+          (i) => i.kind === 'tool-group'
+        ) as Extract<TimelineItem, { kind: 'tool-group' }>
+      ).exploring;
+    expect(exploring(items, true)).toBe(true);
+    expect(exploring([...items, thinkingItem('th')], true)).toBe(true);
+    expect(exploring([...items, toolItem('b', 'bash')], true)).toBe(false);
+    expect(exploring(items, false)).toBe(false);
   });
 
   it('todo 行不进组，平铺在组头之后', () => {

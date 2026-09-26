@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { aggregateUsage } from '@shared/usage/aggregate';
 import { mergeUsageSources } from '@shared/usage/ledger';
@@ -8,47 +8,19 @@ import { app } from 'electron';
 import { getRuntime } from '../oauthProviders';
 import { loadUsageModelPricing, loadUsageProjectAliases } from './aliases';
 import { loadLedger } from './ledgerStore';
-import { type ParsedSession, parseSessionJsonl } from './parseSession';
+import { loadParsedSession, pruneParseCache, usageCacheDir } from './parseCache';
+import type { ParsedSession } from './parseSession';
 import { applyUsageProjectAliases } from './projectLabel';
-
-interface CacheEntry {
-  mtimeMs: number;
-  size: number;
-  parsed: ParsedSession | null;
-}
-
-const fileCache = new Map<string, CacheEntry>();
 
 function sessionDir(): string {
   return path.join(app.getPath('userData'), 'agent', 'sessions');
 }
 
-async function loadOne(file: string): Promise<ParsedSession | null> {
-  let info: { mtimeMs: number; size: number };
-  try {
-    info = await stat(file);
-  } catch {
-    return null;
-  }
-  const cached = fileCache.get(file);
-  if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
-    return cached.parsed;
-  }
-  let parsed: ParsedSession | null = null;
-  try {
-    parsed = parseSessionJsonl(await readFile(file, 'utf8'));
-  } catch {
-    parsed = null;
-  }
-  fileCache.set(file, { mtimeMs: info.mtimeMs, size: info.size, parsed });
-  return parsed;
-}
-
 /**
- * 逐文件按 mtime/size 复用解析结果；消失的文件顺手清掉。
+ * 逐文件按 mtime/size 复用解析结果（内存 + 磁盘缓存）；消失的文件顺手清掉其缓存。
  * 全程 promise IO：冷启动 60MB 级会话目录不能卡住主进程事件循环。
  */
-export async function loadSessions(dir: string): Promise<ParsedSession[]> {
+export async function loadSessions(dir: string, cacheDir: string): Promise<ParsedSession[]> {
   let names: string[];
   try {
     names = (await readdir(dir)).filter((name) => name.endsWith('.jsonl'));
@@ -56,15 +28,12 @@ export async function loadSessions(dir: string): Promise<ParsedSession[]> {
     return [];
   }
   const files = names.map((name) => path.join(dir, name));
-  const seen = new Set(files);
   const sessions: ParsedSession[] = [];
   for (const file of files) {
-    const parsed = await loadOne(file);
+    const parsed = await loadParsedSession(file, cacheDir);
     if (parsed) sessions.push(parsed);
   }
-  for (const file of fileCache.keys()) {
-    if (!seen.has(file)) fileCache.delete(file);
-  }
+  await pruneParseCache(cacheDir, files);
   return sessions;
 }
 
@@ -152,7 +121,8 @@ let sessionsInflight: Promise<ParsedSession[]> | null = null;
 
 /** 连点周期 pill 只触发一次全量扫描 */
 function loadSessionsOnce(): Promise<ParsedSession[]> {
-  sessionsInflight ??= loadSessions(sessionDir()).finally(() => {
+  const dir = sessionDir();
+  sessionsInflight ??= loadSessions(dir, usageCacheDir(dir)).finally(() => {
     sessionsInflight = null;
   });
   return sessionsInflight;

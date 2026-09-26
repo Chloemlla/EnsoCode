@@ -6,6 +6,7 @@ import type {
   ProviderEntry,
   TerminalPalette,
 } from '@enso/pair';
+import { normalizeTimelinePrefs } from '@shared/pair/timelinePrefs';
 import { IPC_CHANNELS } from '@shared/types';
 import { ipcMain } from 'electron';
 import {
@@ -97,6 +98,10 @@ export function registerPairHandlers(): void {
       terminalFontFamily?: string;
       compactReadOnlyTools?: boolean;
       expandLiveEdits?: boolean;
+      expandLiveReasoning?: boolean;
+      autoCollapseTurns?: boolean;
+      collapseCompletedActivity?: boolean;
+      pinUnfinishedTodos?: boolean;
     };
     if (!p || typeof p !== 'object') return;
     updatePairCatalog({
@@ -117,6 +122,7 @@ export function registerPairHandlers(): void {
         : {}),
       compactReadOnlyTools: p.compactReadOnlyTools !== false,
       expandLiveEdits: p.expandLiveEdits !== false,
+      ...normalizeTimelinePrefs(p),
     });
   });
 }

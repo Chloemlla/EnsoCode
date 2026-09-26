@@ -132,7 +132,7 @@ import { ingestSessionJsonl } from '../services/usage/ledgerStore';
 import { sendToAllWindows } from '../windows/createAppWindow';
 import { isMainWebContents } from '../windows/MainWindow';
 import { agentSessionIndex, capabilityGateway, handleCapabilityInvoke } from './capabilities';
-import { readSettings } from './settings';
+import { readSettings, readSshTimeoutSeconds } from './settings';
 import {
   removeRegisteredWorktree,
   sessionWorktree,
@@ -251,15 +251,17 @@ function remoteConfigFor(sessionId: string): AgentRemoteConfig | undefined {
   const secret = project.sshConnectionId
     ? getSshConnectionStore().getSecret(project.sshConnectionId)
     : undefined;
+  const timeoutSeconds = readSshTimeoutSeconds();
   if (secret) {
     return {
       host: resolveSshTarget(secret),
       auth: secret.auth,
       ...(secret.port ? { port: secret.port } : {}),
       ...(secret.auth === 'password' && secret.password ? { password: secret.password } : {}),
+      timeoutSeconds,
     };
   }
-  return project.sshHost ? { host: project.sshHost, auth: 'key' } : undefined;
+  return project.sshHost ? { host: project.sshHost, auth: 'key', timeoutSeconds } : undefined;
 }
 
 function projectIdFor(sessionId: string): string | undefined {

@@ -86,6 +86,14 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogPanel,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
+import {
   Menu,
   MenuItem,
   MenuPopup,
@@ -103,12 +111,12 @@ import { effectiveKeybindings, formatBinding, IS_MAC } from '@/lib/keybindings';
 import { heightVariants, springStandard } from '@/lib/motion';
 import { formatRelativeTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
+import { Z_INDEX } from '@/lib/z-index';
 import { useRemoteNodesStore } from '@/stores/remoteNodes';
 import { useSessionsStore } from '@/stores/sessions';
 import {
   activeConversationIds,
   archivedConversationGroups,
-  archivedConversationIds,
   pinnedConversationIds,
   projectConversationIds,
   staleArchivedConversationIds,
@@ -464,7 +472,6 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
 
   const activeIds = activeConversationIds(order, conversations, archivedProjectIds);
   const pinnedIds = pinnedConversationIds(order, conversations, pinnedOrderIds, archivedProjectIds);
-  const archivedIds = archivedConversationIds(order, conversations, archivedProjectIds);
   const archivedGroups = archivedConversationGroups(
     order,
     conversations,
@@ -518,17 +525,29 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
     if (owner !== surface) return undefined;
     return formatBinding(`mod+${index + 1}`);
   };
+  // 已归档弹窗(缺省关闭,重启回到关闭);搜索框独立于侧栏搜索
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveQuery, setArchiveQuery] = useState('');
+  const [archiveCleanupOpen, setArchiveCleanupOpen] = useState<string | null>(null);
   // 搜索时:归档项目名命中则整组保留(与活动项目一致),否则只留命中的会话
-  const visibleArchivedGroups = searching
+  const visibleArchivedGroups = archiveQuery.trim()
     ? archivedGroups
         .map((group) => {
           const project = projects.find((item) => item.id === group.projectId);
           const projectHit =
             group.projectArchived === true &&
             Boolean(
-              project && matchesQuery(listQuery, [project.alias ?? '', project.name, project.path])
+              project &&
+                matchesQuery(archiveQuery, [project.alias ?? '', project.name, project.path])
             );
-          return projectHit ? group : { ...group, ids: group.ids.filter(convMatches) };
+          return projectHit
+            ? group
+            : {
+                ...group,
+                ids: group.ids.filter((id) =>
+                  matchesQuery(archiveQuery, [conversations[id]?.title || t('New conversation')])
+                ),
+              };
         })
         .filter((group) => group.ids.length > 0)
     : archivedGroups;
@@ -542,9 +561,13 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
     return project.groupId === resolvedGroupId;
   };
   const slicedArchivedGroups = visibleArchivedGroups.filter(archivedInSlice);
-  // 底部「已归档」栏目的折叠态(缺省收起,重启回到收起)
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [archiveCleanupOpen, setArchiveCleanupOpen] = useState<string | null>(null);
+  const archivedCount = archivedGroups
+    .filter(archivedInSlice)
+    .reduce((count, group) => count + group.ids.length, 0);
+  const openArchive = () => {
+    setArchiveQuery('');
+    setArchiveOpen(true);
+  };
 
   // 相对时间每分钟自刷（“3 分钟前”不随时间僵住）
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -709,14 +732,16 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
             <FolderPlus className="h-4 w-4" />
           </button>
           <div className="flex-1" />
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            className={ICON_BUTTON_CLASS}
-            title={t('Expand sidebar')}
-          >
-            <PanelLeft className="h-4 w-4" />
-          </button>
+          {archivedCount > 0 && (
+            <button
+              type="button"
+              onClick={openArchive}
+              className={ICON_BUTTON_CLASS}
+              title={`${t('Archived')} (${archivedCount})`}
+            >
+              <Archive className="h-4 w-4" />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -734,6 +759,14 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
             title={t('Settings')}
           >
             <Settings className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className={ICON_BUTTON_CLASS}
+            title={t('Expand sidebar')}
+          >
+            <PanelLeft className="h-4 w-4" />
           </button>
         </div>
       )}
@@ -1142,7 +1175,6 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                                       animate="animate"
                                       exit="exit"
                                       variants={heightVariants}
-                                      transition={springStandard}
                                       className="overflow-hidden"
                                     >
                                       <div className="enso-conv-tree mt-0.5 flex flex-col gap-y-0.5">
@@ -1307,7 +1339,6 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                                 animate="animate"
                                 exit="exit"
                                 variants={heightVariants}
-                                transition={springStandard}
                                 className="overflow-hidden"
                               >
                                 <div className="space-y-1 pt-0.5">
@@ -1338,156 +1369,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
           </SortableContext>
         </div>
 
-        {slicedArchivedGroups.length > 0 && (
-          <div data-slot="archived-section" className="shrink-0 border-t p-2">
-            {/* 列表在折叠头上方：固定底部向上展开 */}
-            <AnimatePresence initial={false}>
-              {(searching || archivedOpen) && (
-                <motion.div
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  variants={heightVariants}
-                  transition={springStandard}
-                  className="overflow-hidden"
-                >
-                  <div className="mb-0.5 flex max-h-72 flex-col gap-y-1.5 overflow-y-auto">
-                    {slicedArchivedGroups.map((group) => {
-                      const archivedProject = projects.find(
-                        (project) => project.id === group.projectId
-                      );
-                      const projectName = archivedProject
-                        ? projectDisplayName(archivedProject)
-                        : t('Other');
-                      return (
-                        <div key={group.projectId}>
-                          <div className="group flex items-center gap-2 rounded-md pr-0.5 pl-2">
-                            {group.projectArchived && (
-                              <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-                            )}
-                            <span className="min-w-0 flex-1 truncate py-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-                              {projectName}
-                            </span>
-                            <span className="shrink-0 text-[10px] text-muted-foreground">
-                              {group.ids.length}
-                            </span>
-                            {group.projectArchived ? (
-                              <button
-                                type="button"
-                                onClick={() => toggleArchiveProject(group.projectId)}
-                                className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                                title={t('Unarchive project')}
-                              >
-                                <ArchiveRestore className="h-3.5 w-3.5" />
-                              </button>
-                            ) : (
-                              <ArchiveCleanupMenu
-                                open={archiveCleanupOpen === group.projectId}
-                                onOpenChange={(open) =>
-                                  setArchiveCleanupOpen(open ? group.projectId : null)
-                                }
-                                idsForDays={(days) =>
-                                  staleArchivedConversationIds(
-                                    order,
-                                    conversations,
-                                    days,
-                                    Date.now(),
-                                    group.projectId
-                                  )
-                                }
-                                onPick={(days, ids) =>
-                                  setPendingRemove({
-                                    kind: 'archived',
-                                    days,
-                                    conversationIds: ids,
-                                    projectName,
-                                  })
-                                }
-                              />
-                            )}
-                          </div>
-                          <div className="flex flex-col gap-y-0.5">
-                            {group.ids.map((id) => (
-                              <motion.div key={id} layout="position" transition={springStandard}>
-                                <DraggableChat id={id} conversation={conversations[id]}>
-                                  <ConversationRow
-                                    id={id}
-                                    conversation={conversations[id]}
-                                    active={activeId === id}
-                                    locale={locale}
-                                    nowTick={nowTick}
-                                    worktreeStatus={
-                                      conversations[id].worktree ? worktreeStatuses[id] : undefined
-                                    }
-                                    isolated={Boolean(conversations[id].worktree)}
-                                    onSelect={selectConversation}
-                                    onTogglePin={togglePinConversation}
-                                    onToggleArchive={(conversationId) =>
-                                      void handleToggleArchive(conversationId)
-                                    }
-                                    onCleanupWorktree={(conversationId) =>
-                                      void handleCleanupWorktree(conversationId)
-                                    }
-                                    onMoveToWorktree={(conversationId) =>
-                                      void handleMoveToWorktree(conversationId)
-                                    }
-                                    onRemove={(conversationId) =>
-                                      void openRemoveConversation(conversationId)
-                                    }
-                                  />
-                                </DraggableChat>
-                              </motion.div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-            <div className="group flex items-center gap-1 rounded-lg pr-1 transition-colors hover:bg-muted/60">
-              <button
-                type="button"
-                onClick={() => setArchivedOpen((open) => !open)}
-                className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left"
-              >
-                <IconSlot>
-                  <ChevronRight
-                    className={cn(
-                      'size-3.5 transition-transform duration-150',
-                      archivedOpen && 'rotate-90'
-                    )}
-                  />
-                </IconSlot>
-                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                  {t('Archived')}
-                </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                  {archivedIds.length}
-                </span>
-              </button>
-              <ArchiveCleanupMenu
-                open={archiveCleanupOpen === '*'}
-                onOpenChange={(open) => setArchiveCleanupOpen(open ? '*' : null)}
-                idsForDays={(days) =>
-                  staleArchivedConversationIds(order, conversations, days, Date.now())
-                }
-                onPick={(days, ids) =>
-                  setPendingRemove({ kind: 'archived', days, conversationIds: ids })
-                }
-              />
-            </div>
-          </div>
-        )}
-
-        {/* 有归档区时它的上边线已隔开列表，底栏不再叠一条 */}
-        <div
-          className={cn(
-            'flex shrink-0 items-center justify-between p-2',
-            slicedArchivedGroups.length === 0 && 'border-t'
-          )}
-        >
+        <div className="flex shrink-0 items-center justify-between border-t p-2">
           <button
             type="button"
             onClick={onToggleCollapse}
@@ -1497,6 +1379,17 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
             <PanelLeftClose className="h-4 w-4" />
           </button>
           <div className="flex items-center">
+            {archivedCount > 0 && (
+              <button
+                type="button"
+                data-slot="archived-button"
+                onClick={openArchive}
+                className={ICON_BUTTON_CLASS}
+                title={`${t('Archived')} (${archivedCount})`}
+              >
+                <Archive className="h-4 w-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1519,6 +1412,136 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
         </div>
       </div>
 
+      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+        <DialogContent className="h-[min(40rem,85vh)] max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-baseline gap-2">
+              {t('Archived')}
+              <span className="font-sans text-sm text-muted-foreground tabular-nums">
+                {archivedCount}
+              </span>
+            </DialogTitle>
+            <div className="mt-1 flex items-center gap-2">
+              <InputGroup data-size="sm">
+                <InputGroupAddon>
+                  <Search />
+                </InputGroupAddon>
+                <InputGroupInput
+                  value={archiveQuery}
+                  placeholder={t('Search conversations...')}
+                  onChange={(event) => setArchiveQuery(event.target.value)}
+                />
+              </InputGroup>
+              <ArchiveCleanupMenu
+                open={archiveCleanupOpen === '*'}
+                onOpenChange={(open) => setArchiveCleanupOpen(open ? '*' : null)}
+                idsForDays={(days) =>
+                  staleArchivedConversationIds(order, conversations, days, Date.now())
+                }
+                onPick={(days, ids) =>
+                  setPendingRemove({ kind: 'archived', days, conversationIds: ids })
+                }
+                className="h-8 w-8 rounded-md opacity-100 hover:bg-muted"
+              />
+            </div>
+          </DialogHeader>
+          <DialogPanel className="flex flex-col gap-y-3 border-t pt-3!">
+            {slicedArchivedGroups.length === 0 && (
+              <p className="py-10 text-center text-sm text-muted-foreground">
+                {archiveQuery.trim() ? t('No matching conversations') : t('No conversations')}
+              </p>
+            )}
+            {slicedArchivedGroups.map((group) => {
+              const archivedProject = projects.find((project) => project.id === group.projectId);
+              const projectName = archivedProject
+                ? projectDisplayName(archivedProject)
+                : t('Other');
+              return (
+                <div key={group.projectId}>
+                  <div className="group flex items-center gap-2 rounded-md pr-0.5 pl-2">
+                    {group.projectArchived && (
+                      <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate py-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                      {projectName}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                      {group.ids.length}
+                    </span>
+                    {group.projectArchived ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleArchiveProject(group.projectId)}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        title={t('Unarchive project')}
+                      >
+                        <ArchiveRestore className="h-3.5 w-3.5" />
+                      </button>
+                    ) : (
+                      <ArchiveCleanupMenu
+                        open={archiveCleanupOpen === group.projectId}
+                        onOpenChange={(open) =>
+                          setArchiveCleanupOpen(open ? group.projectId : null)
+                        }
+                        idsForDays={(days) =>
+                          staleArchivedConversationIds(
+                            order,
+                            conversations,
+                            days,
+                            Date.now(),
+                            group.projectId
+                          )
+                        }
+                        onPick={(days, ids) =>
+                          setPendingRemove({
+                            kind: 'archived',
+                            days,
+                            conversationIds: ids,
+                            projectName,
+                          })
+                        }
+                      />
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-y-0.5">
+                    {group.ids.map((id) => (
+                      <motion.div key={id} layout="position" transition={springStandard}>
+                        <ConversationRow
+                          id={id}
+                          conversation={conversations[id]}
+                          active={activeId === id}
+                          locale={locale}
+                          nowTick={nowTick}
+                          worktreeStatus={
+                            conversations[id].worktree ? worktreeStatuses[id] : undefined
+                          }
+                          isolated={Boolean(conversations[id].worktree)}
+                          menuZIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                          onSelect={(conversationId) => {
+                            selectConversation(conversationId);
+                            setArchiveOpen(false);
+                          }}
+                          onTogglePin={togglePinConversation}
+                          onToggleArchive={(conversationId) =>
+                            void handleToggleArchive(conversationId)
+                          }
+                          onCleanupWorktree={(conversationId) =>
+                            void handleCleanupWorktree(conversationId)
+                          }
+                          onMoveToWorktree={(conversationId) =>
+                            void handleMoveToWorktree(conversationId)
+                          }
+                          onRemove={(conversationId) => void openRemoveConversation(conversationId)}
+                        />
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </DialogPanel>
+        </DialogContent>
+      </Dialog>
       <AddProjectDialog
         open={addOpen}
         onOpenChange={setAddOpen}
@@ -1916,11 +1939,13 @@ function ArchiveCleanupMenu({
   onOpenChange,
   idsForDays,
   onPick,
+  className,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   idsForDays: (days: number) => string[];
   onPick: (days: number, ids: string[]) => void;
+  className?: string;
 }) {
   const { t } = useI18n();
   return (
@@ -1928,14 +1953,15 @@ function ArchiveCleanupMenu({
       <MenuTrigger
         className={cn(
           'flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive',
-          open && 'opacity-100'
+          open && 'opacity-100',
+          className
         )}
         title={t('Clean up archived')}
         aria-label={t('Clean up archived')}
       >
         <Eraser className="h-3.5 w-3.5" />
       </MenuTrigger>
-      <MenuPopup align="end" side="top" className="min-w-40">
+      <MenuPopup align="end" className="min-w-40" zIndex={Z_INDEX.DROPDOWN_IN_MODAL}>
         {ARCHIVE_PURGE_DAYS.map((days) => {
           const ids = idsForDays(days);
           return (
@@ -2083,6 +2109,8 @@ interface ConversationRowProps {
   /** 隔离会话的 worktree 状态（徽标：未提交/未合并） */
   worktreeStatus?: WorktreeStatus;
   switchHint?: string;
+  /** 右键菜单层级；弹窗内的行需要压过弹窗 */
+  menuZIndex?: number;
   onSelect: (id: string) => void;
   onTogglePin: (id: string) => void;
   onToggleArchive: (id: string) => void;
@@ -2107,6 +2135,7 @@ function ConversationRow({
   isolated,
   worktreeStatus,
   switchHint,
+  menuZIndex,
   onSelect,
   onTogglePin,
   onToggleArchive,
@@ -2305,7 +2334,7 @@ function ConversationRow({
     <>
       <ContextMenu>
         <ContextMenuTrigger render={row as React.ReactElement<Record<string, unknown>>} />
-        <ContextMenuPopup className="min-w-36">
+        <ContextMenuPopup className="min-w-36" zIndex={menuZIndex}>
           <ContextMenuItem onClick={() => setRenaming(true)}>
             <Pencil />
             {t('Rename')}

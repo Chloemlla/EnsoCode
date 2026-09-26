@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import { IPC_CHANNELS, isEditMode, resolveEditMode } from '@shared/types';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
@@ -73,6 +74,7 @@ export const SETTINGS_STATE_FIELDS = [
   'chatWide',
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
+  'sshTimeoutSeconds',
   'generationStallTimeoutMin',
   'autoArchiveIdleDays',
   'autoArchiveMergedWorktrees',
@@ -141,6 +143,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'autoRestartWhenIdle',
   'proxyMode',
   'customProxyUrl',
+  'sshTimeoutSeconds',
   'backgroundImageEnabled',
   'backgroundSourceType',
   'backgroundImagePath',
@@ -553,6 +556,10 @@ export function readTrayPreventDisplaySleep(): boolean {
   return parseTrayPreventDisplaySleep(
     objectRecord(readSettings()?.[TRAY_SETTINGS_KEY])?.preventDisplaySleep
   );
+}
+
+export function readSshTimeoutSeconds(): number {
+  return normalizeSshTimeoutSeconds(settingsStateOf(readSettings()).sshTimeoutSeconds);
 }
 
 export function writeTrayPreventDisplaySleep(enabled: boolean): boolean {

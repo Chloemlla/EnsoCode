@@ -9,10 +9,10 @@ import {
 } from '@shared/ssh';
 import type { SshHostKeyChallenge } from '@shared/types';
 import { sshPasswordEnv } from '../../agent/ssh/executor';
+import { readSshTimeoutSeconds } from '../ipc/settings';
 import { challengeFromScan, classifySshHostKeyFailure, scanSshHostKey } from './sshHostKey';
 
 const CONNECT_TIMEOUT_SECONDS = 10;
-const PROBE_TIMEOUT_MS = 15_000;
 
 export function buildSshProbeArgs(
   host: string,
@@ -89,7 +89,7 @@ function runSshProbe(
     execFile(
       'ssh',
       args,
-      { timeout: PROBE_TIMEOUT_MS, env: probeEnv(options.password) ?? process.env },
+      { timeout: readSshTimeoutSeconds() * 1000, env: probeEnv(options.password) ?? process.env },
       (error, _stdout, stderr) => {
         if (!error) return resolve(null);
         const code =
@@ -155,7 +155,7 @@ export function sshListRemoteDirs(
     execFile(
       'ssh',
       args,
-      { timeout: PROBE_TIMEOUT_MS, env: probeEnv(options.password) ?? process.env },
+      { timeout: readSshTimeoutSeconds() * 1000, env: probeEnv(options.password) ?? process.env },
       (error, stdout, stderr) => {
         if (error) {
           if ((error as { killed?: boolean }).killed) {

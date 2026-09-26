@@ -17,9 +17,12 @@ export const easeOutLayout: Transition = {
   ease: [0.2, 0, 0, 1],
 };
 
-/** 高度展开/收起 —— 用于分组折叠、列表展开(与 EnsoAI heightVariants 对齐) */
+/**
+ * 高度展开/收起 —— 用于分组折叠、列表展开。
+ * height 不 clamp：欠阻尼 spring 冲到负值会被浏览器丢弃，停在末段再瞬间卸载，故固定用无过冲 tween。
+ */
 export const heightVariants: Variants = {
   initial: { height: 0, opacity: 0 },
-  animate: { height: 'auto', opacity: 1 },
-  exit: { height: 0, opacity: 0 },
+  animate: { height: 'auto', opacity: 1, transition: easeOutLayout },
+  exit: { height: 0, opacity: 0, transition: easeOutLayout },
 };

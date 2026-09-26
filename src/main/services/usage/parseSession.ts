@@ -41,7 +41,23 @@ function entryTs(entry: Record<string, unknown>, message: Record<string, unknown
   return null;
 }
 
-/** pi session v3 jsonl → 用量记录。坏行跳过；无 session 头返回 null。 */
+/** 落盘的 ParsedSession（账本 / 解析缓存）读回时的结构收窄；缺 sessionId 或 records 视为坏数据 */
+export function coerceParsedSession(raw: unknown): ParsedSession | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Partial<ParsedSession>;
+  if (typeof value.sessionId !== 'string' || !Array.isArray(value.records)) return null;
+  return {
+    sessionId: value.sessionId,
+    project: typeof value.project === 'string' ? value.project : '',
+    ...(typeof value.cwd === 'string' && value.cwd ? { cwd: value.cwd } : {}),
+    records: value.records,
+    spans: Array.isArray(value.spans) ? value.spans : [],
+    activeMs: typeof value.activeMs === 'number' ? value.activeMs : 0,
+    userMessages: typeof value.userMessages === 'number' ? value.userMessages : 0,
+  };
+}
+
+/** pi session v3 jsonl → 用量记录。坏行跳过；无 session 头返回 null。输出语义变化须递增 parseCache 的 CACHE_VERSION。 */
 export function parseSessionJsonl(text: string): ParsedSession | null {
   let sessionId: string | null = null;
   let project = '';

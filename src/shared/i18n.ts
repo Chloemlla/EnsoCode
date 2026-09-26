@@ -838,6 +838,9 @@ export const zhTranslations: Record<string, string> = {
     '远程项目用的主机。密码保存在系统钥匙串。',
   'Add connection': '添加连接',
   'No SSH connections yet': '还没有 SSH 连接',
+  'SSH timeout': 'SSH 超时',
+  'Time limit for connection tests, loading remote AGENTS.md, remote folder browsing and file panel actions. Agent tool commands are not affected.':
+    '连接测试、读取远端 AGENTS.md、浏览远程目录和文件面板操作的超时时间。不影响 Agent 工具执行的命令。',
   'Add SSH connection': '添加 SSH 连接',
   'Edit SSH connection': '编辑 SSH 连接',
   'Key / agent': '密钥 / agent',
@@ -957,6 +960,8 @@ export const zhTranslations: Record<string, string> = {
   'Waiting for your answer': '等待你回答',
   'Type an answer…': '输入回答…',
   'Message will queue until this round finishes…': '消息将排队,本轮结束后发送…',
+  'Press {{key}} to steer the next queued message into this round…':
+    '按 {{key}} 将下一条排队消息插入本轮…',
   Queued: '排队',
   attachments: '个附件',
   Edit: '编辑',

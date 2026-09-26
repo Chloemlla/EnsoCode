@@ -1,3 +1,4 @@
+import { toUsageTotals } from '@shared/sessionStats';
 import {
   DEFAULT_STATUS_LINE_SEGMENTS,
   isStatusLineSegmentPinned,
@@ -34,24 +35,23 @@ import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
 import type { Conversation } from '@/stores/sessions';
 import { useSessionsStore } from '@/stores/sessions';
-import { computeStats, formatDuration, formatTokens } from '@/stores/sessions/stats';
+import { computeStats, formatDuration } from '@/stores/sessions/stats';
 import { useSettingsStore } from '@/stores/settings';
 import { ContextInspector } from './ContextInspector';
-import { contextSegmentUsed } from './contextSegment';
+import { ContextMeter } from './ContextMeter';
 import { StatusLineSettings } from './StatusLineSettings';
+import {
+  buildUsageSegmentValues,
+  CRITICAL_PERCENT,
+  resolveContextUsage,
+  type SegmentValue,
+  toSessionUsageStats,
+} from './usageSegments';
+
+export type { SegmentValue };
 
 interface StatsLineProps {
   conversationId: string;
-}
-
-/** 段位当前值：`compact` 是状态栏内联展示（紧凑，可为空串走纯 icon），
- *  `full` 是设置弹层预览用的完整句子（不含段名前缀，行内已单独显示段名）。
- *  `percent`：仅 `context` 段在窗口已知时设置，驱动图形环；`critical`：该段是否需要警示色。 */
-export interface SegmentValue {
-  compact: string;
-  full: string;
-  percent?: number;
-  critical?: boolean;
 }
 
 /**
@@ -141,11 +141,6 @@ const SEGMENT_ICONS: Record<Exclude<StatusLineSegmentId, 'approval'>, LucideIcon
   usage: Wallet,
 };
 
-/** 状态栏对「资源即将耗尽」统一用的警戒阈值：占用/额度达到或超过此百分比即判定紧张，标红提示 */
-const CRITICAL_PERCENT = 90;
-/** 上下文进度条转为警示色的阈值 */
-const WARNING_PERCENT = 70;
-
 // 订阅额度的缓存/去重已提取到 hooks/useAccountUsage，与 ModelPicker/ProvidersSettings 共享同一份缓存
 
 /** agent 当前正在跑的那一段（还没落进 computeStats 的已完成消息里）的实时时长归属：
@@ -209,28 +204,6 @@ export function resolveSegmentIcons(
     ...SEGMENT_ICONS,
     approval: APPROVAL_ICONS[conversation.approvalMode ?? 'full'],
   };
-}
-
-/** 上下文占用进度条，比纯数字更直观地传达「还剩多少」。 */
-function ContextMeter({ percent, critical }: { percent: number; critical: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className="h-1 w-7 shrink-0 overflow-hidden rounded-full bg-muted-foreground/20"
-    >
-      <span
-        className={cn(
-          'block h-full rounded-full',
-          critical
-            ? 'bg-destructive'
-            : percent >= WARNING_PERCENT
-              ? 'bg-warning'
-              : 'bg-muted-foreground/70'
-        )}
-        style={{ width: `${percent}%` }}
-      />
-    </span>
-  );
 }
 
 /** 订阅额度：按 auth accountKey 拉取，模块级缓存 + in-flight 去重节流，⛔ 不每次 render 都发 IPC。
@@ -299,18 +272,21 @@ function buildSegmentValues(
   const stats = computeStats(messages);
   const values: Record<StatusLineSegmentId, SegmentValue | undefined> = {
     model: undefined,
-    context: undefined,
     turns: undefined,
     duration: undefined,
     sessionTime: undefined,
-    speed: undefined,
-    tokens: undefined,
-    cache: undefined,
     cwd: undefined,
     sessionName: undefined,
     approval: undefined,
     coworkers: undefined,
     usage: undefined,
+    ...buildUsageSegmentValues(
+      t,
+      toSessionUsageStats(
+        toUsageTotals(stats),
+        resolveContextUsage(conversation.occupancy, conversation.contextWindow)
+      )
+    ),
   };
 
   if (conversation.lastModelId) {
@@ -323,31 +299,6 @@ function buildSegmentValues(
       compact: level ? `${label} · ${t(THINKING_LEVEL_SHORT_KEYS[level])}` : label,
       full: level ? `${label} · ${t(THINKING_LEVEL_FULL_KEYS[level])}` : label,
     };
-  }
-
-  const used = contextSegmentUsed(conversation.occupancy);
-  if (used !== null) {
-    const window =
-      conversation.occupancy?.contextWindow && conversation.occupancy.contextWindow > 0
-        ? conversation.occupancy.contextWindow
-        : conversation.contextWindow && conversation.contextWindow > 0
-          ? conversation.contextWindow
-          : 0;
-    // 窗口未知时不编造百分比：显示已用 tokens，用 `?` 表示窗口未知，而不是拿一个假窗口凑百分比
-    if (window > 0) {
-      const percent = Math.min(100, Math.round((used / window) * 100));
-      values.context = {
-        compact: `${percent}%`,
-        full: `${formatTokens(window)} · ${percent}%`,
-        percent,
-        critical: percent >= CRITICAL_PERCENT,
-      };
-    } else {
-      values.context = {
-        compact: `${formatTokens(used)}·?`,
-        full: `${formatTokens(used)} · ?`,
-      };
-    }
   }
 
   if (stats.steps > 0) {
@@ -381,39 +332,6 @@ function buildSegmentValues(
     compact: formatElapsed(sessionElapsed),
     full: formatElapsed(sessionElapsed),
   };
-
-  const speedCompact: string[] = [];
-  const speedFull: string[] = [];
-  if (stats.ttftAvgMs !== null) {
-    speedCompact.push(formatDuration(stats.ttftAvgMs));
-    speedFull.push(
-      t('First token avg {{duration}}', { duration: formatDuration(stats.ttftAvgMs) })
-    );
-  }
-  if (stats.tokensPerSecond !== null) {
-    speedCompact.push(`${stats.tokensPerSecond} tok/s`);
-    speedFull.push(t('{{speed}} tok/s', { speed: stats.tokensPerSecond }));
-  }
-  if (speedCompact.length > 0) {
-    values.speed = { compact: speedCompact.join(' · '), full: speedFull.join(' · ') };
-  }
-
-  if (stats.inputTokens > 0 || stats.outputTokens > 0) {
-    values.tokens = {
-      compact: `↑${formatTokens(stats.inputTokens)} ↓${formatTokens(stats.outputTokens)}`,
-      full: t('Input {{input}} tok · Output {{output}} tok', {
-        input: formatTokens(stats.inputTokens),
-        output: formatTokens(stats.outputTokens),
-      }),
-    };
-  }
-
-  if (stats.cacheHitPercent !== null) {
-    values.cache = {
-      compact: `${stats.cacheHitPercent}%`,
-      full: t('Cache hit {{percent}}%', { percent: stats.cacheHitPercent }),
-    };
-  }
 
   const project = projects.find((p) => p.id === conversation.projectId);
   if (project) {

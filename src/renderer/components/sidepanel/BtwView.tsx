@@ -259,6 +259,8 @@ export function BtwView({
             injectedDraft={conversation?.draftText}
             injectedImages={conversation?.draftImages}
             onDraftConsumed={() => useSessionsStore.getState().clearDraft(sessionId)}
+            queuedCount={conversation?.queuedMessages?.length ?? 0}
+            onSteerQueued={() => useSessionsStore.getState().steerQueued(sessionId)}
             autoFocus={false}
             placeholder={t('Ask aside…')}
             toolbar={

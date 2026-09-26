@@ -124,8 +124,13 @@ describe('buildPricingTable', () => {
 
 describe('loadSessions', () => {
   let tmp: string;
+  let dir: string;
+  let cacheDir: string;
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'enso-usage-'));
+    dir = path.join(tmp, 'sessions');
+    cacheDir = path.join(tmp, 'usage-cache');
+    fs.mkdirSync(dir);
   });
   afterEach(() => {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -135,25 +140,35 @@ describe('loadSessions', () => {
     JSON.stringify({ type: 'session', version: 3, id, timestamp: 't', cwd: '/p/demo' });
 
   it('只读 .jsonl，无 session 头的文件不计', async () => {
-    fs.writeFileSync(path.join(tmp, 'a.jsonl'), `${header('s1')}\n`);
-    fs.writeFileSync(path.join(tmp, 'b.jsonl'), '{"type":"message"}\n');
-    fs.writeFileSync(path.join(tmp, 'c.txt'), header('s3'));
-    expect((await loadSessions(tmp)).map((s) => s.sessionId)).toEqual(['s1']);
+    fs.writeFileSync(path.join(dir, 'a.jsonl'), `${header('s1')}\n`);
+    fs.writeFileSync(path.join(dir, 'b.jsonl'), '{"type":"message"}\n');
+    fs.writeFileSync(path.join(dir, 'c.txt'), header('s3'));
+    expect((await loadSessions(dir, cacheDir)).map((s) => s.sessionId)).toEqual(['s1']);
   });
 
   it('文件内容变化（mtime/size 改变）后重新解析，删除后不再出现', async () => {
-    const file = path.join(tmp, 'a.jsonl');
+    const file = path.join(dir, 'a.jsonl');
     fs.writeFileSync(file, `${header('s1')}\n`);
-    expect((await loadSessions(tmp))[0]?.sessionId).toBe('s1');
+    expect((await loadSessions(dir, cacheDir))[0]?.sessionId).toBe('s1');
     fs.writeFileSync(file, `${header('s1-renamed')}\n`);
     fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
-    expect((await loadSessions(tmp))[0]?.sessionId).toBe('s1-renamed');
+    expect((await loadSessions(dir, cacheDir))[0]?.sessionId).toBe('s1-renamed');
     fs.rmSync(file);
-    expect(await loadSessions(tmp)).toEqual([]);
+    expect(await loadSessions(dir, cacheDir)).toEqual([]);
+  });
+
+  it('jsonl 删除后同步清理其磁盘缓存，保留仍存在会话的缓存', async () => {
+    fs.writeFileSync(path.join(dir, 'a.jsonl'), `${header('s1')}\n`);
+    fs.writeFileSync(path.join(dir, 'b.jsonl'), `${header('s2')}\n`);
+    await loadSessions(dir, cacheDir);
+    expect(fs.readdirSync(cacheDir)).toHaveLength(2);
+    fs.rmSync(path.join(dir, 'b.jsonl'));
+    expect((await loadSessions(dir, cacheDir)).map((s) => s.sessionId)).toEqual(['s1']);
+    expect(fs.readdirSync(cacheDir)).toHaveLength(1);
   });
 
   it('目录不存在时返回空数组而不抛错', async () => {
-    expect(await loadSessions(path.join(tmp, 'missing'))).toEqual([]);
+    expect(await loadSessions(path.join(tmp, 'missing'), cacheDir)).toEqual([]);
   });
 });
 

@@ -16,7 +16,7 @@ import { useI18n } from '@/i18n';
 const REVEAL =
   'group-hover:grid-cols-[1fr] group-hover:opacity-100 group-focus-visible:grid-cols-[1fr] group-focus-visible:opacity-100 group-data-popup-open:grid-cols-[1fr] group-data-popup-open:opacity-100';
 
-/** 会话头部右侧的工作区徽标：平时只是状态点，悬停展开项目/分支，点击打开「用…打开」菜单 */
+/** 会话头部右侧的工作区徽标：平时只有文件夹图标和状态点，悬停展开项目/分支，点击打开「用…打开」菜单 */
 export function WorkspaceBadge({
   project,
   conversationId,
@@ -54,16 +54,16 @@ export function WorkspaceBadge({
   return (
     <Menu onOpenChange={(next) => next && refreshApps()}>
       <MenuTrigger
-        className="group ml-1.5 flex h-6 min-w-0 shrink-0 items-center rounded-full border border-transparent px-2 font-mono text-[11.5px] text-muted-foreground outline-none transition-colors duration-(--duration-quick) hover:border-border focus-visible:border-border data-popup-open:border-border"
+        className="group ml-1.5 flex h-6 min-w-0 shrink-0 items-center rounded-full border border-border/60 px-2 font-mono text-[11.5px] text-muted-foreground outline-none transition-colors duration-(--duration-quick) hover:border-border focus-visible:border-border data-popup-open:border-border"
         title={path}
         aria-label={branch ? `${project.name} / ${branch}` : project.name}
         onPointerEnter={refreshApps}
       >
+        <Folder className="h-3 w-3 shrink-0" />
         <span
           className={`grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-(--duration-fast) ease-(--ease-smooth-out) ${REVEAL}`}
         >
-          <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap pr-1.5">
-            <Folder className="h-3 w-3 shrink-0" />
+          <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap pl-1.5">
             <span className="max-w-40 truncate">{project.name}</span>
             {branch && (
               <>
@@ -74,7 +74,7 @@ export function WorkspaceBadge({
             )}
           </span>
         </span>
-        {children}
+        <span className="ml-1.5 flex shrink-0 items-center">{children}</span>
       </MenuTrigger>
       <MenuPopup align="end" className="min-w-48">
         {local && (

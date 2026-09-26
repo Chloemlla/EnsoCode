@@ -67,6 +67,9 @@ interface ComposerProps {
   onActivate?: () => void;
   onSend: (payload: ComposerPayload) => boolean | undefined;
   onAbort: () => void;
+  /** 排队消息数；运行中且输入为空时，发送快捷键改为 steer 队首一条 */
+  queuedCount?: number;
+  onSteerQueued?: () => void;
   /**
    * 侧栏旁路等第二输入框：不抢主 Composer 的 insert/focus 桥，也不吃侧栏拖放。
    * 主会话必须保持默认 false。
@@ -106,6 +109,8 @@ export function Composer({
   onActivate,
   onSend,
   onAbort,
+  queuedCount = 0,
+  onSteerQueued,
   isolated = false,
   placeholder: placeholderText,
   planMode = false,
@@ -398,6 +403,10 @@ export function Composer({
   const hasContent = Boolean(content || slash || images.length > 0 || editorHasMentions);
   const agentRecipient = recipient !== undefined;
   const effectiveBusy = busy && !agentRecipient;
+  // 仅快捷键触发，无绑定时不提示
+  const steerAvailable =
+    running && queuedCount > 0 && onSteerQueued !== undefined && enterToSend && !!sendBinding;
+  const steerable = steerAvailable && !hasContent && !agentRecipient && !locked;
 
   const handleSend = () => {
     if (!hasContent) return;
@@ -514,7 +523,8 @@ export function Composer({
       const pressedSend = eventToBinding(event, { allowBare: true });
       if (pressedSend === sendBinding) {
         event.preventDefault();
-        handleSend();
+        if (steerable) onSteerQueued?.();
+        else handleSend();
       }
     }
   };
@@ -668,11 +678,15 @@ export function Composer({
                   ? t('Resolve the pending approval to continue')
                   : agentRecipient
                     ? t('Message the selected Agent…')
-                    : placeholderText
-                      ? placeholderText
-                      : running
-                        ? t('Message will queue until this round finishes…')
-                        : t('Type @ to choose a file or Agent')
+                    : steerAvailable
+                      ? t('Press {{key}} to steer the next queued message into this round…', {
+                          key: formatBinding(sendBinding),
+                        })
+                      : placeholderText
+                        ? placeholderText
+                        : running
+                          ? t('Message will queue until this round finishes…')
+                          : t('Type @ to choose a file or Agent')
             }
             disabled={locked}
             onStateChange={handleEditorState}

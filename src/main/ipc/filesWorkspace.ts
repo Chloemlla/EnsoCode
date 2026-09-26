@@ -43,6 +43,7 @@ import { fetchRemoteImageDataUrl, REMOTE_IMAGE_MAX_BYTES } from '../services/rem
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { searchWorkspaceFiles } from '../services/workspaceFileSearch';
 import { getSourceAuthorityRegistry } from './agent';
+import { readSshTimeoutSeconds } from './settings';
 import { sessionWorktreeBusy } from './worktree';
 
 const watches = new RefCountWatchers();
@@ -160,7 +161,7 @@ async function resolveRemoteUnderCwd(
       root,
       abs,
     ],
-    { timeoutMs: 15_000 }
+    { timeoutMs: readSshTimeoutSeconds() * 1000 }
   );
   return result.code === 0 ? abs : null;
 }
@@ -219,7 +220,10 @@ export function registerFilesWorkspaceHandlers(): void {
       if (ssh) {
         const abs = await resolveRemoteUnderCwd(ssh, parsed.rel);
         if (!abs) return { ok: false, error: 'invalid-path' };
-        const listed = await ssh.executor.exec(['ls', '-1Ap'], { cwd: abs, timeoutMs: 15_000 });
+        const listed = await ssh.executor.exec(['ls', '-1Ap'], {
+          cwd: abs,
+          timeoutMs: readSshTimeoutSeconds() * 1000,
+        });
         if (listed.code !== 0) return { ok: false, error: 'unavailable' };
         const entries = listed.stdout
           .split('\n')
@@ -426,7 +430,7 @@ export function registerFilesWorkspaceHandlers(): void {
               'enso',
               abs,
             ] as string[]);
-      const result = await ssh.executor.exec(cmd, { timeoutMs: 15_000 });
+      const result = await ssh.executor.exec(cmd, { timeoutMs: readSshTimeoutSeconds() * 1000 });
       if (result.code !== 0) {
         const text = `${result.stderr} ${result.stdout}`;
         if (result.code === 17 || /exists|File exists/i.test(text))
@@ -475,7 +479,7 @@ export function registerFilesWorkspaceHandlers(): void {
             toAbs,
           ],
           {
-            timeoutMs: 15_000,
+            timeoutMs: readSshTimeoutSeconds() * 1000,
           }
         );
         if (result.code === 17) return { ok: false, error: 'exists' };

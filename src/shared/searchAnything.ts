@@ -235,6 +235,13 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     description: 'Generate a pairing code to let a phone or another desktop connect.',
   },
   { id: 'ssh.root', category: 'ssh', title: 'SSH' },
+  {
+    id: 'ssh.timeout',
+    category: 'ssh',
+    title: 'SSH timeout',
+    description:
+      'Time limit for connection tests, loading remote AGENTS.md, remote folder browsing and file panel actions. Agent tool commands are not affected.',
+  },
 ];
 
 function named(

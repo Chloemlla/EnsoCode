@@ -1,5 +1,6 @@
 import type { TerminalPalette } from '@enso/pair';
 import type { Locale } from '@shared/i18n';
+import { normalizeTimelinePrefs, type PairTimelinePrefs } from '@shared/pair/timelinePrefs';
 import { useSyncExternalStore } from 'react';
 import type { Theme } from '../../../../src/renderer/stores/settings/types';
 
@@ -9,7 +10,7 @@ import type { Theme } from '../../../../src/renderer/stores/settings/types';
  * 经 vite alias 注入，桌面源码零改动。
  */
 
-interface SettingsSlice {
+interface SettingsSlice extends PairTimelinePrefs {
   language: Locale | 'system';
   theme: Theme;
   terminalTheme: string;
@@ -44,6 +45,8 @@ let state: SettingsSlice = {
   loadLocalSkills: true,
   compactReadOnlyTools: true,
   expandLiveEdits: true,
+  // 时间线折叠 / 待办条：appearance 帧到达前按桌面默认值
+  ...normalizeTimelinePrefs({}),
   keybindings: {},
 };
 
@@ -73,6 +76,13 @@ export function setCompactReadOnlyTools(enabled: boolean): void {
 
 export function setExpandLiveEdits(enabled: boolean): void {
   if (state.expandLiveEdits !== enabled) setState({ expandLiveEdits: enabled });
+}
+
+export function setTimelinePrefs(prefs: PairTimelinePrefs): void {
+  const changed = (Object.keys(prefs) as (keyof PairTimelinePrefs)[]).some(
+    (key) => state[key] !== prefs[key]
+  );
+  if (changed) setState(prefs);
 }
 
 /** 与 theme.ts 的 html.dark 对齐，供 pierre FileDiff 的 themeType 使用 */

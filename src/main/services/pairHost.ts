@@ -42,6 +42,7 @@ import {
   slimCatalogForPhone,
   slimProjectsForPhone,
 } from '@shared/pair/metaSync';
+import { normalizeTimelinePrefs, type PairTimelinePrefs } from '@shared/pair/timelinePrefs';
 import type {
   AgentSpawnRequest,
   ApprovalDecision,
@@ -200,6 +201,7 @@ let terminal: TerminalPalette | undefined;
 let terminalFontFamily: string | undefined;
 let compactReadOnlyTools = true;
 let expandLiveEdits = true;
+let timelinePrefs: PairTimelinePrefs = normalizeTimelinePrefs({});
 /** 剥密前的完整项目路径映射，用于 spawn 反查 cwd */
 let whitelist: SpawnWhitelist = { projects: [], providers: [] };
 
@@ -1076,6 +1078,7 @@ async function sendMeta(conn: Connection): Promise<void> {
     ...(terminalFontFamily ? { terminalFontFamily } : {}),
     compactReadOnlyTools,
     expandLiveEdits,
+    ...timelinePrefs,
   };
   const vapidPublicKey = getVapidPublicKey();
   const directReady = PAIR_DIRECT_ENABLED && isDirectPeerAvailable();
@@ -1319,6 +1322,10 @@ export function updatePairCatalog(payload: {
   terminalFontFamily?: string;
   compactReadOnlyTools?: boolean;
   expandLiveEdits?: boolean;
+  expandLiveReasoning?: boolean;
+  autoCollapseTurns?: boolean;
+  collapseCompletedActivity?: boolean;
+  pinUnfinishedTodos?: boolean;
   /** false：OAuth 暂态空列表，不能覆盖上一份真列表，也不能下发 */
   providersSettled?: boolean;
 }): void {
@@ -1332,6 +1339,7 @@ export function updatePairCatalog(payload: {
   terminalFontFamily = payload.terminalFontFamily;
   compactReadOnlyTools = payload.compactReadOnlyTools !== false;
   expandLiveEdits = payload.expandLiveEdits !== false;
+  timelinePrefs = normalizeTimelinePrefs(payload);
   if (payload.providersSettled !== false) {
     providers = payload.providers;
     providersSettled = true;

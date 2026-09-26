@@ -80,6 +80,7 @@ export const SETTINGS_DATA_COVERAGE = {
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
   maxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
+  sshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   generationStallTimeoutMin: excluded('Renderer stall-abort preference; not an Enso capability.'),
   autoArchiveIdleDays: excluded('Renderer sidebar archive preference; not an Enso capability.'),
   autoArchiveMergedWorktrees: excluded(
@@ -198,6 +199,7 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
   setMaxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
+  setSshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   setGenerationStallTimeoutMin: excluded(
     'Renderer stall-abort preference; not an Enso capability.'
   ),

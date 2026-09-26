@@ -131,3 +131,10 @@ style={{ backgroundColor: theme.background }}
 
 窗口可拖拽区域用 `drag` / `no-drag`（见 `TitleBar.tsx` 与 dialog 的 `no-drag`），
 交互元素必须在 `no-drag` 内，否则点不动。
+
+## 尺寸收到 0 不用欠阻尼 spring
+
+framer-motion 的 `height` / `width` 不做 clamp。欠阻尼 spring（如 `springStandard`）收到 0 时会冲到负值，
+浏览器会丢弃非法的 `-Npx`，元素停在最后一个正值，等 spring 回稳后才卸载，看起来就是“最后卡住再突然收起”。
+展开/收起统一用 `lib/motion.ts` 的 `heightVariants`（已内置无过冲 tween），调用处不要再传 spring `transition`。
+宽度收起同理（如右侧面板 `sidePanelWidthTransition`：目标为 0 时用 `easeOutLayout`）。

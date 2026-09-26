@@ -17,11 +17,13 @@ import {
 } from '@/components/chat/MessageTimeline';
 import { RetryBar } from '@/components/chat/RetryBar';
 import { TaskBar } from '@/components/chat/TaskBar';
+import { TodoBar } from '@/components/chat/TodoBar';
 import { cn } from '@/lib/utils';
 import { buildTimeline } from '@/stores/sessions/timeline';
 import type { ConnState, SessionView } from './client';
 import { compressImage } from './image';
 import { appendEchoMessages, type QueueSendEcho } from './queueSendEcho';
+import { SessionStatsLine } from './SessionStatsLine';
 import { setDisplayedConversation } from './stubs/sessions-store';
 
 interface Props {
@@ -55,6 +57,9 @@ interface Props {
   echoes?: QueueSendEcho[];
   /** 会话目标（桌面下发）：GoalBar 展示与暂停/继续/清除 */
   goal?: CatalogEntry['goal'];
+  /** 输入框下状态栏的上下文占用（桌面下发） */
+  context?: CatalogEntry['context'];
+  usageTotals?: CatalogEntry['usageTotals'];
   slashCommands?: SlashCommand[];
   onSend(text: string, images: AttachedImage[]): void;
   onAbort(): void;
@@ -348,6 +353,7 @@ export function ChatScreen(props: Props) {
               {props.goal && (
                 <GoalBar conversationId={sessionId} goal={{ ...props.goal, noProgressRuns: 0 }} />
               )}
+              <TodoBar key={sessionId} conversationId={sessionId} />
               {/* 后台任务 / subagent 胶囊：停止按钮经 stub 发 pair 命令 */}
               <TaskBar
                 sessionId={sessionId}
@@ -385,6 +391,7 @@ export function ChatScreen(props: Props) {
                 }}
                 onAbort={props.onAbort}
               />
+              <SessionStatsLine usageTotals={props.usageTotals} context={props.context} />
             </div>
           </div>
         )}

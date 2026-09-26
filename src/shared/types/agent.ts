@@ -31,6 +31,7 @@ import {
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSmartCompactMode } from '../smartCompactMode';
+import { parseSshTimeoutSeconds } from '../sshTimeout';
 import { WINDOWS_LOCAL_SHELLS, type WindowsLocalShell } from '../windowsLocalShell';
 import { type EditMode, isEditMode } from './editMode';
 import {
@@ -691,6 +692,15 @@ export interface ContextOccupancy {
   compactionEntryId?: string;
 }
 
+/** worker 按完整消息记录算的会话用量（手机只持有尾窗消息，靠它显示全量） */
+export interface SessionUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheHitPercent?: number;
+  ttftAvgMs?: number;
+  tokensPerSecond?: number;
+}
+
 export interface ConversationForkOrigin {
   conversationId: string;
   entryId: string;
@@ -1261,6 +1271,8 @@ export interface AgentRemoteConfig {
   port?: number;
   /** 仅 password 认证、仅 spawn 内存,禁止落盘 */
   password?: string;
+  /** 远端单次命令超时（设置项 sshTimeoutSeconds） */
+  timeoutSeconds?: number;
 }
 
 /** 普通新会话 Renderer 请求；child 派发不复用此结构。 */
@@ -1450,6 +1462,7 @@ export type AgentWorkerEvent =
       sessionFile?: string;
       contextWindow?: number;
       occupancy?: ContextOccupancy;
+      usageTotals?: SessionUsageTotals;
     }
   | {
       type: 'approval-request';
@@ -1798,6 +1811,27 @@ export function parseContextOccupancy(value: unknown): ContextOccupancy | null {
   return value as unknown as ContextOccupancy;
 }
 
+const isNonNegativeNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+/** 统计只是展示用：脏值返回 undefined 由调用方丢弃该字段，不连累所在事件/条目 */
+export function parseSessionUsageTotals(value: unknown): SessionUsageTotals | undefined {
+  if (!isRecord(value) || !isSequence(value.inputTokens) || !isSequence(value.outputTokens)) {
+    return undefined;
+  }
+  const out: SessionUsageTotals = {
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+  };
+  for (const key of ['cacheHitPercent', 'ttftAvgMs', 'tokensPerSecond'] as const) {
+    const field = value[key];
+    if (field === undefined) continue;
+    if (!isNonNegativeNumber(field)) return undefined;
+    out[key] = field;
+  }
+  return out;
+}
+
 const isProductSurfaceId = (value: unknown): value is ProductSurfaceId =>
   typeof value === 'string' && Object.hasOwn(PRODUCT_SURFACE_INVENTORY, value);
 
@@ -1883,10 +1917,13 @@ function isValidCreateProjectRemoteFields(value: Record<string, unknown>): boole
 export function parseAgentRemoteConfig(value: unknown): AgentRemoteConfig | null {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['host', 'auth', 'port', 'password']) ||
+    !hasOnlyKeys(value, ['host', 'auth', 'port', 'password', 'timeoutSeconds']) ||
     !isNonEmptyString(value.host) ||
     (value.auth !== 'key' && value.auth !== 'password')
   ) {
+    return null;
+  }
+  if (value.timeoutSeconds !== undefined && parseSshTimeoutSeconds(value.timeoutSeconds) === null) {
     return null;
   }
   if (
@@ -3098,10 +3135,16 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       const occupancy =
         value.occupancy === undefined ? undefined : parseContextOccupancy(value.occupancy);
       if (value.occupancy !== undefined && !occupancy) return null;
+      const { usageTotals: rawTotals, ...rest } = value;
+      const usageTotals = parseSessionUsageTotals(rawTotals);
       return (value.sessionFile === undefined || typeof value.sessionFile === 'string') &&
         (value.contextWindow === undefined ||
           (typeof value.contextWindow === 'number' && value.contextWindow > 0))
-        ? ({ ...value, ...(occupancy ? { occupancy } : {}) } as unknown as AgentWorkerEvent)
+        ? ({
+            ...rest,
+            ...(occupancy ? { occupancy } : {}),
+            ...(usageTotals ? { usageTotals } : {}),
+          } as unknown as AgentWorkerEvent)
         : null;
     }
     case 'approval-request':

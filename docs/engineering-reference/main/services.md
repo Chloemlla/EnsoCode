@@ -257,3 +257,13 @@ function isRegisteredSource(id: string, sourcePath: string): boolean { ... }
 
 Wrong：`project = basename(cwd)` 直接进聚合。
 Correct：`usageProjectLabel(basename, cwd, aliases)` 后再 `aggregateUsage`。
+
+## 用量解析缓存
+
+会话目录可达 GB 级，全量解析一次要数秒。`usage/parseCache.ts` 把每个 jsonl 的解析结果按
+`mtime/size` 落盘到 sessions 同级 `usage-cache/<文件名>.json`（内存再叠一层），重启后只读小缓存；
+账本文件同样按 `mtime/size` 在内存复用。
+
+- 缓存存的是**未套别名**的解析原值，别名仍在读取时套用；账本存的是套过别名的冻结值，两者不能互相替代
+- `parseSessionJsonl` 输出语义变化必须递增 `CACHE_VERSION`，否则旧缓存会继续生效
+- jsonl 消失时 `loadSessions` 同步清掉对应缓存文件

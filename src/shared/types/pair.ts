@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from './agent';
+import type { SessionUsageTotals, ThinkingLevel } from './agent';
 
 /** 手机第二屏：renderer ↔ main 的 IPC 数据形状（不含加密实现，故不依赖 @enso/pair） */
 
@@ -74,6 +74,12 @@ export type PairQueueAction =
   | { type: 'task-stop'; sessionId: string; taskId: string }
   | { type: 'subagent-stop'; sessionId: string; agentId: string };
 
+/** 上下文占用；window 已知时（占用优先、会话其次）才下发 */
+export interface ContextUsage {
+  used: number;
+  window?: number;
+}
+
 /** renderer 推给 main 的目录快照。providers 必须已剥掉 apiKey/baseUrl。 */
 export interface PairCatalogPayload {
   catalog: {
@@ -104,6 +110,8 @@ export interface PairCatalogPayload {
       autoTurns: number;
     };
     slashCommands?: { name: string; description: string }[];
+    context?: ContextUsage;
+    usageTotals?: SessionUsageTotals;
   }[];
   /** 置顶组手动拖拽顺序（会话 id）；项目手动顺序已直接体现在 projects 排序里 */
   pinnedOrder?: string[];
@@ -171,4 +179,8 @@ export interface PairCatalogPayload {
   terminalFontFamily?: string;
   compactReadOnlyTools?: boolean;
   expandLiveEdits?: boolean;
+  expandLiveReasoning?: boolean;
+  autoCollapseTurns?: boolean;
+  collapseCompletedActivity?: boolean;
+  pinUnfinishedTodos?: boolean;
 }

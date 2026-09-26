@@ -25,6 +25,7 @@ import type {
   ProjectAuthorityProjection,
   ProjectedMessage,
   RendererAgentEvent,
+  SessionUsageTotals,
   ThinkingLevel,
   TitleSummaryInput,
   TurnDigest,
@@ -209,6 +210,8 @@ export interface Conversation extends SessionProjection {
   contextWindow?: number;
   /** Worker 拆账单；未 spawn 时缺省 */
   occupancy?: ContextOccupancy;
+  /** Worker 按完整记录算的用量（session-meta 下发），供手机状态栏 */
+  usageTotals?: SessionUsageTotals;
   /** 上下文压缩进度：排队中（等本轮收束）/ 压缩中；未压缩时缺省 */
   compaction?: 'queued' | 'running';
   /** 最近一次压缩失败的原文（如「Nothing to compact」），UI 弹完 toast 后清除 */
@@ -431,6 +434,8 @@ interface SessionsState {
   updateQueuedMessage(conversationId: string, messageId: string, text: string): void;
   /** 立即发送队列中某条(running 时 steer 插入,否则直接 prompt) */
   sendQueuedNow(conversationId: string, messageId: string): void;
+  /** 运行中 steer 队首一条排队消息（输入框为空时按发送快捷键触发） */
+  steerQueued(conversationId: string): void;
   /** 打断当前轮并立即发送队列中某条(中断收束后以新一轮 prompt 投递) */
   interruptAndSendQueued(conversationId: string, messageId: string): Promise<void>;
   /** 回退到倒数第 N+1 条 user 消息(0 = 最后一条)。冷会话先 resume 并等到 worker 会话可用（snapshot / ready）。
@@ -1450,6 +1455,7 @@ export const useSessionsStore = create<SessionsState>()(
               ...(event.sessionFile ? { sessionFile: event.sessionFile } : {}),
               ...(event.contextWindow !== undefined ? { contextWindow: event.contextWindow } : {}),
               ...(event.occupancy ? { occupancy: event.occupancy } : {}),
+              ...(event.usageTotals ? { usageTotals: event.usageTotals } : {}),
             });
           });
           return;
@@ -3671,6 +3677,13 @@ export const useSessionsStore = create<SessionsState>()(
             deliveryId,
             restore: { kind: 'queue', item },
           });
+        },
+
+        steerQueued(conversationId) {
+          const conversation = get().conversations[conversationId];
+          if (conversation?.status !== 'running') return;
+          const next = conversation.queuedMessages?.[0];
+          if (next) get().sendQueuedNow(conversationId, next.id);
         },
 
         async interruptAndSendQueued(conversationId, messageId) {

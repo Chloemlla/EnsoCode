@@ -41,8 +41,10 @@ import { resolvePiProviderBaseUrl } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
 import { DEVIN_PROVIDER_ID, devinProviderConfig } from '@shared/providers/devin';
+import { computeStats, toUsageTotals } from '@shared/sessionStats';
 import type { SmartCompactMode } from '@shared/smartCompactMode';
 import { buildSshShellCommand, shellQuote } from '@shared/ssh';
+import { DEFAULT_SSH_TIMEOUT_SECONDS } from '@shared/sshTimeout';
 import { replacePersonaParagraph } from '@shared/systemPrompt';
 import type {
   AgentCommand,
@@ -1473,7 +1475,9 @@ export class SessionSupervisor {
     const remoteOps = sshExecutor ? createRemoteOperations(sshExecutor) : undefined;
     const remoteAgentsFiles = sshExecutor
       ? await sshExecutor
-          .exec(['cat', '--', `${cwd}/AGENTS.md`], { timeoutMs: 15_000 })
+          .exec(['cat', '--', `${cwd}/AGENTS.md`], {
+            timeoutMs: (remote?.timeoutSeconds ?? DEFAULT_SSH_TIMEOUT_SECONDS) * 1000,
+          })
           .then((result) =>
             result.code === 0 && result.stdout.trim().length > 0
               ? [{ path: `${cwd}/AGENTS.md`, content: result.stdout }]
@@ -3449,6 +3453,8 @@ export class SessionSupervisor {
       sessionFile: managed.session.sessionFile,
       ...(occupancy ? { occupancy } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
+      // 渲染层冷会话不留正文、手机只持尾窗：按 worker 的完整记录算好随占用下发
+      usageTotals: toUsageTotals(computeStats(managed.messages)),
     });
   }
 

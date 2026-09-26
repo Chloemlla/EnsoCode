@@ -12,11 +12,24 @@ function ContextMenuTrigger(props: ContextMenuPrimitive.Trigger.Props) {
   return <ContextMenuPrimitive.Trigger data-slot="context-menu-trigger" {...props} />;
 }
 
-function ContextMenuPopup({ children, className, ...props }: ContextMenuPrimitive.Popup.Props) {
+function ContextMenuPopup({
+  children,
+  className,
+  zIndex,
+  ...props
+}: ContextMenuPrimitive.Popup.Props & { zIndex?: number }) {
   return (
     <ContextMenuPrimitive.Portal>
-      <ContextMenuPrimitive.Backdrop className="fixed inset-0 z-40" data-enso-float="" />
-      <ContextMenuPrimitive.Positioner className="z-50" data-slot="context-menu-positioner">
+      <ContextMenuPrimitive.Backdrop
+        className="fixed inset-0 z-40"
+        data-enso-float=""
+        style={zIndex === undefined ? undefined : { zIndex: zIndex - 1 }}
+      />
+      <ContextMenuPrimitive.Positioner
+        className="z-50"
+        data-slot="context-menu-positioner"
+        style={zIndex === undefined ? undefined : { zIndex }}
+      >
         <ContextMenuPrimitive.Popup
           className={cn(MENU_POPUP_CLASS, className)}
           data-slot="context-menu-popup"

@@ -222,6 +222,7 @@ describe('buildSettingsCatalog', () => {
     'instructions.root',
     'phone.root',
     'ssh.root',
+    'ssh.timeout',
   ];
 
   it('包含所有必需静态条目 id', () => {

@@ -8,6 +8,19 @@ describe('usage ledger store', () => {
   let root: string;
   let sessionDir: string;
 
+  const assistant = (id: string, input: number) =>
+    JSON.stringify({
+      type: 'message',
+      id,
+      timestamp: '2026-09-03T00:00:00.000Z',
+      message: {
+        role: 'assistant',
+        model: 'm',
+        timestamp: Date.parse('2026-09-03T00:00:00.000Z'),
+        usage: { input, output: 1, cacheRead: 0, cacheWrite: 0 },
+      },
+    });
+
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'enso-ledger-'));
     sessionDir = path.join(root, 'sessions');
@@ -55,5 +68,20 @@ describe('usage ledger store', () => {
     fs.rmSync(file);
     await expect(ingestSessionJsonl(sessionDir, file)).resolves.toBeUndefined();
     expect(await loadLedger(sessionDir)).toHaveLength(1);
+  });
+
+  it('重复 load 时反映账本的覆盖与删除', async () => {
+    const file = path.join(sessionDir, 'a.jsonl');
+    const head = JSON.stringify({ type: 'session', version: 3, id: 'sid', cwd: '/p/demo' });
+    fs.writeFileSync(file, `${head}\n${assistant('e1', 3)}\n`);
+    await ingestSessionJsonl(sessionDir, file);
+    expect((await loadLedger(sessionDir))[0]?.records).toHaveLength(1);
+
+    fs.writeFileSync(file, `${head}\n${assistant('e1', 3)}\n${assistant('e2', 5)}\n`);
+    await ingestSessionJsonl(sessionDir, file);
+    expect((await loadLedger(sessionDir))[0]?.records.map((r) => r.id)).toEqual(['e1', 'e2']);
+
+    fs.rmSync(path.join(usageLedgerDir(sessionDir), 'sid.json'));
+    expect(await loadLedger(sessionDir)).toEqual([]);
   });
 });

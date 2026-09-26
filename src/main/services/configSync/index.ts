@@ -94,6 +94,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   autoRestartWhenIdle: { mode: 'excluded', reason: 'device update policy' },
   proxyMode: { mode: 'excluded', reason: 'device network configuration' },
   customProxyUrl: { mode: 'excluded', reason: 'device network configuration may contain secrets' },
+  sshTimeoutSeconds: { mode: 'excluded', reason: 'device network configuration' },
   openChangesOnFileEdit: { mode: 'portable' },
   compactReadOnlyTools: { mode: 'portable' },
   expandLiveEdits: { mode: 'portable' },

@@ -418,6 +418,8 @@ export function ChatView() {
             injectedDraft={chrome.draftText}
             injectedImages={chrome.draftImages}
             onDraftConsumed={() => useSessionsStore.getState().clearDraft(chrome.id)}
+            queuedCount={chrome.queuedMessages?.length ?? 0}
+            onSteerQueued={() => useSessionsStore.getState().steerQueued(chrome.id)}
             initialRecipient={
               chrome.prefillAgentTypeKey === ENSO_AGENT_TYPE_KEY
                 ? ENSO_PREFILL_CANDIDATE

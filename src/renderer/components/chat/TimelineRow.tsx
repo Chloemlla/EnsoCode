@@ -66,6 +66,7 @@ import {
   parseSandboxOutput,
   shouldAutoExpandAppliedFileChanges,
   shouldShowToolOutputAfterFileChanges,
+  summarizeSandboxCalls,
   type TimelineItem,
   thinkingRowExpanded,
 } from '@/stores/sessions/timeline';
@@ -1539,7 +1540,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
     item.nestedPending && item.state === 'running'
       ? `${item.summary} · ${item.nestedPending} pending`
       : sandbox?.calls.length && item.state !== 'error'
-        ? `${item.summary} · ${sandbox.calls.length} calls`
+        ? summarizeSandboxCalls(sandbox.calls)
         : item.summary;
   const expandable =
     hasDiff || hasWrite || hasFileChanges || Boolean(item.output) || Boolean(item.source);

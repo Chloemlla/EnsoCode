@@ -718,6 +718,13 @@ describe('parent/child commands', () => {
         remote: { host: 'h', auth: 'key', password: 'nope' },
       })
     ).toBeNull();
+    const withTimeout = { ...base, remote: { host: 'h', auth: 'key', timeoutSeconds: 60 } };
+    expect(parseAgentCommand(withTimeout)).toEqual(withTimeout);
+    for (const timeoutSeconds of [0, 12.5, '60']) {
+      expect(
+        parseAgentCommand({ ...base, remote: { host: 'h', auth: 'key', timeoutSeconds } })
+      ).toBeNull();
+    }
   });
 
   it('release-parent 可解析（Move to worktree 依赖；漏白名单会被 worker 静默丢弃）', () => {
@@ -1347,6 +1354,15 @@ describe('generation lifecycle/events', () => {
     expect(parseAgentWorkerEvent({ ...retry, error: '' })).toBeNull();
     const { error: _dropped, ...withoutError } = retry;
     expect(parseAgentWorkerEvent(withoutError)).toBeNull();
+  });
+
+  it('session-meta 可带 usageTotals；脏统计只丢统计不丢事件', () => {
+    const usageTotals = { inputTokens: 300, outputTokens: 10, cacheHitPercent: 63 };
+    const withTotals = { type: 'session-meta', identity: parent, seq: 5, usageTotals };
+    expect(parseAgentWorkerEvent(withTotals)).toEqual(withTotals);
+    expect(
+      parseAgentWorkerEvent({ ...withTotals, usageTotals: { inputTokens: -1, outputTokens: 'x' } })
+    ).toEqual({ type: 'session-meta', identity: parent, seq: 5 });
   });
 
   it('session-meta 可带 occupancy；脏桶拒绝', () => {

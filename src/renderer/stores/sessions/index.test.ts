@@ -2218,6 +2218,58 @@ describe('typed Agent child projection', () => {
     });
   });
 
+  it('运行中每次只 steer 队首一条排队消息', async () => {
+    const steer = vi.mocked(window.electronAPI.agent.steer);
+    steer.mockClear();
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        parent: {
+          ...state.conversations.parent,
+          started: true,
+          status: 'running' as const,
+          queuedMessages: [
+            { id: 'q1', text: 'first' },
+            { id: 'q2', text: 'second' },
+          ],
+        },
+      },
+    }));
+
+    sessionsModule.useSessionsStore.getState().steerQueued('parent');
+
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(1));
+    expect(steer.mock.calls[0][1]).toBe('first');
+    expect(sessionsModule.useSessionsStore.getState().conversations.parent.queuedMessages).toEqual([
+      { id: 'q2', text: 'second' },
+    ]);
+  });
+
+  it('未在运行时不 steer 排队消息', () => {
+    const steer = vi.mocked(window.electronAPI.agent.steer);
+    steer.mockClear();
+    agentPrompt.mockClear();
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        parent: {
+          ...state.conversations.parent,
+          started: true,
+          status: 'idle' as const,
+          queuedMessages: [{ id: 'q1', text: 'first' }],
+        },
+      },
+    }));
+
+    sessionsModule.useSessionsStore.getState().steerQueued('parent');
+
+    expect(steer).not.toHaveBeenCalled();
+    expect(agentPrompt).not.toHaveBeenCalled();
+    expect(
+      sessionsModule.useSessionsStore.getState().conversations.parent.queuedMessages
+    ).toHaveLength(1);
+  });
+
   it('连续回退用本次内容成对替换草稿，避免文本和图片串台', () => {
     sessionsModule.useSessionsStore.setState((state) => ({
       conversations: {

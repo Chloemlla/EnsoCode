@@ -29,7 +29,6 @@ import {
 } from '@/components/ui/context-menu';
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from '@/components/ui/menu';
 import { useI18n } from '@/i18n';
-import { easeOutLayout, springStandard } from '@/lib/motion';
 import {
   addSidePanelBrowser,
   addSidePanelWorkflow,
@@ -54,7 +53,7 @@ import { BrowserView } from './BrowserView';
 import { BtwView } from './BtwView';
 import { ChangesView } from './ChangesView';
 import { FilesView } from './FilesView';
-import { shouldSkipSidePanelWidthAnim } from './sidePanelWidthAnim';
+import { shouldSkipSidePanelWidthAnim, sidePanelWidthTransition } from './sidePanelWidthAnim';
 import { TerminalView } from './TerminalView';
 import { idsToClose, type TabCloseKind } from './tabCloseActions';
 import { WorkflowView } from './WorkflowView';
@@ -722,7 +721,7 @@ export function SidePanel({
             ? undefined
             : { maxWidth: `max(0px, calc(100% - ${CHAT_MIN_WIDTH + SIDE_PANEL_HANDLE_WIDTH}px))` }
         }
-        transition={skipWidthAnim ? { duration: 0 } : cover ? easeOutLayout : springStandard}
+        transition={sidePanelWidthTransition({ skip: skipWidthAnim, cover, targetW })}
         onAnimationComplete={() => {
           if (!fullscreen) setCover(false);
         }}

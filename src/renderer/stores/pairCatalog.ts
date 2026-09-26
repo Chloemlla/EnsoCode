@@ -2,6 +2,7 @@ import { toPairProjectEntry } from '@enso/pair';
 import { catalogSyncFingerprint, pairJsonFingerprint } from '@shared/pair/metaSync';
 import { projectDisplayName } from '@shared/projectName';
 import type { PairCatalogPayload } from '@shared/types';
+import { resolveContextUsage } from '@/components/chat/usageSegments';
 import { getXtermTheme } from '@/lib/ghosttyTheme';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { pairProviderSyncPlan } from '@/stores/pairCatalogProviders';
@@ -47,49 +48,57 @@ function buildPayload(): PairCatalogPayload {
   const slashCommands = settings.skills
     .filter((skill) => skill.enabled !== false)
     .map((skill) => ({ name: `/skill:${skill.name}`, description: skill.description }));
-  const toEntry = (c: Conversation) => ({
-    id: c.id,
-    title: c.parentId ? c.coworkerName || c.title : c.title,
-    projectName: projectName.get(c.projectId) ?? '',
-    projectId: c.projectId,
-    ...(toolCwd(c) ? { cwd: toolCwd(c) } : {}),
-    status: c.spawning ? 'running' : c.status,
-    updatedAt: c.messages.at(-1)?.timestamp ?? c.createdAt,
-    ...(c.parentId ? { parentId: c.parentId } : {}),
-    ...(c.pinned === true ? { pinned: true } : {}),
-    ...(c.archived === true ? { archived: true } : {}),
-    // 当前模型与推理档位：手机切换器回显；缺省字段不占帧体积
-    ...(c.lastProviderId ? { providerId: c.lastProviderId } : {}),
-    ...(c.lastModelId ? { modelId: c.lastModelId } : {}),
-    ...(c.reasoningEnabled !== undefined ? { reasoningEnabled: c.reasoningEnabled } : {}),
-    ...(c.thinkingLevel ? { thinkingLevel: c.thinkingLevel } : {}),
-    ...(c.unread === true ? { unread: true } : {}),
-    ...(c.pendingAsks && c.pendingAsks.length > 0 ? { pendingAskCount: c.pendingAsks.length } : {}),
-    ...(c.pendingApprovals && c.pendingApprovals.length > 0
-      ? { pendingApprovalCount: c.pendingApprovals.length }
-      : {}),
-    // 排队消息：手机队列区展示与操作；图片不下发正文，只给个标记
-    ...(c.queuedMessages?.length
-      ? {
-          queued: c.queuedMessages.map((m) => ({
-            id: m.id,
-            text: m.text,
-            ...(m.images?.length ? { hasImages: true } : {}),
-          })),
-        }
-      : {}),
-    ...(c.goal
-      ? {
-          goal: {
-            text: c.goal.text,
-            status: c.goal.status,
-            ...(c.goal.note ? { note: c.goal.note } : {}),
-            autoTurns: c.goal.autoTurns,
-          },
-        }
-      : {}),
-    ...(slashCommands.length ? { slashCommands } : {}),
-  });
+  // 冷会话桌面不留消息正文：用量与占用都取 session-meta（worker 按完整记录算），不按 c.messages 算
+  const toEntry = (c: Conversation) => {
+    const context = resolveContextUsage(c.occupancy, c.contextWindow);
+    return {
+      id: c.id,
+      title: c.parentId ? c.coworkerName || c.title : c.title,
+      projectName: projectName.get(c.projectId) ?? '',
+      projectId: c.projectId,
+      ...(toolCwd(c) ? { cwd: toolCwd(c) } : {}),
+      status: c.spawning ? 'running' : c.status,
+      updatedAt: c.messages.at(-1)?.timestamp ?? c.createdAt,
+      ...(c.parentId ? { parentId: c.parentId } : {}),
+      ...(c.pinned === true ? { pinned: true } : {}),
+      ...(c.archived === true ? { archived: true } : {}),
+      // 当前模型与推理档位：手机切换器回显；缺省字段不占帧体积
+      ...(c.lastProviderId ? { providerId: c.lastProviderId } : {}),
+      ...(c.lastModelId ? { modelId: c.lastModelId } : {}),
+      ...(c.reasoningEnabled !== undefined ? { reasoningEnabled: c.reasoningEnabled } : {}),
+      ...(c.thinkingLevel ? { thinkingLevel: c.thinkingLevel } : {}),
+      ...(c.unread === true ? { unread: true } : {}),
+      ...(c.pendingAsks && c.pendingAsks.length > 0
+        ? { pendingAskCount: c.pendingAsks.length }
+        : {}),
+      ...(c.pendingApprovals && c.pendingApprovals.length > 0
+        ? { pendingApprovalCount: c.pendingApprovals.length }
+        : {}),
+      // 排队消息：手机队列区展示与操作；图片不下发正文，只给个标记
+      ...(c.queuedMessages?.length
+        ? {
+            queued: c.queuedMessages.map((m) => ({
+              id: m.id,
+              text: m.text,
+              ...(m.images?.length ? { hasImages: true } : {}),
+            })),
+          }
+        : {}),
+      ...(c.goal
+        ? {
+            goal: {
+              text: c.goal.text,
+              status: c.goal.status,
+              ...(c.goal.note ? { note: c.goal.note } : {}),
+              autoTurns: c.goal.autoTurns,
+            },
+          }
+        : {}),
+      ...(slashCommands.length ? { slashCommands } : {}),
+      ...(context ? { context } : {}),
+      ...(c.usageTotals ? { usageTotals: c.usageTotals } : {}),
+    };
+  };
 
   const topLevel = sessions.order
     .map((id) => sessions.conversations[id])
@@ -131,6 +140,10 @@ function buildPayload(): PairCatalogPayload {
     terminalFontFamily: settings.terminalFontFamily,
     compactReadOnlyTools: settings.compactReadOnlyTools,
     expandLiveEdits: settings.expandLiveEdits,
+    expandLiveReasoning: settings.expandLiveReasoning,
+    autoCollapseTurns: settings.autoCollapseTurns,
+    collapseCompletedActivity: settings.collapseCompletedActivity,
+    pinUnfinishedTodos: settings.pinUnfinishedTodos,
   };
 }
 
@@ -147,6 +160,10 @@ function catalogPushFingerprint(payload: PairCatalogPayload): string {
     terminalFontFamily: payload.terminalFontFamily,
     compactReadOnlyTools: payload.compactReadOnlyTools,
     expandLiveEdits: payload.expandLiveEdits,
+    expandLiveReasoning: payload.expandLiveReasoning,
+    autoCollapseTurns: payload.autoCollapseTurns,
+    collapseCompletedActivity: payload.collapseCompletedActivity,
+    pinUnfinishedTodos: payload.pinUnfinishedTodos,
   });
 }
 
@@ -195,6 +212,10 @@ export function bindPairCatalogSync(): void {
       state.terminalFontFamily !== prev.terminalFontFamily ||
       state.compactReadOnlyTools !== prev.compactReadOnlyTools ||
       state.expandLiveEdits !== prev.expandLiveEdits ||
+      state.expandLiveReasoning !== prev.expandLiveReasoning ||
+      state.autoCollapseTurns !== prev.autoCollapseTurns ||
+      state.collapseCompletedActivity !== prev.collapseCompletedActivity ||
+      state.pinUnfinishedTodos !== prev.pinUnfinishedTodos ||
       state.skills !== prev.skills
     ) {
       schedulePush();
