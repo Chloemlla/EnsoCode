@@ -4,6 +4,7 @@ import {
   ContextUsageTracker,
   calculateContextTokens,
   calculatePromptTokens,
+  contextBreakdownMessages,
   findTranscriptUsageAnchor,
   hasContextTokenUsage,
   isTranscriptUsageAnchor,
@@ -315,5 +316,33 @@ describe('ContextUsageTracker.recordAnchoredHistoryRewrite', () => {
       estimateMessageTokens: estimateTokens,
     });
     expect(result.usedTokens).toBe(4880);
+  });
+});
+
+describe('contextBreakdownMessages', () => {
+  it('压缩后按分支下标定位锚点，并用原始消息估算锚点之后的增量', () => {
+    const usage = { input: 100, output: 10, cacheRead: 900, cacheWrite: 0 };
+    const old = { role: 'user', timestamp: 1, tokens: 50 };
+    const kept = { role: 'user', timestamp: 2, tokens: 30 };
+    const anchor = { role: 'assistant', stopReason: 'stop', timestamp: 3, usage, tokens: 999 };
+    const tail = { role: 'toolResult', timestamp: 4, tokens: 70 };
+    const summary = { role: 'compactionSummary', timestamp: 5, tokens: 20 };
+    const branch = [
+      { type: 'message', message: old },
+      { type: 'message', message: kept },
+      { type: 'compaction' },
+      { type: 'message', message: anchor },
+      { type: 'message', message: tail },
+    ];
+    const inputs = contextBreakdownMessages([summary, kept, anchor, tail], branch, estimateTokens);
+
+    const result = new ContextUsageTracker().getBreakdown({
+      ...inputs,
+      compactionIndex: 2,
+      currentNonMessageTokens: 400,
+      categoryNonMessageTokens: 400,
+    });
+    expect(result.anchored).toBe(true);
+    expect(result.usedTokens).toBe(1000 + 70);
   });
 });

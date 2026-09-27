@@ -1,6 +1,7 @@
 import type { SpawnModelConfig } from '@shared/types';
+import type { AgentControlToolRequest, AgentControlToolResponse } from '@shared/types/agent';
 import { describe, expect, it, vi } from 'vitest';
-import { createUnifiedSubagentTool } from './subagent';
+import { CoworkerIdleReminder, createUnifiedSubagentTool } from './subagent';
 
 const model: SpawnModelConfig = {
   api: 'openai-completions',
@@ -34,5 +35,95 @@ describe('subagent unified control', () => {
       expect.objectContaining({ model: 'Provider/worker', thinking: 'high', wait: false }),
       undefined
     );
+  });
+});
+
+describe('CoworkerIdleReminder', () => {
+  type Child = { name: string; running: boolean };
+  const spawn = (mode: 'task' | 'coworker'): AgentControlToolRequest => ({
+    operation: 'spawn',
+    mode,
+    description: 'review',
+    prompt: 'look',
+    wait: false,
+  });
+  const receipt = (agentId: string, runId: string): AgentControlToolResponse => ({
+    ok: true,
+    value: { agentId, runId, mode: 'coworker', status: 'running' },
+  });
+  /** worker 按 Main 下发的 runId 找子会话 */
+  const byRun = (children: Map<string, Child>) => (runIds: ReadonlySet<string>) =>
+    [...runIds].map((runId) => children.get(runId)).find(Boolean) ?? null;
+  const takeTimes = (
+    reminder: CoworkerIdleReminder,
+    times: number,
+    lookup: (runIds: ReadonlySet<string>) => Child | null
+  ) => Array.from({ length: times }, () => reminder.take(lookup)).flat();
+
+  it('只提醒主 agent 自己雇的 coworker；task 与失败的 spawn 不登记', () => {
+    const reminder = new CoworkerIdleReminder(2);
+    reminder.observe(spawn('task'), {
+      ok: true,
+      value: { agentId: 't1', runId: 'r1', mode: 'task', status: 'running' },
+    });
+    reminder.observe(spawn('coworker'), { ok: false, code: 'mode-disabled', error: 'off' });
+    expect(takeTimes(reminder, 5, () => ({ name: 'x', running: false }))).toEqual([]);
+  });
+
+  it('闲置超过阈值才提醒，带上队员名和 agentId；正在跑的不算闲置', () => {
+    const reminder = new CoworkerIdleReminder(2);
+    const child = { name: 'reviewer-1a2b3c4d', running: true };
+    const lookup = byRun(new Map([['r1', child]]));
+    reminder.observe(spawn('coworker'), receipt('a1', 'r1'));
+    expect(takeTimes(reminder, 5, lookup)).toEqual([]);
+    child.running = false;
+    expect(takeTimes(reminder, 2, lookup)).toEqual([]);
+    const [text] = reminder.take(lookup);
+    expect(text).toContain('reviewer-1a2b3c4d');
+    expect(text).toContain('agentId a1');
+    expect(text).toContain('3 tool calls');
+    expect(text).toContain('operation=dismiss');
+  });
+
+  it('发消息或读结果算使用并重新计数；提醒后又被使用，下次间隔翻倍', () => {
+    const reminder = new CoworkerIdleReminder(2);
+    const child = { name: 'reviewer-1a2b3c4d', running: false };
+    const lookup = byRun(new Map([['r1', child]]));
+    reminder.observe(spawn('coworker'), receipt('a1', 'r1'));
+    takeTimes(reminder, 2, lookup);
+    reminder.observe({ operation: 'report', runId: 'r1' }, { ok: true, value: {} });
+    expect(takeTimes(reminder, 2, lookup)).toEqual([]);
+    expect(reminder.take(lookup)).toHaveLength(1);
+    reminder.observe(
+      { operation: 'message', to: 'a1', text: 'next' },
+      { ok: true, value: { agentId: 'a1', runId: 'r2', delivery: 'next', status: 'queued' } }
+    );
+    reminder.observe(
+      { operation: 'wait', runIds: ['r2'], until: 'all' },
+      { ok: true, value: { runs: [], timedOut: false, interrupted: false } }
+    );
+    expect(takeTimes(reminder, 6, lookup)).toEqual([]);
+    expect(reminder.take(lookup)).toHaveLength(1);
+  });
+
+  it('解雇或子会话已不在后不再提醒；尚未对上子会话时先保留登记', () => {
+    const reminder = new CoworkerIdleReminder(1);
+    const children = new Map<string, Child>([
+      ['r1', { name: 'a', running: false }],
+      ['r2', { name: 'b', running: false }],
+    ]);
+    const lookup = byRun(children);
+    reminder.observe(spawn('coworker'), receipt('a1', 'r1'));
+    reminder.observe(spawn('coworker'), receipt('a2', 'r2'));
+    reminder.observe(spawn('coworker'), receipt('a3', 'r3'));
+    reminder.observe({ operation: 'dismiss', agentId: 'a1' }, { ok: true, value: {} });
+    reminder.take(lookup);
+    children.delete('r2');
+    expect(takeTimes(reminder, 3, lookup)).toEqual([]);
+    children.set('r3', { name: 'c', running: false });
+    const texts = takeTimes(reminder, 2, lookup);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toContain('agentId a3');
+    expect(texts[0]).not.toMatch(/agentId a[12]/);
   });
 });

@@ -5,12 +5,13 @@ import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
+import { openSidePanelFile } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { CodeBlock } from './CodeBlock';
 import { CopyButton } from './CopyButton';
 import { highlightNode } from './highlightQuery';
 import { MermaidRenderer } from './MermaidRenderer';
-import { classifyMarkdownLink, toWorkspaceRelativePath } from './markdownLinks';
+import { classifyMarkdownLink, splitFileLineRef, toWorkspaceRelativePath } from './markdownLinks';
 
 /**
  * 解析代码围栏的 info 串。除了纯语言名（```ts），agent 常输出
@@ -66,7 +67,7 @@ function remarkGithubAlerts() {
   };
 }
 
-/** 仓库内文件路径判定（行内 code 渲染成可复制 chip）：需含目录分隔或 file.ext:line 形式 */
+/** 仓库内文件路径判定（行内 code 渲染成 chip，聊天里点开 Files 面板，无链接上下文时复制）：需含目录分隔或 file.ext:line 形式 */
 const FILE_PATH_RE =
   /^(?:[\w.@-]+\/)+[\w.@-]+\.\w{1,8}(?::\d+(?:-\d+)?)?$|^[\w.-]+\.\w{1,8}:\d+(?:-\d+)?$/;
 
@@ -221,12 +222,31 @@ export const markdownComponents: Components = {
     );
   },
   code: ({ children }) => {
+    const { t } = useI18n();
+    const linkContext = useContext(MarkdownLinkContext);
     const value = typeof children === 'string' ? children : '';
     if (value && FILE_PATH_RE.test(value)) {
+      const { path, line } = splitFileLineRef(value);
+      const onClick = () => {
+        if (!linkContext) {
+          void navigator.clipboard.writeText(path);
+          return;
+        }
+        const rel = toWorkspaceRelativePath(path, linkContext.cwd);
+        if (!rel) {
+          addToast({
+            type: 'error',
+            title: t('Could not open local file link'),
+            description: t('The link is outside the current workspace.'),
+          });
+          return;
+        }
+        openSidePanelFile(linkContext.conversationId, rel, line);
+      };
       return (
         <button
           type="button"
-          onClick={() => void navigator.clipboard.writeText(value.split(':')[0])}
+          onClick={onClick}
           title={value}
           className="inline-flex max-w-full items-center rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px align-baseline font-mono text-xs text-brand transition-colors hover:bg-muted"
         >

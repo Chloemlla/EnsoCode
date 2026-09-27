@@ -41,6 +41,15 @@ import type {
   TreeQuery,
 } from '@shared/memory/graphDto';
 import type { PlanRespondAction } from '@shared/planMode';
+import type {
+  ResourceSnapshot,
+  SessionCleanRequest,
+  StorageCategoryId,
+  StorageCleanResult,
+  StorageRootId,
+  StorageScanProgress,
+  StorageSnapshot,
+} from '@shared/resources';
 import type { BrowserSearchTab } from '@shared/searchAnything';
 import type { SettingsDeepLink } from '@shared/settingsDeepLink';
 import type {
@@ -143,6 +152,13 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
 } from '@shared/types/sidePanel';
+import type {
+  SpeechDownloadProgressDto,
+  SpeechModelId,
+  SpeechPartialDto,
+  SpeechStatusDto,
+  SpeechTranscribeResult,
+} from '@shared/types/speech';
 import type { UpdateStatus } from '@shared/types/updater';
 import type {
   WorkflowPresetDraft,
@@ -188,6 +204,9 @@ const electronAPI = {
     respondFlushPersist: (requestId: string): void => {
       ipcRenderer.send(IPC_CHANNELS.APP_FLUSH_PERSIST_RESPONSE, requestId);
     },
+    setBadgeCount: (count: number): void => {
+      ipcRenderer.send(IPC_CHANNELS.APP_SET_BADGE_COUNT, count);
+    },
   },
 
   settings: {
@@ -222,6 +241,41 @@ const electronAPI = {
   usage: {
     summary: (days: UsageRangeDays): Promise<UsageSummaryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.USAGE_SUMMARY, days),
+  },
+
+  resources: {
+    sample: (): Promise<ResourceSnapshot> => ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_SAMPLE),
+    scanStorage: (): Promise<StorageSnapshot> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_STORAGE_SCAN),
+    cancelScan: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_STORAGE_CANCEL),
+    lastStorage: (): Promise<StorageSnapshot | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_STORAGE_LAST),
+    onScanProgress: (callback: (progress: StorageScanProgress) => void): (() => void) => {
+      const listener = (_event: unknown, progress: StorageScanProgress) => callback(progress);
+      ipcRenderer.on(IPC_CHANNELS.RESOURCES_STORAGE_PROGRESS, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.RESOURCES_STORAGE_PROGRESS, listener);
+    },
+    cleanStorage: (category: StorageCategoryId): Promise<StorageCleanResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_STORAGE_CLEAN, category),
+    revealStorage: (root: StorageRootId, relPath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_STORAGE_REVEAL, root, relPath),
+    cleanSessions: (
+      request: SessionCleanRequest
+    ): Promise<{ removed: number; snapshot: StorageSnapshot }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN, request),
+    onSessionsCleanRequest: (
+      callback: (event: { requestId: string; request: SessionCleanRequest }) => void
+    ): (() => void) => {
+      const listener = (
+        _event: unknown,
+        payload: { requestId: string; request: SessionCleanRequest }
+      ) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_REQUEST, listener);
+      return () =>
+        ipcRenderer.removeListener(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_REQUEST, listener);
+    },
+    sessionsCleanDone: (requestId: string, removed: number): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_DONE, requestId, removed),
   },
 
   memory: {
@@ -290,6 +344,34 @@ const electronAPI = {
         listener(progress);
       ipcRenderer.on(IPC_CHANNELS.MEMORY_CHAT_MODEL_PROGRESS, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.MEMORY_CHAT_MODEL_PROGRESS, handler);
+    },
+  },
+
+  speech: {
+    status: (): Promise<SpeechStatusDto> => ipcRenderer.invoke(IPC_CHANNELS.SPEECH_STATUS),
+    download: (modelId: SpeechModelId): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SPEECH_DOWNLOAD, modelId),
+    cancelDownload: (modelId: SpeechModelId): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SPEECH_CANCEL, modelId),
+    remove: (modelId: SpeechModelId): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SPEECH_DELETE, modelId),
+    /** 16kHz 单声道 PCM；首块到达即开会话 */
+    pushAudio: (sessionId: string, audio: Float32Array): void =>
+      ipcRenderer.send(IPC_CHANNELS.SPEECH_SESSION_PUSH, sessionId, audio),
+    finishSession: (sessionId: string): Promise<SpeechTranscribeResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SPEECH_SESSION_FINISH, sessionId),
+    cancelSession: (sessionId: string): void =>
+      ipcRenderer.send(IPC_CHANNELS.SPEECH_SESSION_CANCEL, sessionId),
+    onPartial: (listener: (partial: SpeechPartialDto) => void): (() => void) => {
+      const handler = (_event: unknown, partial: SpeechPartialDto) => listener(partial);
+      ipcRenderer.on(IPC_CHANNELS.SPEECH_PARTIAL, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.SPEECH_PARTIAL, handler);
+    },
+    requestMicAccess: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.SPEECH_MIC_ACCESS),
+    onProgress: (listener: (progress: SpeechDownloadProgressDto) => void): (() => void) => {
+      const handler = (_event: unknown, progress: SpeechDownloadProgressDto) => listener(progress);
+      ipcRenderer.on(IPC_CHANNELS.SPEECH_PROGRESS, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.SPEECH_PROGRESS, handler);
     },
   },
 

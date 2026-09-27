@@ -149,7 +149,7 @@ export function groupSessionsByProject(sessions: DistillableSessionDto[]): Sessi
   return [...groups.filter((g) => g.key), ...groups.filter((g) => !g.key)];
 }
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
   const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
@@ -271,7 +271,9 @@ export function MemorySettings({ onLibraryChanged }: { onLibraryChanged?: () => 
   }, [refreshModels]);
 
   const refreshChatModels = React.useCallback(() => {
-    void window.electronAPI.memory.chatModels().then(setChatModels);
+    void window.electronAPI.memory
+      .chatModels()
+      .then((models) => setChatModels(models.filter((model) => !model.purpose)));
   }, []);
 
   React.useEffect(() => {

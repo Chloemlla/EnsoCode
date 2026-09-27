@@ -31,6 +31,7 @@ import {
   writeInstructionSource,
 } from '../services/instructionStore';
 import { listMcpOccupancyTools } from '../services/mcpOccupancy';
+import { getMcpToolCatalog } from '../services/mcpToolCatalog';
 import { readSystemPrompt, writeSystemPrompt } from '../services/systemPromptStore';
 import { readSettings } from './settings';
 
@@ -138,13 +139,11 @@ export function registerAssetHandlers(): void {
     )
   );
 
-  ipcMain.handle(IPC_CHANNELS.ASSETS_MCP_OCCUPANCY, (_event, ids: unknown) =>
-    occupancyForMcp(
-      parseOccupancyIds(ids),
-      asMcp(settingsState().mcpServers),
-      listMcpOccupancyTools
-    )
-  );
+  ipcMain.handle(IPC_CHANNELS.ASSETS_MCP_OCCUPANCY, (_event, ids: unknown) => {
+    const servers = asMcp(settingsState().mcpServers);
+    getMcpToolCatalog().retain(servers.map((server) => server.id));
+    return occupancyForMcp(parseOccupancyIds(ids), servers, listMcpOccupancyTools);
+  });
 
   ipcMain.handle(IPC_CHANNELS.ASSETS_BUILTIN_TOOL_OCCUPANCY, () =>
     occupancyForBuiltinTools(snapshotBuiltinOccupancyTools())

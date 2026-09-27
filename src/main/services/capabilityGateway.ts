@@ -617,6 +617,7 @@ const DEFAULT_KEYBINDINGS: Record<string, string> = {
   'new-btw-tab': 'mod+shift+b',
   'close-side-tab': 'mod+w',
   'toggle-minimize-to-tray': DEFAULT_TRAY_TOGGLE_BINDING,
+  'voice-hold': 'mod+shift+space',
 };
 
 export function createCapabilityHandlers(

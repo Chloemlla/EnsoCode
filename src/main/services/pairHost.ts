@@ -12,6 +12,7 @@ import {
   type HostAppearance,
   type HostPairSession,
   type HostToPhone,
+  isConnectStuck,
   openFrame,
   type PairedDevice,
   type PairSyncCursor,
@@ -19,6 +20,7 @@ import {
   type ProjectGroupEntry,
   type ProviderEntry,
   pollHostPairing,
+  RELAY_CONNECT_TIMEOUT_MS,
   revokePairing,
   sealFrame,
   shouldReplaceOnNudge,
@@ -55,6 +57,7 @@ import type {
   PairSessionConfig,
   PairStatus,
 } from '@shared/types/pair';
+import type { SpeechTranscribeResult } from '@shared/types/speech';
 import { app, powerMonitor, powerSaveBlocker } from 'electron';
 import { readTrayPreventDisplaySleep, readTraySleepPolicy } from '../ipc/settings';
 // 会话命令一律走 agentBridge（身份解析留在 ipc/agent.ts），这里只留无需身份的 snapshot。
@@ -92,6 +95,7 @@ import {
   saveRelayUrl,
   upsertDevice,
 } from './pairStore';
+import { VoiceUploads } from './pairVoiceUpload';
 import {
   buildPushPayload,
   clearPushSubscription,
@@ -100,6 +104,7 @@ import {
   sendPush,
   setPushSubscription,
 } from './pushNotifier';
+import { onSpeechAvailabilityChange, openSpeechSession, speechAvailable } from './speech/service';
 
 /**
  * 手机第二屏 host：跑在 main，不依赖窗口焦点。
@@ -122,6 +127,8 @@ interface Connection {
   contentKey: Uint8Array;
   ws: WebSocket | null;
   heartbeat: Heartbeat | null;
+  /** 立即拆掉当前中继链并走重连，不等 close 事件（半开链的 close 可能永不到达） */
+  dropRelay: (() => void) | null;
   /** WebRTC 直连：业务帧优先出口；信令与在线态仍走中继 */
   direct: DirectLink;
   /** 手机当前订阅的会话（null = 列表页，不收正文） */
@@ -162,6 +169,7 @@ interface Connection {
   ioEpoch: number;
   receiveQueue: Promise<void>;
   sendQueue: Promise<void>;
+  voiceUploads: VoiceUploads;
 }
 
 const connections = new Map<string, Connection>();
@@ -304,6 +312,7 @@ function syncPinnedSessions(): void {
 
 let resumeHooked = false;
 let stopNetworkWatch: (() => void) | null = null;
+let stopSpeechWatch: (() => void) | null = null;
 let cacheSeeded = false;
 
 function ensureRelayCacheSeeded(): void {
@@ -321,6 +330,12 @@ export function startPairHost(): void {
     powerMonitor.on('resume', () => reviveAll('resume'));
     stopNetworkWatch = startPairNetworkWatch({ onChange: () => reviveAll('network-change') });
   }
+  // host-info 的 voiceInput 随识别可用性变化，指纹变了才重发
+  stopSpeechWatch ??= onSpeechAvailabilityChange(() => {
+    for (const conn of connections.values()) {
+      if (conn.phoneOnline) requestMeta(conn);
+    }
+  });
   // 先装好 WebRTC 原生模块再进房：host-info 的能力声明在首次 meta 推送就要确定
   void preloadDirectPeer().finally(() => {
     for (const device of loadDevices()) {
@@ -336,13 +351,8 @@ function reviveAll(reason: 'resume' | 'network-change'): void {
     if (shouldReplaceOnNudge(reason, conn.ws !== null, conn.ws?.readyState ?? null)) {
       if (conn.timer) clearTimeout(conn.timer);
       conn.attempt = 0;
-      if (conn.ws) {
-        try {
-          conn.ws.close();
-        } catch {}
-      } else {
-        connect(conn);
-      }
+      if (conn.dropRelay) conn.dropRelay();
+      else connect(conn);
       continue;
     }
     conn.heartbeat?.probe();
@@ -352,11 +362,14 @@ function reviveAll(reason: 'resume' | 'network-change'): void {
 export function stopPairHost(): void {
   stopNetworkWatch?.();
   stopNetworkWatch = null;
+  stopSpeechWatch?.();
+  stopSpeechWatch = null;
   cancelPairing();
   for (const conn of connections.values()) {
     conn.closed = true;
     conn.ioEpoch++;
     conn.syncRevision++;
+    conn.voiceUploads.clear();
     if (conn.timer) clearTimeout(conn.timer);
     if (conn.providersRetry) clearTimeout(conn.providersRetry);
     conn.heartbeat?.stop();
@@ -509,6 +522,7 @@ function openConnection(device: PairedDevice): void {
     existing.closed = true;
     existing.ioEpoch++;
     existing.syncRevision++;
+    existing.voiceUploads.clear();
     if (existing.timer) clearTimeout(existing.timer);
     if (existing.providersRetry) clearTimeout(existing.providersRetry);
     existing.heartbeat?.stop();
@@ -523,6 +537,7 @@ function openConnection(device: PairedDevice): void {
     contentKey: fromBase64Url(device.contentKey),
     ws: null,
     heartbeat: null,
+    dropRelay: null,
     direct: null as unknown as DirectLink,
     subscribedId: null,
     metaDirty: false,
@@ -538,6 +553,17 @@ function openConnection(device: PairedDevice): void {
     syncRevision: 0,
     receiveQueue: Promise.resolve(),
     sendQueue: Promise.resolve(),
+    voiceUploads: new VoiceUploads({
+      open: openSpeechSession,
+      // 每处 ioEpoch++ 都伴随 voiceUploads.clear()，旧连接的会话已取消，中间结果不会再出来
+      onPartial: (requestId, text, correcting) =>
+        void send(conn, {
+          type: 'voice-partial',
+          requestId,
+          text,
+          ...(correcting ? { correcting: true as const } : {}),
+        }),
+    }),
   };
   conn.direct = new DirectLink({
     role: 'host',
@@ -582,6 +608,7 @@ function connect(conn: Connection): void {
 function clearConnectionSubscription(conn: Connection): void {
   conn.ioEpoch++;
   conn.syncRevision++;
+  conn.voiceUploads.clear();
   conn.receiveQueue = Promise.resolve();
   conn.sendQueue = Promise.resolve();
   conn.subscribedId = null;
@@ -604,13 +631,16 @@ function attachHostSocket(conn: Connection, ws: WebSocket, generation: number): 
 
   // 半开死链的 close 事件可能永不到达：心跳判死后直接走关闭路径，幂等防双跑
   let settled = false;
+  let connectTimer: ReturnType<typeof setTimeout> | null = null;
   const closed = (code: number | null): void => {
     if (settled) return;
     settled = true;
+    if (connectTimer) clearTimeout(connectTimer);
     if (conn.closed || conn.generation !== generation || conn.ws !== ws) return;
     conn.heartbeat?.stop();
     conn.heartbeat = null;
     conn.ws = null;
+    conn.dropRelay = null;
     // 直连还活着就不算手机离线：业务帧继续走 DataChannel（直连再掉时由 onTransportChange 补置离线）
     if (conn.direct.transport() !== 'direct') {
       conn.phoneOnline = false;
@@ -625,23 +655,26 @@ function attachHostSocket(conn: Connection, ws: WebSocket, generation: number): 
     notifyStatus();
     scheduleReconnect(conn);
   };
-  conn.heartbeat = attachHeartbeat(
-    ws,
-    () => {
-      try {
-        ws.close();
-      } catch {}
-      closed(null);
-    },
-    (ms) => {
-      if (conn.direct.transport() === 'relay') {
-        conn.rttMs = ms;
-        notifyStatus();
-      }
+  const drop = (): void => {
+    try {
+      ws.close();
+    } catch {}
+    closed(null);
+  };
+  conn.dropRelay = drop;
+  conn.heartbeat = attachHeartbeat(ws, drop, (ms) => {
+    if (conn.direct.transport() === 'relay') {
+      conn.rttMs = ms;
+      notifyStatus();
     }
-  );
+  });
+  // 心跳只管 OPEN：握手卡住（固定 IP 链路 headersTimeout 为 0）时靠这里拆链重连
+  connectTimer = setTimeout(() => {
+    if (isConnectStuck(ws.readyState, RELAY_CONNECT_TIMEOUT_MS)) drop();
+  }, RELAY_CONNECT_TIMEOUT_MS);
 
   ws.onopen = () => {
+    if (connectTimer) clearTimeout(connectTimer);
     conn.attempt = 0;
     notifyStatus();
   };
@@ -696,6 +729,7 @@ function forgetDevice(pairId: string): void {
     conn.closed = true;
     conn.ioEpoch++;
     conn.syncRevision++;
+    conn.voiceUploads.clear();
     if (conn.timer) clearTimeout(conn.timer);
     if (conn.providersRetry) clearTimeout(conn.providersRetry);
     conn.heartbeat?.stop();
@@ -913,6 +947,19 @@ async function handleFrame(
       // 测速必须走中继，走直连会测到 DC 而不是中继路径
       void enqueueSend(conn, { type: 'probe-ack', nonce: command.nonce }, true);
       break;
+    case 'voice-chunk': {
+      const result = conn.voiceUploads.accept(command);
+      if (result?.kind === 'error') {
+        void send(conn, { type: 'voice-result', requestId: result.requestId, error: result.error });
+      } else if (result?.kind === 'finish') {
+        // 定稿可能耗时数秒，不能卡住本连接的收帧队列
+        void replyVoiceResult(conn, result.requestId, result.result, generation, ioEpoch);
+      }
+      break;
+    }
+    case 'voice-cancel':
+      conn.voiceUploads.cancel(command.requestId);
+      break;
     case 'spawn': {
       const check = checkSpawn(command, whitelist);
       if (!check.ok) {
@@ -956,6 +1003,25 @@ async function handleFrame(
     }
   }
   syncPinnedSessions();
+}
+
+async function replyVoiceResult(
+  conn: Connection,
+  requestId: string,
+  pending: Promise<SpeechTranscribeResult>,
+  generation: number,
+  ioEpoch: number
+): Promise<void> {
+  const result = await pending.catch(
+    (): SpeechTranscribeResult => ({ ok: false, error: 'failed' })
+  );
+  if (!connectionCurrent(conn, generation, ioEpoch)) return;
+  await send(
+    conn,
+    result.ok
+      ? { type: 'voice-result', requestId, text: result.text }
+      : { type: 'voice-result', requestId, error: result.error }
+  );
 }
 
 // ── 发：加密下行 ──────────────────────────────────────────────────────
@@ -1064,6 +1130,7 @@ function resyncGuestMeta(conn: Connection, forgetCatalog = true): void {
     const next = forgetGuestSyncMeta(stableMetaByPair.get(conn.device.pairId));
     if (next) stableMetaByPair.set(conn.device.pairId, next);
     else stableMetaByPair.delete(conn.device.pairId);
+    sentProviderFp.delete(conn.device.pairId);
     conn.providersSentFp = undefined;
     conn.providersSentAt = undefined;
   }
@@ -1086,6 +1153,7 @@ async function sendMeta(conn: Connection): Promise<void> {
     hostname: os.hostname(),
     appVersion: app.getVersion(),
     ...(directReady ? { capabilities: ['direct-v1' as const], iceServers: PAIR_STUN_SERVERS } : {}),
+    ...(speechAvailable() ? { voiceInput: true as const } : {}),
   };
   const catalogEntries = slimCatalogForPhone(catalog, conn.subscribedId);
   const projectEntries = slimProjectsForPhone(projects);

@@ -64,6 +64,7 @@ function toDto(spec: ChatModelSpec): ChatModelDto {
           ? 'ready'
           : 'missing',
     downloadable,
+    ...(spec.purpose ? { purpose: spec.purpose } : {}),
   };
 }
 

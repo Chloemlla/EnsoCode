@@ -26,7 +26,7 @@ export interface EmbeddingModelSpec {
     truncateDim: number | null;
   };
   /** 仓库 id；HuggingFace 主源，ModelScope 为中国区镜像回退 */
-  sources: { huggingface: string; modelscope: string | null } | null;
+  sources: { huggingface: string | null; modelscope: string | null } | null;
 }
 
 export interface EmbeddingProvider {

@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsList, TabsTab } from '@/components/ui/tabs';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { type McpServerStatus, useMcpStatusStore } from '@/stores/mcpStatus';
@@ -103,7 +104,10 @@ export function McpSettings() {
   const occupancy = useOccupancyRows(enabledIds, (ids) =>
     window.electronAPI.assets.mcpOccupancy(ids)
   );
-  const enabledTokens = enabledOccupancyTotal(enabledIds, occupancy.rows);
+  const directIds = mcpServers
+    .filter((server) => server.enabled && server.loadMode !== 'deferred')
+    .map((server) => server.id);
+  const enabledTokens = enabledOccupancyTotal(directIds, occupancy.rows);
 
   return (
     <div className="space-y-6">
@@ -170,6 +174,7 @@ export function McpSettings() {
                 // 授权入口不能依赖 unauthorized 状态：discovery/DCR 失败会归为 error，用户会无路可走
                 const canAuthorize =
                   server.transport !== 'stdio' && authorizedMap[server.id] !== true;
+                const deferred = server.loadMode === 'deferred';
                 return (
                   <div key={server.id} className="space-y-1">
                     <div
@@ -234,6 +239,29 @@ export function McpSettings() {
                             server.enabled && occupancy.pending && !occupancy.rows[server.id]
                           }
                         />
+                        <Tabs
+                          value={deferred ? 'deferred' : 'direct'}
+                          onValueChange={(value) =>
+                            updateMcpServer(server.id, {
+                              loadMode: value === 'deferred' ? 'deferred' : 'direct',
+                            })
+                          }
+                          title={t(
+                            'On demand: tool descriptions are not preloaded into context; the model connects through the mcp tool when needed. Suits servers with many or rarely used tools. Takes effect in new conversations.'
+                          )}
+                        >
+                          <TabsList aria-label={t('Load mode')}>
+                            <TabsTab value="direct" className="h-6 px-2 text-xs sm:h-6 sm:text-xs">
+                              {t('Always loaded')}
+                            </TabsTab>
+                            <TabsTab
+                              value="deferred"
+                              className="h-6 px-2 text-xs sm:h-6 sm:text-xs"
+                            >
+                              {t('On demand')}
+                            </TabsTab>
+                          </TabsList>
+                        </Tabs>
                         <Switch
                           checked={server.enabled}
                           onCheckedChange={(enabled) => updateMcpServer(server.id, { enabled })}

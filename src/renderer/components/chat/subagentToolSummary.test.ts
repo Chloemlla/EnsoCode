@@ -41,4 +41,17 @@ describe('summarizeSubagentToolArgs', () => {
     expect(summary).toMatch(/^not json x+…$/);
     expect(summary.length).toBeLessThanOrEqual(121);
   });
+
+  it('mcp 代理调用按内层参数与动作摘要', () => {
+    expect(
+      summarizeSubagentToolArgs(
+        'mcp',
+        '{"action":"call","tool":"mcp__s__search","arguments":{"query":"bug"}}'
+      )
+    ).toBe('bug');
+    expect(summarizeSubagentToolArgs('mcp', '{"action":"list","server":"s"}')).toBe('s');
+    expect(summarizeSubagentToolArgs('mcp', '{"action":"describe","tool":"mcp__s__t"}')).toBe(
+      'mcp__s__t'
+    );
+  });
 });

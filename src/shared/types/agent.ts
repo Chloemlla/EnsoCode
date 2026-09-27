@@ -639,6 +639,10 @@ export interface McpServerSpawnConfig {
   connectTimeoutMs?: number;
   /** 单次 callTool；缺省 120s */
   callTimeoutMs?: number;
+  /** 仅会话级配置携带；deferred 经 `mcp` 代理工具按需连接 */
+  loadMode?: 'deferred';
+  /** deferred 目录用的工具名缓存（可能过期，以实时连接为准） */
+  toolNames?: string[];
 }
 
 export interface ModelRef {

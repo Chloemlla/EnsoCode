@@ -222,9 +222,101 @@ describe('SessionSupervisor terminal turn handling', () => {
       content: [{ type: 'text', text: 'done' }],
     });
     parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
     await settle();
     expect(parentSession.agent.continue).not.toHaveBeenCalled();
     expect(events.some((event) => event.type === 'turn-completed')).toBe(true);
+
+    await supervisor.shutdown();
+  });
+
+  it('agent_end 后 pi 续跑（排队消息/扩展续跑）：等 agent_settled 才收口，全程同一轮', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'a' }] });
+    parentSession.emit({ type: 'agent_end', willRetry: false });
+    await settle();
+    expect(events.some((event) => event.type === 'turn-completed')).toBe(false);
+    expect(events.filter((event) => event.type === 'status').at(-1)).toMatchObject({
+      status: 'running',
+    });
+
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'b' }] });
+    parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
+    await settle();
+    const statuses = events.filter((event) => event.type === 'status').map((e) => e.status);
+    expect(statuses.slice(statuses.indexOf('running'))).toEqual(['running', 'running', 'idle']);
+    expect(events.filter((event) => event.type === 'turn-completed')).toHaveLength(1);
+
+    await supervisor.shutdown();
+  });
+
+  it('上下文溢出错误后 pi 压缩并续跑成功：不先报失败', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.messages.push({
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'prompt is too long: context length exceeded',
+    });
+    parentSession.emit({ type: 'agent_end', willRetry: false });
+    await settle();
+    expect(events.some((event) => event.type === 'turn-failed')).toBe(false);
+
+    parentSession.messages.length = 0;
+    parentSession.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'ok' }] });
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
+    await settle();
+    expect(events.some((event) => event.type === 'turn-failed')).toBe(false);
+    expect(events.filter((event) => event.type === 'turn-completed')).toHaveLength(1);
+
+    await supervisor.shutdown();
+  });
+
+  it('用户中断：agent_end/agent_settled 回流只收一次轮次终态（renderer 靠它清中断标记）', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    parentSession.emit({ type: 'agent_start' });
+    await settle();
+    supervisor.handleCommand({ type: 'abort', identity: parent });
+    await settle();
+    parentSession.messages.push({ role: 'assistant', content: [], stopReason: 'aborted' });
+    parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
+    await settle();
+    const terminal = events.filter(
+      (event) => event.type === 'turn-completed' || event.type === 'turn-failed'
+    );
+    expect(terminal).toHaveLength(1);
+
+    await supervisor.shutdown();
+  });
+
+  it('重试倒计时中中断：已按失败收口，随后的 agent_settled 不再补发完成', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.messages.push({ role: 'assistant', content: [], stopReason: 'error' });
+    parentSession.emit({ type: 'agent_end', willRetry: true });
+    parentSession.emit({
+      type: 'auto_retry_start',
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1000,
+      errorMessage: '503',
+    });
+    parentSession.isRetrying = true;
+    await settle();
+    supervisor.handleCommand({ type: 'abort', identity: parent });
+    await settle();
+    parentSession.emit({ type: 'auto_retry_end', success: false, attempt: 1 });
+    parentSession.emit({ type: 'agent_settled' });
+    await settle();
+    expect(events.filter((event) => event.type === 'turn-failed')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'turn-completed')).toBe(false);
 
     await supervisor.shutdown();
   });
@@ -247,6 +339,7 @@ describe('SessionSupervisor terminal turn handling', () => {
       errorMessage: 'down',
     });
     parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
     await settle();
     await settle();
     expect(parentSession.agent.continue).not.toHaveBeenCalled();
@@ -273,10 +366,55 @@ describe('SessionSupervisor terminal turn handling', () => {
       { role: 'assistant', content: [] }
     );
     parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
     await settle();
     expect(events.some((event) => event.type === 'turn-failed')).toBe(true);
     expect(events.some((event) => event.type === 'turn-completed')).toBe(false);
     expect(parentSession.agent.continue).not.toHaveBeenCalled();
+    await supervisor.shutdown();
+  });
+
+  it('worker 退出时中止在跑的会话：pi 据中断信号杀掉 bash 进程组，不留孤儿进程', async () => {
+    const { supervisor, parentSession } = await spawn();
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.isStreaming = true;
+    await settle();
+    parentSession.abort.mockImplementation(() => new Promise<undefined>(() => {}));
+    await supervisor.shutdown();
+    expect(parentSession.abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('流式增量合并下发：窗口内只发首帧与末帧，其他事件前先补发最新正文', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    const assistant = (text: string) => ({
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      stopReason: 'stop',
+    });
+    const upserts = () =>
+      events.flatMap((event) =>
+        event.type === 'message-upsert' && event.message.role === 'assistant'
+          ? [event.message.content.map((part) => ('text' in part ? part.text : '')).join('')]
+          : []
+      );
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.emit({ type: 'message_start', message: assistant('') });
+    for (const text of ['a', 'ab', 'abc', 'abcd']) {
+      parentSession.emit({ type: 'message_update', message: assistant(text) });
+    }
+    expect(upserts()).toEqual(['', 'a']);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(upserts()).toEqual(['', 'a', 'abcd']);
+
+    parentSession.emit({ type: 'message_update', message: assistant('abcde') });
+    parentSession.emit({ type: 'message_update', message: assistant('abcdef') });
+    parentSession.emit({ type: 'tool_execution_start', toolCallId: 't1' });
+    const order = events.map((event) => event.type);
+    expect(upserts().at(-1)).toBe('abcdef');
+    expect(order.lastIndexOf('message-upsert')).toBeLessThan(order.lastIndexOf('tool-output'));
+
+    parentSession.emit({ type: 'message_end', message: assistant('abcdefg') });
+    expect(upserts().at(-1)).toBe('abcdefg');
     await supervisor.shutdown();
   });
 });

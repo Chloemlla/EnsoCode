@@ -128,6 +128,7 @@ export function App() {
   );
   /** 已收到桌面下发的 push-config；旧版桌面不会发，开关据此提示升级 */
   const [pushConfigReady, setPushConfigReady] = useState(false);
+  const [voiceInput, setVoiceInput] = useState(false);
   /** 订阅进行中：开关乐观显示已开但禁用，避免数秒无反馈 */
   const [pushBusy, setPushBusy] = useState(false);
   const [pushError, setPushError] = useState<PushFailureReason | null>(null);
@@ -203,6 +204,7 @@ export function App() {
     setPushConfigReady(false);
     setHistoryPending(new Set());
     setTransport('relay');
+    setVoiceInput(false);
     const client = new PairClient(device, {
       onState: setState,
       onTransport: (next) => {
@@ -210,6 +212,7 @@ export function App() {
         setRttMs(null);
       },
       onRtt: setRttMs,
+      onVoiceInput: setVoiceInput,
       onCatalog: (entries, order) => {
         setCatalog(entries);
         setPinnedOrder(order ?? []);
@@ -542,6 +545,16 @@ export function App() {
         )}
         historyLoading={Boolean(activeId && historyPending.has(activeId))}
         onLoadOlder={() => activeId && clientRef.current?.requestHistory(activeId)}
+        voice={
+          voiceInput
+            ? (onPartial) =>
+                clientRef.current?.startVoice(onPartial) ?? {
+                  push: () => {},
+                  finish: () => Promise.resolve({ ok: false, error: 'failed' }),
+                  cancel: () => {},
+                }
+            : undefined
+        }
         queued={withoutQueuedIds(entry?.queued, queueEchoes, activeId ?? '')}
         echoes={queueEchoes}
         goal={entry?.goal}

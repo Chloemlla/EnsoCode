@@ -4,7 +4,7 @@ import { app, type BrowserWindow } from 'electron';
 
 import { registerIpcHandlers } from './ipc';
 import { consumeTrayReenterAfterUpdate, readSettings } from './ipc/settings';
-import { startAgentWorker } from './services/agentHost';
+import { agentWorkerAlive, startAgentWorker, stopAgentWorkerForQuit } from './services/agentHost';
 import { attachAppQuitDrain } from './services/appQuitDrain';
 import {
   ensureTray,
@@ -33,6 +33,7 @@ import { startPairGuest, stopPairGuest } from './services/pairGuest';
 import { startPairHost, stopPairHost } from './services/pairHost';
 import { getProxyConfig } from './services/proxyConfig';
 import { hydrateShellPath, seedProcessPath } from './services/shellPath';
+import { syncSpeechFromSettings } from './services/speech/service';
 import { disposeAllTerminals, hasPendingPtys, waitPtyQuitIdle } from './services/terminalService';
 import {
   setTrayToggleHandler,
@@ -123,6 +124,7 @@ if (!gotTheLock) {
     syncMemoryEmbeddingFromSettings(persistedState);
     syncMemoryDistillFromSettings(persistedState);
     syncMemoryKgFromSettings(persistedState);
+    syncSpeechFromSettings(persistedState);
     // UI shell 必须先创建并发起加载；Agent worker 初始化变重时不得阻塞 renderer spawn。
     const mainWindow = createMainWindow();
     ensureTray();
@@ -179,6 +181,10 @@ if (!gotTheLock) {
         await releaseLocalChatSlot();
         await disposeLlamaRuntime();
       },
+    },
+    {
+      shouldWait: agentWorkerAlive,
+      wait: () => stopAgentWorkerForQuit(3_000),
     },
   ]);
 }

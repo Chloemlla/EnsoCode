@@ -80,7 +80,9 @@ import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
+import { getMcpToolCatalog } from './mcpToolCatalog';
 import { PendingReloadRegistry } from './pendingReloads';
+import { killAndWaitExit } from './processExit';
 import { bundledRtkPath } from './rtkBinary';
 import { pickSubagentModelRefs } from './subagentModels';
 import { readStoredSystemPrompt } from './systemPromptStore';
@@ -231,6 +233,20 @@ export function stopAgentWorker(): void {
   snapshotPending = false;
   commandsPending = [];
   workerExited = false;
+}
+
+export function agentWorkerAlive(): boolean {
+  return worker !== null;
+}
+
+/**
+ * 应用退出时 Electron 不给 utility 进程发 SIGTERM，worker 的收尾（中止会话→pi 杀 detached
+ * bash 进程组、断开 MCP）跑不到，命令会成孤儿进程。退出前主动发信号并等它自行退出。
+ */
+export function stopAgentWorkerForQuit(timeoutMs: number): Promise<void> {
+  const child = worker;
+  if (!child) return Promise.resolve();
+  return killAndWaitExit(child, timeoutMs);
 }
 
 /**
@@ -1269,7 +1285,7 @@ function enabledMcpServers(preset?: Preset): McpServerSpawnConfig[] {
   const picked = preset
     ? servers.filter((server) => preset.mcpServerIds.includes(server.id))
     : servers.filter((server) => server.enabled !== false);
-  return picked.map(toMcpSpawnConfig);
+  return picked.map((server) => toSessionMcpConfig(server));
 }
 
 function mcpServerById(serverId: string): McpServerSpawnConfig[] {
@@ -1292,6 +1308,17 @@ function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
     ...(oauth ? { oauth } : {}),
     ...mcpTimeoutsForSpawn(server),
   };
+}
+
+/** 会话级配置才带 loadMode：typed profile 与定向预热始终直接连接 */
+export function toSessionMcpConfig(
+  server: McpServerEntry,
+  catalog = getMcpToolCatalog()
+): McpServerSpawnConfig {
+  const config = toMcpSpawnConfig(server);
+  if (server.loadMode !== 'deferred') return config;
+  const toolNames = catalog.names(server);
+  return { ...config, loadMode: 'deferred', ...(toolNames ? { toolNames } : {}) };
 }
 
 function asModelRef(value: unknown): DefaultModelRef | null {

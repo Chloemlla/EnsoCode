@@ -75,6 +75,7 @@ function jsonClone(value: unknown): unknown {
 
 const RESERVED_CALLABLES = new Set([
   'catalog',
+  'call',
   'store',
   'load',
   'tools',
@@ -138,7 +139,8 @@ function withDidYouMean(message: string, names: readonly string[]): string {
   const missing = match?.[1];
   if (!missing) return message;
   const hint = suggestCallable(missing, names);
-  const rule = 'Tool names replace "-" and "__" with "_" (mcp__foo__bar → mcp_foo_bar).';
+  const rule =
+    'Tool names replace "-" and "__" with "_" (mcp__foo__bar → mcp_foo_bar), or use call("mcp__foo__bar", args).';
   if (hint) return `${message} Did you mean ${hint}? ${rule}`;
   if (missing.includes('mcp') || missing.includes('__')) return `${message} ${rule}`;
   return message;
@@ -264,25 +266,27 @@ export function createIsolatedSandboxTool(options: IsolatedSandboxToolOptions): 
     name: 'exec',
     label: 'Isolated sandbox',
     description:
-      'Run JavaScript to orchestrate similar guest tool calls and return a reduced result. Prefer exec for 3+ similar guest calls — read/grep/find, MCP, or mechanical apply_patch/write — when you only need a count, path list, boolean, extracted fields, or patch outcomes; not for exploring or dumping full file bodies into parent context. ' +
+      'Run JavaScript that calls guest tools (read/grep/find, MCP, mechanical apply_patch/write) and returns only what you need. Prefer exec when the code does work on tool results: filter or extract a few fields from a large result (e.g. a big MCP listing), loop over a list (files, ids, pages), chain one result into the next call or branch on it, or run 3+ independent similar calls. Call the tool directly for a single call whose full result you need to read. Do not use exec to explore unknown code or to dump full file bodies into parent context. ' +
       'Example:\n' +
       'const files = (await find({pattern:"src/**/*.ts"})).content.split("\\n").filter(Boolean);\n' +
       'const hits = await Promise.all(files.map(f => grep({pattern:"TODO", path:f})));\n' +
       'return hits.filter(h => h.content).length;\n' +
+      'const r = await call("mcp__browser__list_requests", {});\n' +
+      'return r.content.split("\\n").filter(l => l.includes("/api/")).slice(0, 20);\n' +
       'Each tool returns { content, details?, isError }. No console/fetch/setTimeout/URL/TextEncoder — use return. ' +
       'Tool failures resolve as { content, isError: true } and do not reject — check isError, do not rely on throw. ' +
       'A JavaScript exception still fails the whole cell. ' +
       'Return values are JSON-serialized and truncated; wrapping one call is strictly worse than calling the tool directly. ' +
-      'Tool names: "-" and "__" become "_": mcp__semble__search → mcp_semble_search. ' +
+      'Call tools as await name(args) where "-" and "__" become "_" (mcp__semble__search → mcp_semble_search), or await call("mcp__semble__search", args) with the original name. ' +
       'catalog.list() / listTools() lists callable names. store()/load() last for this live session. Not a shell.',
     promptSnippet:
-      'exec: prefer for 3+ similar guest calls (read/grep/find, MCP, mechanical apply_patch) when you only need a reduced result — not for exploring, dumping full files, or wrapping a single call. Nested via await name(args); MCP names collapse __ and - to _. Do not spawn a subagent for this. Write JS and return the value. Uncaught throw fails the cell.',
+      'exec: prefer when code does work on guest tool results (read/grep/find, MCP, mechanical apply_patch) — filter a large result, loop, chain or branch, or 3+ independent similar calls; call the tool directly when you need one full result. Nested via await name(args) or call("original__name", args). Do not spawn a subagent for this. Write JS and return the value. Uncaught throw fails the cell.',
     promptGuidelines: [
-      'Do not wrap a single call. Use exec for 3+ similar guest tools you reduce before returning (count, path list, boolean, extracted fields, patch status). Includes MCP and apply_patch as await apply_patch({input}); do not paste a patch document as exec code. Independent reads MAY Promise.all; mutating calls stay sequenced. Do not use exec to explore unknown code or to load full files into parent context.',
+      'Use exec when the code does work on tool results: filter or extract fields from a large result, loop over a list, chain one result into the next call or branch on it, or batch 3+ independent similar calls. Do not wrap a single call just to return its raw result — call the tool directly. Includes MCP and apply_patch as await apply_patch({input}); do not paste a patch document as exec code. Independent reads MAY Promise.all; mutating calls stay sequenced. Do not use exec to explore unknown code or to load full files into parent context.',
       'No console.log — there is no console, fetch, setTimeout, URL, TextEncoder, or structuredClone. Use return.',
       'Tool failures resolve with isError: true and do not throw. A JS exception still fails the whole cell.',
       'Each nested tool returns { content: string, details?: unknown, isError: boolean }. Do not treat the result as a raw string.',
-      'Tool names replace "-" and "__" with "_": mcp__semble__search → mcp_semble_search. Use catalog.list() or listTools() for names.',
+      'Tool names replace "-" and "__" with "_": mcp__semble__search → mcp_semble_search; call("mcp__semble__search", args) also takes the original name. Use catalog.list() or listTools() for names.',
       'store(key, value) / load(key) keep JSON across exec cells until this session unloads; they do not survive resume.',
       'exec is deterministic code with no LLM inside. Use subagent when each item needs judgment.',
     ],
@@ -437,6 +441,12 @@ async function runGuest(input: {
       for (const alias of ${JSON.stringify(aliases)}) {
         globalThis[alias.callable] = (args) => __ensoCall(alias.tool, args);
       }
+      const __ensoToolNames = new Set(${JSON.stringify(aliases)}.map((a) => a.tool));
+      const __ensoByCallable = new Map(${JSON.stringify(aliases)}.map((a) => [a.callable, a.tool]));
+      globalThis.call = (name, args) => {
+        const key = String(name);
+        return __ensoCall(__ensoToolNames.has(key) ? key : (__ensoByCallable.get(key) ?? key), args);
+      };
       globalThis.store = (key, value) => {
         if (value === undefined) { __ensoStore(String(key), ''); return; }
         __ensoStore(String(key), JSON.stringify(value));

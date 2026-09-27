@@ -168,6 +168,11 @@ describe('config sync portable preference contract', () => {
     expect(() => validateBundle(bundle({ smartCompactMode: 'aggressive' as never }))).toThrow();
   });
 
+  it('接受按住说话快捷键的覆盖', () => {
+    const input = bundle({ keybindings: { 'voice-hold': 'mod+shift+v' } });
+    expect(validateBundle(input).state).toMatchObject(input.state);
+  });
+
   it('接受运行时可持久化的正数字号和空快捷键覆盖', () => {
     const input = bundle({
       terminalFontSize: 64,

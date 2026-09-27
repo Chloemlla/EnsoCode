@@ -81,11 +81,16 @@ describe('createIsolatedSandboxTool', () => {
       '\n'
     );
     expect(text).toMatch(/prefer exec/i);
-    expect(text).toMatch(/3\+ similar guest calls/i);
+    expect(text).not.toMatch(/3\+ similar guest calls/i);
+    expect(text).toMatch(/filter/i);
+    expect(text).toMatch(/loop/i);
+    expect(text).toMatch(/chain/i);
+    expect(text).toMatch(/3\+ independent similar calls/i);
+    expect(text).toMatch(/call the tool directly/i);
+    expect(text).toMatch(/call\("mcp__/);
     expect(text).toMatch(/MCP/i);
     expect(text).toMatch(/apply_patch/i);
-    expect(text).toMatch(/reduced result/i);
-    expect(text).toMatch(/not for exploring/i);
+    expect(text).toMatch(/explore unknown code/i);
     expect(text).toMatch(/Do not wrap a single call/i);
     expect(text).not.toMatch(/parent hashline snapshot/i);
     expect(text).toMatch(/JSON-serialized and truncated/i);
@@ -397,5 +402,48 @@ describe('createIsolatedSandboxTool', () => {
     const result = await run(`return await mcp__semble__search({ query: "x" });`, [search]);
     expect(result.details.status).toBe('failed');
     expect(result.text).toMatch(/did you mean mcp_semble_search/i);
+  });
+
+  it('call(name, args) 接受原始名与转换后的名字', async () => {
+    const received: unknown[] = [];
+    const search = mockTool('mcp__fast-context__fast_context_search', async (_id, params) => {
+      received.push(params);
+      return { content: [{ type: 'text', text: 'hit' }], details: {} };
+    });
+    const result = await run(
+      `
+        const a = await call("mcp__fast-context__fast_context_search", { query: "a" });
+        const b = await call("mcp_fast_context_fast_context_search", { query: "b" });
+        return [a.content, b.content];
+      `,
+      [search]
+    );
+    expect(result.details.status).toBe('completed');
+    expect(result.details.value).toEqual(['hit', 'hit']);
+    expect(received).toEqual([{ query: 'a' }, { query: 'b' }]);
+  });
+
+  it('call 不能绕过禁用工具，未知名直接失败', async () => {
+    let ran = 0;
+    const sub = mockTool('subagent', async () => {
+      ran += 1;
+      return { content: [{ type: 'text', text: 'no' }], details: {} };
+    });
+    const blocked = await run(`return await call("subagent", {});`, [sub]);
+    expect(blocked.details.status).toBe('failed');
+    expect(blocked.text).toMatch(/not available/i);
+    const unknown = await run(`return await call("mcp__nope__x", {});`, [sub]);
+    expect(unknown.details.status).toBe('failed');
+    expect(unknown.text).toMatch(/not available/i);
+    expect(ran).toBe(0);
+  });
+
+  it('名为 call 的工具不覆盖 call()', async () => {
+    const tool = mockTool('call', async () => ({
+      content: [{ type: 'text', text: 'tool' }],
+      details: {},
+    }));
+    const result = await run(`return [(await call("call", {})).content, listTools()];`, [tool]);
+    expect(result.details.value).toEqual(['tool', [{ name: 'call_2', tool: 'call' }]]);
   });
 });

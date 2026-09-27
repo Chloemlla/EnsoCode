@@ -30,6 +30,7 @@ export const IPC_CHANNELS = {
   APP_CLOSE_RESPONSE: 'app:close-response',
   APP_FLUSH_PERSIST_REQUEST: 'app:flush-persist-request',
   APP_FLUSH_PERSIST_RESPONSE: 'app:flush-persist-response',
+  APP_SET_BADGE_COUNT: 'app:set-badge-count',
 
   // Local provider scan/import
   PROVIDERS_SCAN_LOCAL: 'providers:scan-local',
@@ -40,6 +41,18 @@ export const IPC_CHANNELS = {
 
   // Local token usage statistics
   USAGE_SUMMARY: 'usage:summary',
+
+  // Resource monitor
+  RESOURCES_SAMPLE: 'resources:sample',
+  RESOURCES_STORAGE_SCAN: 'resources:storage-scan',
+  RESOURCES_STORAGE_CLEAN: 'resources:storage-clean',
+  RESOURCES_STORAGE_REVEAL: 'resources:storage-reveal',
+  RESOURCES_STORAGE_CANCEL: 'resources:storage-cancel',
+  RESOURCES_STORAGE_LAST: 'resources:storage-last',
+  RESOURCES_STORAGE_PROGRESS: 'resources:storage-progress',
+  RESOURCES_SESSIONS_CLEAN: 'resources:sessions-clean',
+  RESOURCES_SESSIONS_CLEAN_REQUEST: 'resources:sessions-clean-request',
+  RESOURCES_SESSIONS_CLEAN_DONE: 'resources:sessions-clean-done',
 
   // Memory administration
   MEMORY_LIST: 'memory:list',
@@ -62,6 +75,16 @@ export const IPC_CHANNELS = {
   MEMORY_CHAT_MODEL_CANCEL: 'memory:chat-model-cancel',
   MEMORY_CHAT_MODEL_DELETE: 'memory:chat-model-delete',
   MEMORY_CHAT_MODEL_PROGRESS: 'memory:chat-model-progress',
+  SPEECH_STATUS: 'speech:status',
+  SPEECH_DOWNLOAD: 'speech:download',
+  SPEECH_CANCEL: 'speech:cancel',
+  SPEECH_DELETE: 'speech:delete',
+  SPEECH_PROGRESS: 'speech:progress',
+  SPEECH_SESSION_PUSH: 'speech:session-push',
+  SPEECH_SESSION_FINISH: 'speech:session-finish',
+  SPEECH_SESSION_CANCEL: 'speech:session-cancel',
+  SPEECH_PARTIAL: 'speech:partial',
+  SPEECH_MIC_ACCESS: 'speech:mic-access',
   MEMORY_REEMBED: 'memory:reembed',
   MEMORY_CHANGED: 'memory:changed',
   MEMORY_GRAPH: 'memory:graph',

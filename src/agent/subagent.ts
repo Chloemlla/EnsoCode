@@ -135,6 +135,7 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
       'Agent and Run are different identities: use runId for wait/report/stop and agentId for send/dismiss.',
       'wait timeout or interruption never stops execution; use stop or dismiss explicitly.',
       'Use send delivery=auto to steer a running Run or start an idle coworker Run; delivery=next queues a new coworker Run.',
+      'Dismiss a coworker as soon as you no longer need it; an idle coworker keeps its session open until dismissed.',
       'gate.commandRef is a Main-authorized command id, not shell text or argv.',
       'Unknown gate ids fail the run and nothing is executed.',
       ...(modelNames.length > 0
@@ -233,6 +234,92 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
       };
     },
   };
+}
+
+export const COWORKER_IDLE_TOOL_CALLS = 20;
+
+type IdleCoworker = { runIds: Set<string>; idle: number; nextAt: number; seen: boolean };
+
+/**
+ * 主 agent 自己用 subagent 雇的 coworker 闲置超过 threshold 次工具调用时提醒解雇。
+ * worker 不知道 agentId：登记 spawn 回执，再按 Main 下发给子会话的 runId 找到它、看是否在跑。
+ * 提醒后又被使用说明仍要留着，下次间隔翻倍，不再按初始阈值反复打扰。
+ */
+export class CoworkerIdleReminder {
+  private readonly coworkers = new Map<string, IdleCoworker>();
+
+  constructor(private readonly threshold = COWORKER_IDLE_TOOL_CALLS) {}
+
+  /** 每次 subagent 调用返回后调用：spawn 登记、dismiss 注销，其余指向它的操作算使用 */
+  observe(request: AgentControlToolRequest, response: AgentControlToolResponse): void {
+    if (!response.ok) return;
+    const { agentId, runId } = (response.value ?? {}) as { agentId?: unknown; runId?: unknown };
+    if (request.operation === 'spawn') {
+      if (request.mode === 'coworker' && typeof agentId === 'string' && typeof runId === 'string') {
+        this.coworkers.set(agentId, {
+          runIds: new Set([runId]),
+          idle: 0,
+          nextAt: this.threshold,
+          seen: false,
+        });
+      }
+      return;
+    }
+    if (request.operation === 'dismiss') {
+      this.coworkers.delete(request.agentId);
+      return;
+    }
+    const target =
+      request.operation === 'send'
+        ? request.agentId
+        : request.operation === 'message'
+          ? request.to
+          : undefined;
+    const runIds =
+      request.operation === 'wait'
+        ? request.runIds
+        : request.operation === 'report' || request.operation === 'stop'
+          ? [request.runId]
+          : [];
+    for (const [id, coworker] of this.coworkers) {
+      if (id !== target && !runIds.some((run) => coworker.runIds.has(run))) continue;
+      coworker.idle = 0;
+      if (id === target && typeof runId === 'string') coworker.runIds.add(runId);
+    }
+  }
+
+  /** SystemReminderRegistry 在主 agent 每次工具调用后调用；lookup 按 runId 找子会话 */
+  take(
+    lookup: (runIds: ReadonlySet<string>) => { name: string; running: boolean } | null
+  ): string[] {
+    const due: string[] = [];
+    for (const [agentId, coworker] of this.coworkers) {
+      const child = lookup(coworker.runIds);
+      if (!child) {
+        // 已解雇或会话已结束；子会话还没收到 Run 时先留着
+        if (coworker.seen) this.coworkers.delete(agentId);
+        continue;
+      }
+      coworker.seen = true;
+      if (child.running) {
+        coworker.idle = 0;
+        continue;
+      }
+      coworker.idle += 1;
+      if (coworker.idle <= coworker.nextAt) continue;
+      coworker.nextAt = coworker.idle * 2;
+      due.push(
+        `- ${child.name} (agentId ${agentId}): idle for the last ${coworker.idle} tool calls`
+      );
+    }
+    if (due.length === 0) return [];
+    return [
+      `These coworkers you spawned have not been used for a while:\n${due.join('\n')}\n\n` +
+        'An idle coworker keeps its session open until dismissed. ' +
+        'If you no longer need one, call subagent with operation=dismiss and its agentId now; ' +
+        'if you still plan to use it, ignore this. Do not mention this reminder to the user.',
+    ];
+  }
 }
 
 /** 从 pi 会话消息取最后一条 assistant 文本 */

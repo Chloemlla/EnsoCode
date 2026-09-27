@@ -24,6 +24,7 @@ import {
 import { parseTerminalShell } from '@shared/terminalShell';
 import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types';
 import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
+import { DEFAULT_SPEECH_MODEL_ID, SYSTEM_MICROPHONE } from '@shared/types/speech';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { create } from 'zustand';
@@ -140,6 +141,12 @@ const initialState = {
   memoryEmbeddingRemoteProviderId: null as string | null,
   memoryDistillEnabled: false,
   memoryKgEnabled: false,
+  voiceInputEnabled: false,
+  voiceInputDevice: SYSTEM_MICROPHONE,
+  voiceModel: DEFAULT_SPEECH_MODEL_ID,
+  voiceCorrectionEnabled: false,
+  voiceCorrectionModel: 'remote',
+  voiceCorrectionRemoteModel: null as import('@shared/defaultModel').DefaultModelRef | null,
   autoUpdate: true,
   autoRestartWhenIdle: false,
   proxyMode: 'system' as ProxyMode,
@@ -288,6 +295,13 @@ export const useSettingsStore = create<SettingsState>()(
         set({ memoryEmbeddingRemoteProviderId }),
       setMemoryDistillEnabled: (memoryDistillEnabled) => set({ memoryDistillEnabled }),
       setMemoryKgEnabled: (memoryKgEnabled) => set({ memoryKgEnabled }),
+      setVoiceInputEnabled: (voiceInputEnabled) => set({ voiceInputEnabled }),
+      setVoiceInputDevice: (voiceInputDevice) => set({ voiceInputDevice }),
+      setVoiceModel: (voiceModel) => set({ voiceModel }),
+      setVoiceCorrectionEnabled: (voiceCorrectionEnabled) => set({ voiceCorrectionEnabled }),
+      setVoiceCorrectionModel: (voiceCorrectionModel) => set({ voiceCorrectionModel }),
+      setVoiceCorrectionRemoteModel: (voiceCorrectionRemoteModel) =>
+        set({ voiceCorrectionRemoteModel }),
       setEditMode: (editMode) => set({ editMode }),
       setCompactStrategy: (compactStrategy) =>
         set({ compactStrategy, smartCompactEnabled: compactStrategy === 'smart' }),

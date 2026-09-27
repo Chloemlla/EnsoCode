@@ -1,0 +1,478 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  DEFAULT_SPEECH_MODEL_ID,
+  SPEECH_MAX_SECONDS,
+  SPEECH_MODEL_IDS,
+  SPEECH_SAMPLE_RATE,
+  type SpeechDownloadProgressDto,
+  type SpeechErrorCode,
+  type SpeechModelDto,
+  type SpeechModelId,
+  type SpeechStatusDto,
+  type SpeechTranscribeResult,
+  type VoiceSession,
+} from '@shared/types/speech';
+import { app } from 'electron';
+import { downloadedBytes, downloadModel, isModelReady } from '../memory/embedding/downloader';
+import { downloadArchiveModel } from './archive';
+import type { SpeechEngine, SpeechEngineStream } from './engine';
+import {
+  recognizerConfig,
+  SPEECH_MODELS,
+  type SpeechModelSpec,
+  speechModelDirName,
+  speechModelIdFromSettings,
+} from './model';
+import { createRemoteSpeechEngine } from './remote';
+import {
+  installSpeechRuntime,
+  isSpeechRuntimeReady,
+  SHERPA_ONNX_VERSION,
+  sherpaPlatformPackage,
+  speechRuntimeDir,
+  speechRuntimeWrapperDir,
+} from './runtime';
+import { createPauseSegmenter, joinSamples } from './segment';
+import { acceptCorrection, joinSegments, normalizeTranscript } from './text';
+
+const IDLE_UNLOAD_MS = 10 * 60_000;
+const CORRECTION_TIMEOUT_MS = 20_000;
+const MAX_SAMPLES = SPEECH_SAMPLE_RATE * SPEECH_MAX_SECONDS;
+
+interface SpeechTestHooks {
+  root: string;
+  platform: string;
+  arch: string;
+  createEngine: (spec: SpeechModelSpec, dir: string) => Promise<SpeechEngine>;
+}
+
+/** 返回模型原始输出；null = 纠错模型不可用（未下载 / 未配置） */
+export type SpeechCorrector = (text: string) => Promise<string | null>;
+
+interface DownloadTask {
+  controller: AbortController;
+  settled: Promise<void>;
+}
+
+let hooks: SpeechTestHooks | null = null;
+let enabled = false;
+let selected: SpeechModelId = DEFAULT_SPEECH_MODEL_ID;
+let correctionEnabled = false;
+let corrector: SpeechCorrector | null = null;
+const downloads = new Map<SpeechModelId, DownloadTask>();
+let runtimeInstall: Promise<void> | null = null;
+let engine: { id: SpeechModelId; promise: Promise<SpeechEngine> } | null = null;
+let activeSessions = 0;
+let idleTimer: NodeJS.Timeout | null = null;
+let progressSink: ((progress: SpeechDownloadProgressDto) => void) | null = null;
+let lastAvailable = false;
+const availabilityListeners = new Set<(available: boolean) => void>();
+
+/** 仅供测试：临时目录 + 假引擎，不碰真实 userData 与原生插件 */
+export function __setSpeechTestHooks(next: SpeechTestHooks | null): void {
+  hooks = next;
+  enabled = false;
+  selected = DEFAULT_SPEECH_MODEL_ID;
+  correctionEnabled = false;
+  corrector = null;
+  lastAvailable = false;
+  downloads.clear();
+  runtimeInstall = null;
+  unloadEngine();
+  activeSessions = 0;
+  availabilityListeners.clear();
+}
+
+export function setSpeechProgressSink(
+  sink: ((progress: SpeechDownloadProgressDto) => void) | null
+): void {
+  progressSink = sink;
+}
+
+export function setSpeechCorrector(next: SpeechCorrector | null): void {
+  corrector = next;
+}
+
+export function onSpeechAvailabilityChange(listener: (available: boolean) => void): () => void {
+  availabilityListeners.add(listener);
+  return () => {
+    availabilityListeners.delete(listener);
+  };
+}
+
+function speechRoot(): string {
+  return hooks?.root ?? path.join(app.getPath('userData'), 'speech');
+}
+
+function platformPackage(): string | null {
+  return sherpaPlatformPackage(hooks?.platform ?? process.platform, hooks?.arch ?? process.arch);
+}
+
+function runtimeDir(): string {
+  return speechRuntimeDir(path.join(speechRoot(), 'runtime'), SHERPA_ONNX_VERSION);
+}
+
+function modelDir(id: SpeechModelId): string {
+  return path.join(speechRoot(), 'models', speechModelDirName(id));
+}
+
+function runtimeReady(): boolean {
+  const pkg = platformPackage();
+  return pkg !== null && isSpeechRuntimeReady(runtimeDir(), pkg);
+}
+
+function modelReady(id: SpeechModelId): boolean {
+  const spec = SPEECH_MODELS[id];
+  return spec.remoteUrl !== undefined || (runtimeReady() && isModelReady(modelDir(id), spec));
+}
+
+export function speechAvailable(): boolean {
+  return enabled && modelReady(selected);
+}
+
+function notifyAvailability(): void {
+  const available = speechAvailable();
+  if (available === lastAvailable) return;
+  lastAvailable = available;
+  for (const listener of [...availabilityListeners]) {
+    try {
+      listener(available);
+    } catch {}
+  }
+}
+
+/** settings.json 的 state 按 unknown 收窄；关闭或换模型即卸载常驻引擎 */
+export function syncSpeechFromSettings(state: Record<string, unknown>): void {
+  enabled = state.voiceInputEnabled === true;
+  correctionEnabled = state.voiceCorrectionEnabled === true;
+  const next = speechModelIdFromSettings(state);
+  if (!enabled || next !== selected) unloadEngine();
+  selected = next;
+  notifyAvailability();
+}
+
+function archivedBytes(id: SpeechModelId): number {
+  try {
+    return fs.statSync(path.join(modelDir(id), '.archive.part')).size;
+  } catch {
+    return 0;
+  }
+}
+
+function modelDto(id: SpeechModelId): SpeechModelDto {
+  const spec = SPEECH_MODELS[id];
+  const ready = modelReady(id);
+  return {
+    id,
+    streaming: spec.streaming,
+    remote: spec.remoteUrl !== undefined,
+    approxBytes: spec.approxBytes,
+    memoryBytes: spec.memoryBytes,
+    downloadedBytes:
+      spec.archive && !ready ? archivedBytes(id) : downloadedBytes(modelDir(id), spec),
+    state: downloads.has(id) ? 'downloading' : ready ? 'ready' : 'missing',
+  };
+}
+
+export function getSpeechStatus(): SpeechStatusDto {
+  const models = SPEECH_MODEL_IDS.map(modelDto);
+  const current = models.find((model) => model.id === selected) as SpeechModelDto;
+  return {
+    state: current.remote || platformPackage() ? current.state : 'unsupported',
+    selected,
+    models,
+  };
+}
+
+/** 多个模型同时下载时共用一次引擎安装 */
+async function ensureRuntime(pkg: string, signal: AbortSignal): Promise<void> {
+  if (isSpeechRuntimeReady(runtimeDir(), pkg)) return;
+  runtimeInstall ??= installSpeechRuntime({
+    dir: runtimeDir(),
+    platformPackage: pkg,
+    version: SHERPA_ONNX_VERSION,
+    signal,
+  }).finally(() => {
+    runtimeInstall = null;
+  });
+  await runtimeInstall;
+}
+
+export async function startSpeechDownload(id: SpeechModelId): Promise<boolean> {
+  const pkg = platformPackage();
+  const spec = SPEECH_MODELS[id];
+  if (!pkg || spec.remoteUrl || downloads.has(id)) return false;
+  const controller = new AbortController();
+  let settle!: () => void;
+  const task = { controller, settled: new Promise<void>((resolve) => (settle = resolve)) };
+  downloads.set(id, task);
+  const fileCount = (spec.archive ? 1 : spec.files.length) + 1;
+  const emit = (progress: Omit<SpeechDownloadProgressDto, 'fileCount' | 'modelId'>) => {
+    if (downloads.get(id) === task) progressSink?.({ ...progress, modelId: id, fileCount });
+  };
+  let error: string | undefined;
+  try {
+    if (!isSpeechRuntimeReady(runtimeDir(), pkg)) {
+      emit({ file: pkg, fileIndex: 0, received: 0, total: null });
+      await ensureRuntime(pkg, controller.signal);
+    }
+    controller.signal.throwIfAborted();
+    const options = {
+      signal: controller.signal,
+      onProgress: (p: {
+        file: string;
+        fileIndex: number;
+        received: number;
+        total: number | null;
+      }) =>
+        emit({ file: p.file, fileIndex: p.fileIndex + 1, received: p.received, total: p.total }),
+    };
+    if (spec.archive) await downloadArchiveModel(spec, modelDir(id), options);
+    else await downloadModel(spec, modelDir(id), options);
+    return true;
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+    return false;
+  } finally {
+    emit({ file: '', fileIndex: 0, received: 0, total: null, done: true, error });
+    if (downloads.get(id) === task) downloads.delete(id);
+    settle();
+    notifyAvailability();
+  }
+}
+
+export function cancelSpeechDownload(id: SpeechModelId): boolean {
+  const task = downloads.get(id);
+  if (!task || task.controller.signal.aborted) return false;
+  task.controller.abort();
+  return true;
+}
+
+/** 删模型必删；最后一个模型删掉时顺带删引擎（Windows 上已加载的原生插件删不掉，留着约 30MB） */
+export async function deleteSpeechModel(id: SpeechModelId): Promise<boolean> {
+  if (SPEECH_MODELS[id].remoteUrl) return false;
+  const task = downloads.get(id);
+  cancelSpeechDownload(id);
+  await task?.settled;
+  if (engine?.id === id) unloadEngine();
+  try {
+    fs.rmSync(modelDir(id), { recursive: true, force: true });
+    if (!SPEECH_MODEL_IDS.some((other) => fs.existsSync(modelDir(other)))) {
+      try {
+        fs.rmSync(runtimeDir(), { recursive: true, force: true });
+      } catch {}
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    notifyAvailability();
+    // 各窗口都按 done 事件重查状态：设置窗删了当前模型，主窗口的麦克风要跟着消失
+    progressSink?.({
+      modelId: id,
+      file: '',
+      fileIndex: 0,
+      fileCount: 0,
+      received: 0,
+      total: null,
+      done: true,
+    });
+  }
+}
+
+function unloadEngine(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
+  const current = engine;
+  engine = null;
+  void current?.promise.then(
+    (loaded) => loaded.dispose(),
+    () => {}
+  );
+}
+
+function scheduleIdleUnload(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
+  if (activeSessions > 0 || !engine) return;
+  idleTimer = setTimeout(unloadEngine, IDLE_UNLOAD_MS);
+  idleTimer.unref?.();
+}
+
+function loadEngine(): Promise<SpeechEngine> {
+  if (engine?.id !== selected) {
+    unloadEngine();
+    const spec = SPEECH_MODELS[selected];
+    const pending = (hooks?.createEngine ?? createEngine)(spec, modelDir(selected));
+    const entry = { id: selected, promise: pending };
+    engine = entry;
+    pending.catch(() => {
+      if (engine === entry) engine = null;
+    });
+  }
+  return engine.promise;
+}
+
+async function createEngine(spec: SpeechModelSpec, dir: string): Promise<SpeechEngine> {
+  if (spec.remoteUrl) return createRemoteSpeechEngine(spec.remoteUrl);
+  const { createWorkerEngine } = await import('./engine');
+  const { kind, config } = recognizerConfig(spec, dir);
+  return createWorkerEngine({ wrapperDir: speechRuntimeWrapperDir(runtimeDir()), kind, config });
+}
+
+async function correct(text: string): Promise<string> {
+  const run = corrector;
+  if (!run) return text;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const output = await Promise.race([
+      run(text),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CORRECTION_TIMEOUT_MS);
+      }),
+    ]);
+    return output === null ? text : acceptCorrection(text, output);
+  } catch (error) {
+    console.warn('[speech] correction failed:', error);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function rejectedSession(error: SpeechErrorCode): VoiceSession {
+  return {
+    push: () => {},
+    finish: () => Promise.resolve({ ok: false, error }),
+    cancel: () => {},
+  };
+}
+
+/**
+ * 录音会话：边录边推 16kHz PCM。流式模型逐块解码并经 onPartial 给中间结果；
+ * 本地整段模型按停顿逐句识别并给中间结果；第三方整段模型攒到 finish 再上传。
+ * 开启纠错时先把原文标记为纠错中给出，再返回纠错后的定稿。
+ */
+export function openSpeechSession(
+  onPartial: (text: string, correcting: boolean) => void
+): VoiceSession {
+  if (!enabled) return rejectedSession('disabled');
+  if (!modelReady(selected)) return rejectedSession('not-ready');
+  const spec = SPEECH_MODELS[selected];
+  const loaded = loadEngine();
+  activeSessions++;
+  scheduleIdleUnload();
+
+  let phase: 'open' | 'finishing' | 'closed' = 'open';
+  let total = 0;
+  let overflow = false;
+  let failed = false;
+  let lastPartial = '';
+  const buffered: Float32Array[] = [];
+  const stream: Promise<SpeechEngineStream> | null = spec.streaming
+    ? loaded.then((ready) => ready.openStream())
+    : null;
+  stream?.catch(() => {
+    failed = true;
+  });
+  const segmenter = spec.streaming || spec.remoteUrl ? null : createPauseSegmenter();
+  const sentences: string[] = [];
+  let chain: Promise<void> = Promise.resolve();
+  const recognize = async (samples: Float32Array) =>
+    normalizeTranscript(await (await loaded).transcribe(samples));
+
+  const close = () => {
+    if (phase === 'closed') return;
+    phase = 'closed';
+    activeSessions--;
+    scheduleIdleUnload();
+  };
+  const partial = (text: string, correcting = false) => {
+    if (phase === 'closed' || !text || (text === lastPartial && !correcting)) return;
+    lastPartial = text;
+    onPartial(text, correcting);
+  };
+
+  return {
+    push: (samples) => {
+      if (phase !== 'open' || overflow || samples.length === 0) return;
+      total += samples.length;
+      if (total > MAX_SAMPLES) {
+        overflow = true;
+        return;
+      }
+      if (segmenter) {
+        for (const sentence of segmenter.push(samples)) {
+          chain = chain
+            .then(async () => {
+              if (phase === 'closed') return;
+              sentences.push(await recognize(sentence));
+              partial(joinSegments(sentences));
+            })
+            .catch(() => {
+              failed = true;
+            });
+        }
+        return;
+      }
+      if (!stream) {
+        buffered.push(samples);
+        return;
+      }
+      chain = chain
+        .then(async () => partial(normalizeTranscript(await (await stream).accept(samples))))
+        .catch(() => {
+          failed = true;
+        });
+    },
+    finish: async (): Promise<SpeechTranscribeResult> => {
+      if (phase !== 'open') return { ok: false, error: 'failed' };
+      phase = 'finishing';
+      try {
+        if (overflow || total === 0) {
+          void stream?.then(
+            (s) => s.cancel(),
+            () => {}
+          );
+          return { ok: false, error: 'invalid-audio' };
+        }
+        let text: string;
+        if (stream) {
+          await chain;
+          if (failed) throw new Error('streaming decode failed');
+          text = await (await stream).finish();
+        } else if (segmenter) {
+          const tail = segmenter.flush();
+          await chain;
+          if (failed) throw new Error('sentence decode failed');
+          if (tail.speech || sentences.length === 0) sentences.push(await recognize(tail.samples));
+          text = joinSegments(sentences);
+        } else {
+          text = await (await loaded).transcribe(joinSamples(buffered));
+        }
+        text = normalizeTranscript(text);
+        if (text && correctionEnabled && corrector) {
+          partial(text, true);
+          text = await correct(text);
+        }
+        return { ok: true, text };
+      } catch (error) {
+        console.warn('[speech] transcription failed:', error);
+        return { ok: false, error: 'failed' };
+      } finally {
+        close();
+      }
+    },
+    cancel: () => {
+      if (phase !== 'open') return;
+      close();
+      buffered.length = 0;
+      segmenter?.flush();
+      void stream?.then(
+        (s) => s.cancel(),
+        () => {}
+      );
+    },
+  };
+}

@@ -37,6 +37,27 @@ describe('orderProjectSessions', () => {
     const out = orderProjectSessions([s('a', 5), s('b', 1, true), s('c', 3, true), s('d', 9)]);
     expect(out.map((x) => x.id)).toEqual(['c', 'b', 'd', 'a']);
   });
+
+  it('待提问 / 待审批的会话整体置前，组内保持原有顺序', () => {
+    const out = orderProjectSessions([
+      s('a', 5),
+      s('b', 1, true),
+      { ...s('c', 3), pendingAskCount: 1 },
+      { ...s('d', 2), pendingApprovalCount: 2 },
+      s('e', 9),
+    ]);
+    expect(out.map((x) => x.id)).toEqual(['c', 'd', 'b', 'e', 'a']);
+  });
+});
+
+describe('orderPinned waiting', () => {
+  it('手动顺序不动，未收录部分待处理的置前', () => {
+    const out = orderPinned(
+      [s('a', 1), s('b', 2), { ...s('c', 0), pendingAskCount: 1 }, s('m', 0)],
+      ['m']
+    );
+    expect(out.map((x) => x.id)).toEqual(['m', 'c', 'b', 'a']);
+  });
 });
 
 describe('isDrawerActive', () => {

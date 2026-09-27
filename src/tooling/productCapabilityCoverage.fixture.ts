@@ -49,6 +49,12 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   memoryDistillEnabled: excluded('Memory auto-distillation preference; not an Enso capability.'),
   memoryKgEnabled: excluded('Memory entity-graph extraction preference; not an Enso capability.'),
+  voiceInputEnabled: excluded('Voice input is a device-local composer preference.'),
+  voiceInputDevice: excluded('Voice input is a device-local composer preference.'),
+  voiceModel: excluded('Voice input is a device-local composer preference.'),
+  voiceCorrectionEnabled: excluded('Voice input is a device-local composer preference.'),
+  voiceCorrectionModel: excluded('Voice input is a device-local composer preference.'),
+  voiceCorrectionRemoteModel: excluded('Voice input is a device-local composer preference.'),
   editMode: excluded('File edit mode is a desktop session preference, not an Enso capability.'),
   compactStrategy: excluded('Context compaction is a desktop session preference.'),
   smartCompactEnabled: excluded(
@@ -166,6 +172,12 @@ export const SETTINGS_ACTION_COVERAGE = {
   setMemoryKgEnabled: excluded(
     'Memory entity-graph extraction preference; not an Enso capability.'
   ),
+  setVoiceInputEnabled: excluded('Voice input is a device-local composer preference.'),
+  setVoiceInputDevice: excluded('Voice input is a device-local composer preference.'),
+  setVoiceModel: excluded('Voice input is a device-local composer preference.'),
+  setVoiceCorrectionEnabled: excluded('Voice input is a device-local composer preference.'),
+  setVoiceCorrectionModel: excluded('Voice input is a device-local composer preference.'),
+  setVoiceCorrectionRemoteModel: excluded('Voice input is a device-local composer preference.'),
   setEditMode: excluded('File edit mode is a desktop session preference, not an Enso capability.'),
   setCompactStrategy: excluded('Context compaction is a desktop session preference.'),
   setSmartCompactEnabled: excluded(
@@ -348,6 +360,7 @@ export const IPC_PRODUCT_COVERAGE = {
     'Main-to-renderer persist flush before destroying the window.'
   ),
   APP_FLUSH_PERSIST_RESPONSE: excluded('Renderer-to-main persist flush ack.'),
+  APP_SET_BADGE_COUNT: excluded('Renderer-to-main Dock badge count for waiting conversations.'),
   PROVIDERS_SCAN_LOCAL: surfaces('providers.import-local'),
   PROVIDERS_COLLECT_IMPORT: excluded('Second phase of the reviewed provider import flow.'),
   PROVIDERS_LIST_MODELS: surfaces('providers.fetch-models'),
@@ -609,6 +622,18 @@ export const IPC_PRODUCT_COVERAGE = {
   USAGE_SUMMARY: excluded(
     'Read-only local token usage aggregation for the Settings → Usage panel.'
   ),
+  RESOURCES_SAMPLE: excluded('Read-only local process sampling for Settings → Resources.'),
+  RESOURCES_STORAGE_SCAN: excluded('Read-only userData disk scan for Settings → Resources.'),
+  RESOURCES_STORAGE_CLEAN: excluded('Local cache/log cleanup for Settings → Resources.'),
+  RESOURCES_STORAGE_REVEAL: excluded('Reveal a userData path in the OS file manager.'),
+  RESOURCES_STORAGE_CANCEL: excluded('Cancel the running storage scan.'),
+  RESOURCES_STORAGE_LAST: excluded('Last storage scan snapshot for instant display.'),
+  RESOURCES_STORAGE_PROGRESS: excluded('Main-to-renderer storage scan progress event.'),
+  RESOURCES_SESSIONS_CLEAN: excluded(
+    'Settings → Resources session cleanup, relayed to the main window removeConversation.'
+  ),
+  RESOURCES_SESSIONS_CLEAN_REQUEST: excluded('Main-to-renderer session cleanup relay event.'),
+  RESOURCES_SESSIONS_CLEAN_DONE: excluded('Main window acknowledgement of a session cleanup.'),
   MEMORY_LIST: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_DETAIL: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_ARCHIVE: excluded('Memory desktop UI; not an Enso capability.'),
@@ -629,6 +654,16 @@ export const IPC_PRODUCT_COVERAGE = {
   MEMORY_CHAT_MODEL_CANCEL: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHAT_MODEL_DELETE: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHAT_MODEL_PROGRESS: excluded('Memory desktop UI; not an Enso capability.'),
+  SPEECH_STATUS: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_DOWNLOAD: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_CANCEL: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_DELETE: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_PROGRESS: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_SESSION_PUSH: excluded('Composer dictation; not an Enso capability.'),
+  SPEECH_SESSION_FINISH: excluded('Composer dictation; not an Enso capability.'),
+  SPEECH_SESSION_CANCEL: excluded('Composer dictation; not an Enso capability.'),
+  SPEECH_PARTIAL: excluded('Composer dictation; not an Enso capability.'),
+  SPEECH_MIC_ACCESS: excluded('Composer dictation microphone permission.'),
   MEMORY_REEMBED: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHANGED: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_GRAPH: excluded('Memory desktop UI; not an Enso capability.'),

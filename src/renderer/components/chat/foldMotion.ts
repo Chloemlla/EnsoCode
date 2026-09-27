@@ -9,7 +9,7 @@ export const EMPTY_FOLD_MOTION: FoldMotionState = { rows: new Set(), expanded: n
 
 /**
  * 对比上一帧折叠行，找出探后折叠组的动效时机：
- * 刚配对（上一帧 mark 与 fold 还平铺）或手动收起 → 从折前跨度缩回；刚展开 → 子行按序揭示。
+ * 刚配对（上一帧 mark 与 fold 还平铺）或收起过程 → 从折前跨度缩回；刚展开过程 → 子行按序揭示。
  * measure(from, to) 返回上一帧两行之间的像素跨度，量不到返回 0。
  */
 export function diffFoldMotion(
@@ -24,7 +24,7 @@ export function diffFoldMotion(
   for (const item of folded) {
     if (item.kind !== 'tool-group' || !item.explore) continue;
     const shown = prev.rows.has(item.key);
-    if (item.expanded) {
+    if (item.explore.steps) {
       expanded.add(item.key);
       if (shown && !prev.expanded.has(item.key)) expands.push(item.key);
       item.children.forEach((child, index) => {

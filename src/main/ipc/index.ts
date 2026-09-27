@@ -1,5 +1,6 @@
 import { app } from 'electron';
 import { registerAgentHandlers } from './agent';
+import { registerAppBadgeHandlers } from './appBadge';
 import { registerAssetHandlers } from './assets';
 import { registerBrowserHandlers } from './browser';
 import { registerBtwHandlers } from './btw';
@@ -16,7 +17,9 @@ import { registerPairHandlers } from './pair';
 import { registerProjectHandlers } from './projects';
 import { registerProviderHandlers } from './providers';
 import { registerProxyHandlers } from './proxy';
+import { registerResourceHandlers } from './resources';
 import { registerSettingsHandlers } from './settings';
+import { registerSpeechHandlers } from './speech';
 import { registerSshConnectionHandlers } from './sshConnections';
 import { registerTerminalHandlers } from './terminal';
 import { registerUpdaterHandlers } from './updater';
@@ -49,8 +52,11 @@ export function registerIpcHandlers(): void {
   registerTerminalHandlers();
   registerWorkspaceSearchHandlers();
   registerUsageHandlers();
+  registerResourceHandlers();
   registerMemoryHandlers();
   registerBtwHandlers();
+  registerAppBadgeHandlers();
+  registerSpeechHandlers();
 
   // 所有新建窗口自动挂载状态事件
   app.on('browser-window-created', (_, win) => {

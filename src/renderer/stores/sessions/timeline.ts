@@ -8,6 +8,7 @@ import type {
   TurnPerf,
 } from '@shared/types/agent';
 import type { ProjectedApplyPatchOutcome, ProjectedFileChange } from '@shared/types/fileChanges';
+import { unwrapMcpProxyCall } from '@/lib/mcpToolName';
 
 /** edit 工具的单个替换块（pi edit 工具参数 edits[] 的元素） */
 export interface EditBlock {
@@ -80,6 +81,12 @@ export type TimelineItem =
       rtk?: RtkToolStats;
       /** submit_plan 提交的计划；其它工具缺省 */
       plan?: { title: string; text: string } | null;
+      /** 联系主 agent / 队员、子代理 send 发出的正文；其它工具缺省 */
+      sentMessage?: string;
+      /** memory_capture 记下的正文（写入回执不带正文）；其它工具缺省 */
+      memoryContent?: string;
+      /** ask_user 当时的问题、选项与用户的回答；其它工具缺省 */
+      ask?: AskUserView;
     }
   | {
       kind: 'tool-group';
@@ -92,8 +99,8 @@ export type TimelineItem =
       exploring: boolean;
       /** 回答完成后的过程折叠组（任意成功工具 + 思考）；普通工具组缺省 */
       activity?: { thinking: number; workedMs: number };
-      /** 成对的 explore_mark → explore_fold 探索组；其它组缺省 */
-      explore?: { goal: string };
+      /** 成对的 explore_mark → explore_fold 探索组：组头展开只给目标与结果，steps 时才平铺过程；其它组缺省 */
+      explore?: { goal: string; report: string; steps: boolean };
       /** 组内原始行（tool + 夹在其间的 thinking），展开时平铺为顶层行 */
       children: TimelineItem[];
     }
@@ -192,6 +199,7 @@ const SUMMARY_KEYS = [
 
 const PATH_SUMMARY_KEYS = new Set(['path', 'file_path']);
 const HASHLINE_HEADER = /^\[(.+)#([0-9A-Fa-f]{4})\]$/;
+const PATCH_FILE_HEADER = /^\*\*\* (?:(?:Add|Delete|Update) File|Move to): (.+)$/;
 
 /** Windows 盘符根路径还原成 POSIX，便于远程 SSH 工具路径和项目 cwd 对齐 */
 function posixifyPath(value: string): string {
@@ -221,6 +229,19 @@ function hashlinePathFromInput(input: unknown): string | undefined {
     return HASHLINE_HEADER.exec(trimmed)?.[1];
   }
   return undefined;
+}
+
+/** apply_patch 尚无落盘结果时从补丁头取目标文件（move 计入新路径，与落盘结果口径一致） */
+function patchPathsFromArgs(args: unknown): string[] | null {
+  if (!args || typeof args !== 'object') return null;
+  const input = (args as Record<string, unknown>).input;
+  if (typeof input !== 'string') return null;
+  const paths = new Set<string>();
+  for (const line of input.split('\n')) {
+    const path = PATCH_FILE_HEADER.exec(line.trim())?.[1];
+    if (path) paths.add(path);
+  }
+  return [...paths];
 }
 
 function summarizeArgs(args: unknown, cwd?: string): string {
@@ -359,6 +380,139 @@ export function extractWriteContent(name: string, args: unknown): string | null 
   if (name !== 'write' || !args || typeof args !== 'object') return null;
   const content = (args as Record<string, unknown>).content;
   return typeof content === 'string' && content ? content : null;
+}
+
+/** 消息类工具的 [正文, 收件人]；子代理收件人只认本时间线 spawn 过的名字，查不到不显示 UUID */
+const MESSAGE_PARTS = new Map<
+  string,
+  (args: Record<string, unknown>, agents: ReadonlyMap<string, string>) => unknown[]
+>([
+  ['message_main_agent', (args) => [args.message]],
+  ['message_coworker', (args) => [args.text, args.to]],
+  [
+    'subagent',
+    (args, agents) =>
+      args.operation === 'send'
+        ? [args.message, agents.get(String(args.agentId))]
+        : args.operation === 'message'
+          ? [args.text, agents.get(String(args.to))]
+          : [],
+  ],
+]);
+/** 投递成功回执只给模型看；失败回执与前面捎带的系统提醒不匹配，照常显示 */
+const DELIVERY_RECEIPT =
+  /(?:^|\n)\((?:delivered to |the main agent is blocked waiting )[^\n]*\)\s*$/;
+/** 子代理 send 的纯投递回执；带 report（wait）等其它内容时整段保留 */
+const SEND_RECEIPT_KEYS = new Set(['agentId', 'runId', 'delivery', 'status']);
+
+function extractSentMessage(
+  name: string,
+  args: unknown,
+  agents: ReadonlyMap<string, string>
+): { text: string; summary: string } | null {
+  const parts = MESSAGE_PARTS.get(name);
+  if (!parts || !args || typeof args !== 'object') return null;
+  const [body, to] = parts(args as Record<string, unknown>, agents);
+  if (typeof body !== 'string' || !body.trim()) return null;
+  const text = body.trim();
+  return { text, summary: typeof to === 'string' && to.trim() ? `${to.trim()} · ${text}` : text };
+}
+
+/** 子代理结果是末尾一段 JSON，前面可能被捎带的系统提醒顶开 */
+function splitTrailingJson(
+  output: string | null | undefined
+): { head: string; value: Record<string, unknown> } | null {
+  if (!output) return null;
+  const start = output.startsWith('{') ? 0 : output.lastIndexOf('\n{') + 1;
+  try {
+    const value: unknown = JSON.parse(output.slice(start));
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { head: output.slice(0, start).trimEnd(), value: value as Record<string, unknown> }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripDeliveryReceipt(output: string | null): string | null {
+  const json = splitTrailingJson(output);
+  const rest =
+    json && Object.keys(json.value).every((key) => SEND_RECEIPT_KEYS.has(key))
+      ? json.head
+      : output?.replace(DELIVERY_RECEIPT, '');
+  return rest?.trimEnd() || null;
+}
+
+/** spawn 回执里的 agentId → 派活时起的名字，供后续发消息行显示收件人 */
+function recordSpawnedAgent(
+  agents: Map<string, string>,
+  args: unknown,
+  output: string | undefined
+): void {
+  if (!args || typeof args !== 'object') return;
+  const { operation, name, description } = args as Record<string, unknown>;
+  if (operation !== 'spawn') return;
+  const label = [name, description].find((value) => typeof value === 'string' && value.trim());
+  const agentId = splitTrailingJson(output)?.value.agentId;
+  if (typeof label === 'string' && typeof agentId === 'string') agents.set(agentId, label.trim());
+}
+
+/** memory_capture 的标题（缺省取正文首行）与正文 */
+function extractCapturedMemory(
+  name: string,
+  args: unknown
+): { title: string; content: string } | null {
+  if (name !== 'memory_capture' || !args || typeof args !== 'object') return null;
+  const { title, content } = args as Record<string, unknown>;
+  if (typeof content !== 'string' || !content.trim()) return null;
+  const text = content.trim();
+  const heading = typeof title === 'string' ? title.trim() : '';
+  return { title: heading || text.split('\n', 1)[0].trim(), content: text };
+}
+
+export interface AskUserView {
+  question: string;
+  /** 当时展示的选项（ask_user 最多展示前 4 个）；自由问答为空 */
+  options: string[];
+  /** 用户的回答；等待中、已取消或超时失败为 null */
+  answer: string | null;
+  /** 超时无人回答，按 default_option 自动选择 */
+  autoSelected: boolean;
+}
+
+/** 工具结果前捎带的系统提醒块（withSystemReminders 注入），不是回答的一部分 */
+const LEADING_NOTICE = /^\s*<(system-reminder|background-task-update)>[\s\S]*?<\/\1>/;
+const AUTO_SELECTED = / \(auto-selected: no response in time\)$/;
+
+/** ask_user 的问题与选项取自参数，回答取自回执；回执里捎带的提醒留给调用方照常显示 */
+function extractAsk(
+  name: string,
+  args: unknown,
+  output: string | null,
+  answered: boolean
+): { ask: AskUserView; output: string | null } | null {
+  if (name !== 'ask_user' || !args || typeof args !== 'object') return null;
+  const { question, options } = args as Record<string, unknown>;
+  if (typeof question !== 'string' || !question.trim()) return null;
+  const shown = Array.isArray(options)
+    ? options
+        .slice(0, 4)
+        .flatMap((option) => (typeof option === 'string' && option.trim() ? [option.trim()] : []))
+    : [];
+  const ask = { question: question.trim(), options: shown, answer: null, autoSelected: false };
+  if (!answered || !output) return { ask, output };
+  let rest = output;
+  const notices: string[] = [];
+  for (let block = LEADING_NOTICE.exec(rest); block; block = LEADING_NOTICE.exec(rest)) {
+    notices.push(block[0].trim());
+    rest = rest.slice(block[0].length);
+  }
+  const reply = rest.trim();
+  const answer = reply.replace(AUTO_SELECTED, '');
+  return {
+    ask: { ...ask, answer: answer || null, autoSelected: answer !== reply },
+    output: notices.join('\n\n') || null,
+  };
 }
 
 /** edit 工具参数里取出替换块（保持同一数组引用，供 memo 做引用比较） */
@@ -569,6 +723,7 @@ function buildMessageTimeline(
     }
   }
   const items: TimelineItem[] = [];
+  const spawnedAgents = new Map<string, string>();
   // 每条消息之后的首个非 toolResult 角色（反向一次扫完）：用于判定「本轮末 step」
   const nextTurnRole: (string | undefined)[] = new Array(messages.length);
   for (let i = messages.length - 1, seen: string | undefined; i >= 0; i--) {
@@ -777,19 +932,41 @@ function buildMessageTimeline(
               : result.output
             : (partial ?? null) || null;
           const sandboxView = part.name === 'exec' ? parseSandboxOutput(output) : null;
+          const call = unwrapMcpProxyCall(part.name, part.arguments);
+          if (part.name === 'subagent') {
+            recordSpawnedAgent(spawnedAgents, part.arguments, result?.output);
+          }
+          const sent = extractSentMessage(part.name, part.arguments, spawnedAgents);
+          const captured = extractCapturedMemory(part.name, part.arguments);
+          const asked = extractAsk(
+            part.name,
+            part.arguments,
+            output,
+            Boolean(result && !result.isError)
+          );
+          const patchPaths =
+            part.name !== 'apply_patch'
+              ? null
+              : result?.fileChanges?.length
+                ? result.fileChanges.map((change) => change.path)
+                : patchPathsFromArgs(part.arguments);
           items.push({
             kind: 'tool',
             key,
-            name: part.name,
+            name: call.name,
             summary: execSource
               ? summarizeExecSource(execSource)
-              : part.name === 'apply_patch' && result?.fileChanges?.length
-                ? result.fileChanges.length === 1
-                  ? toProjectRelativePath(result.fileChanges[0].path, cwd)
-                  : `${result.fileChanges.length} files`
-                : summarizeArgs(part.arguments, cwd),
+              : patchPaths
+                ? patchPaths.length > 1
+                  ? `${patchPaths.length} files`
+                  : toProjectRelativePath(patchPaths[0] ?? '', cwd)
+                : (sent?.summary ??
+                  captured?.title ??
+                  asked?.ask.question ??
+                  call.summary ??
+                  summarizeArgs(call.args, cwd)),
             source: execSource,
-            output,
+            output: sent ? stripDeliveryReceipt(output) : asked ? asked.output : output,
             nestedPending: nestedPendingCount(part.id, pendingApprovals) || undefined,
             state: result
               ? result.isError || sandboxView?.status === 'failed'
@@ -816,6 +993,9 @@ function buildMessageTimeline(
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
               : {}),
+            ...(sent ? { sentMessage: sent.text } : {}),
+            ...(captured ? { memoryContent: captured.content } : {}),
+            ...(asked ? { ask: asked.ask } : {}),
             ...(result || !toolStartedAt ? {} : { startedAt: toolStartedAt[part.id] ?? null }),
           });
           return;
@@ -879,6 +1059,9 @@ const messageItemTime = (
 function insertCompactionNotice(items: TimelineItem[], noticeAt: number): TimelineItem[] {
   const lastSummary = items.findLast((item) => item.kind === 'compaction');
   if (!lastSummary) return items;
+  // 锚点必须在它提示的那次摘要之后；更早说明锚点已失效（如冷缓存清空时记成 0）。
+  // 否则提示会顶成首行，上滑分页的前置行对不上，翻一页就停
+  if (noticeAt <= messageItemIndex(lastSummary)) return items;
   let at = items.length;
   for (let i = 0; i < items.length; i++) {
     const index = messageItemIndex(items[i]);
@@ -1131,6 +1314,10 @@ function mergeAdjacentThinking(items: TimelineItem[]): TimelineItem[] {
 }
 
 const EXPLORE_TOOLS = new Set(['explore_mark', 'explore_fold']);
+const EXPLORE_FOLD_HEAD = /^Explore folded\.[^\n]*\n*/;
+
+/** 探索组「过程」展开态的 key：须与组头同时展开才平铺原始行 */
+export const exploreStepsKey = (key: string): string => `${key}:steps`;
 
 /** 成功的 explore_mark 到 explore_fold（含两端与其间正文/思考）收成探索组；其它行断开配对 */
 function pairExploreFolds(
@@ -1154,14 +1341,19 @@ function pairExploreFolds(
           count += 1;
         }
         const key = `explore-${mark.key}`;
+        const expanded = expandedKeys.has(key);
         result.push({
           kind: 'tool-group',
           key,
-          expanded: expandedKeys.has(key),
+          expanded,
           count,
           stats,
           exploring: false,
-          explore: { goal: mark.summary },
+          explore: {
+            goal: mark.summary,
+            report: (item.output ?? '').replace(EXPLORE_FOLD_HEAD, '').trim(),
+            steps: expanded && expandedKeys.has(exploreStepsKey(key)),
+          },
           children,
         });
         start = -1;
@@ -1174,9 +1366,9 @@ function pairExploreFolds(
   return result;
 }
 
-/** 探索组展开时其原始行紧随组头 */
+/** 探索组展开过程时其原始行紧随组头 */
 function withExploreChildren(item: TimelineItem): TimelineItem[] {
-  return item.kind === 'tool-group' && item.expanded ? [item, ...item.children] : [item];
+  return item.kind === 'tool-group' && item.explore?.steps ? [item, ...item.children] : [item];
 }
 
 function activitySegment(

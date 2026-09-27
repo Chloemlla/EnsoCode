@@ -50,9 +50,9 @@ describe('messageCache', () => {
 
   it('evicts stale message bodies, leaves hot and empty conversations', () => {
     const conversations = {
-      hot: { messages: [1], customEntries: [2] },
+      hot: { messages: [{}], customEntries: [2] },
       stale: {
-        messages: [3],
+        messages: [{ timestamp: 3 }],
         customEntries: [4],
         historyLoading: true,
         historyLoadAttempted: true,
@@ -65,16 +65,39 @@ describe('messageCache', () => {
     expect(next.stale).toEqual({
       messages: [],
       customEntries: [],
+      lastActiveAt: 3,
       historyBaseIndex: undefined,
       historyLoading: undefined,
       historyLoadAttempted: undefined,
     });
   });
 
+  it('丢正文时留下最后活跃时刻，侧栏不回落到 createdAt', () => {
+    type Body = {
+      messages: { timestamp?: number }[];
+      customEntries: unknown[];
+      lastActiveAt?: number;
+    };
+    const conversations: Record<'fromMessage' | 'kept' | 'noTimestamp', Body> = {
+      fromMessage: { messages: [{ timestamp: 1 }, { timestamp: 500 }], customEntries: [] },
+      kept: { messages: [{ timestamp: 500 }], customEntries: [], lastActiveAt: 900 },
+      noTimestamp: { messages: [{}], customEntries: [], lastActiveAt: 700 },
+    };
+    const next = evictColdMessages(
+      conversations,
+      null,
+      { fromMessage: 0, kept: 0, noTimestamp: 0 },
+      MESSAGE_CACHE_TTL_MS
+    );
+    expect(next.fromMessage.lastActiveAt).toBe(500);
+    expect(next.kept.lastActiveAt).toBe(900);
+    expect(next.noTimestamp.lastActiveAt).toBe(700);
+  });
+
   it('requireStamp 不碰从未离开过、因而没有盖章的正文', () => {
     const conversations = {
-      fresh: { messages: [1], customEntries: [] },
-      expired: { messages: [2], customEntries: [3] },
+      fresh: { messages: [{}], customEntries: [] },
+      expired: { messages: [{}], customEntries: [3] },
     };
     const next = evictStampedColdMessages(
       conversations,

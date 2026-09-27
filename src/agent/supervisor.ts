@@ -105,9 +105,10 @@ import {
   type OccupancySkill,
 } from './contextOccupancy';
 import {
-  type AnchorMessage,
+  contextBreakdownMessages,
   type ContextUsageTracker,
   ContextUsageTracker as UsageTracker,
+  toAnchorMessage,
 } from './contextUsage';
 import {
   cancelContinuousMemory,
@@ -126,6 +127,7 @@ import { readHarnessRuleFiles, resolveHarnessSkillRoots } from './harnessAssets'
 import { type ContextMessage, sanitizeContextMessages } from './imageContext';
 import { createIsolatedSandboxTool } from './isolatedSandbox';
 import { McpManager } from './mcp';
+import { createMcpProxyTool, isDeferredMcp } from './mcpProxy';
 import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { ParentNotifier } from './notify';
@@ -166,7 +168,7 @@ import {
   validateAgainstSchema,
   withAgentRead,
 } from './structuredYield';
-import { createUnifiedSubagentTool, lastAssistantText } from './subagent';
+import { CoworkerIdleReminder, createUnifiedSubagentTool, lastAssistantText } from './subagent';
 import { SystemReminderRegistry } from './systemReminder';
 import {
   buildInitialTitleUserText,
@@ -251,6 +253,8 @@ interface ManagedSession {
   adaptiveDowngraded: boolean;
   /** 最近一次 auto_retry_start 携带的原始错误（取消重试时的终态错误文案） */
   lastRetryError?: string;
+  /** 已见终态 agent_end、待 agent_settled 收口；failTurn 等提前收口时清掉，settled 不再重复收 */
+  settlePending?: boolean;
   /** 当前用户轮已做过一次空回复自动续跑 */
   silentTurnNudgeUsed: boolean;
   /** 本次空回复恢复的类型；post-tool 第二次仍空则失败 */
@@ -261,6 +265,9 @@ interface ManagedSession {
   requestStartMs?: number;
   toolStartAt: Map<string, number>;
   toolDurations: Map<string, number>;
+  /** 流式增量合并窗口：窗口内只记下待发下标，窗口结束或遇到其他事件时发最新正文 */
+  upsertTimer?: ReturnType<typeof setTimeout>;
+  upsertPending?: number;
   gate: ApprovalGate;
   asks: AskManager;
   pendingTaskReminders: string[];
@@ -843,7 +850,9 @@ export class SessionSupervisor {
       return;
     }
     if (command.type === 'warm-mcp') {
-      void this.mcp.toolsFor(command.servers);
+      const deferred = command.servers.filter(isDeferredMcp);
+      for (const server of deferred) this.mcp.refresh(server);
+      void this.mcp.toolsFor(command.servers.filter((server) => !isDeferredMcp(server)));
       return;
     }
     if (command.type === 'pin-sessions') {
@@ -1515,9 +1524,11 @@ export class SessionSupervisor {
         : {}),
     });
     const toolsStart = Date.now();
+    const deferredMcp = mcpServers.filter(isDeferredMcp);
+    const directMcp = mcpServers.filter((server) => !isDeferredMcp(server));
     const [, mcpTools] = await Promise.all([
       resourceLoader.reload(),
-      mcpServers.length > 0 ? this.mcp.toolsFor(mcpServers, 3000) : Promise.resolve([]),
+      directMcp.length > 0 ? this.mcp.toolsFor(directMcp, 3000) : Promise.resolve([]),
     ]);
     const toolsMs = Date.now() - toolsStart;
     if (approvalReviewer) this.approvalReviewer = approvalReviewer;
@@ -1713,8 +1724,18 @@ export class SessionSupervisor {
         ...mutations,
       ];
     };
-    const wrapMcpTools = (toolGate: ApprovalGate): Def[] =>
-      mcpTools.map((tool) => withApproval(toolGate, 'mcp', tool));
+    const wrapMcpTools = (toolGate: ApprovalGate): Def[] => [
+      ...mcpTools.map((tool) => withApproval(toolGate, 'mcp', tool)),
+      ...(deferredMcp.length > 0
+        ? [
+            createMcpProxyTool({
+              servers: deferredMcp,
+              resolve: (server) => this.mcp.resolve(server),
+              wrap: (tool) => withApproval(toolGate, 'mcp', tool),
+            }),
+          ]
+        : []),
+    ];
     const buildCoreTools = (): Def[] => [
       ...buildBaseTools(gate, checkpoints),
       ...wrapMcpTools(gate),
@@ -1928,10 +1949,31 @@ export class SessionSupervisor {
         return ++managed.seq;
       }
     );
+    const coworkerIdle = new CoworkerIdleReminder();
+    reminders.register(
+      'coworker-idle',
+      () =>
+        coworkerIdle.take((runIds) => {
+          // worker 不知道 agentId：按 Main 下发给子会话的 runId（prompt-child 的 requestId）对上队员
+          const parent = managedRef ?? this.sessions.get(sessionId);
+          for (const info of parent?.coworkers.values() ?? []) {
+            const child = this.sessions.get(info.id);
+            if (child && [...runIds].some((runId) => child.promptedRequestIds.has(runId))) {
+              return { name: info.name, running: child.status === 'running' };
+            }
+          }
+          return null;
+        }),
+      -1
+    );
     const unifiedSubagentTool = createUnifiedSubagentTool({
       agentTypes,
       models: subagentModels,
-      invoke: (request, signal) => agentControl.invoke(request, signal),
+      invoke: async (request, signal) => {
+        const response = await agentControl.invoke(request, signal);
+        coworkerIdle.observe(request, response);
+        return response;
+      },
     });
     const askManager = this.createAskManager(identity);
     // 内嵌浏览器：页面活在 Main，worker 只发 browser-invoke 事件。每个父会话一张挂起表。
@@ -2066,7 +2108,7 @@ export class SessionSupervisor {
     else ensureAssistantUsage(session.messages as unknown[]);
     console.log(
       `[spawn] ${sessionId.slice(0, 8)} total ${Date.now() - spawnStart}ms` +
-        ` (tools ${toolsMs}ms, mcp ${mcpTools.length} tools, cwd ${cwd})`
+        ` (tools ${toolsMs}ms, mcp ${mcpTools.length} tools + ${deferredMcp.length} deferred servers, cwd ${cwd})`
     );
 
     managedRef = this.registerManagedSession(identity, session, gate, model.modelId, {
@@ -2719,6 +2761,7 @@ export class SessionSupervisor {
     event: Parameters<Parameters<AgentSession['subscribe']>[0]>[0]
   ): void {
     managed.lastActivityAt = Date.now();
+    if (event.type !== 'message_update') this.flushStreamingUpsert(managed);
     switch (event.type) {
       case 'agent_start':
         managed.silentTurnNudgeUsed = false;
@@ -2772,7 +2815,7 @@ export class SessionSupervisor {
             timing.thinkingEndMs = Date.now();
           }
         }
-        this.replaceLastMessage(managed, projected);
+        this.replaceLastMessage(managed, projected, true);
         return;
       }
       case 'message_end': {
@@ -2809,8 +2852,8 @@ export class SessionSupervisor {
         return;
       case 'auto_retry_end': {
         // 重试被取消（abortRetry）时没有后续 agent_end，在这里收口；
-        // 重试耗尽则已由 agent_end(willRetry=false) 走 failTurn，status 守卫避免重复
-        if (event.success || managed.status !== 'running') return;
+        // 重试耗尽已有 agent_end(willRetry=false)，交给 agent_settled 按末条错误收口
+        if (event.success || managed.status !== 'running' || managed.settlePending) return;
         this.failTurn(managed, managed.lastRetryError ?? event.finalError ?? 'Auto-retry failed.');
         return;
       }
@@ -2909,6 +2952,14 @@ export class SessionSupervisor {
           }
           return;
         }
+        // agent_end 不是轮次边界：pi 之后还可能溢出压缩续跑、跑排队消息，agent_settled 才收口
+        managed.settlePending = true;
+        return;
+      }
+      case 'agent_settled': {
+        if (!managed.settlePending) return;
+        managed.settlePending = false;
+        this.reconcileMessages(managed, this.transcript(managed));
         if (this.tryAdaptiveDowngrade(managed)) return;
         // 终态错误轮（重试耗尽或不可重试）按失败收口，不再误报「回复完成」
         const lastAssistant = [...managed.messages]
@@ -3016,21 +3067,60 @@ export class SessionSupervisor {
     });
   }
 
-  private replaceLastMessage(managed: ManagedSession, message: ProjectedMessage | null): void {
+  private replaceLastMessage(
+    managed: ManagedSession,
+    message: ProjectedMessage | null,
+    streaming = false
+  ): void {
     if (!message) return;
     if (managed.messages.length === 0) {
       this.upsertLocalMessage(managed, message);
       return;
     }
     const index = managed.messages.length - 1;
-    const decorated = this.withTiming(managed, index, message);
-    managed.messages[index] = decorated;
+    managed.messages[index] = this.withTiming(managed, index, message);
+    if (!streaming) {
+      this.emitUpsert(managed, index);
+      return;
+    }
+    // 每次增量都下发整条消息：长回复的 IPC 体积与 renderer 重算随长度平方增长，按窗口合并
+    if (managed.upsertTimer) {
+      managed.upsertPending = index;
+      return;
+    }
+    this.emitUpsert(managed, index);
+    this.armUpsertWindow(managed);
+  }
+
+  private armUpsertWindow(managed: ManagedSession): void {
+    managed.upsertTimer = setTimeout(() => {
+      managed.upsertTimer = undefined;
+      const index = managed.upsertPending;
+      if (index === undefined) return;
+      managed.upsertPending = undefined;
+      if (this.sessions.get(managed.identity.sessionId) !== managed) return;
+      this.emitUpsert(managed, index);
+      this.armUpsertWindow(managed);
+    }, STREAM_UPSERT_WINDOW_MS);
+  }
+
+  private flushStreamingUpsert(managed: ManagedSession): void {
+    if (managed.upsertTimer) clearTimeout(managed.upsertTimer);
+    managed.upsertTimer = undefined;
+    const index = managed.upsertPending;
+    managed.upsertPending = undefined;
+    if (index !== undefined) this.emitUpsert(managed, index);
+  }
+
+  private emitUpsert(managed: ManagedSession, index: number): void {
+    const message = managed.messages[index];
+    if (!message) return;
     this.options.emit({
       type: 'message-upsert',
       identity: managed.identity,
       seq: ++managed.seq,
       index,
-      message: decorated,
+      message,
     });
   }
 
@@ -3177,6 +3267,7 @@ export class SessionSupervisor {
   private failTurn(managed: ManagedSession, error: string, undelivered = false): void {
     const turnId = managed.currentTurnId ?? randomUUID();
     managed.currentTurnId = undefined;
+    managed.settlePending = false;
     managed.contextUsage.setPendingSnapshot(undefined);
     managed.status = 'failed';
     // 失败轮不总结，但下一轮的起点仍要往前推，否则失败轮的消息会混进下一轮摘要
@@ -3206,6 +3297,7 @@ export class SessionSupervisor {
   }
 
   private emitStatus(managed: ManagedSession, error?: string): void {
+    this.flushStreamingUpsert(managed);
     this.options.emit({
       type: 'status',
       identity: managed.identity,
@@ -3326,56 +3418,29 @@ export class SessionSupervisor {
     return { current: category + buckets.compaction, category, compactionIndex };
   }
 
-  private toAnchorMessages(
-    messages: readonly unknown[],
-    tracker?: ContextUsageTracker
-  ): AnchorMessage[] {
-    return messages.map((raw) => {
-      const record = (raw ?? {}) as Record<string, unknown>;
-      const usageRaw = record.usage;
-      const usage =
-        usageRaw && typeof usageRaw === 'object'
-          ? {
-              input: Number((usageRaw as { input?: number }).input ?? 0),
-              output: Number((usageRaw as { output?: number }).output ?? 0),
-              cacheRead: Number((usageRaw as { cacheRead?: number }).cacheRead ?? 0),
-              cacheWrite: Number((usageRaw as { cacheWrite?: number }).cacheWrite ?? 0),
-              ...((usageRaw as { contextTokens?: number }).contextTokens !== undefined
-                ? { contextTokens: Number((usageRaw as { contextTokens?: number }).contextTokens) }
-                : {}),
-              ...((usageRaw as { totalTokens?: number }).totalTokens !== undefined
-                ? { totalTokens: Number((usageRaw as { totalTokens?: number }).totalTokens) }
-                : {}),
-            }
-          : undefined;
-      const timestamp = typeof record.timestamp === 'number' ? record.timestamp : undefined;
-      const message: AnchorMessage = {
-        role: typeof record.role === 'string' ? record.role : '',
-        ...(typeof record.stopReason === 'string' ? { stopReason: record.stopReason } : {}),
-        ...(usage ? { usage } : {}),
-        ...(timestamp !== undefined ? { timestamp } : {}),
-      };
-      const snapshot = tracker?.snapshotFor(message);
-      if (snapshot) message.contextSnapshot = snapshot;
-      return message;
-    });
+  private breakdownMessages(managed: ManagedSession) {
+    const inputs = this.occupancyInputs(managed);
+    return contextBreakdownMessages(
+      inputs.contextMessages,
+      inputs.branch,
+      (message) => this.estimateSessionMessage(message),
+      managed.contextUsage
+    );
   }
 
   private armPendingContextUsage(managed: ManagedSession): void {
     const nonMessage = this.currentNonMessageTokens(managed);
-    const contextMessages = this.occupancyInputs(managed).contextMessages;
-    const estimate = (message: unknown) => this.estimateSessionMessage(message);
+    const messages = this.breakdownMessages(managed);
     const breakdown = managed.contextUsage.getBreakdown({
-      activeMessages: this.toAnchorMessages(contextMessages, managed.contextUsage),
+      ...messages,
       compactionIndex: nonMessage.compactionIndex,
       currentNonMessageTokens: nonMessage.current,
       categoryNonMessageTokens: nonMessage.category,
-      estimateMessageTokens: estimate,
     });
     managed.contextUsage.setPendingSnapshot({
       promptTokens: breakdown.usedTokens,
       nonMessageTokens: nonMessage.current,
-      cutoffCount: contextMessages.length,
+      cutoffCount: messages.activeMessages.length,
     });
   }
 
@@ -3394,10 +3459,8 @@ export class SessionSupervisor {
   }
 
   private stampContextSnapshot(managed: ManagedSession, raw: unknown): void {
-    const [anchor] = this.toAnchorMessages([raw]);
-    if (!anchor) return;
     const nonMessage = this.currentNonMessageTokens(managed);
-    managed.contextUsage.stampSettledAnchor(anchor, nonMessage.current);
+    managed.contextUsage.stampSettledAnchor(toAnchorMessage(raw), nonMessage.current);
   }
 
   private emitPlanState(managed: ManagedSession): void {
@@ -3419,14 +3482,12 @@ export class SessionSupervisor {
       );
       occupancy = baseline;
       const nonMessage = this.currentNonMessageTokens(managed);
-      const inputs = this.occupancyInputs(managed);
       const breakdown = managed.contextUsage.getBreakdown({
         contextWindow,
-        activeMessages: this.toAnchorMessages(inputs.contextMessages, managed.contextUsage),
+        ...this.breakdownMessages(managed),
         compactionIndex: nonMessage.compactionIndex,
         currentNonMessageTokens: nonMessage.current,
         categoryNonMessageTokens: nonMessage.category,
-        estimateMessageTokens: (message) => this.estimateSessionMessage(message),
       });
       occupancy = {
         ...baseline,
@@ -3509,6 +3570,9 @@ export class SessionSupervisor {
       managed.memory?.cancelAll('Enso worker shutdown');
       managed.agentControl?.close('Enso worker shutdown');
       managed.currentTurnId = undefined;
+      // pi 的 bash 是 detached 进程组，只在中断信号上 killProcessTree；SDK 未导出退出清理，
+      // 这里同步触发中断（不等 waitForIdle），否则 worker 退出后命令成孤儿进程
+      void managed.session.abort().catch(() => {});
     }
     return this.mcp.closeAll();
   }
@@ -3790,6 +3854,8 @@ export class SessionSupervisor {
 
 /** 投影 idle 但 pi 仍 streaming 时，等它真正空闲的上限；超时视为僵尸轮 */
 const ZOMBIE_TURN_WAIT_MS = 5_000;
+/** 流式增量下发间隔：约 20 帧/秒，肉眼连贯，长回复的 IPC 与 markdown 重算降一个量级 */
+const STREAM_UPSERT_WINDOW_MS = 50;
 
 /** 限时等 pi 空闲；true = 已空闲，false = 超时仍在跑 */
 export function waitIdleBounded(

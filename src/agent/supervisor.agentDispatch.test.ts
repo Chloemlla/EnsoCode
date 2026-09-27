@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   sessions: [] as Array<Record<string, unknown>>,
   managers: [] as Array<Record<string, unknown>>,
   mcpToolsFor: vi.fn(),
+  mcpResolve: vi.fn(),
+  mcpRefresh: vi.fn(),
   createAgentSession: vi.fn(),
   loaderOptions: [] as Array<Record<string, unknown>>,
 }));
@@ -23,8 +25,12 @@ vi.mock('./cursor/loadProvider', () => ({
 vi.mock('./mcp', () => ({
   McpManager: class {
     toolsFor = mocks.mcpToolsFor;
+    resolve = mocks.mcpResolve;
+    refresh = mocks.mcpRefresh;
     closeAll = vi.fn(async () => undefined);
   },
+  mcpServerSlug: (name: string) => name,
+  mcpToolName: (server: string, tool: string) => `mcp__${server}__${tool}`,
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
@@ -241,6 +247,63 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       await supervisor.shutdown();
     }
   );
+
+  it('按需 MCP 不在 spawn 与预热时连接，经 mcp 代理按真实工具名审批', async () => {
+    const events: AgentWorkerEvent[] = [];
+    const direct = { id: 'd', name: 'direct', transport: 'stdio' as const, command: 'd' };
+    const deferred = {
+      id: 'n',
+      name: 'notes',
+      transport: 'stdio' as const,
+      command: 'n',
+      loadMode: 'deferred' as const,
+      toolNames: ['read'],
+    };
+    const readTool = {
+      name: 'mcp__notes__read',
+      label: 'notes: read',
+      description: 'Read a note',
+      parameters: { type: 'object', properties: {} },
+      execute: vi.fn(async () => ({ content: [{ type: 'text', text: 'note' }] })),
+    };
+    mocks.mcpResolve.mockReset().mockResolvedValue({ ok: true, tools: [readTool] });
+    mocks.mcpRefresh.mockReset();
+    const supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-deferred-mcp-')),
+    });
+    supervisor.handleCommand({ type: 'warm-mcp', servers: [direct, deferred] });
+    expect(mocks.mcpToolsFor).toHaveBeenLastCalledWith([direct]);
+    expect(mocks.mcpRefresh).toHaveBeenCalledWith(deferred);
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+      approvalMode: 'supervised',
+      mcpServers: [direct, deferred],
+    });
+    await waitFor(events, 'parent-ready');
+    expect(mocks.mcpToolsFor).toHaveBeenLastCalledWith([direct], 3000);
+    expect(mocks.mcpResolve).not.toHaveBeenCalled();
+    const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
+      customTools: Array<ToolDefinition>;
+    };
+    const proxy = options.customTools.find((tool) => tool.name === 'mcp');
+    expect(proxy?.description).toContain('- notes: read');
+    void proxy!.execute(
+      'call-1',
+      { action: 'call', tool: 'mcp__notes__read', arguments: {} },
+      undefined,
+      undefined,
+      {} as never
+    );
+    await settleUntil(() => events.some((event) => event.type === 'approval-request'));
+    const request = events.find((event) => event.type === 'approval-request');
+    expect(request).toMatchObject({ request: { tool: 'mcp__notes__read', kind: 'mcp' } });
+    await supervisor.shutdown();
+  });
 
   it('apply_patch 完整只读预检失败时不会进入 approval', async () => {
     const events: AgentWorkerEvent[] = [];
@@ -1251,6 +1314,7 @@ describe('SessionSupervisor idle eviction', () => {
     await vi.advanceTimersByTimeAsync(20 * 60_000);
     parentSession.emit({ type: 'agent_start' });
     parentSession.emit({ type: 'agent_end', messages: [] });
+    parentSession.emit({ type: 'agent_settled' });
     await vi.advanceTimersByTimeAsync(20 * 60_000);
     await settle();
     expect(events.filter((event) => event.type === 'parent-ended')).toEqual([]);

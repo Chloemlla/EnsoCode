@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { classifyMarkdownLink, toWorkspaceRelativePath } from './markdownLinks';
+import { classifyMarkdownLink, splitFileLineRef, toWorkspaceRelativePath } from './markdownLinks';
+
+describe('splitFileLineRef', () => {
+  it('拆出路径与起始行号', () => {
+    expect(splitFileLineRef('src/agent/supervisor.ts:107')).toEqual({
+      path: 'src/agent/supervisor.ts',
+      line: 107,
+    });
+    expect(splitFileLineRef('README.md:12-30')).toEqual({ path: 'README.md', line: 12 });
+  });
+
+  it('无行号或行号为 0 时只返回路径', () => {
+    expect(splitFileLineRef('src/a.ts')).toEqual({ path: 'src/a.ts' });
+    expect(splitFileLineRef('src/a.ts:0')).toEqual({ path: 'src/a.ts' });
+  });
+});
 
 describe('classifyMarkdownLink', () => {
   it('保留网页链接交给默认浏览器', () => {

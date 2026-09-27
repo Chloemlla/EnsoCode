@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTimeline,
   completedEditWriteFingerprint,
+  exploreStepsKey,
   foldTimeline,
   historyPageChrome,
   parseSandboxOutput,
@@ -1959,6 +1960,34 @@ describe('工具路径摘要相对化', () => {
   });
 });
 
+describe('mcp 代理调用行', () => {
+  const proxy = (args: Record<string, unknown>) =>
+    buildTimeline(
+      [
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 't1', name: 'mcp', arguments: args }],
+        },
+      ],
+      false,
+      []
+    )[0];
+
+  it('call 行按真实工具名与内层参数展示', () => {
+    expect(
+      proxy({ action: 'call', tool: 'mcp__github__search_issues', arguments: { query: 'bug' } })
+    ).toMatchObject({ name: 'mcp__github__search_issues', summary: 'bug' });
+  });
+
+  it('list / describe 保留代理名并摘要目标', () => {
+    expect(proxy({ action: 'list' })).toMatchObject({ name: 'mcp', summary: 'list' });
+    expect(proxy({ action: 'describe', tool: 'mcp__github__search_issues' })).toMatchObject({
+      name: 'mcp',
+      summary: 'mcp__github__search_issues',
+    });
+  });
+});
+
 describe('compaction 摘要行', () => {
   it('compactionSummary 消息渲染为 compaction 行，带摘要与压缩前 token 数', () => {
     const timeline = buildTimeline(
@@ -2133,6 +2162,41 @@ describe('compaction 摘要行', () => {
   it('锚点陈旧（消息比锚点少）时不钉提示', () => {
     const timeline = buildTimeline([user('old')], false, [], undefined, { compactionNoticeAt: 5 });
     expect(timeline.map((item) => item.kind)).toEqual(['user']);
+  });
+
+  it('锚点不在最新摘要之后（冷缓存清空时记成 0）时不钉提示，不能顶成尾窗首行', () => {
+    const tail: ProjectedMessage[] = [
+      { role: 'assistant', content: [{ type: 'text', text: 'before' }] },
+      { role: 'compactionSummary', content: [{ type: 'text', text: 'S' }] },
+      user('kept'),
+    ];
+    for (const compactionNoticeAt of [0, 3, 691]) {
+      const timeline = buildTimeline(tail, false, [], undefined, {
+        compactionNoticeAt,
+        historyBaseIndex: 690,
+      });
+      expect(timeline.map((item) => item.kind)).toEqual(['text', 'compaction', 'user']);
+    }
+  });
+
+  it('尾窗分页时锚点按绝对下标落在摘要之后', () => {
+    const timeline = buildTimeline(
+      [
+        { role: 'compactionSummary', content: [{ type: 'text', text: 'S' }] },
+        user('kept'),
+        user('new-after-compact'),
+      ],
+      false,
+      [],
+      undefined,
+      { compactionNoticeAt: 692, historyBaseIndex: 690 }
+    );
+    expect(timeline.map((item) => item.kind)).toEqual([
+      'compaction',
+      'user',
+      'compaction-notice',
+      'user',
+    ]);
   });
 });
 
@@ -2367,6 +2431,38 @@ describe('apply_patch timeline', () => {
     expect(timeline[0]).toMatchObject({ fileChanges: [], edits: null, writeContent: null });
   });
 
+  it('没有落盘结果时摘要取补丁头里的目标文件，不显示参数 JSON', () => {
+    const patchCall = (input: string): ProjectedMessage => ({
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'patch-2', name: 'apply_patch', arguments: { input } }],
+    });
+    const summaryOf = (...messages: ProjectedMessage[]) => {
+      const [item] = buildTimeline(messages, true, [], '/repo');
+      return item?.kind === 'tool' ? item.summary : null;
+    };
+    expect(summaryOf(patchCall('*** Begin Patch\n*** Add File: /repo/tests/a.test.js\n+imp'))).toBe(
+      'tests/a.test.js'
+    );
+    expect(
+      summaryOf(
+        patchCall(
+          '*** Begin Patch\n*** Update File: a.ts\n*** Move to: b.ts\n@@\n-x\n+y\n*** Delete File: c.ts\n*** End Patch'
+        )
+      )
+    ).toBe('3 files');
+    expect(summaryOf(patchCall('*** Begin Patch\n*** Add Fi'))).toBe('');
+    expect(
+      summaryOf(patchCall('*** Begin Patch\n*** Update File: a.ts\n@@\n-x\n+y\n*** End Patch'), {
+        role: 'toolResult',
+        toolCallId: 'patch-2',
+        toolName: 'apply_patch',
+        isError: true,
+        content: [{ type: 'text', text: 'preflight failed' }],
+        fileChanges: [],
+      })
+    ).toBe('a.ts');
+  });
+
   it('有实际修改的 partial result 会改变 Changes 指纹', () => {
     const withResult: ProjectedMessage[] = [
       call,
@@ -2574,9 +2670,13 @@ describe('foldTimeline 探索配对折叠（explore_mark → explore_fold）', (
   const mark = (key: string): TimelineItem =>
     ({ ...toolItem(key, 'explore_mark'), summary: 'find auth' }) as TimelineItem;
   const fold = (key: string, state = 'ok'): TimelineItem =>
-    ({ ...toolItem(key, 'explore_fold'), state }) as TimelineItem;
+    ({
+      ...toolItem(key, 'explore_fold'),
+      state,
+      output: 'Explore folded. Subsequent turns see only this report.\n\nauth in src/auth.ts',
+    }) as TimelineItem;
 
-  it('成对后 mark 到 fold（含中间正文、思考）收成一个探索组，展开平铺原始行', () => {
+  it('成对后 mark 到 fold（含中间正文、思考）收成一个探索组；展开先只给目标与结果，再展开过程才平铺原始行', () => {
     const items = [
       userItem('u'),
       mark('m'),
@@ -2590,20 +2690,21 @@ describe('foldTimeline 探索配对折叠（explore_mark → explore_fold）', (
     const folded = foldTimeline(items, true, new Set());
     expect(folded.map((item) => item.kind)).toEqual(['user', 'tool-group', 'text']);
     const group = folded[1] as Group;
-    expect(group.explore).toEqual({ goal: 'find auth' });
+    expect(group.explore).toEqual({
+      goal: 'find auth',
+      report: 'auth in src/auth.ts',
+      steps: false,
+    });
     expect(group.count).toBe(2);
     expect(keys(group.children)).toEqual(['m', 'r', 'mid', 'th', 'b', 'f']);
-    expect(keys(foldTimeline(items, true, new Set([group.key])))).toEqual([
-      'u',
-      group.key,
-      'm',
-      'r',
-      'mid',
-      'th',
-      'b',
-      'f',
-      'answer',
-    ]);
+    const opened = foldTimeline(items, true, new Set([group.key]));
+    expect(keys(opened)).toEqual(['u', group.key, 'answer']);
+    expect((opened[1] as Group).explore?.steps).toBe(false);
+    const steps = exploreStepsKey(group.key);
+    expect(keys(foldTimeline(items, true, new Set([steps])))).toEqual(['u', group.key, 'answer']);
+    const detailed = foldTimeline(items, true, new Set([group.key, steps]));
+    expect((detailed[1] as Group).explore?.steps).toBe(true);
+    expect(keys(detailed)).toEqual(['u', group.key, 'm', 'r', 'mid', 'th', 'b', 'f', 'answer']);
   });
 
   it('fold 未完成、失败或被用户消息隔开时不配对；失败后重试成功仍配对', () => {
@@ -2647,11 +2748,18 @@ describe('foldTimeline 探索配对折叠（explore_mark → explore_fold）', (
       activity.key,
       'a',
       exploreKey,
-      'm',
-      'r',
-      'f',
       'answer',
     ]);
+    expect(
+      keys(
+        foldTimeline(
+          items,
+          false,
+          new Set([activity.key, exploreKey, exploreStepsKey(exploreKey)]),
+          on
+        )
+      )
+    ).toEqual(['u', activity.key, 'a', exploreKey, 'm', 'r', 'f', 'answer']);
   });
 });
 
@@ -2690,5 +2798,233 @@ describe('submit_plan 计划卡片', () => {
     const items = [userItem('u'), toolItem('a', 'read'), toolItem('b', 'grep'), plan];
     const folded = foldTimeline(items, false, new Set(), { collapseCompletedActivity: true });
     expect(folded.at(-1)).toBe(plan);
+  });
+});
+
+describe('消息类工具行（联系主 agent / 联系队员 / 子代理发消息）', () => {
+  const resultOf = (name: string, text: string): ProjectedMessage => ({
+    role: 'toolResult',
+    toolCallId: 'm1',
+    toolName: name,
+    isError: false,
+    content: [{ type: 'text', text }],
+  });
+  const toolFor = (name: string, args: Record<string, unknown>, extra: ProjectedMessage[] = []) =>
+    buildTimeline(
+      [
+        user('去核对'),
+        {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'm1', name, arguments: args }],
+        },
+        ...extra,
+      ],
+      false
+    ).find((item) => item.kind === 'tool');
+
+  it('联系主 agent：摘要与展开内容取正文，而不是参数 JSON 或投递回执', () => {
+    const message = '已核对并按补充约定：\n- 保留导出 AsrSession';
+    const tool = toolFor('message_main_agent', { message: ` ${message}\n`, urgent: false }, [
+      resultOf('message_main_agent', '(delivered to the main agent — async)'),
+    ]);
+    expect(tool).toMatchObject({
+      state: 'ok',
+      summary: message,
+      sentMessage: message,
+      output: null,
+    });
+  });
+
+  it('联系队员：摘要带上收件人，展开内容取正文', () => {
+    const text = '接口改好了，**可以联调**';
+    const tool = toolFor('message_coworker', { to: ' 核对 ASR ', text }, [
+      resultOf(
+        'message_coworker',
+        '(delivered to coworker "核对 ASR" — async; any reply arrives later via message_coworker)'
+      ),
+    ]);
+    expect(tool).toMatchObject({
+      state: 'ok',
+      summary: `核对 ASR · ${text}`,
+      sentMessage: text,
+      output: null,
+    });
+  });
+
+  it('只剥投递回执：捎带的系统提醒与发送失败回执照常显示', () => {
+    const notice =
+      '<background-task-update>\nMessage from coworker "B":\nhi\n</background-task-update>';
+    expect(
+      toolFor('message_coworker', { to: 'B', text: 'x' }, [
+        resultOf('message_coworker', `${notice}\n\n(delivered to coworker "B" — async)`),
+      ])
+    ).toMatchObject({ output: notice });
+    const failed = '(unknown coworker "C" — peers: B)';
+    expect(
+      toolFor('message_coworker', { to: 'C', text: 'x' }, [resultOf('message_coworker', failed)])
+    ).toMatchObject({ state: 'ok', output: failed });
+  });
+
+  it('子代理 send / message：摘要带上 spawn 时起的名字，展开内容取正文，只剥纯投递回执', () => {
+    const agentId = '043a1933-8c77-49da-af93-b770b72f438d';
+    const json = (value: object) => JSON.stringify(value, null, 2);
+    const call = (id: string, args: Record<string, unknown>): ProjectedMessage => ({
+      role: 'assistant',
+      stopReason: 'toolUse',
+      content: [{ type: 'toolCall', id, name: 'subagent', arguments: args }],
+    });
+    const result = (id: string, text: string): ProjectedMessage => ({
+      ...resultOf('subagent', text),
+      toolCallId: id,
+    });
+    const reminder = '<system-reminder>\nx\n</system-reminder>';
+    const withReport = json({
+      agentId,
+      runId: 'r3',
+      delivery: 'next',
+      status: 'queued',
+      report: { runs: [], timedOut: false, interrupted: false },
+    });
+    const tools = buildTimeline(
+      [
+        user('派活'),
+        call('s1', { operation: 'spawn', mode: 'coworker', description: '核对 ASR', prompt: 'p' }),
+        result('s1', json({ agentId, runId: 'r1', mode: 'coworker', status: 'running' })),
+        call('m1', { operation: 'send', agentId, message: ' 先别改 **接口**\n' }),
+        result(
+          'm1',
+          `${reminder}\n\n${json({ agentId, runId: 'r2', delivery: 'steer', status: 'running' })}`
+        ),
+        call('m2', { operation: 'message', to: 'unknown', text: '收尾', wait: true }),
+        result('m2', withReport),
+      ],
+      false
+    ).filter((item) => item.kind === 'tool');
+    expect(tools[1]).toMatchObject({
+      summary: '核对 ASR · 先别改 **接口**',
+      sentMessage: '先别改 **接口**',
+      output: reminder,
+    });
+    expect(tools[2]).toMatchObject({ summary: '收尾', sentMessage: '收尾', output: withReport });
+  });
+
+  it('空正文不产出消息内容；其它带 message 参数的工具不受影响', () => {
+    expect(toolFor('message_main_agent', { message: '  ' })).not.toHaveProperty('sentMessage');
+    const receipt = '(delivered to coworker "B" — async)';
+    const other = toolFor('notify', { message: 'hi' }, [resultOf('notify', receipt)]);
+    expect(other).toMatchObject({ output: receipt });
+    expect(other).not.toHaveProperty('sentMessage');
+  });
+});
+
+describe('memory_capture 记录记忆行', () => {
+  const capture = (name: string, args: Record<string, unknown>) =>
+    buildTimeline(
+      [
+        user('记一下'),
+        {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'c1', name, arguments: args }],
+        },
+      ],
+      false
+    ).find((item) => item.kind === 'tool');
+
+  it('摘要取标题，缺省时取正文首行；正文随行带出供展开显示（回执不带正文）', () => {
+    expect(
+      capture('memory_capture', { title: ' 工具行规则 ', content: ' 第一行\n第二行 ' })
+    ).toMatchObject({ summary: '工具行规则', memoryContent: '第一行\n第二行' });
+    expect(capture('memory_capture', { content: '第一行\n第二行' })).toMatchObject({
+      summary: '第一行',
+    });
+  });
+
+  it('正文为空或其它工具不带正文', () => {
+    expect(capture('memory_capture', { content: '  ' })).not.toHaveProperty('memoryContent');
+    expect(capture('memory_search', { query: 'q', content: 'x' })).toMatchObject({ summary: 'q' });
+    expect(capture('memory_search', { query: 'q', content: 'x' })).not.toHaveProperty(
+      'memoryContent'
+    );
+  });
+});
+
+describe('ask_user 询问用户行', () => {
+  const ask = (
+    args: Record<string, unknown>,
+    result?: { text: string; isError?: boolean },
+    running = false
+  ) =>
+    buildTimeline(
+      [
+        user('帮我定一下'),
+        {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'q1', name: 'ask_user', arguments: args }],
+        },
+        ...(result
+          ? [
+              {
+                role: 'toolResult',
+                toolCallId: 'q1',
+                toolName: 'ask_user',
+                isError: result.isError === true,
+                content: [{ type: 'text', text: result.text }],
+              } satisfies ProjectedMessage,
+            ]
+          : []),
+      ],
+      running
+    ).find((item) => item.kind === 'tool');
+  const args = { question: ' 用哪个方案？\n说明一下 ', options: [' A ', 'B', 'C', 'D', 'E'] };
+
+  it('摘要取问题；带出当时展示的选项（同实际展示最多 4 个）与用户选的那个', () => {
+    expect(ask(args, { text: 'B' })).toMatchObject({
+      state: 'ok',
+      summary: '用哪个方案？\n说明一下',
+      output: null,
+      ask: {
+        question: '用哪个方案？\n说明一下',
+        options: ['A', 'B', 'C', 'D'],
+        answer: 'B',
+        autoSelected: false,
+      },
+    });
+  });
+
+  it('自定义回答原样带出；回执前捎带的系统提醒照常显示', () => {
+    const notice =
+      '<background-task-update>\nMessage from coworker "B":\nhi\n</background-task-update>';
+    expect(ask(args, { text: `${notice}\n\n都不要，用 F` })).toMatchObject({
+      output: notice,
+      ask: { answer: '都不要，用 F', autoSelected: false },
+    });
+  });
+
+  it('超时按默认项自动选择时，回答取默认项本身并注明', () => {
+    expect(
+      ask({ ...args, default_option: 'A' }, { text: 'A (auto-selected: no response in time)' })
+    ).toMatchObject({ output: null, ask: { answer: 'A', autoSelected: true } });
+  });
+
+  it('等待回答或已取消时没有回答，取消原因照常显示', () => {
+    expect(ask(args, undefined, true)).toMatchObject({
+      state: 'running',
+      output: null,
+      ask: { answer: null },
+    });
+    expect(ask(args, { text: 'question cancelled', isError: true })).toMatchObject({
+      state: 'error',
+      output: 'question cancelled',
+      ask: { answer: null },
+    });
+  });
+
+  it('没有问题（调用失败）时不改写，按原样显示', () => {
+    const tool = ask({ options: ['A'] }, { text: 'question is required', isError: true });
+    expect(tool).toMatchObject({ output: 'question is required' });
+    expect(tool).not.toHaveProperty('ask');
   });
 });

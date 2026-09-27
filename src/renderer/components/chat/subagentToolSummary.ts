@@ -1,3 +1,5 @@
+import { unwrapMcpProxyCall } from '@/lib/mcpToolName';
+
 const SEARCH_KEYS = ['pattern', 'query', 'path', 'file_path'] as const;
 const READ_KEYS = ['path', 'file_path', 'query', 'pattern'] as const;
 const COMMAND_KEYS = ['command', 'cmd', 'script'] as const;
@@ -43,8 +45,11 @@ export function summarizeSubagentToolArgs(toolName: string, argumentsText: strin
     return oneLine(JSON.stringify(parsed) ?? String(parsed));
   }
 
-  const record = parsed as Record<string, unknown>;
-  for (const key of keysForTool(toolName)) {
+  const call = unwrapMcpProxyCall(toolName, parsed);
+  if (call.summary !== undefined) return oneLine(call.summary);
+  if (!call.args || typeof call.args !== 'object') return '';
+  const record = call.args as Record<string, unknown>;
+  for (const key of keysForTool(call.name)) {
     const value = record[key];
     if (typeof value === 'string' && value.trim()) return oneLine(value);
   }

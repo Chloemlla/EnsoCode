@@ -57,6 +57,7 @@ export interface OccupancyBranchEntry {
   firstKeptEntryId?: string;
   summary?: string;
   tokensBefore?: number;
+  message?: unknown;
 }
 
 export interface CollectContextOccupancyInput {

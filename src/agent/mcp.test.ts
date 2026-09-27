@@ -277,6 +277,53 @@ describe('McpManager connection cache', () => {
   });
 });
 
+describe('McpManager deferred servers', () => {
+  it('resolve 成功返回该 server 的工具', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [{ name: 'search', inputSchema: { type: 'object' } }],
+    }));
+    const { manager } = makeManager();
+    const result = await manager.resolve(httpServer);
+    expect(result.ok && result.tools.map((tool) => tool.name)).toEqual(['mcp__notion__search']);
+  });
+
+  it('resolve 失败带原因与是否需授权，TTL 内复用同一原因', async () => {
+    clientState.connect = vi.fn(async () => {
+      throw new UnauthorizedError('401');
+    });
+    const { manager } = makeManager();
+    const first = await manager.resolve(httpServer);
+    expect(first).toMatchObject({ ok: false, unauthorized: true });
+    expect(first.ok ? '' : first.error).toContain('401');
+    expect(await manager.resolve(httpServer)).toEqual(first);
+    expect(clientState.instances).toBe(1);
+  });
+
+  it('resolve 用最近下发的凭据，旧配置不会撤销别处刚授权的连接', async () => {
+    const { manager } = makeManager();
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'fresh' } }]);
+    const result = await manager.resolve(httpServer);
+    expect(result.ok).toBe(true);
+    expect(clientState.instances).toBe(1);
+    expect(clientState.closed).toBe(0);
+  });
+
+  it('refresh 不为未连接的 server 建连接，但记下凭据供之后 resolve 使用', async () => {
+    const { manager } = makeManager();
+    manager.refresh({ ...httpServer, oauth: { access_token: 'b' } });
+    expect(clientState.instances).toBe(0);
+    await manager.resolve(httpServer);
+    expect((authProviderOf(0).tokens() as { access_token: string }).access_token).toBe('b');
+  });
+
+  it('refresh 把撤销同步给已建立的连接', async () => {
+    const { manager } = makeManager();
+    await manager.resolve({ ...httpServer, oauth: { access_token: 'a' } });
+    manager.refresh(httpServer);
+    await vi.waitFor(() => expect(clientState.closed).toBe(1));
+  });
+});
+
 describe('McpManager per-server timeouts', () => {
   it('uses configured connectTimeoutMs for connect', async () => {
     vi.useFakeTimers();

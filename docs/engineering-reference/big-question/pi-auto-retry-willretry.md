@@ -33,6 +33,11 @@ pi SDK（AgentSession）**内置瞬态错误自动重试**（指数退避），�
   令后续发送全部入队。abort 须先取 `isRetrying`，为 true 时直接 failTurn 收口。
 - 终态错误轮（末条 assistant `stopReason === 'error'`）发 `turn-failed`
   而非 `turn-completed`。
+- **收口点是 `agent_settled` 而不是 `agent_end`**：`agent_end` 之后 pi 还可能溢出压缩续跑、
+  跑 agent_end 期间入队的消息、跑扩展 `agent_before_settle`（`_runAgentPrompt` 循环），
+  最后才发一次 `agent_settled`。`agent_end` 只做对齐并记 `settlePending`；failTurn
+  （重试取消 / 重试倒计时中 abort）清掉它，随后的 `agent_settled` 不再补发完成。
+  重试耗尽时 `auto_retry_end(success:false)` 看到 `settlePending` 就让给 settled 收口。
 - **回放与实时统一在渲染层解决**：`buildTimeline` 两条规则——错误项后面
   紧跟另一条 assistant（已重试过）或末条且 running（重试倒计时中）都不渲染。
 

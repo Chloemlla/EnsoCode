@@ -96,7 +96,13 @@ import { browserHost } from '../services/browserHost';
 import { chatModelsRoot } from '../services/chatModels';
 import { reloadConversation } from '../services/conversationReload';
 import { searchFiles } from '../services/fileSearch';
-import { memoryCompleteFromSettings } from '../services/llama/chat';
+import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
+import {
+  localChatModelPathIfReady,
+  REMOTE_CHAT_MODEL_ID,
+  resolveChatModelSpec,
+  voiceCorrectionModelIdFromSettings,
+} from '../services/llama/chatModels';
 import { toStoredTokens } from '../services/mcpOAuth';
 import { getMcpOAuthStore } from '../services/mcpOAuthStore';
 import { clearMcpStatuses, recordMcpStatus } from '../services/mcpStatusCache';
@@ -126,6 +132,8 @@ import {
   readExternalSession,
 } from '../services/sessionImport';
 import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
+import { setSpeechCorrector } from '../services/speech/service';
+import { buildCorrectionRequest } from '../services/speech/text';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { titleModelCandidates } from '../services/titleSummary';
 import { ingestSessionJsonl } from '../services/usage/ledgerStore';
@@ -392,21 +400,9 @@ async function remoteDistillCompletion(
   state: Record<string, unknown> | undefined
 ): Promise<Complete | null> {
   if (!isAgentWorkerReady() || !state) return null;
-  const credentialKeys = await readStoredOauthCredentialKeys();
-  const candidates: SpawnModelConfig[] = [];
   // 记忆提炼有自己的模型时排在最前；未设则完全走标题模型的既有回退链
   // （标题总结要快而便宜，提炼要质量，两者诉求不同）
-  const memoryModel = state.memoryDistillModel;
-  const chain = [
-    ...(memoryModel && typeof memoryModel === 'object'
-      ? [memoryModel as { providerId: string; modelId: string }]
-      : []),
-    ...titleModelCandidates(state),
-  ];
-  for (const candidate of chain) {
-    const resolved = resolveModelSelection(candidate.providerId, candidate.modelId, credentialKeys);
-    if (resolved.ok && resolved.selection) candidates.push(resolved.selection.config);
-  }
+  const candidates = await remoteCandidates(state, state.memoryDistillModel);
   if (candidates.length === 0) return null;
   return (systemPrompt, userText, options) =>
     completeText({
@@ -416,6 +412,49 @@ async function remoteDistillCompletion(
       timeoutMs: titleSummaryTimeoutMs(1),
       ...(options?.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
     });
+}
+
+/** 功能单独选的远程模型排最前，其后是标题模型的回退链 */
+async function remoteCandidates(
+  state: Record<string, unknown>,
+  preferred: unknown
+): Promise<SpawnModelConfig[]> {
+  const credentialKeys = await readStoredOauthCredentialKeys();
+  const chain = [
+    ...(preferred && typeof preferred === 'object'
+      ? [preferred as { providerId: string; modelId: string }]
+      : []),
+    ...titleModelCandidates(state),
+  ];
+  const candidates: SpawnModelConfig[] = [];
+  for (const candidate of chain) {
+    const resolved = resolveModelSelection(candidate.providerId, candidate.modelId, credentialKeys);
+    if (resolved.ok && resolved.selection) candidates.push(resolved.selection.config);
+  }
+  return candidates;
+}
+
+const VOICE_CORRECTION_TIMEOUT_MS = 15_000;
+
+/** 语音纠错：本地 GGUF 走 llama.cpp；远程用单独选的模型，未选跟随标题模型。不可用返 null，保留原文 */
+async function voiceCorrection(text: string): Promise<string | null> {
+  const state = readSettingsState();
+  if (!state) return null;
+  const modelId = voiceCorrectionModelIdFromSettings(state);
+  const request = buildCorrectionRequest(modelId, text);
+  if (modelId === REMOTE_CHAT_MODEL_ID) {
+    if (!isAgentWorkerReady()) return null;
+    const candidates = await remoteCandidates(state, state.voiceCorrectionRemoteModel);
+    if (candidates.length === 0) return null;
+    return completeText({ ...request, candidates, timeoutMs: VOICE_CORRECTION_TIMEOUT_MS });
+  }
+  const gguf = localChatModelPathIfReady(chatModelsRoot(), modelId);
+  if (!gguf) return null;
+  const complete = createLocalComplete(gguf, {
+    contextSize: resolveChatModelSpec(modelId)?.contextSize,
+    timeoutMs: VOICE_CORRECTION_TIMEOUT_MS,
+  });
+  return complete(request.systemPrompt, request.userText, { maxTokens: request.maxTokens });
 }
 
 async function readParentHistoryTail(
@@ -704,6 +743,7 @@ export function registerAgentHandlers(): void {
   wirePairAgentBridge();
   wirePairSessionHost();
   configureMemoryDistill({ complete: distillCompletion });
+  setSpeechCorrector(voiceCorrection);
   const agentDataDir = path.join(app.getPath('userData'), 'agent');
   sourceAuthority = new SourceAuthorityRegistry({
     registryFile: path.join(agentDataDir, 'source-registry.json'),

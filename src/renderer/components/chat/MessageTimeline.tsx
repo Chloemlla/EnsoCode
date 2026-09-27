@@ -133,6 +133,8 @@ interface MessageTimelineProps {
   historyLoading?: boolean;
   /** 还有更早一页；false = 已到第 0 条，顶部给出到头提示 */
   hasOlder?: boolean;
+  /** 翻页游标（已加载的最早绝对下标）：变化即新页已落地 */
+  olderCursor?: number;
   searchQuery?: string;
   activeHit?: { key: string; nth: number } | null;
 }
@@ -157,6 +159,7 @@ export function MessageTimeline({
   onStartReached,
   historyLoading = false,
   hasOlder,
+  olderCursor,
   searchQuery = '',
   activeHit = null,
 }: MessageTimelineProps) {
@@ -248,12 +251,17 @@ export function MessageTimeline({
   // 原点必须用折叠后的行。未折叠的 key 还在，但 Virtuoso 的 data 已经把它们收进组里。
   const rowAnchor = useRef<TimelineRowAnchor | null>(null);
   const rowEpoch = useRef(0);
+  /** Virtuoso 最近一次渲染范围的起点（绝对下标）；重挂后作废 */
+  const renderedStartRef = useRef<number | null>(null);
   const rowOrigin = nextTimelineRowOrigin(
     rowAnchor.current,
     folded.map((item) => item.key)
   );
   rowAnchor.current = rowOrigin.anchor;
-  if (rowOrigin.remount) rowEpoch.current += 1;
+  if (rowOrigin.remount) {
+    rowEpoch.current += 1;
+    renderedStartRef.current = null;
+  }
   const firstItemIndex = rowOrigin.firstItemIndex;
   // 引用必须稳定：TimelineRow 的 memo 比较不含回调
   const setTurnCollapsed = useCallback((key: string, collapsed: boolean) => {
@@ -442,13 +450,29 @@ export function MessageTimeline({
   }));
 
   // 顶部触发锁存：进入顶部区域只触发一次，滚离后解锁（避免加载期间连环触发）。
-  // firstItemIndex 变了 = 新页已前置，必须立刻解锁，否则停在第一页。
+  // 游标或 firstItemIndex 变了 = 新页已落地，必须立刻解锁，否则停在第一页。
   const startReachedLatch = useRef(false);
-  const latchedFirstItemIndex = useRef(firstItemIndex);
-  if (latchedFirstItemIndex.current !== firstItemIndex) {
-    latchedFirstItemIndex.current = firstItemIndex;
+  const pageKey = `${olderCursor}:${firstItemIndex}`;
+  const latchedPageKey = useRef(pageKey);
+  if (latchedPageKey.current !== pageKey) {
+    latchedPageKey.current = pageKey;
     startReachedLatch.current = false;
   }
+  const requestOlder = () => {
+    if (!onStartReached || startReachedLatch.current) return;
+    startReachedLatch.current = true;
+    onStartReached();
+  };
+  /*
+   * Virtuoso 的 startReached 按首行绝对下标去重：新页整段并进首行过程组、或整页只有孤立
+   * toolResult 时 firstItemIndex 不动，它不会再报，停在半截。落页后首行仍在渲染范围就接着翻。
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在新页落地 / 加载结束时判定
+  useEffect(() => {
+    if (virtualize && !historyLoading && renderedStartRef.current === firstItemIndex) {
+      requestOlder();
+    }
+  }, [olderCursor, historyLoading]);
 
   // 两条渲染路径（虚拟化 / 全量）共用，保证外观完全一致
   const searchHighlight = useMemo(
@@ -542,15 +566,7 @@ export function MessageTimeline({
   const renderHeader = () => (
     <HistoryPageHeader
       chrome={pageChrome}
-      onLoadMore={
-        pageChrome === 'more'
-          ? () => {
-              if (!onStartReached || startReachedLatch.current) return;
-              startReachedLatch.current = true;
-              onStartReached();
-            }
-          : undefined
-      }
+      onLoadMore={pageChrome === 'more' ? requestOlder : undefined}
     />
   );
   const renderFooter = () => (
@@ -705,11 +721,7 @@ export function MessageTimeline({
             defaultItemHeight={80}
             computeItemKey={(_, item) => item.key}
             firstItemIndex={firstItemIndex}
-            startReached={() => {
-              if (!onStartReached || startReachedLatch.current) return;
-              startReachedLatch.current = true;
-              onStartReached();
-            }}
+            startReached={requestOlder}
             // 贴底时新内容自动跟随（含流式增高）；非贴底不抢滚
             followOutput={followChatOutput}
             atBottomThreshold={AT_BOTTOM_THRESHOLD}
@@ -721,6 +733,7 @@ export function MessageTimeline({
             initialTopMostItemIndex={INITIAL_TOP_MOST_ITEM_INDEX}
             // 可视范围起点附近的 user 轮次作为导航条高亮
             rangeChanged={({ startIndex }) => {
+              renderedStartRef.current = startIndex;
               if (startIndex > firstItemIndex + 4) startReachedLatch.current = false;
               scheduleActiveNavKey(() => {
                 const dataIndex = Math.max(0, startIndex - firstItemIndex);

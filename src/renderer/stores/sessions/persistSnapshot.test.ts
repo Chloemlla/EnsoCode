@@ -88,6 +88,46 @@ describe('cachedPartializeSessions', () => {
     expect(next.conversations.a.title).toBe('renamed');
   });
 
+  it('reuses untouched conversations when another one changes', () => {
+    const b = conv('b');
+    const first = cachedPartializeSessions({
+      conversations: { a: conv('a'), b },
+      order: ['a', 'b'],
+      activeId: 'a',
+    });
+    const next = cachedPartializeSessions({
+      conversations: { a: conv('a', { title: 'renamed' }), b },
+      order: ['a', 'b'],
+      activeId: 'a',
+    });
+    expect(next).not.toBe(first);
+    expect(next.conversations.b).toBe(first.conversations.b);
+  });
+
+  it('rebuilds when order or active conversation changes', () => {
+    const a = conv('a');
+    const b = conv('b');
+    const first = cachedPartializeSessions({
+      conversations: { a, b },
+      order: ['a', 'b'],
+      activeId: 'a',
+    });
+    const reordered = cachedPartializeSessions({
+      conversations: { a, b },
+      order: ['b', 'a'],
+      activeId: 'a',
+    });
+    expect(reordered).not.toBe(first);
+    expect(reordered.order).toEqual(['b', 'a']);
+    const switched = cachedPartializeSessions({
+      conversations: { a, b },
+      order: ['b', 'a'],
+      activeId: 'b',
+    });
+    expect(switched).not.toBe(reordered);
+    expect(switched.activeId).toBe('b');
+  });
+
   it('omits btw conversations from persistence', () => {
     const persisted = cachedPartializeSessions({
       conversations: {

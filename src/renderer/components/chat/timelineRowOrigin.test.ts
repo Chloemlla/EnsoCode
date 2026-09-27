@@ -25,7 +25,10 @@ describe('nextTimelineRowOrigin', () => {
     const prepended = nextTimelineRowOrigin(first.anchor, ['m10', 'm11', 'm40', 'm41']);
     expect(prepended.remount).toBe(false);
     expect(prepended.firstItemIndex).toBe(TIMELINE_ROW_INDEX_BASE - 2);
-    expect(prepended.anchor).toEqual({ key: 'm10', index: TIMELINE_ROW_INDEX_BASE - 2 });
+    expect(prepended.anchor).toEqual({
+      keys: ['m10', 'm11', 'm40', 'm41'],
+      index: TIMELINE_ROW_INDEX_BASE - 2,
+    });
   });
 
   it('旧首行消失时重挂并回到原点', () => {
@@ -61,5 +64,23 @@ describe('nextTimelineRowOrigin', () => {
     );
     expect(next.remount).toBe(true);
     expect(next.firstItemIndex).toBe(TIMELINE_ROW_INDEX_BASE);
+  });
+
+  it('前置的新页并进首行过程组时按第一条仍在的旧行对齐，不重挂（重挂会跳回底部）', () => {
+    const origin = nextTimelineRowOrigin(null, ['group-668-0', '672-0', 'group-672-1']);
+    const next = nextTimelineRowOrigin(origin.anchor, [
+      '650-0',
+      'group-650-1',
+      '672-0',
+      'group-672-1',
+    ]);
+    expect(next.remount).toBe(false);
+    expect(next.firstItemIndex).toBe(TIMELINE_ROW_INDEX_BASE - 1);
+  });
+
+  it('新页整段并进首行（行数不变）时原点不动', () => {
+    const origin = nextTimelineRowOrigin(null, ['group-80-0', '128-0']);
+    const next = nextTimelineRowOrigin(origin.anchor, ['group-21-0', '128-0']);
+    expect(next).toMatchObject({ firstItemIndex: TIMELINE_ROW_INDEX_BASE, remount: false });
   });
 });

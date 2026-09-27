@@ -13,7 +13,7 @@ export type DownloadSource = 'huggingface' | 'modelscope';
 export interface DownloadableModel {
   id: string;
   files: readonly EmbeddingModelFile[];
-  sources: { huggingface: string; modelscope: string | null } | null;
+  sources: { huggingface: string | null; modelscope: string | null } | null;
 }
 
 export interface DownloadProgress {

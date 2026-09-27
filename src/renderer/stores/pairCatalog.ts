@@ -7,6 +7,7 @@ import { getXtermTheme } from '@/lib/ghosttyTheme';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { pairProviderSyncPlan } from '@/stores/pairCatalogProviders';
 import { useSessionsStore } from '@/stores/sessions';
+import { lastActiveAt } from '@/stores/sessions/pinned';
 import { setPairViewedSession } from '@/stores/sessions/unread';
 import { useSettingsStore } from '@/stores/settings';
 import { applyProjectOrder } from '@/stores/settings/projectOrder';
@@ -58,7 +59,8 @@ function buildPayload(): PairCatalogPayload {
       projectId: c.projectId,
       ...(toolCwd(c) ? { cwd: toolCwd(c) } : {}),
       status: c.spawning ? 'running' : c.status,
-      updatedAt: c.messages.at(-1)?.timestamp ?? c.createdAt,
+      // 与桌面侧栏同一活跃时间：冷会话消息被剥离时回落到持久化的 lastActiveAt
+      updatedAt: lastActiveAt(c),
       ...(c.parentId ? { parentId: c.parentId } : {}),
       ...(c.pinned === true ? { pinned: true } : {}),
       ...(c.archived === true ? { archived: true } : {}),

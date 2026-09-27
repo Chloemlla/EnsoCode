@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { foldTimeline, type TimelineItem } from '@/stores/sessions/timeline';
+import { exploreStepsKey, foldTimeline, type TimelineItem } from '@/stores/sessions/timeline';
 import { diffFoldMotion, EMPTY_FOLD_MOTION } from './foldMotion';
 
 const tool = (key: string, name: string, state: 'ok' | 'running' = 'ok'): TimelineItem => ({
@@ -24,6 +24,7 @@ const live = [
 ];
 const paired = [user, tool('m', 'explore_mark'), tool('r', 'read'), tool('f', 'explore_fold')];
 const KEY = 'explore-m';
+const STEPS = new Set([KEY, exploreStepsKey(KEY)]);
 
 function measurer(height = 90) {
   const spans: string[] = [];
@@ -44,7 +45,7 @@ describe('diffFoldMotion', () => {
     expect(spans).toEqual(['m->f']);
   });
 
-  it('手动展开时子行带组内序号；再收起从组头量到最后一行', () => {
+  it('展开过程时子行带组内序号；再收起从组头量到最后一行；只展开目标与结果不播', () => {
     const { spans, measure } = measurer();
     const first = diffFoldMotion(
       EMPTY_FOLD_MOTION,
@@ -52,10 +53,21 @@ describe('diffFoldMotion', () => {
       measure
     );
     expect(first.collapses).toEqual([]);
-    const opened = diffFoldMotion(first.next, foldTimeline(paired, false, new Set([KEY])), measure);
+    const summary = diffFoldMotion(
+      first.next,
+      foldTimeline(paired, false, new Set([KEY])),
+      measure
+    );
+    expect(summary.expands).toEqual([]);
+    expect(summary.children.size).toBe(0);
+    const opened = diffFoldMotion(summary.next, foldTimeline(paired, false, STEPS), measure);
     expect(opened.expands).toEqual([KEY]);
     expect(opened.children.get('r')).toEqual({ group: KEY, index: 1 });
-    const closed = diffFoldMotion(opened.next, foldTimeline(paired, false, new Set()), measure);
+    const closed = diffFoldMotion(
+      opened.next,
+      foldTimeline(paired, false, new Set([KEY])),
+      measure
+    );
     expect(closed.collapses).toEqual([{ key: KEY, height: 90, pair: false }]);
     expect(spans).toEqual([`${KEY}->f`]);
   });
@@ -67,7 +79,7 @@ describe('diffFoldMotion', () => {
       diffFoldMotion(first.next, foldTimeline(paired, true, new Set()), measure).collapses
     ).toEqual([]);
     expect(
-      diffFoldMotion(EMPTY_FOLD_MOTION, foldTimeline(paired, true, new Set([KEY])), measure).expands
+      diffFoldMotion(EMPTY_FOLD_MOTION, foldTimeline(paired, true, STEPS), measure).expands
     ).toEqual([]);
   });
 });

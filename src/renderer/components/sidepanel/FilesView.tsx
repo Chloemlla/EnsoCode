@@ -22,7 +22,11 @@ import {
 import { addToast } from '@/components/ui/toast';
 import { useCodeHighlightOptions } from '@/hooks/useColorScheme';
 import { useI18n } from '@/i18n';
-import { addSidePanelBrowser, registerFilesTabCloser } from '@/lib/sidePanelDock';
+import {
+  addSidePanelBrowser,
+  registerFilesOpener,
+  registerFilesTabCloser,
+} from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { useSessionsStore } from '@/stores/sessions';
 import { hasAuthoritativeMessages } from '@/stores/sessions/messageCache';
@@ -133,6 +137,9 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   openDocsRef.current = openDocs;
   const activeRelRef = useRef(activeRel);
   activeRelRef.current = activeRel;
+  /** 待跳转行：目标文件的编辑器挂上后消费 */
+  const pendingLineRef = useRef<{ rel: string; line: number } | null>(null);
+  const attachedEditorRef = useRef<{ rel: string; editor: Editor<undefined> } | null>(null);
   const tabStripRef = useRef<HTMLDivElement>(null);
   /** 重命名/删除留痕：让 rename/delete 期间已在途的 read/write 不再复活失效路径 */
   const opEpochRef = useRef(0);
@@ -278,6 +285,21 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
       return true;
     });
   }, [conversationId, requestCloseFile]);
+
+  useEffect(
+    () =>
+      registerFilesOpener(conversationId, (rel, line) => {
+        pendingLineRef.current = line ? { rel, line } : null;
+        const attached = attachedEditorRef.current;
+        if (line && attached?.rel === rel && activeRelRef.current === rel) {
+          pendingLineRef.current = null;
+          attached.editor.focus({ lineNumber: line });
+          return;
+        }
+        void openFile(rel);
+      }),
+    [conversationId, openFile]
+  );
 
   useEffect(() => {
     return () => {
@@ -612,6 +634,14 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
             doc.rel === rel ? { ...doc, draft: next, dirty: next !== doc.contents } : doc
           )
         );
+      },
+      onAttach(editor) {
+        if (!activeRel) return;
+        attachedEditorRef.current = { rel: activeRel, editor };
+        const pending = pendingLineRef.current;
+        if (pending?.rel !== activeRel) return;
+        pendingLineRef.current = null;
+        editor.focus({ lineNumber: pending.line });
       },
     }),
     [activeRel, t]

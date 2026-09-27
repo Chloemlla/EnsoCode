@@ -81,6 +81,7 @@ import {
   shouldSendRewindCommand,
 } from './conversationRewind';
 import {
+  bodyLastActiveAt,
   btwHotSessionIds,
   evictColdMessages,
   evictStampedColdMessages,
@@ -1009,6 +1010,10 @@ export const useSessionsStore = create<SessionsState>()(
                     : {
                         messages: [],
                         customEntries: [],
+                        lastActiveAt: bodyLastActiveAt(
+                          next.messages,
+                          bodyLastActiveAt(conversation.messages, conversation.lastActiveAt)
+                        ),
                         historyBaseIndex: undefined,
                         historyLoading: undefined,
                         ...(droppingBody ? { historyLoadAttempted: undefined } : {}),
@@ -1063,6 +1068,10 @@ export const useSessionsStore = create<SessionsState>()(
                       ? {
                           messages: [],
                           customEntries: [],
+                          lastActiveAt: bodyLastActiveAt(
+                            conversation.messages,
+                            conversation.lastActiveAt
+                          ),
                           historyBaseIndex: undefined,
                           historyLoading: undefined,
                           historyLoadAttempted: undefined,
@@ -1390,7 +1399,10 @@ export const useSessionsStore = create<SessionsState>()(
                         ...(event.error || event.abandoned
                           ? {}
                           : {
-                              compactionNoticeAt: state.conversations[id].messages?.length ?? 0,
+                              // 与时间线行 key 同为绝对下标：只持有尾窗时要加上窗起点
+                              compactionNoticeAt:
+                                (state.conversations[id].historyBaseIndex ?? 0) +
+                                (state.conversations[id].messages?.length ?? 0),
                             }),
                       }
                     : {}),
@@ -1491,15 +1503,24 @@ export const useSessionsStore = create<SessionsState>()(
             set((state) => patch(state, id, { title: extractedTitle }));
           }
           // 正文不落地，但可见输出仍要续心跳，否则 watchdog 会把后台仍在跑的会话当卡死。
-          // 没有旧正文可比对，重复快照也算；代价只是最多每 5s 一次写入
+          // 没有旧正文可比对，重复快照也算；代价只是最多每 5s 一次写入。
+          // 新消息的时间戳推进 lastActiveAt，流式续写同一条消息不重复写
           const now = Date.now();
-          if (
+          const heartbeat =
             event.type === 'message-upsert' &&
             currentConversation.status === 'running' &&
             now - (currentConversation.lastOutputAt ?? 0) >= COLD_HEARTBEAT_INTERVAL_MS &&
-            isVisibleGenerationOutput(event.message)
-          ) {
-            set((state) => patch(state, id, { lastOutputAt: now }));
+            isVisibleGenerationOutput(event.message);
+          const activeAt = event.type === 'message-upsert' ? event.message.timestamp : undefined;
+          const advance =
+            activeAt !== undefined && activeAt > (currentConversation.lastActiveAt ?? 0);
+          if (heartbeat || advance) {
+            set((state) =>
+              patch(state, id, {
+                ...(heartbeat ? { lastOutputAt: now } : {}),
+                ...(advance ? { lastActiveAt: activeAt } : {}),
+              })
+            );
           }
           // persist 在 set 返回原 state 时也会写，必须在调用 set 之前跳过。
           return;
@@ -1601,6 +1622,7 @@ export const useSessionsStore = create<SessionsState>()(
               ? {
                   messages: [],
                   customEntries: [],
+                  lastActiveAt: bodyLastActiveAt(next.messages, conversation.lastActiveAt),
                   historyBaseIndex: undefined,
                   historyLoading: undefined,
                   historyLoadAttempted: undefined,

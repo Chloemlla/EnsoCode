@@ -485,7 +485,7 @@ describe('SessionSupervisor failTurn compaction cleanup', () => {
   });
 
   /**
-   * 模拟 pi 终态错误轮：agent_end 会用 session.messages 重建投影（reconcileMessages），
+   * 模拟 pi 终态错误轮：agent_settled 会用 session.messages 重建投影（reconcileMessages），
    * 故把终态错误 assistant 塞进 session.messages，transcript 才保留它，
    * lastAssistant.stopReason==='error' 才会走 failTurn（而非误报 turn-completed）。
    */
@@ -497,6 +497,7 @@ describe('SessionSupervisor failTurn compaction cleanup', () => {
       errorMessage: 'model down',
     });
     parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
   }
 
   it('忙碌中 compact 进入 queued 后轮次失败：emit compaction end（无 error）并清掉 queued', async () => {
@@ -615,6 +616,7 @@ describe('SessionSupervisor failTurn compaction cleanup', () => {
       stopReason: 'stop',
     });
     parentSession.emit({ type: 'agent_end', willRetry: false });
+    parentSession.emit({ type: 'agent_settled' });
     await settle();
     await settle();
     await settle();

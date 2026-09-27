@@ -21,6 +21,7 @@ import type {
   SubagentModelEntry,
 } from '@shared/types';
 import type { AgentMode, ApprovalMode, ThinkingLevel } from '@shared/types/agent';
+import type { SpeechModelId } from '@shared/types/speech';
 import type { ModelPricing, PricingTable } from '@shared/usage/pricing';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import type { OauthCredentialSnapshot } from '@/stores/oauthCredentials';
@@ -141,6 +142,18 @@ export interface SettingsState {
   memoryDistillEnabled: boolean;
   /** 记忆创建后是否用 LLM 异步抽取实体图谱；缺省关 */
   memoryKgEnabled: boolean;
+  /** 语音输入：开启后才提示下载本地识别模型；缺省关 */
+  voiceInputEnabled: boolean;
+  /** 桌面录音用的麦克风设备 id；SYSTEM_MICROPHONE 跟随系统 */
+  voiceInputDevice: string;
+  /** 本机语音识别模型 */
+  voiceModel: SpeechModelId;
+  /** 识别后用 LLM 纠错；缺省关 */
+  voiceCorrectionEnabled: boolean;
+  /** 纠错后端：'remote' 或本地 chat 模型 id */
+  voiceCorrectionModel: string;
+  /** 纠错走远程时的模型；null 跟随标题模型 */
+  voiceCorrectionRemoteModel: DefaultModelRef | null;
 
   /** 是否自动检查并下载应用更新；缺省 true */
   autoUpdate: boolean;
@@ -301,6 +314,12 @@ export interface SettingsState {
   setMemoryEmbeddingRemoteProviderId: (value: string | null) => void;
   setMemoryDistillEnabled: (value: boolean) => void;
   setMemoryKgEnabled: (value: boolean) => void;
+  setVoiceInputEnabled: (value: boolean) => void;
+  setVoiceInputDevice: (deviceId: string) => void;
+  setVoiceModel: (model: SpeechModelId) => void;
+  setVoiceCorrectionEnabled: (value: boolean) => void;
+  setVoiceCorrectionModel: (model: string) => void;
+  setVoiceCorrectionRemoteModel: (model: DefaultModelRef | null) => void;
   setEditMode: (value: EditMode) => void;
   setCompactStrategy: (value: CompactStrategy) => void;
   setSmartCompactEnabled: (value: boolean) => void;

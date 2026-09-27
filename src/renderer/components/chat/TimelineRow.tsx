@@ -62,6 +62,7 @@ import {
 } from '@/stores/sessions/conversationRewind';
 import { formatDuration, formatTokens } from '@/stores/sessions/stats';
 import {
+  exploreStepsKey,
   isReadOnlyTool,
   parseSandboxOutput,
   shouldAutoExpandAppliedFileChanges,
@@ -71,6 +72,7 @@ import {
   thinkingRowExpanded,
 } from '@/stores/sessions/timeline';
 import { useSettingsStore } from '@/stores/settings';
+import { AskUserResult } from './AskUserResult';
 import { CodeBlock } from './CodeBlock';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useChatHost } from './chatHost';
@@ -78,7 +80,9 @@ import { EditDiff } from './EditDiff';
 import { EnsoMark } from './EnsoMark';
 import { renderHighlighted, useChatSearchHighlight } from './highlightQuery';
 import { Markdown } from './Markdown';
+import { MemoryCaptureResult, MemorySearchResults } from './MemorySearchResults';
 import { mentionChipClass } from './MentionChip';
+import { parseMemoryCapture, parseMemorySearchHits } from './memorySearchHits';
 import { splitInlineMentions, splitMentionRefs } from './mentionComposer';
 import { ReadFileView } from './ReadFileView';
 import { RtkToolStatsBar } from './RtkToolStatsBar';
@@ -160,7 +164,13 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.nestedPending === b.nestedPending &&
         a.rtk === b.rtk &&
         a.plan?.title === b.plan?.title &&
-        a.plan?.text === b.plan?.text
+        a.plan?.text === b.plan?.text &&
+        a.sentMessage === b.sentMessage &&
+        a.memoryContent === b.memoryContent &&
+        a.ask?.question === b.ask?.question &&
+        a.ask?.options.join('\n') === b.ask?.options.join('\n') &&
+        a.ask?.answer === b.ask?.answer &&
+        a.ask?.autoSelected === b.ask?.autoSelected
       );
     case 'tool-group':
       return (
@@ -174,7 +184,9 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.exploring === b.exploring &&
         a.activity?.thinking === b.activity?.thinking &&
         a.activity?.workedMs === b.activity?.workedMs &&
-        a.explore?.goal === b.explore?.goal
+        a.explore?.goal === b.explore?.goal &&
+        a.explore?.report === b.explore?.report &&
+        a.explore?.steps === b.explore?.steps
       );
     case 'error':
       return b.kind === 'error' && a.text === b.text;
@@ -1338,10 +1350,13 @@ function ToolGroupRow({
       : compact
         ? explored
         : parts;
-  return (
+  const head = (
     <button
       type="button"
-      onClick={() => onToggle?.(item.key)}
+      onClick={() => {
+        if (explore?.steps) onToggle?.(exploreStepsKey(item.key));
+        onToggle?.(item.key);
+      }}
       title={explore?.goal}
       data-explore-head={explore ? '' : undefined}
       className="group/step flex min-h-[30px] w-full items-center gap-2 rounded-lg pr-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
@@ -1359,6 +1374,38 @@ function ToolGroupRow({
         className={cn('h-3 w-3 shrink-0 transition-transform', item.expanded && 'rotate-90')}
       />
     </button>
+  );
+  if (!explore || !item.expanded) return head;
+  // 探索组首层展开只给目标与结果，过程另开一层才平铺原始行
+  return (
+    <>
+      {head}
+      <div className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card text-sm shadow-xs">
+        {explore.goal && (
+          <div className="border-b border-border/60 px-3 py-2">
+            <div className="mb-0.5 text-[11px] text-muted-foreground">{t('Goal')}</div>
+            <p className="whitespace-pre-wrap">{explore.goal}</p>
+          </div>
+        )}
+        {explore.report && (
+          <div className="border-b border-border/60 px-3 py-2">
+            <div className="mb-0.5 text-[11px] text-muted-foreground">{t('Result')}</div>
+            <Markdown text={explore.report} />
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => onToggle?.(exploreStepsKey(item.key))}
+          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+        >
+          <ChevronRight
+            className={cn('h-3 w-3 shrink-0 transition-transform', explore.steps && 'rotate-90')}
+          />
+          <span>{explore.steps ? t('Hide process') : t('Show process')}</span>
+          <span>· {t('{{count}} tool calls', { count: item.count })}</span>
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -1534,6 +1581,8 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const hasWrite = Boolean(item.writeContent);
   const hasFileChanges = Boolean(item.fileChanges && item.fileChanges.length > 0);
   const sandbox = item.name === 'exec' ? parseSandboxOutput(item.output) : null;
+  // 消息类工具展开显示发出的正文（投递回执已在 timeline 剥掉）；出错时只显示错误输出
+  const sentMessage = item.state === 'error' ? null : item.sentMessage;
   const labelKey = TOOL_LABEL_KEYS[item.name];
   const mcp = parseMcpToolName(item.name);
   const headerSummary =
@@ -1542,13 +1591,19 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
       : sandbox?.calls.length && item.state !== 'error'
         ? summarizeSandboxCalls(sandbox.calls)
         : item.summary;
-  const expandable =
-    hasDiff || hasWrite || hasFileChanges || Boolean(item.output) || Boolean(item.source);
+  const hasBody = Boolean(item.output || item.source || sentMessage || item.ask);
+  const expandable = hasDiff || hasWrite || hasFileChanges || hasBody;
   // edit 的 diff 与 write 的内容只在本轮直播（running）且开启 expandLiveEdits 时默认展开；
   // 历史会话挂载时全部折叠——否则切会话时视口内成排 FileDiff 同步解析+高亮，
   // 主线程阻塞几秒白屏
   const autoExpand = expandLiveEdits && (hasDiff || hasWrite) && item.state === 'running';
   const [expanded, setExpanded] = useState(autoExpand);
+  const memoryHits =
+    expanded && item.name === 'memory_search' ? parseMemorySearchHits(item.output) : null;
+  const memoryCapture =
+    expanded && item.name === 'memory_capture'
+      ? parseMemoryCapture(item.output, item.memoryContent)
+      : null;
   const previouslyHadFileChanges = useRef(hasFileChanges);
   // apply_patch 只在终态结果中拿到真实 diff：必须按「本行从无到有」识别直播，历史首次挂载不展开。
   useEffect(() => {
@@ -1684,7 +1739,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
               <ReadFileView path={item.summary} contents={item.writeContent} />
             </ToolContentScroller>
           )}
-          {!hasDiff && !hasWrite && !hasFileChanges && (item.output || item.source) && (
+          {!hasDiff && !hasWrite && !hasFileChanges && hasBody && (
             <ToolContentScroller follow={item.state === 'running'}>
               {item.name === 'exec' ? (
                 <SandboxOutput source={item.source} output={item.output} view={sandbox} />
@@ -1692,14 +1747,28 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
                 <TerminalOutput command={item.summary} output={item.output ?? ''} />
               ) : item.name === 'read' ? (
                 <ReadFileView path={item.summary} contents={item.output ?? ''} />
-              ) : item.name === 'subagent' && item.state !== 'error' ? (
+              ) : item.name === 'subagent' && item.state !== 'error' && !sentMessage ? (
                 <div className="px-3 py-2 text-sm">
                   <Markdown text={item.output ?? ''} />
                 </div>
+              ) : memoryHits ? (
+                <MemorySearchResults hits={memoryHits} />
+              ) : memoryCapture ? (
+                <MemoryCaptureResult view={memoryCapture} />
               ) : (
-                <pre className="px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
-                  {stripAnsi(item.output ?? '')}
-                </pre>
+                <>
+                  {item.ask && <AskUserResult ask={item.ask} waiting={item.state === 'running'} />}
+                  {sentMessage && (
+                    <div className="px-3 py-2 text-sm">
+                      <Markdown text={sentMessage} />
+                    </div>
+                  )}
+                  {item.output && (
+                    <pre className="px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                      {stripAnsi(item.output)}
+                    </pre>
+                  )}
+                </>
               )}
               <RtkToolStatsBar value={item.rtk} />
             </ToolContentScroller>

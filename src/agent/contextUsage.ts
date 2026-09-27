@@ -106,6 +106,59 @@ function resolveActiveIndex(
   );
 }
 
+export function toAnchorMessage(raw: unknown, tracker?: ContextUsageTracker): AnchorMessage {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  const u = record.usage as Record<string, unknown> | undefined;
+  const usage: UsageLike | undefined =
+    u && typeof u === 'object'
+      ? {
+          input: Number(u.input ?? 0),
+          output: Number(u.output ?? 0),
+          cacheRead: Number(u.cacheRead ?? 0),
+          cacheWrite: Number(u.cacheWrite ?? 0),
+          ...(u.contextTokens !== undefined ? { contextTokens: Number(u.contextTokens) } : {}),
+          ...(u.totalTokens !== undefined ? { totalTokens: Number(u.totalTokens) } : {}),
+        }
+      : undefined;
+  const message: AnchorMessage = {
+    role: typeof record.role === 'string' ? record.role : '',
+    ...(typeof record.stopReason === 'string' ? { stopReason: record.stopReason } : {}),
+    ...(usage ? { usage } : {}),
+    ...(typeof record.timestamp === 'number' ? { timestamp: record.timestamp } : {}),
+  };
+  const snapshot = tracker?.snapshotFor(message);
+  if (snapshot) message.contextSnapshot = snapshot;
+  return message;
+}
+
+/** compactionIndex 是分支条目下标，故 branchMessages 须与分支逐条对齐；估算回落到原始消息 */
+export function contextBreakdownMessages(
+  contextMessages: readonly unknown[],
+  branch: readonly { type: string; message?: unknown }[],
+  estimate: (message: unknown) => number,
+  tracker?: ContextUsageTracker
+): {
+  activeMessages: AnchorMessage[];
+  branchMessages: AnchorMessage[];
+  estimateMessageTokens: (message: unknown) => number;
+} {
+  const sources = new Map<AnchorMessage, unknown>();
+  const activeMessages = contextMessages.map((raw) => {
+    const message = toAnchorMessage(raw, tracker);
+    sources.set(message, raw);
+    return message;
+  });
+  const branchMessages = branch.map((entry) =>
+    entry.type === 'message' ? toAnchorMessage(entry.message, tracker) : { role: '' }
+  );
+  return {
+    activeMessages,
+    branchMessages,
+    estimateMessageTokens: (message) =>
+      estimate(sources.has(message as AnchorMessage) ? sources.get(message as AnchorMessage) : message),
+  };
+}
+
 export class ContextUsageTracker {
   #compactionEpoch = 0;
   #pending: (PendingContextSnapshotInput & { epoch: number }) | undefined;

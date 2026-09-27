@@ -35,6 +35,7 @@ import { Button } from '@/components/ui/button';
 import { ToastProvider } from '@/components/ui/toast';
 import { useAutoArchiveScan } from '@/hooks/useAutoArchiveScan';
 import { useBackgroundImage } from '@/hooks/useBackgroundImage';
+import { useDockBadge } from '@/hooks/useDockBadge';
 import { useGenerationStallTimeout } from '@/hooks/useGenerationStallTimeout';
 import { useWindowsWindowChrome } from '@/hooks/useWindowsWindowChrome';
 import { useI18n } from '@/i18n';
@@ -48,6 +49,7 @@ import { cn } from '@/lib/utils';
 import { bindPairCatalogSync } from '@/stores/pairCatalog';
 import { useRemoteNodesStore } from '@/stores/remoteNodes';
 import { useSessionsStore } from '@/stores/sessions';
+import { runSessionClean } from '@/stores/sessions/storageClean';
 import { useSettingsStore } from '@/stores/settings';
 import { flushElectronPersist } from '@/stores/settings/storage';
 import { useSidePanelStore } from '@/stores/sidePanel';
@@ -68,6 +70,7 @@ export default function App() {
   useBackgroundImage();
   useGenerationStallTimeout();
   useAutoArchiveScan();
+  useDockBadge();
   const [searchOpen, setSearchOpen] = useState(false);
   const [closeRequestId, setCloseRequestId] = useState<string | null>(null);
   useWindowsWindowChrome();
@@ -129,6 +132,16 @@ export default function App() {
     () =>
       window.electronAPI.window.onAgentComposerPrefill((prefill) => {
         useSessionsStore.getState().prefillAgent(prefill.typeKey, prefill.prompt);
+      }),
+    []
+  );
+
+  useEffect(
+    () =>
+      window.electronAPI.resources.onSessionsCleanRequest(({ requestId, request }) => {
+        void runSessionClean(request)
+          .catch(() => 0)
+          .then((removed) => window.electronAPI.resources.sessionsCleanDone(requestId, removed));
       }),
     []
   );

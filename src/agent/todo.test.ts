@@ -35,12 +35,17 @@ describe('TodoStaleReminder', () => {
     expect(takeTimes(reminder, 2).flat()).toEqual([]);
   });
 
-  it('提醒后不会每次调用都重复，隔一个周期再提醒', () => {
+  it('提醒后未更新则间隔翻倍退避，更新后恢复初始阈值', () => {
     const reminder = new TodoStaleReminder(2);
     reminder.update(open);
     takeTimes(reminder, 2);
+    expect(reminder.take()[0]).toContain('last 3 tool calls');
+    expect(takeTimes(reminder, 3).flat()).toEqual([]);
+    expect(reminder.take()[0]).toContain('last 7 tool calls');
+    expect(takeTimes(reminder, 7).flat()).toEqual([]);
     expect(reminder.take()).toHaveLength(1);
-    expect(takeTimes(reminder, 2).flat()).toEqual([]);
+    reminder.update(open);
+    takeTimes(reminder, 2);
     expect(reminder.take()).toHaveLength(1);
   });
 

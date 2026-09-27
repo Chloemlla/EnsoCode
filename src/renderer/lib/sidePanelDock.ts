@@ -13,6 +13,12 @@ import { resolveSidePanelDockConversationId } from './sidePanelDockId';
 
 const docks = new Map<string, DockviewApi>();
 const filesTabClosers = new Map<string, () => boolean>();
+type FileTarget = [rel: string, line?: number];
+const filesOpeners = new Map<string, (...target: FileTarget) => void>();
+/** Files 视图未挂载时挂起的待开文件，视图注册 opener 时补开 */
+const pendingFileOpens = new Map<string, FileTarget>();
+/** dock 未挂载时挂起的 Files 面板，dock 绑定后补建 */
+const pendingFilesReveal = new Set<string>();
 const pendingBrowserReveal: { conversationId: string; tabId?: string; ownerId?: string }[] = [];
 const pendingWorkflowReveal: {
   conversationId: string;
@@ -41,8 +47,32 @@ export function registerFilesTabCloser(conversationId: string, close: () => bool
   };
 }
 
+export function registerFilesOpener(
+  conversationId: string,
+  open: (...target: FileTarget) => void
+): () => void {
+  filesOpeners.set(conversationId, open);
+  const pending = pendingFileOpens.get(conversationId);
+  if (pending !== undefined) {
+    pendingFileOpens.delete(conversationId);
+    open(...pending);
+  }
+  return () => {
+    if (filesOpeners.get(conversationId) === open) filesOpeners.delete(conversationId);
+  };
+}
+
 export function bindSidePanelDock(conversationId: string, api: DockviewApi): void {
   docks.set(conversationId, api);
+  if (pendingFilesReveal.delete(conversationId)) {
+    // 等 onReady 里的布局恢复完再建，免得被 fromJSON 覆盖
+    queueMicrotask(() => {
+      const projectId = useSessionsStore.getState().conversations[conversationId]?.projectId;
+      if (projectId && docks.get(conversationId) === api) {
+        revealFilesPanel(api, conversationId, projectId);
+      }
+    });
+  }
   const due = pendingBrowserReveal.filter((item) => item.conversationId === conversationId);
   pendingBrowserReveal.splice(
     0,
@@ -116,17 +146,42 @@ export function addSidePanelFiles(opts?: { title?: string }): void {
   const active = activeDock();
   if (!active) return;
   useSidePanelStore.getState().ensureOpen();
-  const existing = active.api.getPanel('files');
+  revealFilesPanel(active.api, active.conversationId, active.projectId, opts?.title);
+}
+
+function revealFilesPanel(
+  api: DockviewApi,
+  conversationId: string,
+  projectId: string,
+  title?: string
+): void {
+  const existing = api.getPanel('files');
   if (existing) {
     existing.focus();
     return;
   }
-  active.api.addPanel({
+  api.addPanel({
     id: 'files',
     component: 'files',
-    title: opts?.title ?? 'Files',
-    params: { conversationId: active.conversationId, projectId: active.projectId },
+    title: title ?? 'Files',
+    params: { conversationId, projectId },
   });
+}
+
+/** 在会话所属 dock 的 Files 面板打开文件（btw 落到父会话 dock） */
+export function openSidePanelFile(conversationId: string, rel: string, line?: number): void {
+  const sessions = useSessionsStore.getState();
+  const dockId = resolveSidePanelDockConversationId(sessions.conversations, conversationId);
+  const projectId = sessions.conversations[dockId]?.projectId;
+  if (!projectId) return;
+  useSidePanelStore.getState().ensureOpen(dockId);
+  const target: FileTarget = line ? [rel, line] : [rel];
+  const open = filesOpeners.get(dockId);
+  if (open) open(...target);
+  else pendingFileOpens.set(dockId, target);
+  const api = docks.get(dockId);
+  if (api) revealFilesPanel(api, dockId, projectId);
+  else pendingFilesReveal.add(dockId);
 }
 
 export function addSidePanelBrowser(opts?: {
@@ -218,6 +273,9 @@ export function disposeConversationResources(conversationId: string): void {
   const api = docks.get(conversationId);
   docks.delete(conversationId);
   filesTabClosers.delete(conversationId);
+  filesOpeners.delete(conversationId);
+  pendingFileOpens.delete(conversationId);
+  pendingFilesReveal.delete(conversationId);
   pendingBrowserReveal.splice(
     0,
     pendingBrowserReveal.length,

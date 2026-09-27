@@ -38,9 +38,13 @@ export interface McpServerEntry {
   connectTimeoutSec?: number;
   /** 单次 callTool 超时（秒）；缺省 120 */
   callTimeoutSec?: number;
+  /** deferred：不注入工具 schema，经 `mcp` 代理工具按需连接；缺省 direct */
+  loadMode?: McpLoadMode;
   source: string;
   enabled: boolean;
 }
+
+export type McpLoadMode = 'direct' | 'deferred';
 
 /** 注入组合预设：会话级选用的 skill/MCP/指令文件集合。
  *  默认预设不入库（DEFAULT_PRESET_ID 运行时合成，语义 = 跟随各条目的 enabled 开关）；
@@ -126,7 +130,7 @@ export interface AgentTypeEntry {
   /** 类型级推理覆盖（与模型选型模式无关）；缺省 = 跟随模型条目 / 父会话 */
   reasoning?: ModelReasoningOverride;
   thinkingLevel?: ModelThinkingLevelOverride;
-  /** 工具集：all 全部 / readonly 仅只读（read+grep/find/ls,无 bash/edit/write/MCP） */
+  /** 工具集：all 全部 / readonly 仅只读（read+grep/find/ls + 本类型绑定的 MCP，无 bash/edit/write） */
   tools: 'all' | 'readonly';
   /** 可写路径 glob 白名单（相对 cwd，posix）；只约束 edit/write；缺省不限 */
   writeScope?: string[];

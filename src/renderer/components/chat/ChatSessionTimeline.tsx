@@ -245,6 +245,7 @@ export function ChatSessionTimeline({
         }
         historyLoading={historyLoading}
         hasOlder={historyBaseIndex > 0}
+        olderCursor={historyBaseIndex}
         onStartReached={
           historyBaseIndex > 0
             ? () => void useSessionsStore.getState().loadOlderHistory(conversationId)

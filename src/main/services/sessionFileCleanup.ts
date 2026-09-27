@@ -42,4 +42,17 @@ export function removeConversationSessionFiles(
       rmSync(path.join(root, entry), { force: true });
     } catch {}
   }
+  // 超长工具输出落盘目录：tool-output/<sessionId>，子会话为 <id>-child / <id>::cw-*
+  const toolRoot = path.join(root, 'tool-output');
+  let toolEntries: string[] = [];
+  try {
+    toolEntries = readdirSync(toolRoot);
+  } catch {}
+  const id = options.conversationId;
+  for (const entry of toolEntries) {
+    if (entry !== id && !entry.startsWith(`${id}-`) && !entry.startsWith(`${id}::`)) continue;
+    try {
+      rmSync(path.join(toolRoot, entry), { recursive: true, force: true });
+    } catch {}
+  }
 }

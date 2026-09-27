@@ -20,6 +20,7 @@ export const KEYBINDING_ACTIONS = [
   'new-btw-tab',
   'close-side-tab',
   'toggle-minimize-to-tray',
+  'voice-hold',
 ] as const;
 export type KeybindingAction = (typeof KEYBINDING_ACTIONS)[number];
 
@@ -40,6 +41,7 @@ export const ACTION_LABEL_KEYS: Record<KeybindingAction, string> = {
   'new-btw-tab': 'New Btw tab',
   'close-side-tab': 'Close terminal tab',
   'toggle-minimize-to-tray': 'Toggle minimize to tray',
+  'voice-hold': 'Voice input (hold to talk)',
 };
 
 /** 仅部分动作需要补充生效范围，没有就不渲染 */
@@ -49,6 +51,7 @@ export const ACTION_HINT_KEYS: Partial<Record<KeybindingAction, string>> = {
   'new-side-tab': 'New terminal when the side panel is focused; otherwise new conversation',
   'new-btw-tab': 'Open a Btw tab in the side panel',
   'toggle-minimize-to-tray': 'Works while the app is in the tray',
+  'voice-hold': 'Hold to record, release to put the text in the chat input',
 };
 
 export function isEventInSidePanel(target: EventTarget | null): boolean {
@@ -78,6 +81,7 @@ export const DEFAULT_KEYBINDINGS: Record<KeybindingAction, string> = {
   'new-btw-tab': 'mod+shift+b',
   'close-side-tab': 'mod+w',
   'toggle-minimize-to-tray': DEFAULT_TRAY_TOGGLE_BINDING,
+  'voice-hold': 'mod+shift+space',
 };
 
 /** 合并用户覆盖与默认(store 只存覆盖项,默认可随版本演进) */
@@ -92,7 +96,7 @@ export function eventToBinding(
   e: KeyboardEvent | React.KeyboardEvent,
   options?: { allowBare?: boolean }
 ): string | null {
-  const key = e.key.toLowerCase();
+  const key = bindingKey(e);
   if (['meta', 'control', 'alt', 'shift'].includes(key)) return null;
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
   const ctrl = IS_MAC && e.ctrlKey;
@@ -105,6 +109,23 @@ export function eventToBinding(
   if (e.shiftKey) parts.push('shift');
   parts.push(key);
   return parts.join('+');
+}
+
+/** 空格记作 space：否则绑定串里是看不见的空格，mac 的 ⌥Space 还会给出不换行空格 */
+function bindingKey(e: KeyboardEvent | React.KeyboardEvent): string {
+  return e.key === ' ' || e.key === '\u00a0' ? 'space' : e.key.toLowerCase();
+}
+
+/** 按住型快捷键：松开主键或任一所需修饰键都算松手（mac 按着 ⌘ 时主键的 keyup 不一定会来） */
+export function isHoldReleased(binding: string, e: KeyboardEvent): boolean {
+  const parts = binding.split('+');
+  if (bindingKey(e) === parts.at(-1)) return true;
+  return (
+    (parts.includes('mod') && !(IS_MAC ? e.metaKey : e.ctrlKey)) ||
+    (parts.includes('ctrl') && !e.ctrlKey) ||
+    (parts.includes('alt') && !e.altKey) ||
+    (parts.includes('shift') && !e.shiftKey)
+  );
 }
 
 /** 绑定串转显示文本:mac 用符号(⌃⌥⇧⌘B),其它平台 Ctrl+Alt+Shift+B */

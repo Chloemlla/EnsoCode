@@ -62,6 +62,26 @@ describe('config sync codec schema and crypto boundaries', () => {
     }
   });
 
+  it('MCP loadMode 合法值随包往返，非法值拒绝', () => {
+    const mcp = (loadMode?: unknown) => ({
+      id: 'mcp-1',
+      name: 'Search',
+      transport: 'stdio',
+      command: 'search-mcp',
+      source: 'manual',
+      enabled: true,
+      ...(loadMode === undefined ? {} : { loadMode }),
+    });
+    for (const loadMode of ['direct', 'deferred']) {
+      const input = minimalBundle();
+      (input.state as unknown as Record<string, unknown>).mcpServers = [mcp(loadMode)];
+      expect(validateBundle(input).state.mcpServers[0]).toMatchObject({ loadMode });
+    }
+    const invalid = minimalBundle();
+    (invalid.state as unknown as Record<string, unknown>).mcpServers = [mcp('lazy')];
+    expect(() => validateBundle(invalid)).toThrow(/loadMode/);
+  });
+
   it('接受智能压缩设置并校验模型引用', () => {
     const input = minimalBundle();
     input.state.providers = [provider()];

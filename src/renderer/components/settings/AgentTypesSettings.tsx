@@ -500,7 +500,7 @@ export function AgentTypeEditDialog({
             <Select
               items={[
                 { value: 'all', label: t('All tools (bash/edit/write)') },
-                { value: 'readonly', label: t('Read-only (read/grep/find/ls)') },
+                { value: 'readonly', label: t('Read-only (read/grep/find/ls + bound MCP)') },
               ]}
               value={tools}
               onValueChange={(value) => setTools(value as 'all' | 'readonly')}
@@ -510,7 +510,9 @@ export function AgentTypeEditDialog({
               </SelectTrigger>
               <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL}>
                 <SelectItem value="all">{t('All tools (bash/edit/write)')}</SelectItem>
-                <SelectItem value="readonly">{t('Read-only (read/grep/find/ls)')}</SelectItem>
+                <SelectItem value="readonly">
+                  {t('Read-only (read/grep/find/ls + bound MCP)')}
+                </SelectItem>
               </SelectPopup>
             </Select>
           </Field>

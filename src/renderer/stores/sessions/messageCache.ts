@@ -136,7 +136,23 @@ export function isBulkyAgentEvent(type: string): boolean {
   return type === 'message-upsert' || type === 'session-custom-entry';
 }
 
-export function evictColdMessages<T extends { messages: unknown[]; customEntries: unknown[] }>(
+/** 丢正文前留下最后活跃时刻，否则侧栏与排序回落到 createdAt */
+export function bodyLastActiveAt(
+  messages: readonly { timestamp?: number }[],
+  lastActiveAt: number | undefined
+): number | undefined {
+  const last = messages.at(-1)?.timestamp;
+  if (last === undefined) return lastActiveAt;
+  return lastActiveAt === undefined ? last : Math.max(last, lastActiveAt);
+}
+
+type EvictableConversation = {
+  messages: { timestamp?: number }[];
+  customEntries: unknown[];
+  lastActiveAt?: number;
+};
+
+export function evictColdMessages<T extends EvictableConversation>(
   conversations: Record<string, T>,
   viewedId: string | null,
   lastViewedAt: Readonly<Record<string, number>>,
@@ -156,9 +172,7 @@ export function evictColdMessages<T extends { messages: unknown[]; customEntries
 }
 
 /** 只清已经离开并过 TTL 的正文。没有盖章的留给定时全量清，避免同一次写入被切 tab 抹掉。 */
-export function evictStampedColdMessages<
-  T extends { messages: unknown[]; customEntries: unknown[] },
->(
+export function evictStampedColdMessages<T extends EvictableConversation>(
   conversations: Record<string, T>,
   viewedId: string | null,
   lastViewedAt: Readonly<Record<string, number>>,
@@ -169,7 +183,7 @@ export function evictStampedColdMessages<
   return evictColdMessageBodies(conversations, viewedId, lastViewedAt, now, ttl, extraHotIds, true);
 }
 
-function evictColdMessageBodies<T extends { messages: unknown[]; customEntries: unknown[] }>(
+function evictColdMessageBodies<T extends EvictableConversation>(
   conversations: Record<string, T>,
   viewedId: string | null,
   lastViewedAt: Readonly<Record<string, number>>,
@@ -188,6 +202,7 @@ function evictColdMessageBodies<T extends { messages: unknown[]; customEntries: 
       ...conversation,
       messages: [],
       customEntries: [],
+      lastActiveAt: bodyLastActiveAt(conversation.messages, conversation.lastActiveAt),
       historyBaseIndex: undefined,
       historyLoading: undefined,
       historyLoadAttempted: undefined,

@@ -352,7 +352,9 @@ export class AgentService implements AgentServiceContract {
         run.value.validationAbort?.abort();
       }
       this.finishRun(run.value, 'cancelled');
-      if (agent.activeRunId === run.value.runId) {
+      if (agent.mode === 'task') {
+        this.closeTask(agent);
+      } else if (agent.activeRunId === run.value.runId) {
         agent.activeRunId = undefined;
         agent.status = 'ready';
         await this.startNext(agent);
@@ -734,15 +736,22 @@ export class AgentService implements AgentServiceContract {
     agent.activeRunId = undefined;
     agent.status = 'ready';
     if (agent.mode === 'task') {
-      agent.status = 'closed';
-      void this.options.runtime.dismiss({
-        context: agent.context,
-        identity: agent.identity,
-        agentId: agent.agentId,
-      });
+      this.closeTask(agent);
     } else {
       void this.serial(agent.context.owner.ownerId, () => this.startNext(agent));
     }
+  }
+
+  /** task 只有一轮：完成、失败或被 stop 后都不能再用，关闭并回收子会话，否则留下孤儿 */
+  private closeTask(agent: AgentRecord): void {
+    if (agent.status === 'closed') return;
+    agent.activeRunId = undefined;
+    agent.status = 'closed';
+    void this.options.runtime.dismiss({
+      context: agent.context,
+      identity: agent.identity,
+      agentId: agent.agentId,
+    });
   }
 
   private finishRun(run: RunRecord, status: AgentRunStatus, error?: string): void {

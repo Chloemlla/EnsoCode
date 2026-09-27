@@ -409,6 +409,50 @@ describe('AgentService lifecycle', () => {
     expect(runtime.dismiss).toHaveBeenCalledTimes(1);
   });
 
+  it('stop 掉 task 唯一的 Run 后关闭实例并回收子会话，不留孤儿', async () => {
+    const { service, runtime } = setup();
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    expect(
+      await service.stop({ context, requestId: 'stop-task', runId: spawned.value.runId })
+    ).toMatchObject({ ok: true, value: { status: 'cancelled' } });
+    expect(runtime.stop).toHaveBeenCalledTimes(1);
+    expect(runtime.dismiss).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: spawned.value.agentId })
+    );
+    expect(
+      await service.send({
+        context,
+        requestId: 'send-after-stop',
+        agentId: spawned.value.agentId,
+        message: 'again',
+      })
+    ).toMatchObject({ ok: false, code: 'invalid-state' });
+    await service.dismiss({
+      context,
+      requestId: 'dismiss-after-stop',
+      agentId: spawned.value.agentId,
+    });
+    expect(runtime.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('task stop 途中子会话先收尾时只回收一次', async () => {
+    const { service, runtime, children } = setup();
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    vi.mocked(runtime.stop).mockImplementationOnce(async () => {
+      service.observe({
+        type: 'turn-completed',
+        identity: children[0],
+        seq: 1,
+        turnId: spawned.value.runId,
+      });
+      return { ok: true };
+    });
+    await service.stop({ context, requestId: 'stop-race', runId: spawned.value.runId });
+    expect(runtime.dismiss).toHaveBeenCalledTimes(1);
+  });
+
   it('owner/project/actor 不一致时在 runtime 前拒绝', async () => {
     const { service, runtime } = setup();
     const result = await service.spawn(

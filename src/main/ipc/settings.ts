@@ -123,6 +123,12 @@ export const SETTINGS_STATE_FIELDS = [
   'memoryModelIdleMinutes',
   'memoryEmbeddingRemoteProviderId',
   'memoryDistillEnabled',
+  'voiceInputEnabled',
+  'voiceInputDevice',
+  'voiceModel',
+  'voiceCorrectionEnabled',
+  'voiceCorrectionModel',
+  'voiceCorrectionRemoteModel',
   'memoryKgEnabled',
   'onboarded',
   'keybindings',
@@ -155,6 +161,12 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'memoryEmbeddingAutoDownload',
   'memoryModelIdleMinutes',
   'memoryEmbeddingRemoteProviderId',
+  'voiceInputEnabled',
+  'voiceInputDevice',
+  'voiceModel',
+  'voiceCorrectionEnabled',
+  'voiceCorrectionModel',
+  'voiceCorrectionRemoteModel',
   'onboarded',
   'projects',
   'projectGroups',
@@ -187,6 +199,13 @@ function notifyTrayToggleShortcut(settings: Record<string, unknown>): void {
   const keybindings = settingsStateOf(settings).keybindings;
   void import('../services/trayToggleShortcut')
     .then(({ syncTrayToggleShortcut }) => syncTrayToggleShortcut(keybindings))
+    .catch(() => {});
+}
+
+function notifySpeechSettings(settings: Record<string, unknown>): void {
+  const state = settingsStateOf(settings);
+  void import('../services/speech/service')
+    .then(({ syncSpeechFromSettings }) => syncSpeechFromSettings(state))
     .catch(() => {});
 }
 
@@ -333,6 +352,7 @@ function scheduleWrite(
     isDirty = true;
     notifyMemoryEmbeddingSettings(data);
     notifyTrayToggleShortcut(data);
+    notifySpeechSettings(data);
 
     // 普通 store 写排除 sender；Gateway 写显式选择 all-renderers。
     for (const win of BrowserWindow.getAllWindows()) {
@@ -472,6 +492,7 @@ export function commitSettingsTransaction(
   isDirty = false;
   notifyMemoryEmbeddingSettings(next);
   notifyTrayToggleShortcut(next);
+  notifySpeechSettings(next);
   try {
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;

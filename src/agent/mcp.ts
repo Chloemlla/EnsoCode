@@ -161,7 +161,15 @@ export const oauthFingerprint = (tokens: McpOAuthTokens | undefined): string =>
     ? createHash('sha256').update(tokens.access_token).digest('hex').slice(0, 16)
     : '';
 
-const slug = (name: string): string => name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
+export const mcpServerSlug = (name: string): string =>
+  name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
+
+export const mcpToolName = (serverName: string, toolName: string): string =>
+  `mcp__${mcpServerSlug(serverName)}__${toolName}`;
+
+export type McpServerResolution =
+  | { ok: true; tools: ToolDefinition[] }
+  | { ok: false; error: string; unauthorized: boolean };
 
 function mapToolResult(
   result: unknown,
@@ -224,7 +232,12 @@ export class McpManager {
   /** 同 server 并发 stale 调用合并成一次重连 */
   private readonly reconnecting = new Map<string, Promise<Connection | null>>();
   /** 失败短时负缓存：同凭据在 TTL 内不再打连接 */
-  private readonly failedUntil = new Map<string, { until: number; fingerprint: string }>();
+  private readonly failedUntil = new Map<
+    string,
+    { until: number; fingerprint: string; error: string; unauthorized: boolean }
+  >();
+  /** 最近一次下发的凭据：按需 server 的会话配置在 spawn 时冻结，连接时以它为准 */
+  private readonly latestOAuth = new Map<string, McpOAuthTokens | undefined>();
 
   constructor(private readonly options: McpManagerOptions = { emit: () => {} }) {}
 
@@ -247,9 +260,38 @@ export class McpManager {
     return results.flatMap((connection) => connection?.tools ?? []);
   }
 
+  /** 按需连接单个 server（代理工具用）：以最近下发的凭据为准，失败带原因 */
+  async resolve(server: McpServerSpawnConfig): Promise<McpServerResolution> {
+    const current = this.withLatestOAuth(server);
+    const connection = await this.connectionFor(current);
+    if (connection) return { ok: true, tools: connection.tools };
+    const failed = this.failedUntil.get(connectionKey(current));
+    return {
+      ok: false,
+      error: failed?.error ?? 'connection failed',
+      unauthorized: failed?.unauthorized ?? false,
+    };
+  }
+
+  /** 按需 server 的预热：记下凭据，只把换 token / 撤销同步给已建立的连接，不新连 */
+  refresh(server: McpServerSpawnConfig): void {
+    const key = connectionKey(server);
+    this.latestOAuth.set(key, server.oauth);
+    if (this.connections.has(key)) void this.connectionFor(server);
+  }
+
+  private withLatestOAuth(server: McpServerSpawnConfig): McpServerSpawnConfig {
+    const key = connectionKey(server);
+    if (!this.latestOAuth.has(key)) return server;
+    const { oauth: _frozen, ...rest } = server;
+    const oauth = this.latestOAuth.get(key);
+    return oauth ? { ...rest, oauth } : rest;
+  }
+
   private connectionFor(server: McpServerSpawnConfig): Promise<Connection | null> {
     const key = connectionKey(server);
     const fingerprint = oauthFingerprint(server.oauth);
+    this.latestOAuth.set(key, server.oauth);
     const failed = this.failedUntil.get(key);
     if (failed && failed.fingerprint !== fingerprint) this.failedUntil.delete(key);
     else if (failed && Date.now() < failed.until) return Promise.resolve(null);
@@ -258,11 +300,16 @@ export class McpManager {
     if (!pending) {
       pending = this.connect(server).catch((error) => {
         console.error(`[mcp] connect failed for "${server.name}":`, error);
-        this.emitStatus(server, isUnauthorized(error) ? 'unauthorized' : 'error', {
-          error: errorMessage(error),
-        });
+        const unauthorized = isUnauthorized(error);
+        const message = errorMessage(error);
+        this.emitStatus(server, unauthorized ? 'unauthorized' : 'error', { error: message });
         this.connections.delete(key);
-        this.failedUntil.set(key, { until: Date.now() + MCP_FAIL_TTL_MS, fingerprint });
+        this.failedUntil.set(key, {
+          until: Date.now() + MCP_FAIL_TTL_MS,
+          fingerprint,
+          error: message,
+          unauthorized,
+        });
         return null;
       });
       this.connections.set(key, pending);
@@ -406,7 +453,7 @@ export class McpManager {
     tool: { name: string; description?: string; inputSchema: unknown },
     callTimeoutMs: number
   ): ToolDefinition {
-    const name = `mcp__${slug(server.name)}__${tool.name}`;
+    const name = mcpToolName(server.name, tool.name);
     let active = client;
     const invoke = (target: Client, params: unknown) =>
       withTimeout(

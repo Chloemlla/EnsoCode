@@ -2638,6 +2638,19 @@ describe('typed Agent child projection', () => {
       expect(conversation.compaction).toBeUndefined();
       expect(conversation.compactionNoticeAt).toBe(5);
     });
+
+    it('只持有尾窗时锚点取绝对下标，与时间线行 key 同口径', () => {
+      seedCompaction({ compaction: 'running', historyBaseIndex: 100 });
+      onAgentEvent?.({
+        type: 'compaction',
+        identity: { sessionId: 'parent', generation: 'pg1' },
+        seq: 1,
+        state: 'end',
+      });
+      expect(
+        sessionsModule.useSessionsStore.getState().conversations.parent.compactionNoticeAt
+      ).toBe(105);
+    });
   });
 
   it('summon only pre-fills the parent composer and never dispatches', () => {
@@ -3078,6 +3091,29 @@ describe('parent history tail hydrate', () => {
     vi.useRealTimers();
   });
 
+  it('worker 释放冷会话清正文时留下最后活跃时刻，侧栏不回落到 createdAt', () => {
+    seedReleasable('releasedAt');
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        releasedAt: {
+          ...state.conversations.releasedAt,
+          lastActiveAt: undefined,
+          messages: [{ role: 'assistant', content: [], timestamp: 42_000 }],
+        },
+      },
+    }));
+    onAgentEvent?.({
+      type: 'parent-ended',
+      identity: { sessionId: 'releasedAt', generation: 'g1' },
+      seq: 9,
+      reason: 'evicted',
+    });
+    const released = sessionsModule.useSessionsStore.getState().conversations.releasedAt;
+    expect(released.messages).toEqual([]);
+    expect(released.lastActiveAt).toBe(42_000);
+  });
+
   it('partial snapshot 不往冷会话灌正文，但 worker 持有即 started', () => {
     sessionsModule.useSessionsStore.setState((state) => ({
       conversations: {
@@ -3106,13 +3142,20 @@ describe('parent history tail hydrate', () => {
         {
           identity: { sessionId: 'phoneFed', generation: 'g1' },
           status: 'idle',
-          messages: [{ role: 'assistant', content: [{ type: 'text', text: '手机灌进来的' }] }],
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: '手机灌进来的' }],
+              timestamp: 77_000,
+            },
+          ],
           commands: [],
         },
       ],
     });
     const phoneFed = sessionsModule.useSessionsStore.getState().conversations.phoneFed;
     expect(phoneFed.messages).toEqual([]);
+    expect(phoneFed.lastActiveAt).toBe(77_000);
     expect(phoneFed.started).toBe(true);
     expect(phoneFed.generation).toBe('g1');
   });
@@ -3423,6 +3466,45 @@ describe('parent history tail hydrate', () => {
     vi.setSystemTime(62_000);
     upsert(3, { role: 'assistant', content: [{ type: 'text', text: 'working more' }] });
     expect(bgRun().lastOutputAt).toBe(60_000);
+  });
+
+  it('冷会话新消息推进 lastActiveAt，侧栏时间不停在冷却那一刻', () => {
+    const template = sessionsModule.useSessionsStore.getState().conversations.parent;
+    sessionsModule.useSessionsStore.setState({
+      conversations: {
+        stay: { ...template, id: 'stay', activeTabId: undefined, parentId: undefined },
+        coldRun: {
+          ...template,
+          id: 'coldRun',
+          started: true,
+          sessionFile: '/tmp/coldRun.jsonl',
+          status: 'running',
+          generation: 'g1',
+          lastSeq: 0,
+          lastActiveAt: 5_000,
+          activeTabId: undefined,
+          parentId: undefined,
+          messages: [],
+        },
+      },
+      order: ['stay', 'coldRun'],
+      activeId: 'stay',
+    });
+    const upsert = (seq: number, timestamp: number) =>
+      onAgentEvent?.({
+        type: 'message-upsert',
+        identity: { sessionId: 'coldRun', generation: 'g1' },
+        seq,
+        index: seq - 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'x' }], timestamp },
+      });
+    const coldRun = () => sessionsModule.useSessionsStore.getState().conversations.coldRun;
+
+    upsert(1, 9_000);
+    expect(coldRun().messages).toEqual([]);
+    expect(coldRun().lastActiveAt).toBe(9_000);
+    upsert(2, 3_000);
+    expect(coldRun().lastActiveAt).toBe(9_000);
   });
 });
 

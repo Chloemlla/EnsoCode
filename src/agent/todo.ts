@@ -37,30 +37,34 @@ const formatTodos = (todos: TodoItem[]) =>
     )
     .join('\n');
 
-export const TODO_STALE_TOOL_CALLS = 8;
+export const TODO_STALE_TOOL_CALLS = 12;
 
 /**
  * 清单有未完成项、且自上次 todo 起已过 threshold 次工具调用（含 todo 自身）时产出提醒；
- * take() 由 SystemReminderRegistry 在每次工具调用后调用，提醒后重新计数避免逐次唠叨。
+ * take() 由 SystemReminderRegistry 在每次工具调用后调用；提醒后仍未更新则间隔翻倍退避。
  */
 export class TodoStaleReminder {
   private todos: TodoItem[] = [];
   private calls = 0;
+  private nextAt: number;
 
-  constructor(private readonly threshold = TODO_STALE_TOOL_CALLS) {}
+  constructor(private readonly threshold = TODO_STALE_TOOL_CALLS) {
+    this.nextAt = threshold;
+  }
 
   update(todos: TodoItem[]): void {
     this.todos = todos;
     this.calls = 0;
+    this.nextAt = this.threshold;
   }
 
   take(): string[] {
     if (!this.todos.some((todo) => todo.status !== 'completed')) return [];
     this.calls += 1;
-    if (this.calls <= this.threshold) return [];
-    this.calls = 0;
+    if (this.calls <= this.nextAt) return [];
+    this.nextAt = this.calls * 2;
     return [
-      `The todo list has not been updated in the last ${this.threshold} tool calls. ` +
+      `The todo list has not been updated in the last ${this.calls} tool calls. ` +
         'If a step has finished, call todo now: mark it completed and the next step in_progress. ' +
         'If the plan changed, revise the list; if it no longer applies, clear it. ' +
         'Do not mention this reminder to the user.\n\n' +

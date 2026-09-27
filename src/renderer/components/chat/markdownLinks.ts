@@ -9,6 +9,14 @@ const PROTOCOL_RE = /^[a-z][a-z\d+.-]*:/i;
 const SAFE_EXTERNAL_PROTOCOL_RE = /^(?:https?|ircs?|mailto|xmpp):/i;
 const WINDOWS_ABSOLUTE_RE = /^(?:[a-z]:[\\/]|\\\\)/i;
 
+/** 拆开 `path:line` / `path:start-end` 形式的文件引用，行号取起始行 */
+export function splitFileLineRef(value: string): { path: string; line?: number } {
+  const match = /^(.*?):(\d+)(?:-\d+)?$/.exec(value);
+  if (!match) return { path: value };
+  const line = Number(match[2]);
+  return line > 0 ? { path: match[1], line } : { path: match[1] };
+}
+
 function decodePath(value: string): string | null {
   try {
     return decodeURIComponent(value);

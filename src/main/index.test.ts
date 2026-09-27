@@ -59,7 +59,11 @@ vi.mock('./services/pairGuest', () => ({
   startPairGuest: vi.fn(),
   stopPairGuest: vi.fn(),
 }));
-vi.mock('./services/agentHost', () => ({ startAgentWorker: mocks.startAgentWorker }));
+vi.mock('./services/agentHost', () => ({
+  startAgentWorker: mocks.startAgentWorker,
+  agentWorkerAlive: () => false,
+  stopAgentWorkerForQuit: vi.fn(async () => undefined),
+}));
 vi.mock('./services/proxyConfig', () => ({
   getProxyConfig: () => ({
     initFromConfig: vi.fn(),

@@ -7,6 +7,7 @@ import {
   pinnedConversationIds,
   projectConversationIds,
   staleArchivedConversationIds,
+  waitingConversationCount,
 } from './pinned';
 
 type CandidateHelpers = {
@@ -43,6 +44,8 @@ type Minimal = {
   spawning?: boolean;
   unread?: boolean;
   pendingAsks?: { requestId: string }[];
+  pendingApprovals?: unknown[];
+  pendingCapabilityAsks?: unknown[];
   coworkerIds?: string[];
   worktree?: { path: string };
 };
@@ -478,5 +481,76 @@ describe('activeConversationIds', () => {
 
   it('order 之外的 coworker 不进栏', () => {
     expect(activeConversationIds(liveOrder, live)).not.toContain('kid');
+  });
+});
+
+describe('等你处理优先', () => {
+  const ask = { pendingAsks: [{ requestId: 'r1' }] };
+  const withWaiting = (patch: Record<string, Partial<Minimal>>): Record<string, Minimal> => {
+    const next = { ...conversations };
+    for (const [id, extra] of Object.entries(patch)) next[id] = { ...conversations[id], ...extra };
+    return next;
+  };
+
+  it('项目分组内等你处理的排最前,其余保持原顺序', () => {
+    expect(projectConversationIds(order, withWaiting({ d: ask }), 'p1')).toEqual([
+      'd',
+      'e',
+      'b',
+      'a',
+    ]);
+    expect(projectConversationIds(order, withWaiting({ a: ask, e: ask }), 'p1')).toEqual([
+      'e',
+      'a',
+      'b',
+      'd',
+    ]);
+  });
+
+  it('判定与侧栏圆点一致:failed 不算等待,failed 但 spawning 仍算', () => {
+    expect(
+      projectConversationIds(order, withWaiting({ d: { ...ask, status: 'failed' } }), 'p1')
+    ).toEqual(['e', 'b', 'a', 'd']);
+    expect(
+      projectConversationIds(
+        order,
+        withWaiting({ d: { ...ask, status: 'failed', spawning: true } }),
+        'p1'
+      )
+    ).toEqual(['d', 'e', 'b', 'a']);
+  });
+
+  it('置顶无手动顺序时等你处理的排最前', () => {
+    expect(pinnedConversationIds(order, withWaiting({ b: ask }))).toEqual(['b', 'e', 'c']);
+  });
+
+  it('置顶手动顺序不动,只在按活跃追加的尾部内优先', () => {
+    expect(pinnedConversationIds(order, withWaiting({ b: ask }), ['c'])).toEqual(['c', 'b', 'e']);
+    expect(pinnedConversationIds(order, withWaiting({ e: ask }), ['c', 'e', 'b'])).toEqual([
+      'c',
+      'e',
+      'b',
+    ]);
+  });
+
+  it('waitingConversationCount 只数 order 内与圆点 waiting 同口径的会话', () => {
+    const live = withWaiting({
+      a: ask,
+      b: { ...ask, status: 'failed' },
+      c: { ...ask, status: 'failed', spawning: true },
+      d: { pendingAsks: [] },
+      ghost: ask,
+    });
+    expect(waitingConversationCount(order, live)).toBe(2);
+    expect(waitingConversationCount([], live)).toBe(0);
+    expect(waitingConversationCount(['missing'], live)).toBe(0);
+  });
+
+  it('待审批 / 待能力确认同样算等你处理', () => {
+    const approval = { pendingApprovals: [{ requestId: 'x' }] };
+    const capability = { pendingCapabilityAsks: [{ requestId: 'y' }] };
+    const live = withWaiting({ d: approval, a: capability });
+    expect(projectConversationIds(order, live, 'p1')).toEqual(['a', 'd', 'e', 'b']);
+    expect(waitingConversationCount(order, live)).toBe(2);
   });
 });

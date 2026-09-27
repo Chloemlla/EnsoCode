@@ -1,4 +1,8 @@
-import { conversationDotTone, conversationHasRunningChild } from '@shared/conversationDotTone';
+import {
+  type ConversationDotTone,
+  conversationDotTone,
+  conversationHasRunningChild,
+} from '@shared/conversationDotTone';
 import type { WorktreeStatus } from '@shared/types/worktree';
 import { worktreeReadyToAutoCleanup } from './worktree';
 
@@ -23,6 +27,8 @@ interface SidebarConversation {
   spawning?: boolean;
   unread?: boolean;
   pendingAsks?: readonly { requestId: string }[];
+  pendingApprovals?: readonly unknown[];
+  pendingCapabilityAsks?: readonly unknown[];
   coworkerIds?: readonly string[];
   subagents?: readonly { status: string }[];
   worktree?: { path?: string };
@@ -31,7 +37,7 @@ interface SidebarConversation {
 type Conversations = Record<string, SidebarConversation | undefined>;
 
 /** 会话的最后活跃时刻:最后一条消息时间 → 持久化 lastActiveAt(messages 被剥离时) → createdAt */
-function lastActiveAt(conversation: SidebarConversation): number {
+export function lastActiveAt(conversation: SidebarConversation): number {
   return (
     conversation.messages.at(-1)?.timestamp ?? conversation.lastActiveAt ?? conversation.createdAt
   );
@@ -55,16 +61,19 @@ export function projectConversationIds(
   const ids = order.filter(
     (id) => conversations[id]?.projectId === projectId && conversations[id]?.archived !== true
   );
-  return [
-    ...sortByActivity(
-      ids.filter((id) => conversations[id]?.pinned === true),
-      conversations
-    ),
-    ...sortByActivity(
-      ids.filter((id) => conversations[id]?.pinned !== true),
-      conversations
-    ),
-  ];
+  return waitingFirst(
+    [
+      ...sortByActivity(
+        ids.filter((id) => conversations[id]?.pinned === true),
+        conversations
+      ),
+      ...sortByActivity(
+        ids.filter((id) => conversations[id]?.pinned !== true),
+        conversations
+      ),
+    ],
+    conversations
+  );
 }
 
 /**
@@ -126,10 +135,13 @@ export function pinnedConversationIds(
       remaining.delete(id);
     }
   }
-  for (const id of byActivity) {
-    if (remaining.has(id)) ordered.push(id);
-  }
-  return ordered;
+  return [
+    ...ordered,
+    ...waitingFirst(
+      byActivity.filter((id) => remaining.has(id)),
+      conversations
+    ),
+  ];
 }
 
 /** 全部归档会话 id(跨项目,按最后活跃时间倒序);归档项目的会话全部计入 */
@@ -195,10 +207,10 @@ export function archivedConversationGroups(
   return groups;
 }
 
-export function isActiveTone(id: string, conversations: Conversations): boolean {
+function dotTone(id: string, conversations: Conversations): ConversationDotTone | undefined {
   const conversation = conversations[id];
-  if (!conversation) return false;
-  const tone = conversationDotTone({
+  if (!conversation) return undefined;
+  return conversationDotTone({
     status: conversation.status ?? 'idle',
     spawning: conversation.spawning,
     unread: conversation.unread,
@@ -208,7 +220,37 @@ export function isActiveTone(id: string, conversations: Conversations): boolean 
       conversations as Record<string, { status: string; spawning?: boolean } | undefined>
     ),
   });
+}
+
+export function isActiveTone(id: string, conversations: Conversations): boolean {
+  const tone = dotTone(id, conversations);
   return tone === 'running' || tone === 'waiting' || tone === 'failed' || tone === 'unread';
+}
+
+/** 等你处理:待审批 / 待能力确认（圆点 attention），或圆点 waiting（待回答） */
+function isWaiting(id: string, conversations: Conversations): boolean {
+  const conversation = conversations[id];
+  if (
+    (conversation?.pendingApprovals?.length ?? 0) > 0 ||
+    (conversation?.pendingCapabilityAsks?.length ?? 0) > 0
+  )
+    return true;
+  return dotTone(id, conversations) === 'waiting';
+}
+
+/** 稳定两档:等你处理的在前,其余保持传入顺序 */
+function waitingFirst(ids: string[], conversations: Conversations): string[] {
+  const waiting = ids.filter((id) => isWaiting(id, conversations));
+  if (waiting.length === 0) return ids;
+  return [...waiting, ...ids.filter((id) => !isWaiting(id, conversations))];
+}
+
+/** Dock 角标数:order 内等你处理的会话数 */
+export function waitingConversationCount(
+  order: readonly string[],
+  conversations: Conversations
+): number {
+  return order.filter((id) => isWaiting(id, conversations)).length;
 }
 
 const DAY_MS = 86_400_000;

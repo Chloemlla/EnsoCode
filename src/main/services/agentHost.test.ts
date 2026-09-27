@@ -1,4 +1,9 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import type { McpServerEntry } from '@shared/types';
 import { describe, expect, it, vi } from 'vitest';
+import { McpToolCatalogStore } from './mcpToolCatalog';
 
 vi.mock('../../agent/index?modulePath', () => ({ default: '/tmp/agent.js' }));
 
@@ -6,7 +11,41 @@ import {
   expectedAgentTypeToolIds,
   rememberParentToolProfile,
   resolvePresetSystemPrompt,
+  toSessionMcpConfig,
 } from './agentHost';
+
+describe('agentHost session MCP config', () => {
+  it('deferred 带 loadMode 与缓存工具名，direct 与缺省保持原样', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'enso-session-mcp-'));
+    const catalog = new McpToolCatalogStore(path.join(dir, 'catalog.json'));
+    const entry = (loadMode?: McpServerEntry['loadMode']): McpServerEntry => ({
+      id: 's1',
+      name: 'search',
+      transport: 'stdio',
+      command: 'search-mcp',
+      source: 'manual',
+      enabled: true,
+      ...(loadMode ? { loadMode } : {}),
+    });
+    expect(toSessionMcpConfig(entry('deferred'), catalog)).toEqual({
+      id: 's1',
+      name: 'search',
+      transport: 'stdio',
+      command: 'search-mcp',
+      loadMode: 'deferred',
+    });
+    catalog.record(entry(), ['find']);
+    expect(toSessionMcpConfig(entry('deferred'), catalog)).toMatchObject({ toolNames: ['find'] });
+    for (const config of [
+      toSessionMcpConfig(entry('direct'), catalog),
+      toSessionMcpConfig(entry(), catalog),
+    ]) {
+      expect(config).not.toHaveProperty('loadMode');
+      expect(config).not.toHaveProperty('toolNames');
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 describe('agentHost agent type tool filtering', () => {
   it('all 按编辑模式只期望一套写工具，readonly 不开放写工具', () => {

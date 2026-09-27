@@ -89,4 +89,21 @@ describe('removeConversationSessionFiles', () => {
       })
     ).not.toThrow();
   });
+
+  it('删除该会话及其子会话的 tool-output 目录，保留其他会话的', () => {
+    const toolRoot = path.join(sessionDir, 'tool-output');
+    const own = path.join(toolRoot, CONVERSATION_ID);
+    const child = path.join(toolRoot, `${CONVERSATION_ID}-child`);
+    const other = path.join(toolRoot, '22222222-2222-4222-8222-222222222222');
+    for (const dir of [own, child, other]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'toolu_1.txt'), 'x');
+    }
+
+    removeConversationSessionFiles({ sessionDir, conversationId: CONVERSATION_ID });
+
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(child)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+  });
 });

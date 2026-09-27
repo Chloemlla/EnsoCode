@@ -106,23 +106,60 @@ function persistOne(conversation: PersistableConversation): PersistableConversat
   };
 }
 
-let cached: { fingerprint: string; value: SessionsPersistSlice } | null = null;
+type PersistedEntry = { value: PersistableConversation; json: string };
+
+// 每次 set 都会 partialize：按会话对象身份缓存，流式时只有活跃会话重算，其余几百个直接复用
+const entries = new WeakMap<PersistableConversation, PersistedEntry>();
+let cached: {
+  entries: Map<string, PersistedEntry>;
+  order: string[];
+  value: SessionsPersistSlice;
+} | null = null;
+
+function entryOf(conversation: PersistableConversation): PersistedEntry {
+  let entry = entries.get(conversation);
+  if (!entry) {
+    const value = persistOne(conversation);
+    entry = { value, json: JSON.stringify(value) };
+    entries.set(conversation, entry);
+  }
+  return entry;
+}
 
 export function cachedPartializeSessions(state: SessionsPersistSlice): SessionsPersistSlice {
   const keep = (id: string): boolean =>
     Boolean(state.conversations[id]) && !state.conversations[id]?.btwParentId;
+  const previous = cached;
+  const next = new Map<string, PersistedEntry>();
+  let changed = !previous;
+  for (const [id, conversation] of Object.entries(state.conversations)) {
+    if (conversation.btwParentId) continue;
+    let entry = entryOf(conversation);
+    const old = previous?.entries.get(id);
+    if (old && old !== entry && old.json === entry.json) {
+      entry = old;
+      entries.set(conversation, old);
+    }
+    if (old !== entry) changed = true;
+    next.set(id, entry);
+  }
+  const order = state.order.filter(keep);
+  const activeId = state.activeId && keep(state.activeId) ? state.activeId : (order[0] ?? null);
+  if (
+    previous &&
+    !changed &&
+    previous.entries.size === next.size &&
+    previous.value.activeId === activeId &&
+    previous.order.length === order.length &&
+    previous.order.every((id, index) => order[index] === id)
+  ) {
+    return previous.value;
+  }
   const value: SessionsPersistSlice = {
-    conversations: Object.fromEntries(
-      Object.entries(state.conversations)
-        .filter(([, conversation]) => !conversation.btwParentId)
-        .map(([id, conversation]) => [id, persistOne(conversation)])
-    ),
-    order: state.order.filter(keep),
-    activeId:
-      state.activeId && keep(state.activeId) ? state.activeId : (state.order.find(keep) ?? null),
+    conversations: Object.fromEntries([...next].map(([id, entry]) => [id, entry.value])),
+    order,
+    activeId,
   };
-  const fingerprint = JSON.stringify(value);
-  if (cached?.fingerprint === fingerprint) return cached.value;
-  cached = { fingerprint, value };
+  cached = { entries: next, order, value };
   return value;
 }
