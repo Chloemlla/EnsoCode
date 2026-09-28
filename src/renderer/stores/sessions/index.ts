@@ -161,6 +161,19 @@ function forgetUnknownSessionClocks(conversations: Record<string, unknown>): voi
   pruneSessionClocks(snapshotResyncAt, known);
 }
 
+/**
+ * worker 回流的 child metadata 来源恒为 typed-mention、不带 mode；这两项沿用 Main 预约时的权威值。
+ * 落盘的就是这份，Main 重启后靠它认领 agent-tool coworker。
+ */
+function withMainChildMetadata(
+  incoming: ChildConversationMetadata,
+  existing: ChildConversationMetadata | undefined
+): ChildConversationMetadata {
+  if (existing?.agentInstanceId !== incoming.agentInstanceId) return incoming;
+  const mode = incoming.mode ?? existing.mode;
+  return { ...incoming, dispatchOrigin: existing.dispatchOrigin, ...(mode ? { mode } : {}) };
+}
+
 function viewedFromState(state: {
   activeId: string | null;
   conversations: Record<string, { activeTabId?: string }>;
@@ -1032,7 +1045,7 @@ export const useSessionsStore = create<SessionsState>()(
                         parentId: snapshot.child.parentId,
                         coworkerName: snapshot.child.agentInstanceName,
                         agentType: snapshot.child.agentTypeKey,
-                        child: snapshot.child,
+                        child: withMainChildMetadata(snapshot.child, conversation.child),
                       }
                     : {}),
                   started: true,
@@ -1271,18 +1284,19 @@ export const useSessionsStore = create<SessionsState>()(
                     ...(metadata
                       ? {
                           generation: metadata.childGeneration,
-                          // worker 回流的 metadata 不带 mode，沿用 Main 预约时的权威值
-                          child:
-                            metadata.mode || !existing.child?.mode
-                              ? metadata
-                              : { ...metadata, mode: existing.child.mode },
+                          child: withMainChildMetadata(metadata, existing.child),
                           agentType: metadata.agentTypeKey,
                         }
                       : {}),
                   }
                 : {
                     ...emptyProjection,
-                    ...(metadata ? { generation: metadata.childGeneration, child: metadata } : {}),
+                    ...(metadata
+                      ? {
+                          generation: metadata.childGeneration,
+                          child: withMainChildMetadata(metadata, existing?.child),
+                        }
+                      : {}),
                     id: coworker.id,
                     projectId: parent.projectId,
                     parentId: id,

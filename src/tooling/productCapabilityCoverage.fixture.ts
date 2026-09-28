@@ -55,6 +55,8 @@ export const SETTINGS_DATA_COVERAGE = {
   voiceCorrectionEnabled: excluded('Voice input is a device-local composer preference.'),
   voiceCorrectionModel: excluded('Voice input is a device-local composer preference.'),
   voiceCorrectionRemoteModel: excluded('Voice input is a device-local composer preference.'),
+  voiceVocabulary: excluded('Voice input is a device-local composer preference.'),
+  voiceGeminiApiKey: excluded('Voice input is a device-local composer preference.'),
   editMode: excluded('File edit mode is a desktop session preference, not an Enso capability.'),
   compactStrategy: excluded('Context compaction is a desktop session preference.'),
   smartCompactEnabled: excluded(
@@ -178,6 +180,8 @@ export const SETTINGS_ACTION_COVERAGE = {
   setVoiceCorrectionEnabled: excluded('Voice input is a device-local composer preference.'),
   setVoiceCorrectionModel: excluded('Voice input is a device-local composer preference.'),
   setVoiceCorrectionRemoteModel: excluded('Voice input is a device-local composer preference.'),
+  setVoiceVocabulary: excluded('Voice input is a device-local composer preference.'),
+  setVoiceGeminiApiKey: excluded('Voice input is a device-local composer preference.'),
   setEditMode: excluded('File edit mode is a desktop session preference, not an Enso capability.'),
   setCompactStrategy: excluded('Context compaction is a desktop session preference.'),
   setSmartCompactEnabled: excluded(
@@ -659,6 +663,7 @@ export const IPC_PRODUCT_COVERAGE = {
   SPEECH_CANCEL: excluded('Voice input settings UI; not an Enso capability.'),
   SPEECH_DELETE: excluded('Voice input settings UI; not an Enso capability.'),
   SPEECH_PROGRESS: excluded('Voice input settings UI; not an Enso capability.'),
+  SPEECH_STATUS_CHANGED: excluded('Voice input settings UI; not an Enso capability.'),
   SPEECH_SESSION_PUSH: excluded('Composer dictation; not an Enso capability.'),
   SPEECH_SESSION_FINISH: excluded('Composer dictation; not an Enso capability.'),
   SPEECH_SESSION_CANCEL: excluded('Composer dictation; not an Enso capability.'),

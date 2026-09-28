@@ -147,6 +147,8 @@ const initialState = {
   voiceCorrectionEnabled: false,
   voiceCorrectionModel: 'remote',
   voiceCorrectionRemoteModel: null as import('@shared/defaultModel').DefaultModelRef | null,
+  voiceVocabulary: '',
+  voiceGeminiApiKey: '',
   autoUpdate: true,
   autoRestartWhenIdle: false,
   proxyMode: 'system' as ProxyMode,
@@ -302,6 +304,8 @@ export const useSettingsStore = create<SettingsState>()(
       setVoiceCorrectionModel: (voiceCorrectionModel) => set({ voiceCorrectionModel }),
       setVoiceCorrectionRemoteModel: (voiceCorrectionRemoteModel) =>
         set({ voiceCorrectionRemoteModel }),
+      setVoiceVocabulary: (voiceVocabulary) => set({ voiceVocabulary }),
+      setVoiceGeminiApiKey: (voiceGeminiApiKey) => set({ voiceGeminiApiKey }),
       setEditMode: (editMode) => set({ editMode }),
       setCompactStrategy: (compactStrategy) =>
         set({ compactStrategy, smartCompactEnabled: compactStrategy === 'smart' }),

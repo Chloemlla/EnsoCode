@@ -4,6 +4,7 @@ import * as React from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Select,
   SelectItem,
@@ -12,6 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
 import { useSpeechStatus } from '@/hooks/useSpeechStatus';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
@@ -39,14 +41,10 @@ const MODEL_TEXT: Record<SpeechModelId, { name: string; description: string }> =
     name: 'SenseVoice',
     description: 'Chinese, English, Japanese, Korean and Cantonese.',
   },
-  'enso-asr-streaming': {
-    name: 'enso-asr Streaming',
-    description: 'Text appears while you speak. No download; needs a network connection.',
-  },
-  'enso-asr': {
-    name: 'enso-asr',
+  'gemini-live': {
+    name: 'Gemini Transcribe Live',
     description:
-      'Uploads after you stop; nothing is sent if you cancel. No download; needs a network connection.',
+      'Google cloud recognition, most accurate with mixed Chinese-English and code terms. Needs a Gemini API key.',
   },
 };
 
@@ -108,15 +106,18 @@ export function VoiceModelList() {
     }
     if (error?.modelId === model.id) return `${t('Download failed')}: ${error.message}`;
     if (model.remote) {
-      return t(
-        'What you say is uploaded to a third-party service for recognition. Avoid it for sensitive content.'
-      );
+      return model.state === 'ready'
+        ? t(
+            'Audio is uploaded to Google. On the free tier Google may use it to improve its products.'
+          )
+        : t('Enter a Gemini API key below first.');
     }
     return t('Download {{size}} · Memory about {{memory}}', {
       size: formatBytes(model.approxBytes),
       memory: formatBytes(model.memoryBytes),
     });
   };
+  const selectedModel = status.models.find((model) => model.id === selected);
   return (
     <div className="space-y-1.5" data-settings-row="tools.voiceModel">
       <p className="text-sm">{t('Speech model')}</p>
@@ -146,15 +147,13 @@ export function VoiceModelList() {
                 <span className="min-w-0">
                   <span className="flex flex-wrap items-center gap-1.5 text-sm">
                     {t(MODEL_TEXT[model.id].name)}
-                    <Badge variant={model.remote ? 'warning' : 'outline'} size="sm">
-                      {model.remote ? t('Third-party service') : t('Local')}
-                    </Badge>
+                    {model.remote ? (
+                      <Badge variant="warning" size="sm">
+                        {t('Cloud')}
+                      </Badge>
+                    ) : null}
                     <Badge variant={model.streaming ? 'info' : 'secondary'} size="sm">
-                      {model.streaming
-                        ? t('Streaming')
-                        : model.remote
-                          ? t('After you stop')
-                          : t('Sentence by sentence')}
+                      {model.streaming ? t('Streaming') : t('Sentence by sentence')}
                     </Badge>
                     {model.state === 'ready' && !model.remote ? (
                       <Badge variant="success" size="sm">
@@ -192,11 +191,63 @@ export function VoiceModelList() {
           );
         })}
       </div>
-      {status.state !== 'ready' && status.state !== 'downloading' ? (
+      {status.state !== 'ready' && status.state !== 'downloading' && !selectedModel?.remote ? (
         <p className="text-muted-foreground text-xs">
           {t('Download the selected model to start using voice input.')}
         </p>
       ) : null}
+      {selectedModel?.remote ? (
+        <>
+          <GeminiKeySetting />
+          <VoiceVocabularySetting />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function GeminiKeySetting() {
+  const { t } = useI18n();
+  const value = useSettingsStore((state) => state.voiceGeminiApiKey);
+  const setValue = useSettingsStore((state) => state.setVoiceGeminiApiKey);
+  return (
+    <div className="space-y-1.5 pt-2" data-settings-row="voice.geminiApiKey">
+      <p className="text-sm">{t('Gemini API key')}</p>
+      <p className="text-muted-foreground text-xs">
+        {t('Create one for free in Google AI Studio.')}
+      </p>
+      <Input
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder="AIza…"
+        className="font-mono"
+      />
+    </div>
+  );
+}
+
+function VoiceVocabularySetting() {
+  const { t } = useI18n();
+  const value = useSettingsStore((state) => state.voiceVocabulary);
+  const setValue = useSettingsStore((state) => state.setVoiceVocabulary);
+  return (
+    <div className="space-y-1.5 pt-2" data-settings-row="voice.vocabulary">
+      <p className="text-sm">{t('Custom vocabulary')}</p>
+      <p className="text-muted-foreground text-xs">
+        {t(
+          'One term per line, up to 100. Helps with names and code terms such as useEffect or pnpm.'
+        )}
+      </p>
+      <Textarea
+        size="sm"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder={'useEffect\npnpm\nTypeScript'}
+        className="font-mono"
+      />
     </div>
   );
 }

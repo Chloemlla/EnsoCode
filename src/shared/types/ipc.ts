@@ -80,6 +80,7 @@ export const IPC_CHANNELS = {
   SPEECH_CANCEL: 'speech:cancel',
   SPEECH_DELETE: 'speech:delete',
   SPEECH_PROGRESS: 'speech:progress',
+  SPEECH_STATUS_CHANGED: 'speech:status-changed',
   SPEECH_SESSION_PUSH: 'speech:session-push',
   SPEECH_SESSION_FINISH: 'speech:session-finish',
   SPEECH_SESSION_CANCEL: 'speech:session-cancel',

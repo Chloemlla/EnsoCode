@@ -51,7 +51,7 @@ export const ACTION_HINT_KEYS: Partial<Record<KeybindingAction, string>> = {
   'new-side-tab': 'New terminal when the side panel is focused; otherwise new conversation',
   'new-btw-tab': 'Open a Btw tab in the side panel',
   'toggle-minimize-to-tray': 'Works while the app is in the tray',
-  'voice-hold': 'Hold to record, release to put the text in the chat input',
+  'voice-hold': 'Hold while the chat input is focused, release to put the text in it',
 };
 
 export function isEventInSidePanel(target: EventTarget | null): boolean {
@@ -81,7 +81,7 @@ export const DEFAULT_KEYBINDINGS: Record<KeybindingAction, string> = {
   'new-btw-tab': 'mod+shift+b',
   'close-side-tab': 'mod+w',
   'toggle-minimize-to-tray': DEFAULT_TRAY_TOGGLE_BINDING,
-  'voice-hold': 'mod+shift+space',
+  'voice-hold': 'space',
 };
 
 /** 合并用户覆盖与默认(store 只存覆盖项,默认可随版本演进) */
@@ -91,7 +91,7 @@ export function effectiveKeybindings(
   return { ...DEFAULT_KEYBINDINGS, ...overrides };
 }
 
-/** keydown 事件转绑定串;纯修饰键返回 null。默认拒绝无修饰单键以免劫持输入;allowBare 仅放行 Enter。 */
+/** keydown 事件转绑定串;纯修饰键返回 null。默认拒绝无修饰单键以免劫持输入;allowBare 仅放行 Enter / Space。 */
 export function eventToBinding(
   e: KeyboardEvent | React.KeyboardEvent,
   options?: { allowBare?: boolean }
@@ -101,7 +101,9 @@ export function eventToBinding(
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
   const ctrl = IS_MAC && e.ctrlKey;
   const hasNonShiftModifier = Boolean(mod || ctrl || e.altKey);
-  if (!hasNonShiftModifier && !(options?.allowBare && key === 'enter')) return null;
+  if (!hasNonShiftModifier && !(options?.allowBare && (key === 'enter' || key === 'space'))) {
+    return null;
+  }
   const parts: string[] = [];
   if (mod) parts.push('mod');
   if (ctrl) parts.push('ctrl');

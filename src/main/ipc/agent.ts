@@ -233,6 +233,11 @@ function exactIdentity(sessionId: unknown): SessionIdentity | ChildSessionIdenti
   return isNonEmptyString(sessionId) ? agentSessionIndex.currentIdentity(sessionId) : undefined;
 }
 
+function rootIdentity(sessionId: unknown): SessionIdentity | undefined {
+  const identity = exactIdentity(sessionId);
+  return identity && !('parent' in identity) ? identity : undefined;
+}
+
 function persistedRootSpawn(request: AgentSpawnRequest, ownerWebContentsId: number): boolean {
   if (!isMainWebContents(ownerWebContentsId) || request.sessionId.includes('::cw-')) return false;
   const conversation = sourceAuthority?.conversation(request.sessionId);
@@ -501,33 +506,29 @@ async function readParentHistoryTail(
  * pairHost 只做传输。解析不出身份就丢弃命令，不降级成按 sessionId 盲发。
  */
 function wirePairAgentBridge(): void {
-  const identityOf = (sessionId: unknown) => {
-    const identity = exactIdentity(sessionId);
-    return identity && !('parent' in identity) ? identity : undefined;
-  };
   setPairAgentBridge({
     prompt: (sessionId, text, images) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) promptSession(identity, text, images);
     },
     steer: (sessionId, text, images) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) steerSession(identity, text, images);
     },
     abort: (sessionId) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) abortSession(identity);
     },
     respondApproval: (sessionId, requestId, decision) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) respondApproval(identity, requestId, decision);
     },
     respondAsk: (sessionId, requestId, answer) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) respondAsk(identity, requestId, answer);
     },
     spawn: async (request) => {
-      const identity = identityOf(request.sessionId) ?? {
+      const identity = rootIdentity(request.sessionId) ?? {
         sessionId: request.sessionId,
         generation: randomUUID(),
       };
@@ -544,17 +545,13 @@ function wirePairAgentBridge(): void {
 }
 
 function wirePairSessionHost(): void {
-  const identityOf = (sessionId: unknown) => {
-    const identity = exactIdentity(sessionId);
-    return identity && !('parent' in identity) ? identity : undefined;
-  };
   configurePairSessionHost({
     isAlive: (sessionId) => agentSessionIndex.isAlive(sessionId),
     requestSnapshot: (sessionId) => {
       requestSnapshot(sessionId);
     },
     spawn: async (request) => {
-      const identity = identityOf(request.sessionId) ?? {
+      const identity = rootIdentity(request.sessionId) ?? {
         sessionId: request.sessionId,
         generation: randomUUID(),
       };
@@ -568,26 +565,26 @@ function wirePairSessionHost(): void {
       return spawnBoundSession(identity, request, credentialKeys);
     },
     prompt: (sessionId, text, images) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) promptSession(identity, text, images);
     },
     steer: (sessionId, text, images) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) steerSession(identity, text, images);
     },
     abort: (sessionId) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) abortSession(identity);
     },
     setModel: (sessionId, providerId, modelId) => {
-      const identity = identityOf(sessionId);
+      const identity = rootIdentity(sessionId);
       if (!identity) return;
       void readStoredOauthCredentialKeys()
         .then((keys) => setSessionModel(identity, providerId, modelId, keys))
         .catch(() => {});
     },
     setReasoning: (sessionId, enabled, level) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (!identity) return;
       const thinking =
         typeof level === 'string' && (THINKING_LEVELS as readonly string[]).includes(level)
@@ -596,28 +593,28 @@ function wirePairSessionHost(): void {
       setSessionReasoning(identity, enabled, thinking);
     },
     setThinking: (sessionId, level) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (!identity || !(THINKING_LEVELS as readonly string[]).includes(level)) return;
       setSessionThinking(identity, level as ThinkingLevel);
     },
     compact: (sessionId, instructions) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) compactSession(identity, instructions);
     },
     rewind: (sessionId, userIndexFromEnd, restoreFiles) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) rewindSession(identity, userIndexFromEnd, restoreFiles);
     },
     retry: (sessionId) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) retrySession(identity);
     },
     stopTask: (sessionId, taskId) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) stopBackgroundTask(identity, taskId);
     },
     stopSubagent: (sessionId, agentId) => {
-      const identity = identityOf(sessionId);
+      const identity = exactIdentity(sessionId);
       if (identity) stopSubagent(identity, agentId);
     },
     createAuthority: (sessionId, projectId) => {

@@ -1,5 +1,7 @@
 import type { SpawnModelConfig } from '@shared/types';
+import type { AgentWorkerEvent } from '@shared/types/agent';
 import { describe, expect, it, vi } from 'vitest';
+import { AgentControlInvoker } from './agentControl';
 import { createUnifiedSubagentTool, type UnifiedSubagentDeps } from './subagent';
 
 const cheapConfig: SpawnModelConfig = {
@@ -149,20 +151,33 @@ describe('unified subagent tool', () => {
     expect(result.details).toMatchObject({ request: { operation: 'spawn', mode: 'task' } });
   });
 
-  it('spawn/send 不把工具调用 abort 传给 Main，避免创建后丢 receipt', async () => {
-    const { deps, tool } = setup();
+  it('spawn/send 带 wait:true 被 abort 时只打断等待，仍返回 Main 的回执', async () => {
+    const emitted: AgentWorkerEvent[] = [];
+    const invoker = new AgentControlInvoker(
+      { sessionId: 'parent', generation: '11111111-1111-4111-8111-111111111111' },
+      (event) => emitted.push(event),
+      () => 'req-wait'
+    );
+    const { tool } = setup({ invoke: (request, signal) => invoker.invoke(request, signal) });
     const controller = new AbortController();
-    await tool.execute(
-      'call-abort-safe',
-      { operation: 'spawn', description: 'review', prompt: 'review this' },
+    const running = tool.execute(
+      'call-abort',
+      { operation: 'send', agentId: 'agent-1', message: 'more', wait: true },
       controller.signal,
       undefined,
       {} as never
     );
-    expect(deps.invoke).toHaveBeenLastCalledWith(
-      expect.objectContaining({ operation: 'spawn' }),
-      undefined
-    );
+    controller.abort();
+    expect(emitted.at(-1)).toMatchObject({ type: 'agent-control-cancel', requestId: 'req-wait' });
+    const receipt = {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      delivery: 'steer',
+      status: 'running',
+      report: { runs: [], timedOut: false, interrupted: true },
+    };
+    invoker.resolve('req-wait', { ok: true, value: receipt });
+    await expect(running).resolves.toMatchObject({ details: receipt });
   });
 
   it('list/message normalize pagination and server-bound sender inputs', async () => {

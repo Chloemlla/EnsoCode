@@ -1307,6 +1307,69 @@ describe('typed Agent child projection', () => {
         sessionsModule.useSessionsStore.getState().conversations[child.sessionId].child?.mode
       ).toBe('task');
     });
+
+    it('worker 回流的 metadata 来源恒为 typed-mention、不带 mode：落盘仍是 Main 预约的 agent-tool coworker，重启换代后也是', () => {
+      const reserved = reserve(1);
+      if (reserved.type !== 'child-reserved') throw new Error('expected reservation');
+      onAgentEvent?.({
+        ...reserved,
+        metadata: { ...reserved.metadata, dispatchOrigin: 'agent-tool', mode: 'coworker' },
+      });
+      const child = childIdentity(1);
+      const fromWorker = { ...reserved.metadata, dispatchOrigin: 'typed-mention' as const };
+      const persistedChild = () => {
+        const partialize = sessionsModule.useSessionsStore.persist.getOptions().partialize;
+        const persisted = partialize?.(sessionsModule.useSessionsStore.getState()) as {
+          conversations: Record<string, { child?: { dispatchOrigin?: string; mode?: string } }>;
+        };
+        return persisted.conversations[child.sessionId].child;
+      };
+
+      onAgentEvent?.({
+        type: 'coworker-update',
+        identity: child.parent,
+        seq: 2,
+        coworker: {
+          id: child.sessionId,
+          child: fromWorker,
+          name: child.instanceName,
+          agentType: child.typeKey,
+          status: 'running',
+          createdAt: 1,
+        },
+      });
+      expect(persistedChild()).toMatchObject({ dispatchOrigin: 'agent-tool', mode: 'coworker' });
+
+      onAgentEvent?.({
+        type: 'snapshot',
+        partial: true,
+        sessions: [
+          { identity: child, status: 'idle', messages: [], commands: [], child: fromWorker },
+        ],
+      });
+      expect(persistedChild()).toMatchObject({ dispatchOrigin: 'agent-tool', mode: 'coworker' });
+
+      // Main 重启后按落盘 metadata 恢复，worker 带着新 generation 回流
+      const resumed = { ...fromWorker, childGeneration: '33333333-3333-4333-8333-333333333333' };
+      onAgentEvent?.({
+        type: 'coworker-update',
+        identity: child.parent,
+        seq: 3,
+        coworker: {
+          id: child.sessionId,
+          child: resumed,
+          name: child.instanceName,
+          agentType: child.typeKey,
+          status: 'idle',
+          createdAt: 2,
+        },
+      });
+      expect(persistedChild()).toMatchObject({
+        childGeneration: resumed.childGeneration,
+        dispatchOrigin: 'agent-tool',
+        mode: 'coworker',
+      });
+    });
   });
 
   describe('手动雇佣委托 Main dispatch', () => {

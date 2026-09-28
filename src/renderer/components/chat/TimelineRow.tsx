@@ -51,7 +51,7 @@ import { diffCacheKey } from '@/lib/diffCacheKey';
 import { parseMcpToolName } from '@/lib/mcpToolName';
 import { addSidePanelChanges } from '@/lib/sidePanelDock';
 import { stripAnsi } from '@/lib/terminalText';
-import { TOOL_LABEL_KEYS, toolLabel } from '@/lib/toolLabels';
+import { SUBAGENT_OP_LABEL_KEYS, TOOL_LABEL_KEYS, toolLabel } from '@/lib/toolLabels';
 import { cn } from '@/lib/utils';
 import { useSessionsStore } from '@/stores/sessions';
 import {
@@ -88,6 +88,8 @@ import { ReadFileView } from './ReadFileView';
 import { RtkToolStatsBar } from './RtkToolStatsBar';
 import { SlashChip, slashChipClass, splitSlashCommand } from './SlashChip';
 import { StepNode, type StepNodeState } from './StepNode';
+import { SubagentResult } from './SubagentResult';
+import { parseSubagentReceipt } from './subagentReceipt';
 import { TerminalOutput } from './TerminalOutput';
 import { TodoList } from './TodoBar';
 import { ZoomableImage } from './ZoomableImage';
@@ -170,7 +172,9 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.ask?.question === b.ask?.question &&
         a.ask?.options.join('\n') === b.ask?.options.join('\n') &&
         a.ask?.answer === b.ask?.answer &&
-        a.ask?.autoSelected === b.ask?.autoSelected
+        a.ask?.autoSelected === b.ask?.autoSelected &&
+        a.subagentOp === b.subagentOp &&
+        JSON.stringify(a.subagentTitles) === JSON.stringify(b.subagentTitles)
       );
     case 'tool-group':
       return (
@@ -1585,12 +1589,16 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const sentMessage = item.state === 'error' ? null : item.sentMessage;
   const labelKey = TOOL_LABEL_KEYS[item.name];
   const mcp = parseMcpToolName(item.name);
+  // 子代理按 id 指代的操作：动作词在前，长标题截断时动作仍可见
+  const summary = item.subagentOp
+    ? [t(SUBAGENT_OP_LABEL_KEYS[item.subagentOp]), item.summary].filter(Boolean).join(' · ')
+    : item.summary;
   const headerSummary =
     item.nestedPending && item.state === 'running'
-      ? `${item.summary} · ${item.nestedPending} pending`
+      ? `${summary} · ${item.nestedPending} pending`
       : sandbox?.calls.length && item.state !== 'error'
         ? summarizeSandboxCalls(sandbox.calls)
-        : item.summary;
+        : summary;
   const hasBody = Boolean(item.output || item.source || sentMessage || item.ask);
   const expandable = hasDiff || hasWrite || hasFileChanges || hasBody;
   // edit 的 diff 与 write 的内容只在本轮直播（running）且开启 expandLiveEdits 时默认展开；
@@ -1603,6 +1611,10 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const memoryCapture =
     expanded && item.name === 'memory_capture'
       ? parseMemoryCapture(item.output, item.memoryContent)
+      : null;
+  const subagentReceipt =
+    expanded && item.name === 'subagent' && item.state !== 'error'
+      ? parseSubagentReceipt(item.subagentOp, item.output)
       : null;
   const previouslyHadFileChanges = useRef(hasFileChanges);
   // apply_patch 只在终态结果中拿到真实 diff：必须按「本行从无到有」识别直播，历史首次挂载不展开。
@@ -1641,13 +1653,13 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
               item.state === 'error' ? 'text-destructive' : 'text-muted-foreground'
             )}
           >
-            {!item.summary
-              ? null
-              : item.state === 'error' && item.output
-                ? item.name === 'apply_patch' && hasFileChanges
-                  ? `${headerSummary} · ${firstLine(item.output)}`
-                  : firstLine(item.output)
-                : headerSummary}
+            {item.state === 'error' && item.output
+              ? summary && item.name === 'apply_patch' && hasFileChanges
+                ? `${headerSummary} · ${firstLine(item.output)}`
+                : firstLine(item.output)
+              : summary
+                ? headerSummary
+                : null}
           </span>
           {item.state === 'reviewing' ? (
             <span className="t-shimmer shrink-0 text-[11px]" data-text={t('Assistant reviewing…')}>
@@ -1747,7 +1759,10 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
                 <TerminalOutput command={item.summary} output={item.output ?? ''} />
               ) : item.name === 'read' ? (
                 <ReadFileView path={item.summary} contents={item.output ?? ''} />
-              ) : item.name === 'subagent' && item.state !== 'error' && !sentMessage ? (
+              ) : item.name === 'subagent' &&
+                item.state !== 'error' &&
+                !sentMessage &&
+                !subagentReceipt ? (
                 <div className="px-3 py-2 text-sm">
                   <Markdown text={item.output ?? ''} />
                 </div>
@@ -1763,10 +1778,14 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
                       <Markdown text={sentMessage} />
                     </div>
                   )}
-                  {item.output && (
-                    <pre className="px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
-                      {stripAnsi(item.output)}
-                    </pre>
+                  {subagentReceipt ? (
+                    <SubagentResult view={subagentReceipt} titles={item.subagentTitles} />
+                  ) : (
+                    item.output && (
+                      <pre className="px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                        {stripAnsi(item.output)}
+                      </pre>
+                    )
                   )}
                 </>
               )}

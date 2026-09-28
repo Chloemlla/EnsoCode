@@ -1008,7 +1008,6 @@ export const zhTranslations: Record<string, string> = {
   'Microphone {{n}}': '麦克风 {{n}}',
   'Disconnected, using the system default': '已断开，暂用系统默认',
   Streaming: '流式',
-  'After you stop': '整段',
   'Sentence by sentence': '逐句',
   Downloaded: '已下载',
   'Download {{size}} · Memory about {{memory}}': '下载 {{size}} · 内存约 {{memory}}',
@@ -1019,14 +1018,17 @@ export const zhTranslations: Record<string, string> = {
   'Best with mixed Chinese-English and code terms. Slower and uses more memory.':
     '中英混说和代码术语识别最好，但较慢且更占内存。',
   'Chinese, English, Japanese, Korean and Cantonese.': '支持中文、英文、日语、韩语和粤语。',
-  'enso-asr Streaming': 'enso-asr 流式',
-  'Text appears while you speak. No download; needs a network connection.':
-    '边说边出字，无需下载，需要联网。',
-  'Uploads after you stop; nothing is sent if you cancel. No download; needs a network connection.':
-    '说完再上传识别，取消录音不会上传。无需下载，需要联网。',
-  'Third-party service': '第三方服务',
-  'What you say is uploaded to a third-party service for recognition. Avoid it for sensitive content.':
-    '你说的话会上传到第三方服务识别，敏感内容请勿使用。',
+  'Google cloud recognition, most accurate with mixed Chinese-English and code terms. Needs a Gemini API key.':
+    'Google 云端识别，中英混说和代码术语最准；需要 Gemini API Key。',
+  'Audio is uploaded to Google. On the free tier Google may use it to improve its products.':
+    '音频会上传到 Google；免费层级下 Google 可能用它改进产品。',
+  'Enter a Gemini API key below first.': '需先在下方填写 Gemini API Key。',
+  'Gemini API key': 'Gemini API Key',
+  'Create one for free in Google AI Studio.': '可在 Google AI Studio 免费创建。',
+  Cloud: '云端',
+  'Custom vocabulary': '自定义词表',
+  'One term per line, up to 100. Helps with names and code terms such as useEffect or pnpm.':
+    '每行一个，最多 100 个。可提升人名和 useEffect、pnpm 这类代码术语的识别率。',
   'Correct with a language model': '用大模型纠错',
   'Fixes homophones, code terms and number formats after recognition. Adds about 1-3 seconds; the raw text is kept if it fails.':
     '识别后纠正同音错字、代码术语和数字写法，约多 1–3 秒；纠错失败时保留原文。',
@@ -1050,7 +1052,8 @@ export const zhTranslations: Record<string, string> = {
   'Getting the microphone ready…': '麦克风准备中…',
   'Speak now': '请说话',
   'Voice input (hold to talk)': '语音输入（按住说话）',
-  'Hold to record, release to put the text in the chat input': '按住录音，松开后识别并填入输入框',
+  'Hold while the chat input is focused, release to put the text in it':
+    '输入框聚焦时按住录音，松开后识别并填入输入框',
   'Hold {{key}} to talk': '按住 {{key}} 说话',
   'Microphone access denied. Allow it in system settings.':
     '无法使用麦克风，请在系统设置中允许访问。',
@@ -1570,6 +1573,21 @@ export const zhTranslations: Record<string, string> = {
   'Show process': '展开过程',
   'Hide process': '收起过程',
   Subagent: '子代理',
+  'Read report': '查看报告',
+  Wait: '等待',
+  'Dismiss agent': '解雇',
+  'List agents': '列出全部',
+  'awaiting input': '等待输入',
+  validating: '校验中',
+  interrupted: '已中断',
+  'Run info': '运行信息',
+  'Timed out; unfinished agents keep running': '等待超时，未结束的子代理仍在运行',
+  'Wait was interrupted': '等待被打断',
+  creating: '创建中',
+  idle: '空闲',
+  parked: '已休眠',
+  closed: '已关闭',
+  'No agents': '没有子代理',
   'Ask user': '询问用户',
   'Task output': '查看后台任务',
   'Task stop': '停止后台任务',

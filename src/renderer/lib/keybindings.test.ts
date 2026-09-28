@@ -71,11 +71,19 @@ describe('send-message binding', () => {
 describe('voice hold-to-talk binding', () => {
   const held = { metaKey: IS_MAC, ctrlKey: !IS_MAC, shiftKey: true };
 
-  it('defaults to mod+shift+space without clashing with any other default', () => {
+  it('defaults to a bare Space without clashing with any other default', () => {
     expect(KEYBINDING_ACTIONS).toContain('voice-hold');
-    expect(DEFAULT_KEYBINDINGS['voice-hold']).toBe('mod+shift+space');
+    expect(DEFAULT_KEYBINDINGS['voice-hold']).toBe('space');
     const values = Object.values(DEFAULT_KEYBINDINGS).filter(Boolean);
     expect(new Set(values).size).toBe(values.length);
+  });
+
+  it('only yields a bare Space binding when bare keys are allowed', () => {
+    expect(eventToBinding(keyEvent({ key: ' ' }))).toBeNull();
+    expect(eventToBinding(keyEvent({ key: ' ' }), { allowBare: true })).toBe('space');
+    expect(formatBinding('space')).toBe('Space');
+    expect(isHoldReleased('space', keyEvent({ key: ' ' }))).toBe(true);
+    expect(isHoldReleased('space', keyEvent({ key: 'a' }))).toBe(false);
   });
 
   it('encodes Space by name, including the non-breaking space of mac Option+Space', () => {

@@ -24,8 +24,8 @@ export interface SpeechModelSpec extends DownloadableModel {
   /** 实测（M4，2026-09）加载后进程 RSS 增量的量级 */
   memoryBytes: number;
   archive?: SpeechModelArchive;
-  /** 第三方识别服务根地址（流式 /ws、整段 /asr）；有它就不下载、不走本地引擎 */
-  remoteUrl?: string;
+  /** 云端识别，凭证来自已配置的服务商 */
+  remote?: true;
 }
 
 const X_ASR_STREAMING_ROOT =
@@ -151,23 +151,14 @@ export const SPEECH_MODELS: Record<SpeechModelId, SpeechModelSpec> = {
       modelscope: 'pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue',
     },
   },
-  'enso-asr-streaming': {
-    id: 'enso-asr-streaming',
+  'gemini-live': {
+    id: 'gemini-live',
     streaming: true,
     approxBytes: 0,
     memoryBytes: 0,
     files: [],
     sources: null,
-    remoteUrl: 'https://enso-asr.j3.do',
-  },
-  'enso-asr': {
-    id: 'enso-asr',
-    streaming: false,
-    approxBytes: 0,
-    memoryBytes: 0,
-    files: [],
-    sources: null,
-    remoteUrl: 'https://enso-asr.j3.do',
+    remote: true,
   },
 };
 
@@ -268,8 +259,7 @@ export function recognizerConfig(spec: SpeechModelSpec, dir: string): Recognizer
           },
         },
       };
-    case 'enso-asr-streaming':
-    case 'enso-asr':
-      throw new Error('remote speech model has no local recognizer');
+    case 'gemini-live':
+      throw new Error('cloud speech model has no local recognizer');
   }
 }

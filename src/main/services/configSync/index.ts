@@ -96,6 +96,8 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   voiceCorrectionEnabled: { mode: 'excluded', reason: 'voice input is configured per device' },
   voiceCorrectionModel: { mode: 'excluded', reason: 'local correction model lives on this device' },
   voiceCorrectionRemoteModel: { mode: 'excluded', reason: 'voice input is configured per device' },
+  voiceVocabulary: { mode: 'excluded', reason: 'voice input is configured per device' },
+  voiceGeminiApiKey: { mode: 'excluded', reason: 'voice input is configured per device' },
   autoUpdate: { mode: 'excluded', reason: 'device update policy' },
   autoRestartWhenIdle: { mode: 'excluded', reason: 'device update policy' },
   proxyMode: { mode: 'excluded', reason: 'device network configuration' },

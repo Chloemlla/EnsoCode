@@ -30,6 +30,7 @@ interface RuntimeResult {
 
 export interface AgentRuntimeSpawnInput {
   context: AgentControlContext;
+  /** 仅作预约关联；Agent 最终以返回的子会话 instanceId 为 id */
   agentId: string;
   mode: AgentMode;
   name?: string;
@@ -208,13 +209,13 @@ export class AgentService implements AgentServiceContract {
       if (!request.requestId || !request.description.trim() || !request.prompt.trim()) {
         return failure('invalid-state', 'requestId, description and prompt are required.');
       }
-      const agentId = this.randomUuid();
+      const reservationId = this.randomUuid();
       const runId = this.randomUuid();
       let identity: ChildSessionIdentity;
       try {
         identity = await this.options.runtime.spawn({
           context: request.context,
-          agentId,
+          agentId: reservationId,
           mode,
           ...(request.name?.trim() ? { name: request.name.trim() } : {}),
           description: request.description,
@@ -228,6 +229,9 @@ export class AgentService implements AgentServiceContract {
           error instanceof Error ? error.message : String(error)
         );
       }
+      // Main 重启后只能按 instanceId 认领 coworker；以它为 agentId，模型手里的 id 才不会失效。
+      // spawn 途中 child-ready 已按同一个键 adopt 过的记录在这里被覆盖，不会留下第二条
+      const agentId = identity.instanceId;
       const agent: AgentRecord = {
         context: request.context,
         agentId,

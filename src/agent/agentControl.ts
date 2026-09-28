@@ -34,9 +34,11 @@ export class AgentControlInvoker {
   ): Promise<AgentControlToolResponse> {
     if (signal?.aborted) return Promise.reject(new Error('Agent control wait interrupted.'));
     const requestId = this.randomUuid();
+    // spawn/send 可能已在 Main 建好 Agent/Run：abort 只让 Main 打断附带的等待，回执照常回来
+    const keepReceipt = request.operation === 'spawn' || request.operation === 'send';
     return new Promise((resolve, reject) => {
       const onAbort = () => {
-        const pending = this.take(requestId);
+        const pending = keepReceipt ? this.pending.get(requestId) : this.take(requestId);
         if (!pending) return;
         this.emit({
           type: 'agent-control-cancel',
@@ -44,7 +46,7 @@ export class AgentControlInvoker {
           seq: this.nextSeq(),
           requestId,
         });
-        reject(new Error('Agent control wait interrupted.'));
+        if (!keepReceipt) reject(new Error('Agent control wait interrupted.'));
       };
       this.pending.set(requestId, {
         resolve,

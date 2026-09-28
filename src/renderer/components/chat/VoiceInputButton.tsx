@@ -1,6 +1,13 @@
 import type { StartVoiceSession } from '@shared/types/speech';
 import { Mic, Square, X } from 'lucide-react';
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { Spinner } from '@/components/ui/spinner';
 import { useI18n } from '@/i18n';
@@ -17,6 +24,8 @@ const PREVIEW_CHARS = 120;
 const MINI_BARS = 12;
 const MINI_BAR_KEYS = Array.from({ length: MINI_BARS }, (_, i) => `bar-${i}`);
 const SILENT = pushLevel([], 0);
+/** 长按判定：按下后这么久没松、也没按别的键才开录；短按照常打字 */
+const HOLD_DELAY_MS = 300;
 
 type Placement = ReturnType<typeof voiceNotePlacement>;
 
@@ -75,13 +84,15 @@ export function VoiceInputButton({
   requestMicAccess,
   disabled,
   holdBinding,
+  holdScope,
   onText,
 }: {
   startSession: StartVoiceSession;
   requestMicAccess?: () => Promise<boolean>;
   disabled?: boolean;
-  /** 按住录音、松开识别的快捷键（窗口内任意位置生效） */
+  /** 长按录音、松开识别的快捷键（仅焦点在 holdScope 内时生效） */
   holdBinding?: string;
+  holdScope: RefObject<HTMLElement | null>;
   onText: (text: string) => void;
 }) {
   const { t } = useI18n();
@@ -104,7 +115,19 @@ export function VoiceInputButton({
   useEffect(() => {
     if (!holdBinding || disabled) return;
     let heldSince: number | null = null;
+    let pending: ReturnType<typeof setTimeout> | undefined;
+    const abortPending = () => {
+      clearTimeout(pending);
+      pending = undefined;
+    };
+    // 裸空格的原生输入已被拦下：没构成长按就补回这个空格
+    const flushTap = () => {
+      if (pending === undefined) return;
+      abortPending();
+      if (holdBinding === 'space') document.execCommand('insertText', false, ' ');
+    };
     const release = () => {
+      abortPending();
       if (heldSince === null) return;
       const voice = latest.current;
       const action = releaseAction({
@@ -118,16 +141,29 @@ export function VoiceInputButton({
       if (action === 'too-short') setError(t('Speech was too short.'));
     };
     const onDown = (event: KeyboardEvent) => {
-      if (event.isComposing || eventToBinding(event) !== holdBinding) return;
+      // 229：输入法已接管这次按键，拦不住原生输入
+      if (event.isComposing || event.keyCode === 229) return;
+      if (eventToBinding(event, { allowBare: true }) !== holdBinding) {
+        flushTap();
+        return;
+      }
+      const scope = holdScope.current;
+      if (!scope || !(event.target instanceof Node) || !scope.contains(event.target)) return;
+      const idle = heldSince === null && pending === undefined;
+      if (idle && (event.repeat || latest.current.phase !== 'idle')) return;
       event.preventDefault();
-      event.stopPropagation();
-      if (event.repeat || heldSince !== null || latest.current.phase !== 'idle') return;
-      heldSince = performance.now();
-      void latest.current.start();
+      if (heldSince !== null) event.stopPropagation();
+      if (!idle) return;
+      pending = setTimeout(() => {
+        pending = undefined;
+        heldSince = performance.now();
+        void latest.current.start();
+      }, HOLD_DELAY_MS);
     };
     const onUp = (event: KeyboardEvent) => {
-      if (heldSince === null || !isHoldReleased(holdBinding, event)) return;
+      if ((heldSince === null && !pending) || !isHoldReleased(holdBinding, event)) return;
       event.preventDefault();
+      flushTap();
       release();
     };
     // 按住时切走窗口收不到 keyup，按松手处理
@@ -138,9 +174,10 @@ export function VoiceInputButton({
       window.removeEventListener('keydown', onDown, true);
       window.removeEventListener('keyup', onUp, true);
       window.removeEventListener('blur', release);
+      abortPending();
       if (heldSince !== null) latest.current.cancel();
     };
-  }, [disabled, holdBinding, setError, t]);
+  }, [disabled, holdBinding, holdScope, setError, t]);
 
   useEffect(() => {
     if (phase !== 'recording') return;

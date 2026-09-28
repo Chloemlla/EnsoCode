@@ -1,6 +1,6 @@
 import { getTranslation, zhTranslations } from '@shared/i18n';
 import { describe, expect, it } from 'vitest';
-import { TOOL_LABEL_KEYS, toolLabel } from './toolLabels';
+import { SUBAGENT_OP_LABEL_KEYS, TOOL_LABEL_KEYS, toolLabel } from './toolLabels';
 
 const zh = (key: string) => getTranslation('zh', key);
 
@@ -12,7 +12,10 @@ describe('toolLabel', () => {
   });
 
   it('映射表里的词条都有中文', () => {
-    for (const key of Object.values(TOOL_LABEL_KEYS)) {
+    for (const key of [
+      ...Object.values(TOOL_LABEL_KEYS),
+      ...Object.values(SUBAGENT_OP_LABEL_KEYS),
+    ]) {
       expect(zhTranslations[key as string], key).toBeTypeOf('string');
     }
   });

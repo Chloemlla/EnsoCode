@@ -222,37 +222,6 @@ describe('speech sessions', () => {
     await again.finish();
     expect(loads).toEqual(['x-asr-streaming', 'x-asr-streaming']);
   });
-
-  it('uses the third-party service without a download or a supported local runtime', async () => {
-    __setSpeechTestHooks({
-      root,
-      platform: 'freebsd',
-      arch: 'x64',
-      createEngine: async (spec) => {
-        loads.push(spec.id);
-        return fakeEngine(spec.id);
-      },
-    });
-    enable({ voiceModel: 'enso-asr-streaming' });
-    expect(speechAvailable()).toBe(true);
-    expect(getSpeechStatus().state).toBe('ready');
-    const partials: string[] = [];
-    const session = openSpeechSession((text) => partials.push(text));
-    session.push(second());
-    await expect(session.finish()).resolves.toEqual({ ok: true, text: '字。' });
-    expect(partials).toEqual(['字']);
-    enable({ voiceModel: 'enso-asr' });
-    const whole = openSpeechSession(() => {});
-    whole.push(second());
-    await expect(whole.finish()).resolves.toEqual({ ok: true, text: '你好，世界。' });
-    expect(transcribed).toEqual([16_000]);
-    expect(loads).toEqual(['enso-asr-streaming', 'enso-asr']);
-    for (const id of ['enso-asr-streaming', 'enso-asr'] as const) {
-      await expect(startSpeechDownload(id)).resolves.toBe(false);
-      await expect(deleteSpeechModel(id)).resolves.toBe(false);
-    }
-    expect(speechAvailable()).toBe(true);
-  });
 });
 
 describe('speech correction', () => {
@@ -331,20 +300,59 @@ describe('speech correction', () => {
 });
 
 describe('speech status', () => {
-  it('lists every model with its streaming flag, location and download state', () => {
+  it('lists every model with its streaming flag and download state', () => {
     installModel('x-asr');
     enable({ voiceModel: 'x-asr' });
     const status = getSpeechStatus();
     expect(status.selected).toBe('x-asr');
     expect(status.state).toBe('ready');
-    expect(status.models.map((m) => [m.id, m.streaming, m.remote, m.state])).toEqual([
-      ['x-asr-streaming', true, false, 'missing'],
-      ['x-asr', false, false, 'ready'],
-      ['qwen3-asr', false, false, 'missing'],
-      ['sense-voice', false, false, 'missing'],
-      ['enso-asr-streaming', true, true, 'ready'],
-      ['enso-asr', false, true, 'ready'],
+    expect(status.models.map((m) => [m.id, m.streaming, m.state])).toEqual([
+      ['x-asr-streaming', true, 'missing'],
+      ['x-asr', false, 'ready'],
+      ['qwen3-asr', false, 'missing'],
+      ['sense-voice', false, 'missing'],
+      ['gemini-live', true, 'missing'],
     ]);
+  });
+
+  describe('Gemini cloud model', () => {
+    const gemini = {
+      voiceInputEnabled: true,
+      voiceModel: 'gemini-live',
+      voiceGeminiApiKey: 'AIza',
+    };
+
+    it('is ready once the voice settings hold a Gemini key, with no download or local engine runtime', async () => {
+      syncSpeechFromSettings(gemini);
+      expect(getSpeechStatus().state).toBe('ready');
+      expect(getSpeechStatus().models.find((m) => m.id === 'gemini-live')?.remote).toBe(true);
+      expect(speechAvailable()).toBe(true);
+      await expect(startSpeechDownload('gemini-live')).resolves.toBe(false);
+      const session = openSpeechSession(() => {});
+      session.push(second());
+      await expect(session.finish()).resolves.toEqual({ ok: true, text: '字。' });
+    });
+
+    it('stays usable on platforms without the local engine', () => {
+      __setSpeechTestHooks({
+        root,
+        platform: 'freebsd',
+        arch: 'riscv',
+        createEngine: async () => fakeEngine('gemini-live'),
+      });
+      syncSpeechFromSettings(gemini);
+      expect(getSpeechStatus().state).toBe('ready');
+    });
+
+    it('is not ready without a Gemini key', async () => {
+      syncSpeechFromSettings({ ...gemini, voiceGeminiApiKey: '' });
+      expect(getSpeechStatus().state).toBe('missing');
+      expect(speechAvailable()).toBe(false);
+      await expect(openSpeechSession(() => {}).finish()).resolves.toEqual({
+        ok: false,
+        error: 'not-ready',
+      });
+    });
   });
 
   it('tells listeners when voice input becomes usable or stops being usable', async () => {

@@ -221,11 +221,8 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
     async execute(_toolCallId, params, signal) {
       const request = normalize(params as Record<string, unknown>);
       if (!request) throw new Error('invalid subagent operation parameters');
-      // spawn/send 已经可能在 Main 创建 Agent/Run；不能因单次工具调用 abort 丢失权威 receipt。
-      const response = await deps.invoke(
-        request,
-        request.operation === 'spawn' || request.operation === 'send' ? undefined : signal
-      );
+      // spawn/send 被 abort 时 invoker 只让 Main 打断附带的等待，仍等权威 receipt，不丢 agentId/runId
+      const response = await deps.invoke(request, signal);
       if (!response.ok) throw new Error(`${response.code}: ${response.error}`);
       const serialized = JSON.stringify(response.value, null, 2);
       return {

@@ -1,6 +1,8 @@
 /** 识别结果与纠错的纯文本处理，不依赖 Electron */
 
 const CJK = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+const CJK_GAP =
+  /(?<=[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef])[ \t]+(?=[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef])/g;
 
 /** 逐句识别的结果按顺序拼接，两侧都不是中日韩字符时才补空格 */
 export function joinSegments(parts: readonly string[]): string {
@@ -19,6 +21,8 @@ export function normalizeTranscript(text: string): string {
       .replace(/\uFFFD/g, '')
       // X-ASR 在中文标点后多带一个空格
       .replace(/([，。？！、；：])\s+/g, '$1')
+      // Gemini Live 的中间结果在分块边界夹空格
+      .replace(CJK_GAP, '')
       .trim()
   );
 }

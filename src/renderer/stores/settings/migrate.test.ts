@@ -295,6 +295,16 @@ describe('设置持久化迁移', () => {
     });
   });
 
+  it('hydrate 时已下架的识别模型落回当前值，合法模型照常恢复', () => {
+    const current = {
+      editMode: 'apply_patch' as const,
+      accentColor: 'violet' as const,
+      voiceModel: 'qwen3-asr',
+    };
+    expect(mergeSettingsState({ voiceModel: 'enso-asr' }, current).voiceModel).toBe('qwen3-asr');
+    expect(mergeSettingsState({ voiceModel: 'x-asr' }, current).voiceModel).toBe('x-asr');
+  });
+
   it('已是当前版本时原样返回，不重复搬运', () => {
     const current = { providers: [{ id: 'p1', oauthAccountKey: 'anthropic#2' }] };
     expect(migrateSettings(current, SETTINGS_VERSION)).toBe(current);

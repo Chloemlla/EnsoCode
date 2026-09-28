@@ -7,8 +7,7 @@ export const SPEECH_MODEL_IDS = [
   'x-asr',
   'qwen3-asr',
   'sense-voice',
-  'enso-asr-streaming',
-  'enso-asr',
+  'gemini-live',
 ] as const;
 export type SpeechModelId = (typeof SPEECH_MODEL_IDS)[number];
 export const DEFAULT_SPEECH_MODEL_ID: SpeechModelId = 'qwen3-asr';
@@ -25,7 +24,7 @@ export interface SpeechModelDto {
   id: SpeechModelId;
   /** 边说边出字 */
   streaming: boolean;
-  /** 第三方服务识别：无需下载，音频会发出本机 */
+  /** 云端识别：不下载，音频上传给服务商，ready = 已配好凭证 */
   remote: boolean;
   /** 下载体积 */
   approxBytes: number;

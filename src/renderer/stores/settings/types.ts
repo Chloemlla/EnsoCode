@@ -154,6 +154,10 @@ export interface SettingsState {
   voiceCorrectionModel: string;
   /** 纠错走远程时的模型；null 跟随标题模型 */
   voiceCorrectionRemoteModel: DefaultModelRef | null;
+  /** 云端识别的自定义词表，逐行或逗号分隔 */
+  voiceVocabulary: string;
+  /** 云端识别（Gemini Live）的 API Key */
+  voiceGeminiApiKey: string;
 
   /** 是否自动检查并下载应用更新；缺省 true */
   autoUpdate: boolean;
@@ -320,6 +324,8 @@ export interface SettingsState {
   setVoiceCorrectionEnabled: (value: boolean) => void;
   setVoiceCorrectionModel: (model: string) => void;
   setVoiceCorrectionRemoteModel: (model: DefaultModelRef | null) => void;
+  setVoiceVocabulary: (value: string) => void;
+  setVoiceGeminiApiKey: (value: string) => void;
   setEditMode: (value: EditMode) => void;
   setCompactStrategy: (value: CompactStrategy) => void;
   setSmartCompactEnabled: (value: boolean) => void;

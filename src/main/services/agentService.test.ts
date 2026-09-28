@@ -388,6 +388,69 @@ describe('AgentService lifecycle', () => {
     );
   });
 
+  // 生产里子会话 instanceId 随机生成，与 agentId 不同；child-ready 会让 Main 调 adoptCoworker
+  const instanceId = 'bbbbbbbb-bbbb-4bbb-8bbb-000000000001';
+  const liveChild: ChildSessionIdentity = {
+    ...child(instanceId, '22222222-2222-4222-8222-000000000001'),
+    sessionId: `chat-1::cw-${instanceId}`,
+  };
+  const agentIds = async (service: AgentService) => {
+    const listed = await service.list({ context, requestId: 'list-ids', limit: 20 });
+    return listed.ok ? listed.value.agents.map((agent) => agent.agentId) : listed;
+  };
+
+  it('spawn 途中 child-ready 先触发 adopt 时不留幽灵记录，首个 Run 能正常结束', async () => {
+    const { service, runtime } = setup();
+    vi.mocked(runtime.spawn).mockImplementationOnce(async () => {
+      service.adoptCoworker(context, liveChild);
+      return liveChild;
+    });
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({
+      type: 'turn-completed',
+      identity: liveChild,
+      seq: 1,
+      turnId: spawned.value.runId,
+    });
+    await expect(
+      service.report({ context, requestId: 'report-first-run', runId: spawned.value.runId })
+    ).resolves.toMatchObject({ ok: true, value: { run: { status: 'succeeded' } } });
+    expect(await agentIds(service)).toEqual([spawned.value.agentId]);
+  });
+
+  it('spawn 之后同一子会话再次 child-ready 只更新原记录，不重复登记', async () => {
+    const { service, runtime } = setup();
+    vi.mocked(runtime.spawn).mockResolvedValueOnce(liveChild);
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({ type: 'worker-exited' });
+    const replacement = { ...liveChild, generation: '99999999-9999-4999-8999-999999999999' };
+    service.observe({ type: 'child-ready', identity: replacement } as never);
+    expect(service.adoptCoworker(context, replacement)).toBe(true);
+    expect(await agentIds(service)).toEqual([spawned.value.agentId]);
+  });
+
+  it('agentId 取子会话 instanceId：Main 重启后按 instanceId 认领，模型手里的 id 照样能用', async () => {
+    const { service, runtime } = setup();
+    vi.mocked(runtime.spawn).mockResolvedValueOnce(liveChild);
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    expect(spawned.value.agentId).toBe(instanceId);
+
+    const restarted = setup().service;
+    const resumed = { ...liveChild, generation: '99999999-9999-4999-8999-999999999999' };
+    expect(restarted.adoptCoworker(context, resumed)).toBe(true);
+    await expect(
+      restarted.message({
+        context,
+        requestId: 'after-restart',
+        to: spawned.value.agentId,
+        text: 'continue',
+      })
+    ).resolves.toMatchObject({ ok: true, value: { agentId: instanceId } });
+  });
+
   it('stop 只终止 Run 并保留 coworker；dismiss 关闭实例且幂等', async () => {
     const { service, runtime } = setup();
     const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));

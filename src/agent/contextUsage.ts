@@ -155,7 +155,9 @@ export function contextBreakdownMessages(
     activeMessages,
     branchMessages,
     estimateMessageTokens: (message) =>
-      estimate(sources.has(message as AnchorMessage) ? sources.get(message as AnchorMessage) : message),
+      estimate(
+        sources.has(message as AnchorMessage) ? sources.get(message as AnchorMessage) : message
+      ),
   };
 }
 

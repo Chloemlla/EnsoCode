@@ -22,6 +22,10 @@ const mocks = vi.hoisted(() => ({
   steerSession: vi.fn(),
   abortSession: vi.fn(),
   setPairAgentBridge: vi.fn(),
+  configurePairSessionHost: vi.fn(),
+  respondApproval: vi.fn(),
+  respondAsk: vi.fn(),
+  prepareParent: vi.fn(),
   setSessionModel: vi.fn(() => ({ ok: true })),
   forkSession: vi.fn(() => ({ ok: true })),
   sessionWorktree: vi.fn(),
@@ -76,8 +80,8 @@ vi.mock('../services/agentHost', () => ({
   resolveAgentTypeSpawnConfig: vi.fn(),
   resolveModelSelection: mocks.resolveModelSelection,
   resolveSubagentModelSelection: vi.fn(),
-  respondApproval: vi.fn(),
-  respondAsk: vi.fn(),
+  respondApproval: mocks.respondApproval,
+  respondAsk: mocks.respondAsk,
   rewindSession: vi.fn(),
   forkSession: mocks.forkSession,
   setAgentEventListener: mocks.setAgentEventListener,
@@ -112,13 +116,13 @@ vi.mock('../services/pairHost', () => ({
   refreshPowerKeepAlive: vi.fn(),
 }));
 vi.mock('../services/pairSessionHost', () => ({
-  configurePairSessionHost: vi.fn(),
+  configurePairSessionHost: mocks.configurePairSessionHost,
   handlePairHeadlessAgentEvent: vi.fn(),
 }));
 vi.mock('./capabilities', () => ({
   agentSessionIndex: {
     currentIdentity: mocks.currentIdentity,
-    prepareParent: vi.fn(),
+    prepareParent: mocks.prepareParent,
     observe: vi.fn(),
     reserveChild: vi.fn(),
     releaseChild: vi.fn(),
@@ -176,6 +180,10 @@ describe('agent IPC Main identity boundary', () => {
     mocks.steerSession.mockClear();
     mocks.abortSession.mockClear();
     mocks.setPairAgentBridge.mockClear();
+    mocks.configurePairSessionHost.mockClear();
+    mocks.respondApproval.mockClear();
+    mocks.respondAsk.mockClear();
+    mocks.prepareParent.mockClear();
     mocks.setSessionModel.mockClear();
     mocks.coworkerOf.mockReset();
     mocks.dismissChildSession.mockClear();
@@ -464,10 +472,26 @@ describe('agent IPC Main identity boundary', () => {
 
   describe('手机第二屏的会话命令桥', () => {
     const parent = { sessionId: 'conv-1', generation: 'gen-1' };
+    const child = {
+      sessionId: 'conv-1::cw-1',
+      generation: 'g',
+      parent,
+      instanceId: 'i',
+      instanceName: 'Enso-1',
+      typeKey: 'agent:enso',
+    };
     const bridge = () =>
       mocks.setPairAgentBridge.mock.calls.at(-1)?.[0] as {
         prompt(sessionId: string, text: string): void;
         abort(sessionId: string): void;
+        respondApproval(sessionId: string, requestId: string, decision: string): void;
+        respondAsk(sessionId: string, requestId: string, answer: unknown): void;
+        spawn(request: { sessionId: string }): Promise<unknown>;
+      };
+    const headless = () =>
+      mocks.configurePairSessionHost.mock.calls.at(-1)?.[0] as {
+        prompt(sessionId: string, text: string): void;
+        setModel(sessionId: string, providerId: string, modelId: string): void;
       };
 
     it('裸 sessionId 被解析成 exact identity 后才下发', () => {
@@ -485,17 +509,28 @@ describe('agent IPC Main identity boundary', () => {
       expect(mocks.abortSession).not.toHaveBeenCalled();
     });
 
-    it('child 身份不能冒充父会话接收手机命令', () => {
-      mocks.currentIdentity.mockReturnValue({
-        sessionId: 'conv-1::cw-1',
-        generation: 'g',
-        parent,
-        instanceId: 'i',
-        instanceName: 'Enso-1',
-        typeKey: 'agent:enso',
-      });
+    it('coworker 标签页的审批/回答/输入/停止与桌面同样按 child 身份下发', () => {
+      mocks.currentIdentity.mockReturnValue(child);
+      bridge().respondApproval('conv-1::cw-1', 'r-1', 'allow');
+      bridge().respondAsk('conv-1::cw-1', 'r-2', 'yes');
       bridge().prompt('conv-1::cw-1', 'hello');
-      expect(mocks.promptSession).not.toHaveBeenCalled();
+      bridge().abort('conv-1::cw-1');
+      headless().prompt('conv-1::cw-1', 'tray');
+      expect(mocks.respondApproval).toHaveBeenCalledWith(child, 'r-1', 'allow');
+      expect(mocks.respondAsk).toHaveBeenCalledWith(child, 'r-2', 'yes');
+      expect(mocks.promptSession).toHaveBeenCalledWith(child, 'hello', undefined);
+      expect(mocks.promptSession).toHaveBeenCalledWith(child, 'tray', undefined);
+      expect(mocks.abortSession).toHaveBeenCalledWith(child);
+    });
+
+    it('child 身份不能作为新建会话的父身份，也不能被切模型', async () => {
+      mocks.currentIdentity.mockReturnValue(child);
+      mocks.credentials.mockRejectedValue(new Error('stop here'));
+      await bridge().spawn({ sessionId: 'conv-1::cw-1' });
+      expect(mocks.prepareParent).not.toHaveBeenCalledWith(child);
+      headless().setModel('conv-1::cw-1', 'pv', 'm');
+      await Promise.resolve();
+      expect(mocks.setSessionModel).not.toHaveBeenCalled();
     });
   });
 

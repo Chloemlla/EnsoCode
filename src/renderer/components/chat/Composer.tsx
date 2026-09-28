@@ -786,6 +786,7 @@ export function Composer({
                 requestMicAccess={requestMicAccess}
                 disabled={locked}
                 holdBinding={voiceHoldBinding || undefined}
+                holdScope={composerRef}
                 onText={(text) => {
                   editorRef.current?.insertText(text);
                   editorRef.current?.focus();

@@ -22,7 +22,8 @@ export function useSpeechStatus(active = true) {
   useEffect(() => {
     if (!active) return;
     refresh();
-    return window.electronAPI.speech.onProgress((next) => {
+    const offStatus = window.electronAPI.speech.onStatusChanged(refresh);
+    const offProgress = window.electronAPI.speech.onProgress((next) => {
       if (next.done) {
         setProgress(({ [next.modelId]: _, ...rest }) => rest);
         setError(next.error ? { modelId: next.modelId, message: next.error } : null);
@@ -32,6 +33,10 @@ export function useSpeechStatus(active = true) {
         setError((current) => (current?.modelId === next.modelId ? null : current));
       }
     });
+    return () => {
+      offStatus();
+      offProgress();
+    };
   }, [active, refresh]);
   return { status, progress, error, refresh };
 }

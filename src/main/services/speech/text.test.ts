@@ -26,6 +26,13 @@ describe('normalizeTranscript', () => {
     expect(normalizeTranscript('\uFFFD')).toBe('');
     expect(normalizeTranscript('你好\uFFFD世界')).toBe('你好世界');
   });
+
+  it('drops the chunk-boundary spaces between CJK characters but keeps them around Latin words', () => {
+    expect(
+      normalizeTranscript('今天我们先 看一下登录 页面的问题。 我 怀疑是 useEffect 的依赖 写错 了，')
+    ).toBe('今天我们先看一下登录页面的问题。我怀疑是 useEffect 的依赖写错了，');
+    expect(normalizeTranscript('안녕 하세요 run pnpm test')).toBe('안녕 하세요 run pnpm test');
+  });
 });
 
 describe('correction', () => {

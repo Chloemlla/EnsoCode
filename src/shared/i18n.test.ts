@@ -17,9 +17,6 @@ const MAPPED_I18N_KEYS = [
   'Most accurate on everyday speech. Chinese and English.',
   'Best with mixed Chinese-English and code terms. Slower and uses more memory.',
   'Chinese, English, Japanese, Korean and Cantonese.',
-  'enso-asr Streaming',
-  'Text appears while you speak. No download; needs a network connection.',
-  'Uploads after you stop; nothing is sent if you cancel. No download; needs a network connection.',
   // ModelPicker.LEVEL_LABEL_KEYS + StatsLine.THINKING_LEVEL_SHORT_KEYS
   'Min',
   'Low',
@@ -97,6 +94,19 @@ const MAPPED_I18N_KEYS = [
   'Background task started',
   'Bypassed',
   'Unavailable',
+  // SubagentResult.STATUS
+  'Queued',
+  'running',
+  'awaiting input',
+  'validating',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'creating',
+  'idle',
+  'parked',
+  'closed',
 ] as const;
 
 const MODEL_CENTER_ENSO_I18N_KEYS = [

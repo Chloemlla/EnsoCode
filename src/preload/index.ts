@@ -373,6 +373,11 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.SPEECH_PROGRESS, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.SPEECH_PROGRESS, handler);
     },
+    onStatusChanged: (listener: () => void): (() => void) => {
+      const handler = () => listener();
+      ipcRenderer.on(IPC_CHANNELS.SPEECH_STATUS_CHANGED, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.SPEECH_STATUS_CHANGED, handler);
+    },
   },
 
   providers: {

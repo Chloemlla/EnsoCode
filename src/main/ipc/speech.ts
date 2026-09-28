@@ -13,6 +13,7 @@ import {
   cancelSpeechDownload,
   deleteSpeechModel,
   getSpeechStatus,
+  onSpeechAvailabilityChange,
   openSpeechSession,
   setSpeechProgressSink,
   startSpeechDownload,
@@ -59,6 +60,8 @@ export function registerSpeechHandlers(): void {
   // 设置窗下载，主窗口据 done 事件重查状态决定是否显示麦克风
   // （主窗口 UI 在 WebContentsView 里，win.webContents.send 送不到）
   setSpeechProgressSink((progress) => sendToAllWindows(IPC_CHANNELS.SPEECH_PROGRESS, progress));
+  // 设置变化（如填入云端 Key）改变可用性时，各窗口重查状态
+  onSpeechAvailabilityChange(() => sendToAllWindows(IPC_CHANNELS.SPEECH_STATUS_CHANGED));
 
   ipcMain.handle(IPC_CHANNELS.SPEECH_STATUS, (event) =>
     isTrustedWindow(event.sender.id) ? getSpeechStatus() : UNSUPPORTED

@@ -2,6 +2,7 @@ import { type AccentColor, resolveAccentColor } from '@shared/accentColor';
 import { resolveCompactStrategy } from '@shared/compactStrategy';
 import { type EditMode, resolveEditMode } from '@shared/types';
 import { effectiveSubagentAllowedModes } from '@shared/types/builtinTools';
+import { isSpeechModelId } from '@shared/types/speech';
 
 /**
  * 持久化数据的版本迁移。
@@ -23,7 +24,7 @@ export function mergeSettingsState<T extends { editMode: EditMode; accentColor: 
 ): T {
   if (!persisted || typeof persisted !== 'object' || Array.isArray(persisted)) return current;
   const source = persisted as Record<string, unknown>;
-  const { hashlineEditEnabled, bashInterceptEnabled, ...rest } = source;
+  const { hashlineEditEnabled, bashInterceptEnabled, voiceModel, ...rest } = source;
   const editMode =
     'editMode' in source || 'hashlineEditEnabled' in source
       ? resolveEditMode(source.editMode, hashlineEditEnabled)
@@ -31,8 +32,10 @@ export function mergeSettingsState<T extends { editMode: EditMode; accentColor: 
   // 外部手改 settings.json 可能写进未知强调色，非法值落回默认
   const accentColor =
     'accentColor' in source ? resolveAccentColor(source.accentColor) : current.accentColor;
+  // 已下架的识别模型（如 enso-asr）保留当前值，与 Main 的回落一致
+  const voice = isSpeechModelId(voiceModel) ? { voiceModel } : {};
   void bashInterceptEnabled;
-  return { ...current, ...rest, editMode, accentColor } as T;
+  return { ...current, ...rest, ...voice, editMode, accentColor } as T;
 }
 
 /**

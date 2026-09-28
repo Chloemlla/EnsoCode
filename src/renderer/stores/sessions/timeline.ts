@@ -81,12 +81,16 @@ export type TimelineItem =
       rtk?: RtkToolStats;
       /** submit_plan 提交的计划；其它工具缺省 */
       plan?: { title: string; text: string } | null;
-      /** 联系主 agent / 队员、子代理 send 发出的正文；其它工具缺省 */
+      /** 联系主 agent / 队员、子代理 send 发出的正文，或子代理 spawn 交代的任务；其它工具缺省 */
       sentMessage?: string;
       /** memory_capture 记下的正文（写入回执不带正文）；其它工具缺省 */
       memoryContent?: string;
       /** ask_user 当时的问题、选项与用户的回答；其它工具缺省 */
       ask?: AskUserView;
+      /** 子代理按 runId / agentId 指代目标的操作（summary 为 spawn 时起的标题）；其它缺省 */
+      subagentOp?: SubagentOp;
+      /** wait / list 行：agentId → spawn 时起的名字，展开后逐个标注；其它缺省 */
+      subagentTitles?: Record<string, string>;
     }
   | {
       kind: 'tool-group';
@@ -418,8 +422,17 @@ function extractSentMessage(
   return { text, summary: typeof to === 'string' && to.trim() ? `${to.trim()} · ${text}` : text };
 }
 
+/** 子代理 spawn 交代的任务；行头仍是 spawn 起的标题 */
+function extractSpawnTask(name: string, args: unknown): string | null {
+  if (name !== 'subagent' || !args || typeof args !== 'object') return null;
+  const { operation, prompt } = args as Record<string, unknown>;
+  return operation === 'spawn' && typeof prompt === 'string' && prompt.trim()
+    ? prompt.trim()
+    : null;
+}
+
 /** 子代理结果是末尾一段 JSON，前面可能被捎带的系统提醒顶开 */
-function splitTrailingJson(
+export function splitTrailingJson(
   output: string | null | undefined
 ): { head: string; value: Record<string, unknown> } | null {
   if (!output) return null;
@@ -443,18 +456,72 @@ function stripDeliveryReceipt(output: string | null): string | null {
   return rest?.trimEnd() || null;
 }
 
-/** spawn 回执里的 agentId → 派活时起的名字，供后续发消息行显示收件人 */
-function recordSpawnedAgent(
+/** 回执顶层带 agentId / runId 的操作；report / wait 的大段结果不在建时间线时解析 */
+const RECEIPT_OPS = new Set<unknown>(['spawn', 'send', 'message']);
+
+/** spawn 回执里的 agentId → 派活时起的名字；回执里的 runId → agentId，供后续按 id 指代的行显示标题 */
+function recordSubagent(
   agents: Map<string, string>,
+  runs: Map<string, string>,
   args: unknown,
   output: string | undefined
 ): void {
   if (!args || typeof args !== 'object') return;
   const { operation, name, description } = args as Record<string, unknown>;
+  if (!RECEIPT_OPS.has(operation)) return;
+  const { agentId, runId } = splitTrailingJson(output)?.value ?? {};
+  if (typeof agentId !== 'string') return;
+  if (typeof runId === 'string') runs.set(runId, agentId);
   if (operation !== 'spawn') return;
   const label = [name, description].find((value) => typeof value === 'string' && value.trim());
-  const agentId = splitTrailingJson(output)?.value.agentId;
-  if (typeof label === 'string' && typeof agentId === 'string') agents.set(agentId, label.trim());
+  if (typeof label === 'string') agents.set(agentId, label.trim());
+}
+
+export type SubagentOp = 'report' | 'wait' | 'stop' | 'dismiss' | 'list';
+const SUBAGENT_OPS = new Set<unknown>(['report', 'wait', 'stop', 'dismiss', 'list']);
+
+/**
+ * 子代理行头：spawn 起了名字时带上名字（后续行的标题就是它）；
+ * 按 runId / agentId 指代的操作带上动作，标题只认本时间线 spawn 过的名字，查不到留空也不显示 id
+ */
+function extractSubagentHeader(
+  args: unknown,
+  agents: ReadonlyMap<string, string>,
+  runs: ReadonlyMap<string, string>
+): { op?: SubagentOp; title: string; titles?: Record<string, string> } | null {
+  if (!args || typeof args !== 'object') return null;
+  const { operation, name, description, agentId, runId, runIds } = args as Record<string, unknown>;
+  if (operation === 'spawn') {
+    if (typeof name !== 'string' || !name.trim()) return null;
+    const parts = [name, description].flatMap((part) =>
+      typeof part === 'string' && part.trim() ? [part.trim()] : []
+    );
+    return { title: [...new Set(parts)].join(' · ') };
+  }
+  if (!SUBAGENT_OPS.has(operation)) return null;
+  // list 结果只有 agentId，展开后按此前 spawn 过的名字逐个标注
+  if (operation === 'list') {
+    return agents.size > 0
+      ? { op: 'list', title: '', titles: Object.fromEntries(agents) }
+      : { op: 'list', title: '' };
+  }
+  const ids =
+    operation === 'dismiss'
+      ? [agentId]
+      : [runId, ...(Array.isArray(runIds) ? runIds : [])].map((id) =>
+          typeof id === 'string' ? runs.get(id) : undefined
+        );
+  const titles: Record<string, string> = {};
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const title = agents.get(id);
+    if (title) titles[id] = title;
+  }
+  const title = [...new Set(Object.values(titles))].join(', ');
+  // wait 可能等多个 run，展开后要逐个标注是哪个子代理
+  return operation === 'wait' && title
+    ? { op: 'wait', title, titles }
+    : { op: operation as SubagentOp, title };
 }
 
 /** memory_capture 的标题（缺省取正文首行）与正文 */
@@ -724,6 +791,7 @@ function buildMessageTimeline(
   }
   const items: TimelineItem[] = [];
   const spawnedAgents = new Map<string, string>();
+  const subagentRuns = new Map<string, string>();
   // 每条消息之后的首个非 toolResult 角色（反向一次扫完）：用于判定「本轮末 step」
   const nextTurnRole: (string | undefined)[] = new Array(messages.length);
   for (let i = messages.length - 1, seen: string | undefined; i >= 0; i--) {
@@ -934,9 +1002,14 @@ function buildMessageTimeline(
           const sandboxView = part.name === 'exec' ? parseSandboxOutput(output) : null;
           const call = unwrapMcpProxyCall(part.name, part.arguments);
           if (part.name === 'subagent') {
-            recordSpawnedAgent(spawnedAgents, part.arguments, result?.output);
+            recordSubagent(spawnedAgents, subagentRuns, part.arguments, result?.output);
           }
+          const subagent =
+            part.name === 'subagent'
+              ? extractSubagentHeader(part.arguments, spawnedAgents, subagentRuns)
+              : null;
           const sent = extractSentMessage(part.name, part.arguments, spawnedAgents);
+          const sentMessage = sent?.text ?? extractSpawnTask(part.name, part.arguments);
           const captured = extractCapturedMemory(part.name, part.arguments);
           const asked = extractAsk(
             part.name,
@@ -963,6 +1036,7 @@ function buildMessageTimeline(
                 : (sent?.summary ??
                   captured?.title ??
                   asked?.ask.question ??
+                  subagent?.title ??
                   call.summary ??
                   summarizeArgs(call.args, cwd)),
             source: execSource,
@@ -993,9 +1067,11 @@ function buildMessageTimeline(
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
               : {}),
-            ...(sent ? { sentMessage: sent.text } : {}),
+            ...(sentMessage ? { sentMessage } : {}),
             ...(captured ? { memoryContent: captured.content } : {}),
             ...(asked ? { ask: asked.ask } : {}),
+            ...(subagent?.op ? { subagentOp: subagent.op } : {}),
+            ...(subagent?.titles ? { subagentTitles: subagent.titles } : {}),
             ...(result || !toolStartedAt ? {} : { startedAt: toolStartedAt[part.id] ?? null }),
           });
           return;

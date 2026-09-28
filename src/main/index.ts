@@ -5,6 +5,7 @@ import { app, type BrowserWindow } from 'electron';
 import { registerIpcHandlers } from './ipc';
 import { consumeTrayReenterAfterUpdate, readSettings } from './ipc/settings';
 import { agentWorkerAlive, startAgentWorker, stopAgentWorkerForQuit } from './services/agentHost';
+import { installAppMenu } from './services/appMenu';
 import { attachAppQuitDrain } from './services/appQuitDrain';
 import {
   ensureTray,
@@ -100,6 +101,7 @@ if (!gotTheLock) {
     if (!app.isPackaged && process.platform === 'darwin') {
       app.dock?.setIcon(path.join(app.getAppPath(), 'build', 'icon.png'));
     }
+    installAppMenu();
 
     // Default open/close DevTools by F12 in development
     app.on('browser-window-created', (_, window) => {

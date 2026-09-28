@@ -50,6 +50,25 @@ describe('AgentControlInvoker', () => {
     expect(invoker.resolve('r2', { ok: true, value: 'late' })).toBe(false);
   });
 
+  it('spawn/send 被 abort 时只通知 Main 打断附带的等待，仍等回执', async () => {
+    const emitted: AgentWorkerEvent[] = [];
+    const invoker = new AgentControlInvoker(
+      identity,
+      (event) => emitted.push(event),
+      () => 'r3'
+    );
+    const controller = new AbortController();
+    const pending = invoker.invoke(
+      { operation: 'send', agentId: 'agent-1', message: 'more', delivery: 'auto', wait: true },
+      controller.signal
+    );
+    controller.abort();
+    expect(emitted.at(-1)).toMatchObject({ type: 'agent-control-cancel', requestId: 'r3' });
+    const receipt = { ok: true as const, value: { agentId: 'agent-1', runId: 'run-1' } };
+    expect(invoker.resolve('r3', receipt)).toBe(true);
+    await expect(pending).resolves.toEqual(receipt);
+  });
+
   it('close wakes all pending invocations', async () => {
     const invoker = new AgentControlInvoker(identity, vi.fn(), () => crypto.randomUUID());
     const one = invoker.invoke(request);

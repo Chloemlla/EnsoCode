@@ -3028,3 +3028,153 @@ describe('ask_user 询问用户行', () => {
     expect(tool).not.toHaveProperty('ask');
   });
 });
+
+describe('子代理按 runId / agentId 指代的操作行', () => {
+  const json = (value: object) => JSON.stringify(value, null, 2);
+  const call = (id: string, args: Record<string, unknown>): ProjectedMessage => ({
+    role: 'assistant',
+    stopReason: 'toolUse',
+    content: [{ type: 'toolCall', id, name: 'subagent', arguments: args }],
+  });
+  const result = (id: string, text: string): ProjectedMessage => ({
+    role: 'toolResult',
+    toolCallId: id,
+    toolName: 'subagent',
+    isError: false,
+    content: [{ type: 'text', text }],
+  });
+  const a = 'c1a2b3c4-0000-4000-8000-00000000000a';
+  const b = 'c1a2b3c4-0000-4000-8000-00000000000b';
+  const history: ProjectedMessage[] = [
+    user('派活'),
+    call('s1', { operation: 'spawn', description: '子代理连通性测试', prompt: 'p', wait: true }),
+    result(
+      's1',
+      json({
+        agentId: a,
+        runId: 'r1',
+        mode: 'task',
+        status: 'running',
+        report: { runs: [], timedOut: false, interrupted: false },
+      })
+    ),
+    call('s2', { operation: 'spawn', name: 'reviewer', description: '审查兼容性', prompt: 'p' }),
+    result('s2', json({ agentId: b, runId: 'r2', mode: 'coworker', status: 'running' })),
+    call('m1', { operation: 'send', agentId: b, message: '再看一遍' }),
+    result('m1', json({ agentId: b, runId: 'r3', delivery: 'next', status: 'queued' })),
+  ];
+  const rows = (extra: ProjectedMessage[], running = false) =>
+    buildTimeline([...history, ...extra], running).filter((item) => item.kind === 'tool');
+
+  it('report / stop 按 runId 找回 spawn 时起的标题（起了名字取名字）', () => {
+    const tools = rows([
+      call('q1', { operation: 'report', runId: 'r1' }),
+      result('q1', json({ run: { agentId: a, runId: 'r1', status: 'succeeded' }, text: 'ok' })),
+      call('q2', { operation: 'stop', runId: 'r2' }),
+      result('q2', json({ agentId: b, runId: 'r2', status: 'cancelled' })),
+    ]);
+    expect(tools[3]).toMatchObject({ summary: '子代理连通性测试', subagentOp: 'report' });
+    expect(tools[4]).toMatchObject({ summary: 'reviewer', subagentOp: 'stop' });
+  });
+
+  it('send 新开的 run 也能对回子代理；wait 多个 run 时列出各自标题并去重', () => {
+    const [, , , single, many] = rows(
+      [
+        call('w1', { operation: 'wait', runId: 'r3' }),
+        result('w1', json({ runs: [], timedOut: false, interrupted: false })),
+        call('w2', { operation: 'wait', runIds: ['r1', 'r2', 'r3'], until: 'all' }),
+      ],
+      true
+    );
+    expect(single).toMatchObject({ summary: 'reviewer', subagentOp: 'wait' });
+    expect(many).toMatchObject({
+      state: 'running',
+      summary: '子代理连通性测试, reviewer',
+      subagentOp: 'wait',
+    });
+  });
+
+  it('dismiss 按 agentId 显示标题', () => {
+    const tools = rows([
+      call('d1', { operation: 'dismiss', agentId: b }),
+      result('d1', json({ agentId: b })),
+    ]);
+    expect(tools[3]).toMatchObject({ summary: 'reviewer', subagentOp: 'dismiss' });
+  });
+
+  it('wait 行按 agentId 带上各目标的标题，供展开后逐个标注；其它操作不带', () => {
+    const tools = rows(
+      [
+        call('w1', { operation: 'wait', runIds: ['r1', 'r3', 'c39dfb22-dead'] }),
+        call('q1', { operation: 'report', runId: 'r1' }),
+      ],
+      true
+    );
+    expect(tools[3]).toMatchObject({
+      subagentTitles: { [a]: '子代理连通性测试', [b]: 'reviewer' },
+    });
+    for (const tool of [tools[0], tools[2], tools[4]]) {
+      expect(tool).not.toHaveProperty('subagentTitles');
+    }
+  });
+
+  it('列表与查不到的目标只标操作，不回退参数 JSON', () => {
+    const tools = rows([
+      call('l1', { operation: 'list' }),
+      call('q9', { operation: 'report', runId: 'c39dfb22-9f2c-432e-a826-99cde1491d88' }),
+    ]);
+    expect(tools[3]).toMatchObject({ summary: '', subagentOp: 'list' });
+    expect(tools[4]).toMatchObject({ summary: '', subagentOp: 'report' });
+  });
+
+  it('list 行带上此前 spawn 过的全部标题，供展开后逐个标注', () => {
+    const tools = rows([call('l1', { operation: 'list' })], true);
+    expect(tools[3]).toMatchObject({
+      subagentOp: 'list',
+      subagentTitles: { [a]: '子代理连通性测试', [b]: 'reviewer' },
+    });
+    const bare = buildTimeline([user('列一下'), call('l0', { operation: 'list' })], true);
+    expect(bare.find((item) => item.kind === 'tool')).not.toHaveProperty('subagentTitles');
+  });
+
+  it('spawn / send 与不带 operation 的旧调用不受影响', () => {
+    const tools = rows([call('x1', { description: '旧式派活', prompt: 'p' })]);
+    expect(tools[0]).toMatchObject({ summary: '子代理连通性测试' });
+    expect(tools[2]).toMatchObject({ summary: 'reviewer · 再看一遍' });
+    expect(tools[3]).toMatchObject({ summary: '旧式派活' });
+    expect(tools[3]).not.toHaveProperty('sentMessage');
+    for (const tool of tools) {
+      expect(tool).not.toHaveProperty('subagentOp');
+    }
+  });
+
+  it('spawn 展开显示交代的任务（去掉首尾空白），行头与回执原文不变', () => {
+    const receipt = json({ agentId: a, runId: 'r1', mode: 'task', status: 'running' });
+    const spawned = buildTimeline(
+      [
+        user('派活'),
+        call('s9', { operation: 'spawn', description: '核对 ASR', prompt: '\n 看看 **ASR**\n' }),
+        result('s9', receipt),
+      ],
+      false
+    ).find((item) => item.kind === 'tool');
+    expect(spawned).toMatchObject({
+      summary: '核对 ASR',
+      sentMessage: '看看 **ASR**',
+      output: receipt,
+    });
+  });
+
+  it('spawn 起了名字时行头带上名字，与后续按 id 指代的行对得上', () => {
+    const [, named] = rows([]);
+    expect(named).toMatchObject({ summary: 'reviewer · 审查兼容性' });
+    const same = buildTimeline(
+      [
+        user('派活'),
+        call('s9', { operation: 'spawn', name: ' x ', description: 'x', prompt: 'p' }),
+      ],
+      false
+    ).find((item) => item.kind === 'tool');
+    expect(same).toMatchObject({ summary: 'x' });
+  });
+});

@@ -1,4 +1,5 @@
 import type { TFunction } from '@/i18n';
+import type { SubagentOp } from '@/stores/sessions/timeline';
 
 /** 工具 id → 显示名 i18n key；只影响 UI，发给模型的工具名不变 */
 export const TOOL_LABEL_KEYS: Partial<Record<string, string>> = {
@@ -41,3 +42,12 @@ export function toolLabel(name: string, t: TFunction): string {
   const key = TOOL_LABEL_KEYS[name];
   return key ? t(key) : name;
 }
+
+/** 子代理按 id 指代目标的操作 → 行头动作词 i18n key */
+export const SUBAGENT_OP_LABEL_KEYS: Record<SubagentOp, string> = {
+  report: 'Read report',
+  wait: 'Wait',
+  stop: 'Stop',
+  dismiss: 'Dismiss agent',
+  list: 'List agents',
+};
