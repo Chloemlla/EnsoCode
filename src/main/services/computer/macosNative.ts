@@ -8,6 +8,12 @@ import axWorkerPath from './axWorkerThread?modulePath';
 import type { PointerOptions } from './backend';
 import { decodeCfNumberAsFloat64, kCFNumberFloat64Type } from './cfNumber';
 import { macKeyForAsciiChar, splitMacChord, splitTypeSegments } from './macKey';
+import {
+  SKY_CLICK_UNAVAILABLE,
+  skyClickCgEventType,
+  skyClickEventRecipe,
+  skyLightActivationRecord,
+} from './skyClick';
 import { isListedCgWindowLayer } from './windowSource';
 
 export interface MacosNative {
@@ -299,6 +305,43 @@ async function load(): Promise<MacosNative | null> {
     return axClient.call(request);
   };
 
+  let sky: {
+    postToPid: (pid: number, event: unknown) => void;
+    setIntegerField: (event: unknown, field: number, value: number) => void;
+    setWindowLocation: (event: unknown, x: number, y: number) => void;
+    postEventRecord: (psn: unknown, record: unknown) => number;
+    getProcessForPID: (pid: number, psn: unknown) => number;
+  } | null = null;
+  try {
+    const sl = koffi.load('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight');
+    sky = {
+      postToPid: sl.func('SLEventPostToPid', 'void', ['int32', 'void *']) as (
+        pid: number,
+        event: unknown
+      ) => void,
+      setIntegerField: sl.func('SLEventSetIntegerValueField', 'void', [
+        'void *',
+        'uint32',
+        'int64',
+      ]) as (event: unknown, field: number, value: number) => void,
+      setWindowLocation: sl.func('CGEventSetWindowLocation', 'void', [
+        'void *',
+        'double',
+        'double',
+      ]) as (event: unknown, x: number, y: number) => void,
+      postEventRecord: sl.func('SLPSPostEventRecordTo', 'int32', ['void *', 'void *']) as (
+        psn: unknown,
+        record: unknown
+      ) => number,
+      getProcessForPID: carbon.func('GetProcessForPID', 'int32', ['int32', 'void *']) as (
+        pid: number,
+        psn: unknown
+      ) => number,
+    };
+  } catch {
+    sky = null;
+  }
+
   return {
     windows: listWindows,
     async click(x, y, opts) {
@@ -317,20 +360,17 @@ async function load(): Promise<MacosNative | null> {
         if (status !== 0) throw new Error(`${SKY_CLICK_UNAVAILABLE}: PSN ${status}`);
         const activate = Buffer.from(skyLightActivationRecord(input.windowId, true));
         const activateStatus = Number(sky.postEventRecord(psn, activate));
-        if (activateStatus !== 0) throw new Error(`${SKY_CLICK_UNAVAILABLE}: focus ${activateStatus}`);
+        if (activateStatus !== 0)
+          throw new Error(`${SKY_CLICK_UNAVAILABLE}: focus ${activateStatus}`);
         await new Promise<void>((resolve) => setTimeout(resolve, 40));
       }
       const clickGroupId = Date.now() % 1_000_000_000;
       try {
         for (const step of recipe) {
           const screen =
-            step.pointKind === 'target'
-              ? { x: input.screenX, y: input.screenY }
-              : { x: -1, y: -1 };
+            step.pointKind === 'target' ? { x: input.screenX, y: input.screenY } : { x: -1, y: -1 };
           const windowPoint =
-            step.pointKind === 'target'
-              ? { x: input.windowX, y: input.windowY }
-              : { x: -1, y: -1 };
+            step.pointKind === 'target' ? { x: input.windowX, y: input.windowY } : { x: -1, y: -1 };
           const event = CGEventCreateMouseEvent(
             null,
             skyClickCgEventType(step.kind),
@@ -491,46 +531,3 @@ async function load(): Promise<MacosNative | null> {
     },
   };
 }
-
-  let sky: {
-    postToPid: (pid: number, event: unknown) => void;
-    setIntegerField: (event: unknown, field: number, value: number) => void;
-    setWindowLocation: (event: unknown, x: number, y: number) => void;
-    postEventRecord: (psn: unknown, record: unknown) => number;
-    getProcessForPID: (pid: number, psn: unknown) => number;
-  } | null = null;
-  try {
-    const sl = koffi.load('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight');
-    sky = {
-      postToPid: sl.func('SLEventPostToPid', 'void', ['int32', 'void *']) as (
-        pid: number,
-        event: unknown
-      ) => void,
-      setIntegerField: sl.func('SLEventSetIntegerValueField', 'void', [
-        'void *',
-        'uint32',
-        'int64',
-      ]) as (event: unknown, field: number, value: number) => void,
-      setWindowLocation: sl.func('CGEventSetWindowLocation', 'void', [
-        'void *',
-        'double',
-        'double',
-      ]) as (event: unknown, x: number, y: number) => void,
-      postEventRecord: sl.func('SLPSPostEventRecordTo', 'int32', ['void *', 'void *']) as (
-        psn: unknown,
-        record: unknown
-      ) => number,
-      getProcessForPID: carbon.func('GetProcessForPID', 'int32', ['int32', 'void *']) as (
-        pid: number,
-        psn: unknown
-      ) => number,
-    };
-  } catch {
-    sky = null;
-  }
-import {
-  SKY_CLICK_UNAVAILABLE,
-  skyClickCgEventType,
-  skyClickEventRecipe,
-  skyLightActivationRecord,
-} from './skyClick';

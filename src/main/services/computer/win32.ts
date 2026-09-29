@@ -2,10 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { BackgroundUnavailableError, ComputerError } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
-import type {
-  ComputerCapabilities,
-  ComputerWindowInfo,
-} from '@shared/computer/types';
+import type { ComputerCapabilities, ComputerWindowInfo } from '@shared/computer/types';
 import { clipboard, desktopCapturer, type NativeImage, screen, shell } from 'electron';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadWin32Native, type Win32Native } from './win32Native';
@@ -265,4 +262,3 @@ export class WindowsDesktopBackend implements DesktopBackend {
     clipboard.writeText(text);
   }
 }
-import { BackgroundUnavailableError, ComputerError } from '@shared/computer/errors';

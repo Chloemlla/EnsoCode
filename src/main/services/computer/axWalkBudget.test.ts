@@ -1,11 +1,12 @@
+import type { AxTreeNode } from '@shared/computer/axTree';
 import { describe, expect, it } from 'vitest';
 import {
   AX_SNAPSHOT_BUDGET_MS,
   AX_SNAPSHOT_DEFAULT_DEPTH,
   AX_SNAPSHOT_MAX_NODES,
   AX_WORKER_TIMEOUT_MS,
-  axCollectVisibleText,
   axChildTraversalAttributes,
+  axCollectVisibleText,
   axFillEmptyRowTitle,
   axKeepPartialOnTimeout,
   axNextDepth,
@@ -64,7 +65,7 @@ describe('ax walk depth', () => {
 
 describe('empty AXRow labels', () => {
   it('从嵌套 StaticText 抽出侧栏可见字', () => {
-    const row = {
+    const row: AxTreeNode = {
       ref: 'e9',
       role: 'AXRow',
       children: [
@@ -120,14 +121,18 @@ describe('axChildTraversalAttributes', () => {
   });
 
   it('Outline 有 Rows 时不重复扫 AXChildren', () => {
-    expect(
-      axChildTraversalAttributes({ role: 'AXOutline', hasRows: true })
-    ).toEqual(['AXRows', 'AXContents', 'AXVisibleChildren']);
+    expect(axChildTraversalAttributes({ role: 'AXOutline', hasRows: true })).toEqual([
+      'AXRows',
+      'AXContents',
+      'AXVisibleChildren',
+    ]);
   });
 
   it('List 有 VisibleChildren 时以可见子节点为主', () => {
-    expect(
-      axChildTraversalAttributes({ role: 'AXList', hasVisibleChildren: true })
-    ).toEqual(['AXRows', 'AXContents', 'AXVisibleChildren']);
+    expect(axChildTraversalAttributes({ role: 'AXList', hasVisibleChildren: true })).toEqual([
+      'AXRows',
+      'AXContents',
+      'AXVisibleChildren',
+    ]);
   });
 });

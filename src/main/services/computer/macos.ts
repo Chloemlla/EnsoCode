@@ -20,8 +20,8 @@ import { AX_SNAPSHOT_DEFAULT_DEPTH, AX_WORKER_TIMEOUT_MS } from './axWalkBudget'
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { resolveClickRoute } from './clickRoute';
 import { loadMacosNative, type MacosNative } from './macosNative';
-import { isSkyClickUnavailable, skyClickLocalPoint } from './skyClick';
 import { preflightScreenCaptureAccess } from './screenCaptureAccess';
+import { isSkyClickUnavailable, skyClickLocalPoint } from './skyClick';
 import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
 
 const execFileAsync = promisify(execFile);
@@ -426,4 +426,3 @@ export class MacosDesktopBackend implements DesktopBackend {
     await execFileAsync('open', paneUrl ? [paneUrl] : resolveOpenArgs(name), { timeout: 15_000 });
   }
 }
-import { resolveClickRoute } from './clickRoute';

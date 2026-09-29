@@ -111,6 +111,7 @@ vi.mock('../services/agentDispatchService', async () => {
   };
 });
 vi.mock('../services/notifications', () => ({ maybeNotify: vi.fn() }));
+vi.mock('../services/computer/axWorkerThread?modulePath', () => ({ default: '/tmp/ax.js' }));
 vi.mock('../services/pairHost', () => ({
   forwardAgentEvent: vi.fn(),
   setPairAgentBridge: mocks.setPairAgentBridge,

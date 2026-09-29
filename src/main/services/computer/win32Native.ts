@@ -1,5 +1,6 @@
 import type { ComputerWindowInfo } from '@shared/computer/types';
 import {
+  absoluteMouseCoords,
   INPUT_SIZE,
   KEYEVENTF_KEYUP,
   KEYEVENTF_UNICODE,
@@ -11,7 +12,6 @@ import {
   MOUSEEVENTF_VIRTUALDESK,
   MOUSEEVENTF_WHEEL,
   WHEEL_DELTA,
-  absoluteMouseCoords,
   writeKeyboardInput,
   writeMouseInput,
 } from './winInput';
@@ -51,7 +51,10 @@ async function load(): Promise<Win32Native | null> {
   const koffi = (await import('koffi')).default as unknown as KoffiApi;
   const user32 = koffi.load('user32.dll');
   const EnumWindowsProc = koffi.proto('bool __stdcall EnumWindowsProc(void *hwnd, intptr lParam)');
-  const EnumWindows = user32.func('EnumWindows', 'bool', [koffi.pointer(EnumWindowsProc), 'intptr']);
+  const EnumWindows = user32.func('EnumWindows', 'bool', [
+    koffi.pointer(EnumWindowsProc),
+    'intptr',
+  ]);
   const IsWindowVisible = user32.func('IsWindowVisible', 'bool', ['void *']);
   const GetWindow = user32.func('GetWindow', 'void *', ['void *', 'uint32']);
   const GetWindowTextLengthW = user32.func('GetWindowTextLengthW', 'int', ['void *']);

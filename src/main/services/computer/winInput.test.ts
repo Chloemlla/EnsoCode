@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, absoluteMouseCoords, writeMouseInput } from './winInput';
+import {
+  absoluteMouseCoords,
+  INPUT_MOUSE,
+  MOUSEEVENTF_ABSOLUTE,
+  writeMouseInput,
+} from './winInput';
 
 describe('absoluteMouseCoords', () => {
   it('把屏幕坐标映射到 0..65535 虚拟桌面', () => {

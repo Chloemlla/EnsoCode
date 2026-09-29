@@ -17,7 +17,7 @@ export function skyClickCgEventType(kind: SkyClickEventKind): number {
 
 export function skyClickEventRecipe(clickCount: number): SkyClickEventStep[] {
   if (clickCount !== 1 && clickCount !== 2) {
-    throw new Error("sky_click supports click_count 1 or 2");
+    throw new Error('sky_click supports click_count 1 or 2');
   }
   const steps: SkyClickEventStep[] = [
     { kind: 'moved', pointKind: 'target', clickState: 0, phase: 2, delayAfterMs: 15 },
@@ -68,8 +68,7 @@ export function skyClickWindowMatchesTarget(
   pid: number
 ): boolean {
   return windows.some(
-    (window) =>
-      Number(window.id) === windowId && window.pid === pid && window.onScreen !== false
+    (window) => Number(window.id) === windowId && window.pid === pid && window.onScreen !== false
   );
 }
 

@@ -3,6 +3,7 @@ import {
   createAxWorkerClient,
   spawnAxWorker,
   spawnAxWorkerThread,
+  unwrapAxWorkerMessage,
   wrapUtilityProcess,
 } from './axWorkerClient';
 
@@ -124,5 +125,20 @@ describe('spawnAxWorkerThread', () => {
     const handle = spawnAxWorkerThread('/tmp/ax-worker.js');
     expect(workers).toEqual([{ filename: '/tmp/ax-worker.js' }]);
     handle.postMessage({ id: '1', op: 'focused' });
+  });
+});
+
+describe('unwrapAxWorkerMessage', () => {
+  const job = { id: 'j1', op: 'focused' };
+
+  it('utilityProcess 从 MessageEvent.data 取 job，worker_threads 直接取', () => {
+    expect(unwrapAxWorkerMessage({ data: job, ports: [] }, true)).toEqual(job);
+    expect(unwrapAxWorkerMessage(job, false)).toEqual(job);
+  });
+
+  it('形状不对时丢弃而不是把事件当 job', () => {
+    expect(unwrapAxWorkerMessage({ data: job, ports: [] }, false)).toBeNull();
+    expect(unwrapAxWorkerMessage(job, true)).toBeNull();
+    expect(unwrapAxWorkerMessage(null, true)).toBeNull();
   });
 });

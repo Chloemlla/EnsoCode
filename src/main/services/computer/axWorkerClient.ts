@@ -30,6 +30,13 @@ export type AxWorkerResponse =
   | { id: string; ok: true; result: unknown }
   | { id: string; ok: false; error: string };
 
+export function unwrapAxWorkerMessage(message: unknown, utility: boolean): AxWorkerJob | null {
+  const job = utility ? (message as { data?: unknown } | null)?.data : message;
+  if (!job || typeof job !== 'object') return null;
+  const { id, op } = job as { id?: unknown; op?: unknown };
+  return typeof id === 'string' && typeof op === 'string' ? (job as AxWorkerJob) : null;
+}
+
 export interface AxWorkerHandle {
   postMessage: (job: AxWorkerJob) => void;
   terminate: () => void | Promise<void>;

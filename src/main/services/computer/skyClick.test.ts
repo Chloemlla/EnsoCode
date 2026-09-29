@@ -19,9 +19,9 @@ describe('skyClickEventRecipe', () => {
 
   it('只接受 1 或 2 击', () => {
     expect(() => skyClickEventRecipe(3)).toThrow(/click_count/);
-    expect(skyClickEventRecipe(2).filter((step) => step.pointKind === 'target' && step.kind !== 'moved')).toHaveLength(
-      4
-    );
+    expect(
+      skyClickEventRecipe(2).filter((step) => step.pointKind === 'target' && step.kind !== 'moved')
+    ).toHaveLength(4);
   });
 });
 
@@ -42,10 +42,12 @@ describe('skyLightActivationRecord', () => {
 
 describe('skyClickLocalPoint', () => {
   it('屏幕坐标换成窗口内坐标', () => {
-    expect(skyClickLocalPoint({ x: 120, y: 80 }, { x: 100, y: 50, width: 40, height: 40 })).toEqual({
-      x: 20,
-      y: 30,
-    });
+    expect(skyClickLocalPoint({ x: 120, y: 80 }, { x: 100, y: 50, width: 40, height: 40 })).toEqual(
+      {
+        x: 20,
+        y: 30,
+      }
+    );
   });
 });
 

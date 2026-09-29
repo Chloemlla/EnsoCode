@@ -522,7 +522,7 @@ export async function runComputerGuest(input: {
             );
           if (method === 'click') await settle();
           if (method === 'click') await throwIfProtected();
-          const probe =
+          const probe: Partial<Awaited<ReturnType<typeof probePixels>>> =
             method === 'click' ? await probePixels(input.backend, input.session, target) : {};
           const { png, ...hashProbe } = probe;
           if (png && method === 'click') {
@@ -672,7 +672,8 @@ export async function runComputerGuest(input: {
               all: args.all === true,
             });
             const text =
-              formatAxTree(nodes) || describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 });
+              formatAxTree(nodes) ||
+              (describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 }) ?? '');
             await throwIfProtected(text);
             const target = String(args.target ?? '');
             const disableDiff = args.diff === false || args.disableDiff === true;

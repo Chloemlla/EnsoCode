@@ -1,12 +1,20 @@
 import { parentPort } from 'node:worker_threads';
 import { performAxJob } from './axNative';
-import type { AxWorkerJob } from './axWorkerClient';
+import { unwrapAxWorkerMessage } from './axWorkerClient';
 
-const port =
-  parentPort ?? (process as NodeJS.Process & { parentPort?: typeof parentPort }).parentPort;
+interface Port {
+  on(event: 'message', handler: (message: unknown) => void): void;
+  postMessage(message: unknown): void;
+}
+
+// utilityProcess 的 parentPort 投递 MessageEvent（job 在 .data），worker_threads 直接投递 job
+const utilityPort = (process as unknown as { parentPort?: Port }).parentPort;
+const port: Port | null | undefined = parentPort ?? utilityPort;
 if (!port) throw new Error('ax worker missing parentPort');
 
-port.on('message', async (job: AxWorkerJob) => {
+port.on('message', async (message) => {
+  const job = unwrapAxWorkerMessage(message, !parentPort);
+  if (!job) return;
   try {
     const result = await performAxJob(job);
     port.postMessage({ id: job.id, ok: true, result });
