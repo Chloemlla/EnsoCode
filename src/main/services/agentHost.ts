@@ -1032,13 +1032,13 @@ export function compactSession(
 
 export function rewindSession(
   identity: SessionIdentity,
-  userIndexFromEnd: number,
+  anchor: string | number,
   restoreFiles?: boolean
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({
     type: 'rewind',
     identity,
-    userIndexFromEnd,
+    ...(typeof anchor === 'string' ? { entryId: anchor } : { userIndexFromEnd: anchor }),
     ...(restoreFiles ? { restoreFiles } : {}),
   });
 }
