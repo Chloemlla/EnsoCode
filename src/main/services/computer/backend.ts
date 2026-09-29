@@ -25,6 +25,8 @@ export interface CaptureBytes {
 
 export interface DesktopBackend {
   capabilities(): Promise<ComputerCapabilities>;
+  /** 一次 run 收尾（输入已投递完）：恢复 run 期间临时改动的系统状态，如输入法 */
+  endRun?(): Promise<void>;
   displays(): Promise<ComputerDisplayInfo[]>;
   windows(): Promise<ComputerWindowInfo[]>;
   capture(target: string, maxWidth: number, maxHeight: number): Promise<CaptureBytes>;

@@ -324,6 +324,11 @@ export class MacosDesktopBackend implements DesktopBackend {
     await native.keyChord(keys);
   }
 
+  async endRun() {
+    const native = await this.nativeOrNull();
+    await native?.endInput();
+  }
+
   async raise(windowId: string) {
     const native = await this.requireNative('input');
     await native.raise(windowId);

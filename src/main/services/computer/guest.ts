@@ -898,6 +898,11 @@ export async function runComputerGuest(input: {
     };
   } finally {
     clearTimeout(deadline);
+    try {
+      await input.backend.endRun?.();
+    } catch {
+      // 恢复失败不覆盖 run 结果
+    }
     if (resultHandle && !resultHandle.disposed) {
       try {
         resultHandle.dispose();

@@ -511,4 +511,24 @@ describe('runComputerGuest 生命周期', () => {
     expect(result.text.length).toBeLessThan(40_000);
     expect(result.text).toMatch(/truncated/);
   });
+
+  it('run 结束（含超时）都会调 backend.endRun 恢复临时系统状态', async () => {
+    const backend = new FakeDesktopBackend();
+    let ended = 0;
+    backend.endRun = async () => {
+      ended += 1;
+    };
+    await run('return 1', { backend });
+    await expect(
+      runComputerGuest({
+        code: 'for (;;) await wait(20);',
+        readOnly: false,
+        timeoutMs: 60,
+        backend,
+        session: createComputerGuestSession(),
+        settleMs: 0,
+      })
+    ).rejects.toThrow(/exceeded/);
+    expect(ended).toBe(2);
+  });
 });

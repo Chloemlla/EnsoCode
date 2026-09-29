@@ -42,6 +42,8 @@ export interface MacosNative {
   scroll(x: number, y: number, dx: number, dy: number): Promise<void>;
   typeText(text: string): Promise<void>;
   keyChord(keys: string[]): Promise<void>;
+  /** run 结束：等已投递的键盘事件被消费后恢复用户原输入法 */
+  endInput(): Promise<void>;
   raise(windowId: string): Promise<void>;
   axSnapshot(target: string, maxDepth: number): Promise<AxTreeNode[]>;
   axQuery(
@@ -383,26 +385,46 @@ async function load(): Promise<MacosNative | null> {
     return TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
   };
 
-  const withEnglishLayout = async <T>(fn: () => T | Promise<T>): Promise<T> => {
-    const current = TISCopyCurrentKeyboardInputSource();
-    let english: unknown = null;
-    let switched = false;
+  /**
+   * 键盘事件按目标 App 处理时的输入源解释，而不是投递时：每次输入后立刻切回会让拼音等
+   * 输入法吞进组字缓冲并乱序上屏。所以整次 run 内首次输入时切到英文布局并确认生效，
+   * run 结束（输入已被消费）后再恢复。
+   */
+  let layoutRestore: { original: unknown } | null = null;
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const currentSourceId = (): string => {
+    const now = TISCopyCurrentKeyboardInputSource();
     try {
-      english = copyEnglishLayout();
-      if (english && inputSourceId(english) !== inputSourceId(current)) {
-        switched = Number(TISSelectInputSource(english)) === 0;
-      }
-      if (switched) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 50));
-      }
-      const result = await fn();
-      if (switched) await new Promise<void>((resolve) => setTimeout(resolve, 30));
-      return result;
+      return inputSourceId(now);
     } finally {
-      if (switched && current) TISSelectInputSource(current);
+      if (now) CFRelease(now);
+    }
+  };
+  const ensureEnglishLayout = async (): Promise<void> => {
+    if (layoutRestore) return;
+    const current = TISCopyCurrentKeyboardInputSource();
+    const english = copyEnglishLayout();
+    try {
+      const target = english ? inputSourceId(english) : '';
+      if (!target || target === inputSourceId(current)) {
+        layoutRestore = { original: null };
+        return;
+      }
+      if (Number(TISSelectInputSource(english)) !== 0) {
+        layoutRestore = { original: null };
+        return;
+      }
+      layoutRestore = { original: current ? CFRetain(current) : null };
+      for (let i = 0; i < 20 && currentSourceId() !== target; i++) await sleep(25);
+      await sleep(300);
+    } finally {
       if (english) CFRelease(english);
       if (current) CFRelease(current);
     }
+  };
+  const withEnglishLayout = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    await ensureEnglishLayout();
+    return fn();
   };
 
   let axClient: ReturnType<typeof createAxWorkerClient> | undefined;
@@ -661,6 +683,17 @@ async function load(): Promise<MacosNative | null> {
           for (const code of held.reverse()) releaseKey(code);
         }
       });
+    },
+    async endInput() {
+      const restore = layoutRestore;
+      layoutRestore = null;
+      if (!restore?.original) return;
+      await sleep(200);
+      try {
+        TISSelectInputSource(restore.original);
+      } finally {
+        CFRelease(restore.original);
+      }
     },
     async raise(windowId) {
       const { pid, windowId: cgWindowId, title } = await windowPid(windowId);

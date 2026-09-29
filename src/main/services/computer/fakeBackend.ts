@@ -13,6 +13,7 @@ export class FakeDesktopBackend implements DesktopBackend {
   readonly launches: string[] = [];
   readonly panes: string[] = [];
   clipboard = '';
+  endRun?: () => Promise<void>;
   private readonly registry = new AxRegistry<AxTreeNode>();
   windowsList: ComputerWindowInfo[] = [
     {
