@@ -2136,18 +2136,33 @@ export class SessionSupervisor {
     const workflowRuns = new Map<string, AbortController>();
     const computer =
       toolEnabled('computer') && !remote
-        ? new ComputerInvoker(identity, (request) => {
-            const managed = managedRef ?? this.sessions.get(sessionId);
-            if (!managed) throw new Error('Session is not ready for computer actions.');
-            this.options.emit({
-              type: 'computer-invoke',
-              identity: managed.identity,
-              seq: ++managed.seq,
-              requestId: request.requestId,
-              op: request.op,
-              params: request.params,
-            });
-          })
+        ? new ComputerInvoker(
+            identity,
+            (request) => {
+              const managed = managedRef ?? this.sessions.get(sessionId);
+              if (!managed) throw new Error('Session is not ready for computer actions.');
+              this.options.emit({
+                type: 'computer-invoke',
+                identity: managed.identity,
+                seq: ++managed.seq,
+                requestId: request.requestId,
+                op: request.op,
+                params: request.params,
+              });
+            },
+            {
+              emitCancel: (requestId) => {
+                const managed = managedRef ?? this.sessions.get(sessionId);
+                if (!managed) return;
+                this.options.emit({
+                  type: 'computer-cancel',
+                  identity: managed.identity,
+                  seq: ++managed.seq,
+                  requestId,
+                });
+              },
+            }
+          )
         : undefined;
     const sessionTools = [
       ...buildCoreTools(),

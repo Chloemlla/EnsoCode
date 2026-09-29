@@ -187,6 +187,7 @@ const isValidMessageInput = (sessionId: unknown, text: unknown, images: unknown)
 let dispatchService: AgentDispatchService | null = null;
 let agentService: AgentService | null = null;
 const pendingAgentControl = new Map<string, AbortController>();
+const pendingComputer = new Map<string, AbortController>();
 let sourceBindings: ActiveConversationRegistry | null = null;
 let sourceAuthority: SourceAuthorityRegistry | null = null;
 const selectionClockOwners = new WeakSet<WebContents>();
@@ -889,6 +890,9 @@ export function registerAgentHandlers(): void {
     if (workerEvent.type === 'worker-exited') {
       for (const controller of pendingAgentControl.values()) controller.abort();
       pendingAgentControl.clear();
+      for (const controller of pendingComputer.values()) controller.abort();
+      pendingComputer.clear();
+      computerHost.closeAll();
       for (const targetId of pendingWorktreeForks.keys()) discardForkWorktree(targetId);
       // worker 死后连接全部失效：清掉残留状态，避免设置页长期显示假 ready
       clearMcpStatuses();
@@ -1037,8 +1041,20 @@ export function registerAgentHandlers(): void {
       );
       return;
     }
+    if (workerEvent.type === 'computer-cancel') {
+      pendingComputer.get(workerEvent.requestId)?.abort();
+      return;
+    }
     if (workerEvent.type === 'computer-invoke') {
       const { identity, requestId, op, params } = workerEvent;
+      // worker 只给父会话挂 computer；Main 再兜一层，child / coworker 一律拒绝
+      if ('parent' in identity) {
+        sendComputerResultToSession(identity, requestId, {
+          ok: false,
+          error: 'Computer is only available to the parent session',
+        });
+        return;
+      }
       const conversation = sourceAuthority?.conversation(rootSessionId(identity));
       const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
       const projectId = project?.state === 'active' ? project.projectId : null;
@@ -1046,21 +1062,29 @@ export function registerAgentHandlers(): void {
       const disabled = resolveDisabledBuiltinTools(state.disabledBuiltinTools, {
         disabledBuiltinTools: projectDisabledBuiltinTools(state.projects, projectId ?? undefined),
       });
-      if (disabled.includes('computer')) {
+      if (disabled.includes('computer') || project?.kind === 'ssh') {
         sendComputerResultToSession(identity, requestId, {
           ok: false,
-          error: 'Computer tool is disabled',
+          error:
+            project?.kind === 'ssh'
+              ? 'Computer is not available in SSH projects'
+              : 'Computer tool is disabled',
         });
         return;
       }
-      void computerHost.invoke(identity.sessionId, op, params).then(
-        (result) => sendComputerResultToSession(identity, requestId, { ok: true, result }),
-        (error: unknown) =>
-          sendComputerResultToSession(identity, requestId, {
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-          })
-      );
+      const controller = new AbortController();
+      pendingComputer.set(requestId, controller);
+      void computerHost
+        .invoke(identity.sessionId, op, params, controller.signal)
+        .then(
+          (result) => sendComputerResultToSession(identity, requestId, { ok: true, result }),
+          (error: unknown) =>
+            sendComputerResultToSession(identity, requestId, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+        )
+        .finally(() => pendingComputer.delete(requestId));
       return;
     }
     if (workerEvent.type === 'agent-control-cancel') {

@@ -137,7 +137,7 @@ describe('ComputerHost', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     esc();
-    await expect(pending).rejects.toThrow(/abort/);
+    await expect(pending).rejects.toThrow(/took over/);
     expect(events).toEqual(['show', 'hide']);
   });
 
@@ -155,5 +155,70 @@ describe('ComputerHost', () => {
       read_only: true,
     });
     expect(events).toEqual([]);
+  });
+
+  it('worker 发来的 read_only 线格式在 Main 真正生效', async () => {
+    const backend = new FakeDesktopBackend();
+    const host = new ComputerHost(() => backend);
+    await expect(
+      host.invoke('s1', 'run', {
+        code: 'const win = await desktop.window("w1"); await win.screenshot(); await win.click(1, 1)',
+        read_only: true,
+        timeout: 5,
+      })
+    ).rejects.toThrow(/read-only/);
+    expect(backend.clicks).toHaveLength(0);
+  });
+
+  it('外部 signal 中止正在跑的 run', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    const controller = new AbortController();
+    const pending = host.invoke('s1', 'run', { code: 'await wait(8000)' }, controller.signal);
+    setTimeout(() => controller.abort(), 20);
+    await expect(pending).rejects.toThrow(/abort/);
+  });
+
+  it('同一 session 新 run 先中止并等旧 run 收尾', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    const first = host.invoke('s1', 'run', { code: 'await wait(8000); return 1' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = host.invoke('s1', 'run', { code: 'return 2' });
+    await expect(first).rejects.toThrow(/abort/);
+    await expect(second).resolves.toMatchObject({ returnValue: 2 });
+  });
+
+  it('桌面同一时刻只给一个 session，另一个排队等租约', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    const order: string[] = [];
+    const a = host
+      .invoke('a', 'run', { code: 'await wait(80); return "a"' })
+      .then((r) => order.push(String(r.returnValue)));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const b = host
+      .invoke('b', 'run', { code: 'return "b"' })
+      .then((r) => order.push(String(r.returnValue)));
+    await Promise.all([a, b]);
+    expect(order).toEqual(['a', 'b']);
+  });
+
+  it('等租约超时给出明确错误，排队中可被中止', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend(), undefined, { leaseWaitMs: 30 });
+    const a = host.invoke('a', 'run', { code: 'await wait(300); return 1' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(host.invoke('b', 'run', { code: 'return 2' })).rejects.toThrow(
+      /another session/i
+    );
+    await a;
+  });
+
+  it('closeAll 中止所有 run 并释放 VM', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    await host.invoke('s1', 'run', { code: 'globalThis.mark = 1' });
+    const pending = host.invoke('s2', 'run', { code: 'await wait(8000)' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    host.closeAll();
+    await expect(pending).rejects.toThrow(/abort/);
+    const after = await host.invoke('s1', 'run', { code: 'return typeof globalThis.mark' });
+    expect(after.returnValue).toBe('undefined');
   });
 });

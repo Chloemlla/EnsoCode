@@ -1396,7 +1396,16 @@ export type RendererAgentEvent =
       | ChildLifecycleEvent
       | McpWorkerEvent
       | WorkspaceLockEvent
-      | Extract<AgentWorkerEvent, { type: 'agent-control-invoke' | 'agent-control-cancel' }>
+      | Extract<
+          AgentWorkerEvent,
+          {
+            type:
+              | 'agent-control-invoke'
+              | 'agent-control-cancel'
+              | 'computer-invoke'
+              | 'computer-cancel';
+          }
+        >
       | { type: 'session-reloaded' }
     >
   | RendererChildLifecycleEvent
@@ -1589,6 +1598,12 @@ export type AgentWorkerEvent =
       requestId: string;
       op: ComputerOp;
       params: unknown;
+    }
+  | {
+      type: 'computer-cancel';
+      identity: SessionIdentity | ChildSessionIdentity;
+      seq: number;
+      requestId: string;
     }
   | { type: 'task-started'; identity: SessionIdentity; seq: number; task: BackgroundTaskInfo }
   | {
@@ -3160,6 +3175,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
         COMPUTER_OPS.includes(value.op as ComputerOp)
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    case 'computer-cancel':
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
+        isNonEmptyString(value.requestId)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'workspace-branch-context-consumed':

@@ -1,4 +1,5 @@
-export const COMPUTER_DEFAULT_TIMEOUT_SEC = 30;
+/** timeout 是整次 run 的墙钟预算（含截图、等待与输入耗时） */
+export const COMPUTER_DEFAULT_TIMEOUT_SEC = 60;
 export const COMPUTER_MAX_TIMEOUT_SEC = 120;
 export const COORDINATE_SAFE_MAX_WIDTH = 1280;
 export const COORDINATE_SAFE_MAX_HEIGHT = 896;
@@ -7,6 +8,12 @@ export interface ComputerRunParams {
   code: string;
   readOnly: boolean;
   timeoutSec: number;
+}
+
+export interface ComputerWireParams {
+  code: string;
+  read_only: boolean;
+  timeout: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -48,4 +55,9 @@ export function normalizeComputerParams(value: unknown): ComputerRunParams | nul
     readOnly: asBoolean(record.read_only),
     timeoutSec: asTimeoutSec(record.timeout),
   };
+}
+
+/** worker→Main 线上沿用工具入参键名，Main 侧再按同一口径归一化 */
+export function toComputerWireParams(params: ComputerRunParams): ComputerWireParams {
+  return { code: params.code, read_only: params.readOnly, timeout: params.timeoutSec };
 }

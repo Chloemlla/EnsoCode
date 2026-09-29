@@ -34,6 +34,10 @@ const mocks = vi.hoisted(() => ({
   removeRegisteredWorktree: vi.fn(async () => {}),
   cleanupSessionFiles: vi.fn(),
   credentials: vi.fn(async () => new Set<string>()),
+  readSettingsState: vi.fn((): Record<string, unknown> | undefined => undefined),
+  sendComputerResult: vi.fn(),
+  computerInvoke: vi.fn(),
+  computerCloseAll: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -95,6 +99,15 @@ vi.mock('../services/agentHost', () => ({
   stopBackgroundTask: vi.fn(),
   backgroundForegroundTool: vi.fn(),
   summarizeConversationTitle: mocks.summarizeConversationTitle,
+  readSettingsState: mocks.readSettingsState,
+  sendComputerResultToSession: mocks.sendComputerResult,
+}));
+vi.mock('../services/computerHost', () => ({
+  computerHost: {
+    invoke: mocks.computerInvoke,
+    close: vi.fn(),
+    closeAll: mocks.computerCloseAll,
+  },
 }));
 vi.mock('../services/agentDispatchService', async () => {
   const actual = await vi.importActual<typeof import('../services/agentDispatchService')>(
@@ -111,7 +124,6 @@ vi.mock('../services/agentDispatchService', async () => {
   };
 });
 vi.mock('../services/notifications', () => ({ maybeNotify: vi.fn() }));
-vi.mock('../services/computer/axWorkerThread?modulePath', () => ({ default: '/tmp/ax.js' }));
 vi.mock('../services/pairHost', () => ({
   forwardAgentEvent: vi.fn(),
   setPairAgentBridge: mocks.setPairAgentBridge,
@@ -746,5 +758,76 @@ describe('agent IPC 标题总结：回退链全部可解析候选一次性下发
       error: 'title summary disabled',
     });
     expect(mocks.resolveModelSelection).not.toHaveBeenCalled();
+  });
+
+  describe('computer bridge', () => {
+    const parent = { sessionId: '11111111-1111-4111-8111-111111111111', generation: 'g' };
+    const emit = (event: Record<string, unknown>) =>
+      mocks.setAgentEventListener.mock.calls.at(-1)![0]({ seq: 1, ...event });
+
+    beforeEach(() => {
+      mocks.readSettingsState.mockReturnValue({ disabledBuiltinTools: [] });
+      mocks.computerInvoke.mockReset();
+      mocks.sendComputerResult.mockReset();
+    });
+
+    it('child / coworker 身份的 computer-invoke 在 Main 拒绝', () => {
+      emit({
+        type: 'computer-invoke',
+        identity: { ...parent, sessionId: 'child', parent, instanceId: 'i', instanceName: 'n' },
+        requestId: 'r1',
+        op: 'run',
+        params: { code: 'return 1' },
+      });
+      expect(mocks.computerInvoke).not.toHaveBeenCalled();
+      expect(mocks.sendComputerResult).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'child' }),
+        'r1',
+        expect.objectContaining({ ok: false })
+      );
+    });
+
+    it('computer-cancel 中止 Main 侧 run，worker 退出时停下全部', async () => {
+      let signal: AbortSignal | undefined;
+      mocks.computerInvoke.mockImplementation(
+        (_id: string, _op: string, _params: unknown, s: AbortSignal) => {
+          signal = s;
+          return new Promise((_, reject) =>
+            s.addEventListener('abort', () => reject(new Error('Computer action aborted')))
+          );
+        }
+      );
+      emit({
+        type: 'computer-invoke',
+        identity: parent,
+        requestId: 'r2',
+        op: 'run',
+        params: { code: 'await wait(1000)' },
+      });
+      expect(signal?.aborted).toBe(false);
+      emit({ type: 'computer-cancel', identity: parent, requestId: 'r2' });
+      expect(signal?.aborted).toBe(true);
+      await vi.waitFor(() =>
+        expect(mocks.sendComputerResult).toHaveBeenCalledWith(
+          parent,
+          'r2',
+          expect.objectContaining({ ok: false })
+        )
+      );
+      emit({ type: 'worker-exited' });
+      expect(mocks.computerCloseAll).toHaveBeenCalled();
+    });
+
+    it('默认关闭时不执行', () => {
+      mocks.readSettingsState.mockReturnValue({});
+      emit({
+        type: 'computer-invoke',
+        identity: parent,
+        requestId: 'r3',
+        op: 'run',
+        params: { code: 'return 1' },
+      });
+      expect(mocks.computerInvoke).not.toHaveBeenCalled();
+    });
   });
 });

@@ -40,6 +40,8 @@ export interface ComputerGuestSession {
   host?: GuestHostBridge;
   clock?: GuestClock;
   lastAx?: Map<string, string>;
+  /** 被中止的 run 可能留下仍在执行的宿主调用；下一次 run 先等它落地 */
+  inflight?: Promise<unknown>;
 }
 
 interface GuestHostBridge {
@@ -275,6 +277,28 @@ const __noConsole = () => { throw new Error('No console; use return / assert'); 
 globalThis.console = { log: __noConsole, info: __noConsole, warn: __noConsole, error: __noConsole, debug: __noConsole };
 `;
 
+const ABORTED_MESSAGE = 'Computer action aborted';
+/** 送达前先确认没有 Touch ID / 密码授权框：这些输入不可撤回 */
+const INPUT_METHODS = new Set([
+  'click',
+  'drag',
+  'scroll',
+  'type',
+  'press',
+  'axClick',
+  'axPerform',
+  'axSetValue',
+]);
+/** 连续这么多轮既无宿主调用也未完成，判定 guest 在等永不 resolve 的 Promise */
+const IDLE_ROUNDS_LIMIT = 3;
+
+function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error && reason.name.startsWith('Computer')
+    ? reason
+    : new Error(ABORTED_MESSAGE);
+}
+
 export async function runComputerGuest(input: {
   code: string;
   readOnly: boolean;
@@ -290,24 +314,53 @@ export async function runComputerGuest(input: {
   const screenshots: ComputerScreenshot[] = [];
   const logs: string[] = [];
   const session = input.session;
-  session.host ??= { queue: [], nextId: 0 };
-  session.host.queue.length = 0;
-  session.host.nextId = 0;
-  const queue = session.host.queue;
+  // read_only 不经审批，跑一次性 VM，避免篡改之后获批 run 共享的全局
+  const persist = input.persistVm === true && !input.readOnly;
+  if (session.inflight) {
+    await session.inflight;
+    session.inflight = undefined;
+  }
+
+  // 墙钟预算：含截图、等待与输入耗时；外部 abort 同样收口到这里
+  const run = new AbortController();
+  const signal = run.signal;
+  const deadline = setTimeout(() => {
+    const error = new Error(
+      `Computer run exceeded its ${Math.round(input.timeoutMs / 1000)}s time budget`
+    );
+    error.name = 'ComputerTimeoutError';
+    run.abort(error);
+  }, input.timeoutMs);
+  const onOuterAbort = () => run.abort(input.signal?.reason);
+  if (input.signal?.aborted) run.abort(input.signal.reason);
+  else input.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  const aborted = new Promise<never>((_, reject) => {
+    const fail = () => reject(abortError(signal));
+    if (signal.aborted) fail();
+    else signal.addEventListener('abort', fail, { once: true });
+  });
+  aborted.catch(() => {});
+
+  const bridge: GuestHostBridge = persist
+    ? (session.host ??= { queue: [], nextId: 0 })
+    : { queue: [], nextId: 0 };
+  bridge.queue.length = 0;
+  const queue = bridge.queue;
   const clock: GuestClock = {
     timeoutMs: input.timeoutMs,
-    signal: input.signal,
+    signal,
     started: performance.now(),
     pausedMs: 0,
     pauseStarted: 0,
     hostInflight: 0,
   };
-  session.clock = clock;
+  const clockHolder: { clock?: GuestClock } = persist ? session : { clock };
+  clockHolder.clock = clock;
 
   const settleMs = input.settleMs ?? DEFAULT_SETTLE_MS;
   const sleep = input.sleep ?? defaultSleep;
   const settle = async () => {
-    if (settleMs > 0) await abortableDelay(settleMs, input.signal, sleep);
+    if (settleMs > 0) await abortableDelay(settleMs, signal, sleep);
   };
   const withSynthetic = async <T>(fn: () => Promise<T>): Promise<T> => {
     input.occupancy?.beginSynthetic();
@@ -325,14 +378,15 @@ export async function runComputerGuest(input: {
     if (isProtectedAuthText(blob)) throw new Error(PROTECTED_SETTING_MESSAGE);
   };
 
+  const reuse = persist && session.vm !== undefined;
   const vm =
-    input.persistVm && session.vm
+    reuse && session.vm
       ? session.vm
       : await QuickJS.create({
           wasm: await loadQuickJsWasm(),
           memoryLimit: 32 * 1024 * 1024,
           interruptHandler: () => {
-            const c = session.clock;
+            const c = clockHolder.clock;
             if (!c) return true;
             const now = performance.now();
             const ran =
@@ -340,7 +394,10 @@ export async function runComputerGuest(input: {
             return ran > c.timeoutMs || Boolean(c.signal?.aborted);
           },
         });
-  if (input.persistVm) session.vm = vm;
+  if (persist) session.vm = vm;
+  const primed = reuse && session.primed === true;
+  let clean = false;
+  let resultHandle: JSValueHandle | undefined;
 
   const pause = () => {
     if (clock.hostInflight++ === 0) clock.pauseStarted = performance.now();
@@ -354,10 +411,9 @@ export async function runComputerGuest(input: {
     clock.pauseStarted = 0;
   };
 
-  const capabilities = await input.backend.capabilities();
-
   try {
-    if (!session.primed) {
+    const capabilities = await Promise.race([input.backend.capabilities(), aborted]);
+    if (!primed) {
       vm.newFunction('__ensoHost', (methodHandle: JSValueHandle, argsHandle: JSValueHandle) => {
         const method = methodHandle.toString();
         let args: unknown = {};
@@ -366,16 +422,16 @@ export async function runComputerGuest(input: {
         } catch {
           args = {};
         }
-        const id = String(++session.host!.nextId);
-        session.host!.queue.push({ id, method, args });
+        const id = String(++bridge.nextId);
+        bridge.queue.push({ id, method, args });
         return vm.newString(id);
       }).consume((handle) => vm.global.setProp('__ensoHost', handle));
       vm.evalCode(PRELUDE, 'enso-computer:prelude.js').dispose();
-      session.primed = true;
+      if (persist) session.primed = true;
     } else {
       vm.evalCode('if (globalThis.__ensoWaiters) globalThis.__ensoWaiters.clear();').dispose();
     }
-    const resultHandle = vm.evalCode(`(async () => {\n${input.code}\n})()`, 'enso-computer.js');
+    resultHandle = vm.evalCode(`(async () => {\n${input.code}\n})()`, 'enso-computer.js');
     const done = vm.resolvePromise(resultHandle);
     let settled: Awaited<typeof done> | undefined;
     const finish = done.then((value) => {
@@ -404,7 +460,8 @@ export async function runComputerGuest(input: {
 
     const dispatch = async (method: string, raw: unknown): Promise<unknown> => {
       if (input.readOnly && !isReadOnlyAllowed(method)) throw new ReadOnlyError(method);
-      if (input.signal?.aborted) throw new Error('Computer action aborted');
+      if (signal.aborted) throw abortError(signal);
+      if (INPUT_METHODS.has(method)) await throwIfProtected();
       const args = asRecord(raw);
       switch (method) {
         case 'capabilities':
@@ -446,14 +503,14 @@ export async function runComputerGuest(input: {
           await input.backend.launchApp(name, pane ? { pane } : undefined);
           const deadline = Date.now() + 8_000;
           while (true) {
-            if (input.signal?.aborted) throw new Error('Computer action aborted');
+            if (signal.aborted) throw abortError(signal);
             const opened = await find();
             if (opened) {
               await settle();
               return opened;
             }
             if (Date.now() >= deadline) throw new Error(`app '${name}' did not open a window`);
-            await abortableDelay(200, input.signal, sleep);
+            await abortableDelay(200, signal, sleep);
           }
           throw new Error(`app '${name}' did not open a window`);
         }
@@ -756,7 +813,7 @@ export async function runComputerGuest(input: {
           return { ok: true };
         case 'wait': {
           const ms = Math.min(Math.max(Number(args.ms) || 0, 0), 60_000);
-          if (ms > 0) await abortableDelay(ms, input.signal, sleep);
+          if (ms > 0) await abortableDelay(ms, signal, sleep);
           return { ok: true };
         }
         default:
@@ -764,20 +821,35 @@ export async function runComputerGuest(input: {
       }
     };
 
+    let idleRounds = 0;
     while (settled === undefined) {
-      if (input.signal?.aborted) throw new Error('Computer action aborted');
+      if (signal.aborted) throw abortError(signal);
       vm.executePendingJobs();
       const job = queue.shift();
       if (!job) {
-        await Promise.race([finish, new Promise((resolve) => setImmediate(resolve))]);
+        await Promise.race([finish, new Promise((resolve) => setImmediate(resolve)), aborted]);
+        if (settled === undefined && queue.length === 0 && ++idleRounds >= IDLE_ROUNDS_LIMIT) {
+          throw new Error(
+            'computer script awaits a Promise that never resolves; only await desktop/win/el calls and wait()'
+          );
+        }
         continue;
       }
+      idleRounds = 0;
       pause();
       try {
-        const payload = await dispatch(job.method, job.args);
+        const call = dispatch(job.method, job.args);
+        session.inflight = call.then(
+          () => {},
+          () => {}
+        );
+        const payload = await Promise.race([call, aborted]);
+        session.inflight = undefined;
         settleJob(job.id, true, jsonClone(payload) ?? null);
         vm.executePendingJobs();
       } catch (error) {
+        if (signal.aborted) throw abortError(signal);
+        session.inflight = undefined;
         const message = error instanceof Error ? error.message : String(error);
         const name = error instanceof Error ? error.name : 'Error';
         settleJob(job.id, false, { message, name });
@@ -785,6 +857,8 @@ export async function runComputerGuest(input: {
         resume();
       }
     }
+    if (signal.aborted) throw abortError(signal);
+    clean = true;
 
     if (settled instanceof JSException) {
       throw new Error(settled.message);
@@ -800,7 +874,6 @@ export async function runComputerGuest(input: {
     }
     const returnValue = jsonClone(vm.dump(settled.value));
     settled.value.dispose();
-    resultHandle.dispose();
     if (typeof returnValue === 'string' && returnValue) logs.push(returnValue);
     else if (returnValue !== undefined) logs.push(JSON.stringify(returnValue));
     return {
@@ -810,11 +883,24 @@ export async function runComputerGuest(input: {
       capabilities,
     };
   } finally {
-    if (!input.persistVm) {
-      vm.dispose();
-      session.vm = undefined;
-      session.primed = false;
-      session.host = undefined;
+    clearTimeout(deadline);
+    if (resultHandle && !resultHandle.disposed) {
+      try {
+        resultHandle.dispose();
+      } catch {
+        // VM 已销毁
+      }
+    }
+    input.signal?.removeEventListener('abort', onOuterAbort);
+    if (!persist) {
+      try {
+        vm.dispose();
+      } catch {
+        // ignore
+      }
+    } else if (!clean) {
+      // 中止/超时时 guest 仍挂着半截 async 与宿主等待，VM 不再可信
+      disposeComputerGuestVm(session);
     }
   }
 }

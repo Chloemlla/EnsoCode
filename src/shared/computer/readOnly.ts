@@ -1,4 +1,4 @@
-/** 只读跑允许的 guest 方法。其它桌面副作用一律拒绝。 */
+/** 只读跑允许的 guest 方法。其它桌面副作用一律拒绝；剪贴板可能有密码，不算只读。 */
 export const READ_ONLY_ALLOWED = new Set([
   'windows',
   'window',
@@ -13,15 +13,12 @@ export const READ_ONLY_ALLOWED = new Set([
   'ref',
   'elementAt',
   'focusedElement',
-  'clipboard.read',
-  'value',
-  'bounds',
-  'attributes',
-  'actions',
-  'parent',
-  'children',
+  'axBounds',
+  'axAttributes',
+  'axActions',
+  'axParent',
+  'axChildren',
   'wait',
-  'assert',
 ]);
 
 export function isReadOnlyAllowed(method: string): boolean {

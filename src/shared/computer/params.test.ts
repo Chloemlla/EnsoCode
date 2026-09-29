@@ -3,6 +3,7 @@ import {
   COMPUTER_DEFAULT_TIMEOUT_SEC,
   COMPUTER_MAX_TIMEOUT_SEC,
   normalizeComputerParams,
+  toComputerWireParams,
 } from './params';
 
 describe('normalizeComputerParams', () => {
@@ -34,5 +35,17 @@ describe('normalizeComputerParams', () => {
     expect(normalizeComputerParams({ code: 'x', timeout: 999 })?.timeoutSec).toBe(
       COMPUTER_MAX_TIMEOUT_SEC
     );
+  });
+});
+
+describe('toComputerWireParams', () => {
+  it('worker→Main 往返后 read_only 与 timeout 不丢', () => {
+    const normalized = normalizeComputerParams({ code: 'x', read_only: true, timeout: 12 });
+    expect(normalized).not.toBeNull();
+    expect(normalizeComputerParams(toComputerWireParams(normalized!))).toEqual({
+      code: 'x',
+      readOnly: true,
+      timeoutSec: 12,
+    });
   });
 });

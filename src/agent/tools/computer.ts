@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { ChildSessionIdentity } from '@shared/builtinAgents';
 import { pixelFingerprint, screenshotCaption } from '@shared/computer/frame';
-import { normalizeComputerParams } from '@shared/computer/params';
+import { normalizeComputerParams, toComputerWireParams } from '@shared/computer/params';
 import type { ComputerRunResult, ComputerScreenshot } from '@shared/computer/types';
 import type { ComputerOp, SessionIdentity } from '@shared/types/agent';
 import type { ApprovalGate } from '../approval';
@@ -24,13 +24,17 @@ export interface ComputerInvokeResult {
 interface Pending {
   resolve(result: unknown): void;
   reject(error: Error): void;
+  cancel(error: Error): void;
 }
 
-const DEFAULT_TIMEOUT_MS = 125_000;
+/** 超出 run 墙钟预算的余量：覆盖等桌面租约与 Main 收尾 */
+export const COMPUTER_INVOKE_GRACE_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 150_000;
 
 /**
  * worker ↔ Main 的桌面 computer 挂起表。请求经 `computer-invoke` 上抛，
- * 结果经 `computer-result` 回落；abort / 超时 / shutdown 全部 fail-closed。
+ * 结果经 `computer-result` 回落；abort / 超时 / shutdown 本地 fail-closed，
+ * 并经 `computer-cancel` 通知 Main 停止仍在驱动桌面的 run。
  */
 export class ComputerInvoker {
   private readonly pending = new Map<string, Pending>();
@@ -38,27 +42,36 @@ export class ComputerInvoker {
   constructor(
     private readonly identity: SessionIdentity | ChildSessionIdentity,
     private readonly emit: (request: ComputerInvokeRequest) => void,
-    private readonly options: { timeoutMs?: number } = {}
+    private readonly options: { timeoutMs?: number; emitCancel?: (requestId: string) => void } = {}
   ) {}
 
-  invoke(op: ComputerOp, params: unknown, signal?: AbortSignal): Promise<unknown> {
+  invoke(
+    op: ComputerOp,
+    params: unknown,
+    signal?: AbortSignal,
+    timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  ): Promise<unknown> {
     if (signal?.aborted) return Promise.reject(new Error('Computer action aborted'));
     const requestId = randomUUID();
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-    const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const timer = setTimeout(
-      () => settle(new Error(`Computer action ${op} timed out after ${timeoutMs}ms`)),
+      () => settle(new Error(`Computer action ${op} timed out after ${timeoutMs}ms`), true),
       timeoutMs
     );
-    const onAbort = () => settle(new Error('Computer action aborted'));
-    const settle = (outcome: unknown) => {
+    const onAbort = () => settle(new Error('Computer action aborted'), true);
+    const settle = (outcome: unknown, cancelRemote = false) => {
       if (!this.pending.delete(requestId)) return;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      if (cancelRemote) this.cancelRemote(requestId);
       if (outcome instanceof Error) reject(outcome);
       else resolve(outcome);
     };
-    this.pending.set(requestId, { resolve: settle, reject: settle });
+    this.pending.set(requestId, {
+      resolve: (value) => settle(value),
+      reject: (error) => settle(error),
+      cancel: (error) => settle(error, true),
+    });
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
       this.emit({ identity: this.identity, requestId, op, params });
@@ -66,6 +79,14 @@ export class ComputerInvoker {
       settle(error instanceof Error ? error : new Error(String(error)));
     }
     return promise;
+  }
+
+  private cancelRemote(requestId: string): void {
+    try {
+      this.options.emitCancel?.(requestId);
+    } catch {
+      // 会话已释放：Main 侧由 worker-exited / parent-ended 兜底停止
+    }
   }
 
   resolve(result: ComputerInvokeResult): boolean {
@@ -77,11 +98,19 @@ export class ComputerInvoker {
   }
 
   cancelAll(reason = 'Computer action cancelled'): void {
-    for (const entry of [...this.pending.values()]) entry.reject(new Error(reason));
+    for (const entry of [...this.pending.values()]) entry.cancel(new Error(reason));
   }
 
   get pendingCount(): number {
     return this.pending.size;
+  }
+}
+
+const MAX_CODE_CHARS = 20_000;
+
+function assertCodeSize(code: string | undefined): void {
+  if (code && code.length > MAX_CODE_CHARS) {
+    throw new Error(`computer code is too long (max ${MAX_CODE_CHARS} characters); split the task`);
   }
 }
 
@@ -158,7 +187,13 @@ export function createComputerTool(invoker: ComputerInvoker): ToolDefinition {
     async execute(_toolCallId, params, signal) {
       const normalized = normalizeComputerParams(params ?? {});
       if (!normalized) throw new Error('computer requires code');
-      const result = (await invoker.invoke('run', normalized, signal)) as ComputerRunResult;
+      assertCodeSize(normalized.code);
+      const result = (await invoker.invoke(
+        'run',
+        toComputerWireParams(normalized),
+        signal,
+        normalized.timeoutSec * 1000 + COMPUTER_INVOKE_GRACE_MS
+      )) as ComputerRunResult;
       return formatComputerResult(result);
     },
   };
@@ -206,11 +241,13 @@ export function withComputerApproval(gate: ApprovalGate, tool: ToolDefinition): 
     ...tool,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const normalized = normalizeComputerParams(params ?? {});
+      assertCodeSize(normalized?.code);
+      // 桌面输入不可撤回：审批展示整段脚本
       if (!normalized?.readOnly && gate.needsApproval('command', tool.name)) {
         const result = await gate.ask(
           tool.name,
           'command',
-          (normalized?.code ?? '').slice(0, 300),
+          normalized?.code ?? '',
           signal,
           toolCallId
         );

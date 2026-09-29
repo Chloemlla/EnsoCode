@@ -1863,6 +1863,13 @@ describe('computer-invoke / computer-result', () => {
     expect(parseAgentWorkerEvent({ ...invoke, extra: 1 })).toBeNull();
   });
 
+  it('computer-cancel 只带 requestId', () => {
+    const cancel = { type: 'computer-cancel', identity: parent, seq: 6, requestId: 'cu-1' };
+    expect(parseAgentWorkerEvent(cancel)).toEqual(cancel);
+    expect(parseAgentWorkerEvent({ ...cancel, requestId: '' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...cancel, extra: 1 })).toBeNull();
+  });
+
   it('computer-result 成功带 result，失败带 error，字段互斥', () => {
     expect(parseAgentCommand(result)).toEqual(result);
     const failed = {

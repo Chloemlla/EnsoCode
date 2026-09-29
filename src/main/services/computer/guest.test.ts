@@ -381,3 +381,108 @@ describe('runComputerGuest', () => {
     expect(result.returnValue).toBe('浅色');
   });
 });
+
+describe('runComputerGuest 生命周期', () => {
+  const base = (session = createComputerGuestSession(), backend = new FakeDesktopBackend()) => ({
+    readOnly: false,
+    backend,
+    session,
+    settleMs: 0,
+    persistVm: true,
+  });
+
+  it('timeout 是墙钟预算，宿主调用耗时也计入', async () => {
+    const started = Date.now();
+    await expect(
+      runComputerGuest({
+        ...base(),
+        code: 'for (;;) await wait(50);',
+        timeoutMs: 200,
+      })
+    ).rejects.toThrow(/exceeded/);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it('await 永不 resolve 的 Promise 立即失败，不空转', async () => {
+    await expect(
+      runComputerGuest({ ...base(), code: 'await new Promise(() => {}); return 1', timeoutMs: 5_000 })
+    ).rejects.toThrow(/never resolves/);
+  });
+
+  it('宿主调用卡住时 abort 立即返回', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windows = () => new Promise(() => {});
+    const controller = new AbortController();
+    const pending = runComputerGuest({
+      ...base(createComputerGuestSession(), backend),
+      code: 'await desktop.windows(); return 1',
+      timeoutMs: 10_000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    await expect(pending).rejects.toThrow(/abort/);
+  });
+
+  it('被中止的 run 之后同一 session 仍可继续执行', async () => {
+    const session = createComputerGuestSession();
+    await expect(
+      runComputerGuest({ ...base(session), code: 'for (;;) await wait(20);', timeoutMs: 100 })
+    ).rejects.toThrow(/exceeded/);
+    await expect(
+      runComputerGuest({ ...base(session), code: 'return 5', timeoutMs: 1_000 })
+    ).resolves.toMatchObject({ returnValue: 5 });
+  });
+
+  it('read_only 跑在一次性 VM，改不到后续可写 run 的全局', async () => {
+    const session = createComputerGuestSession();
+    await runComputerGuest({ ...base(session), code: 'globalThis.mark = 7', timeoutMs: 1_000 });
+    await runComputerGuest({
+      ...base(session),
+      readOnly: true,
+      code: 'globalThis.mark = 9; globalThis.desktop = null',
+      timeoutMs: 1_000,
+    });
+    const after = await runComputerGuest({
+      ...base(session),
+      code: 'return [globalThis.mark, typeof desktop.windows]',
+      timeoutMs: 1_000,
+    });
+    expect(after.returnValue).toEqual([7, 'function']);
+  });
+
+  it('只读可读元素属性，但不能读剪贴板', async () => {
+    const { result } = await run(
+      `const win = await desktop.window('w1'); await win.ax(); const el = await win.ref('e1'); return [await el.attributes(), await el.actions(), (await el.children()).length]`,
+      { readOnly: true }
+    );
+    expect(result.returnValue).toBeDefined();
+    await expect(run('return await desktop.clipboard.read()', { readOnly: true })).rejects.toThrow(
+      /read-only/
+    );
+  });
+
+  it('鉴权框出现时，键盘输入在送达前就拒绝', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList = [
+      ...backend.windowsList,
+      {
+        id: 'auth',
+        app: 'SecurityAgent',
+        title: 'System Settings is trying to modify system settings',
+        pid: 9,
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 10,
+      },
+    ];
+    const typed: string[] = [];
+    backend.typeText = (async (_target: string, text: string) => {
+      typed.push(text);
+    }) as typeof backend.typeText;
+    await expect(
+      run(`const win = await desktop.window('w1'); await win.type('secret')`, { backend })
+    ).rejects.toThrow(/Touch ID or a password/);
+    expect(typed).toEqual([]);
+  });
+});

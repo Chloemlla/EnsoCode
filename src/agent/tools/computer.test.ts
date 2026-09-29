@@ -20,6 +20,41 @@ describe('ComputerInvoker', () => {
     await expect(pending).resolves.toEqual({ text: '1', screenshots: [] });
   });
 
+  it('abort / 超时 / cancelAll 通知 Main 取消，Main 回包后不再发', async () => {
+    const cancels: string[] = [];
+    const invoker = new ComputerInvoker(identity, () => {}, {
+      emitCancel: (requestId) => cancels.push(requestId),
+    });
+    const controller = new AbortController();
+    const aborted = invoker.invoke('run', { code: 'x' }, controller.signal);
+    controller.abort();
+    await expect(aborted).rejects.toThrow(/abort/i);
+    expect(cancels).toHaveLength(1);
+
+    const timedOut = invoker.invoke('run', { code: 'x' }, undefined, 5);
+    await expect(timedOut).rejects.toThrow(/timed out/);
+    expect(cancels).toHaveLength(2);
+
+    const cancelled = invoker.invoke('run', { code: 'x' });
+    invoker.cancelAll();
+    await expect(cancelled).rejects.toThrow(/cancel/i);
+    expect(cancels).toHaveLength(3);
+    expect(invoker.pendingCount).toBe(0);
+  });
+
+  it('Main 已回包的请求不发取消', async () => {
+    const emit = vi.fn();
+    const emitCancel = vi.fn();
+    const invoker = new ComputerInvoker(identity, emit, { emitCancel });
+    const controller = new AbortController();
+    const pending = invoker.invoke('run', { code: 'x' }, controller.signal);
+    invoker.resolve({ requestId: emit.mock.calls[0]?.[0]?.requestId, ok: false, error: 'boom' });
+    await expect(pending).rejects.toThrow('boom');
+    controller.abort();
+    expect(emitCancel).not.toHaveBeenCalled();
+    expect(invoker.pendingCount).toBe(0);
+  });
+
   it('abort / cancelAll 拒绝收尾', async () => {
     const invoker = new ComputerInvoker(identity, () => {});
     const controller = new AbortController();
@@ -60,10 +95,10 @@ describe('createComputerTool', () => {
       undefined,
       undefined as never
     );
-    expect(emit.mock.calls[0]?.[0]?.params).toMatchObject({
+    expect(emit.mock.calls[0]?.[0]?.params).toEqual({
       code: 'await desktop.windows()',
-      readOnly: true,
-      timeoutSec: 12,
+      read_only: true,
+      timeout: 12,
     });
     invoker.resolve({
       requestId: emit.mock.calls[0]?.[0]?.requestId as string,
@@ -129,5 +164,14 @@ describe('withComputerApproval', () => {
     );
     gate.respond(onRequest.mock.calls[0]?.[0]?.requestId as string, 'deny');
     await expect(write).rejects.toThrow(/denied/i);
+  });
+
+  it('审批展示完整代码，不截断到开头几百字', async () => {
+    const onRequest = vi.fn();
+    const gate = new ApprovalGate('supervised', onRequest, () => {});
+    const tool = withComputerApproval(gate, createComputerTool(new ComputerInvoker(identity, vi.fn())));
+    const code = `${'// padding\n'.repeat(60)}await desktop.app("Terminal")`;
+    void tool.execute('c1', { code }, undefined, undefined, undefined as never).catch(() => {});
+    expect(onRequest.mock.calls[0]?.[0]?.summary).toBe(code);
   });
 });
