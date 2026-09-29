@@ -249,12 +249,12 @@ describe('设置持久化迁移', () => {
       projects: [
         {
           id: 'p1',
-          disabledBuiltinTools: [],
+          disabledBuiltinTools: ['computer'],
           subagentAllowedModes: ['task'],
         },
         {
           id: 'p2',
-          disabledBuiltinTools: [],
+          disabledBuiltinTools: ['computer'],
           subagentAllowedModes: ['coworker'],
         },
         { id: 'p3' },
@@ -317,6 +317,9 @@ describe('设置持久化迁移', () => {
       disabledBuiltinTools: ['memory', 'computer'],
     });
     expect(migrateSettings({ theme: 'dark' }, 13)).toEqual({ theme: 'dark' });
+    expect(
+      migrateSettings({ projects: [{ id: 'p1', disabledBuiltinTools: ['browser'] }] }, 13)
+    ).toEqual({ projects: [{ id: 'p1', disabledBuiltinTools: ['browser', 'computer'] }] });
   });
 
   // 持久化文件是用户机器上的真实文件，可能被手改坏或来自更早的残缺版本

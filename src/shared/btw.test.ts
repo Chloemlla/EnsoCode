@@ -226,8 +226,15 @@ describe('btwDisabledTools', () => {
       'coworker',
       'workflow',
       'plan',
+      'computer',
     ]);
-    expect(btwDisabledTools(['coworker'])).toEqual(['coworker', 'subagent', 'workflow', 'plan']);
+    expect(btwDisabledTools(['coworker'])).toEqual([
+      'coworker',
+      'subagent',
+      'workflow',
+      'plan',
+      'computer',
+    ]);
   });
 });
 

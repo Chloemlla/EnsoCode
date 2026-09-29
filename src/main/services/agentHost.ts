@@ -63,6 +63,7 @@ import {
   type Preset,
   type SkillEntry,
 } from '@shared/types/assets';
+import { persistedSettingsState } from '@shared/types/builtinTools';
 import {
   MODEL_REASONING_OVERRIDES,
   MODEL_THINKING_LEVEL_OVERRIDES,
@@ -1406,8 +1407,7 @@ export function pushDisabledWorkflowPresets(): void {
 }
 
 export function readSettingsState(): Record<string, unknown> | undefined {
-  const settings = readSettings();
-  return (settings?.['enso-settings'] as { state?: Record<string, unknown> } | undefined)?.state;
+  return persistedSettingsState(readSettings()?.['enso-settings']);
 }
 
 function providersFromSettings(): ModelProvider[] {

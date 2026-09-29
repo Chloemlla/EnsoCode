@@ -1,7 +1,11 @@
 import { type AccentColor, resolveAccentColor } from '@shared/accentColor';
 import { resolveCompactStrategy } from '@shared/compactStrategy';
 import { type EditMode, resolveEditMode } from '@shared/types';
-import { effectiveSubagentAllowedModes } from '@shared/types/builtinTools';
+import {
+  addComputerDefaultOff,
+  COMPUTER_DEFAULT_OFF_SETTINGS_VERSION,
+  effectiveSubagentAllowedModes,
+} from '@shared/types/builtinTools';
 import { isSpeechModelId } from '@shared/types/speech';
 
 /**
@@ -124,11 +128,8 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
   if (version < 13) {
     state = migrateAgentToolModes(state);
   }
-  if (version < 14 && Array.isArray(state.disabledBuiltinTools)) {
-    const list = state.disabledBuiltinTools.filter((id): id is string => typeof id === 'string');
-    if (!list.includes('computer')) {
-      state = { ...state, disabledBuiltinTools: [...list, 'computer'] };
-    }
+  if (version < COMPUTER_DEFAULT_OFF_SETTINGS_VERSION) {
+    state = addComputerDefaultOff(state);
   }
   return state;
 }
