@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { AxRegistry } from './axRegistry';
+import {
+  AX_STALE_HANDLE,
+  AxRegistry,
+  axHandleEpoch,
+  formatAxHandle,
+  isAxStaleHandleError,
+  parseAxHandle,
+} from './axRegistry';
 import { StaleRefError } from './errors';
 
 describe('AxRegistry', () => {
@@ -38,5 +45,46 @@ describe('AxRegistry', () => {
     expect(child).toMatch(/^e\d+$/);
     expect(registry.resolve(child)).toBe('ax99');
     expect(registry.targetOf(child)).toBe('w1');
+  });
+
+  it('worker 纪元变化后，旧纪元句柄解析为 StaleRefError', () => {
+    const registry = new AxRegistry<string>(axHandleEpoch);
+    const g1 = registry.beginSnapshot('w1');
+    const old = registry.register('w1', g1, formatAxHandle('aaaa', 1));
+    const g2 = registry.beginSnapshot('w2');
+    const fresh = registry.register('w2', g2, formatAxHandle('bbbb', 1));
+    expect(registry.resolve(fresh)).toBe('ax-bbbb-1');
+    let caught: unknown;
+    try {
+      registry.resolve(old);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(StaleRefError);
+    expect((caught as StaleRefError).code).toBe('stale-ref');
+    expect(() => registry.targetOf(old)).toThrow(StaleRefError);
+    expect(() => registry.adopt(old, formatAxHandle('bbbb', 2))).toThrow(StaleRefError);
+  });
+});
+
+describe('ax handle epoch', () => {
+  it('格式化与解析往返', () => {
+    expect(formatAxHandle('k3x9', 12)).toBe('ax-k3x9-12');
+    expect(parseAxHandle('ax-k3x9-12')).toEqual({ epoch: 'k3x9', id: 12 });
+    expect(axHandleEpoch('ax-k3x9-12')).toBe('k3x9');
+  });
+
+  it('旧格式与脏输入不解析', () => {
+    for (const bad of ['ax12', 'ax--1', 'ax-k-0', 'ax-k-1x', 'e1', '', 'ax-K!-1']) {
+      expect(parseAxHandle(bad)).toBeNull();
+      expect(axHandleEpoch(bad)).toBeUndefined();
+    }
+  });
+
+  it('识别 worker 侧过期句柄错误（含旧 axN expired 文案）', () => {
+    expect(isAxStaleHandleError(new Error(`${AX_STALE_HANDLE}: ax-k-1`))).toBe(true);
+    expect(isAxStaleHandleError(new Error('ax12 expired; re-run ax()/find()'))).toBe(true);
+    expect(isAxStaleHandleError(new Error('AX action press failed (-25206)'))).toBe(false);
+    expect(isAxStaleHandleError('nope')).toBe(false);
   });
 });

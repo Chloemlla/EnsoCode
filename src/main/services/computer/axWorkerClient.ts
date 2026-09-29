@@ -4,6 +4,8 @@ import { AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
 
 const require = createRequire(import.meta.url);
 
+export const AX_WORKER_EXITED = 'AX_WORKER_EXITED';
+
 export type AxWorkerRequest =
   | { op: 'snapshot'; pid: number; maxDepth: number }
   | {
@@ -122,14 +124,15 @@ export function createAxWorkerClient(opts: { timeoutMs?: number; spawn: () => Ax
   let seq = 0;
   const pending = new Map<
     string,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    { owner: AxWorkerHandle; resolve: (value: unknown) => void; reject: (error: Error) => void }
   >();
 
-  const failAll = (error: Error) => {
-    const waiting = [...pending.values()];
-    pending.clear();
-    worker = undefined;
-    for (const item of waiting) item.reject(error);
+  // 只清理属于 owner 的请求；旧实例的迟到事件不能波及新 worker
+  const retire = (owner: AxWorkerHandle, error: Error) => {
+    if (worker === owner) worker = undefined;
+    const waiting = [...pending].filter(([, item]) => item.owner === owner);
+    for (const [id] of waiting) pending.delete(id);
+    for (const [, item] of waiting) item.reject(error);
   };
 
   const ensure = () => {
@@ -137,19 +140,23 @@ export function createAxWorkerClient(opts: { timeoutMs?: number; spawn: () => Ax
     const spawned = opts.spawn();
     worker = spawned;
     spawned.on('message', (value) => {
-      const msg = value as AxWorkerResponse;
+      if (worker !== spawned) return;
+      const msg = value as AxWorkerResponse | null;
+      if (!msg || typeof msg !== 'object' || typeof msg.id !== 'string') return;
       const item = pending.get(msg.id);
-      if (!item) return;
+      if (!item || item.owner !== spawned) return;
       pending.delete(msg.id);
       if (msg.ok) item.resolve(msg.result);
       else item.reject(new Error(msg.error));
     });
     spawned.on('error', (value) => {
-      failAll(value instanceof Error ? value : new Error(String(value)));
+      if (worker !== spawned) return;
+      void Promise.resolve(spawned.terminate()).catch(() => undefined);
+      retire(spawned, value instanceof Error ? value : new Error(String(value)));
     });
     spawned.on('exit', () => {
-      if (pending.size > 0) failAll(new Error('AX_TIMEOUT'));
-      else worker = undefined;
+      if (worker !== spawned) return;
+      retire(spawned, new Error(AX_WORKER_EXITED));
     });
     return spawned;
   };
@@ -160,13 +167,12 @@ export function createAxWorkerClient(opts: { timeoutMs?: number; spawn: () => Ax
       const current = ensure();
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
-          pending.delete(id);
-          worker = undefined;
+          if (!pending.has(id)) return;
           void Promise.resolve(current.terminate()).catch(() => undefined);
-          failAll(new Error('AX_TIMEOUT'));
-          reject(new Error('AX_TIMEOUT'));
+          retire(current, new Error('AX_TIMEOUT'));
         }, timeoutMs);
         pending.set(id, {
+          owner: current,
           resolve: (value) => {
             clearTimeout(timer);
             resolve(value);
@@ -176,7 +182,13 @@ export function createAxWorkerClient(opts: { timeoutMs?: number; spawn: () => Ax
             reject(error);
           },
         });
-        current.postMessage({ ...request, id });
+        try {
+          current.postMessage({ ...request, id });
+        } catch (error) {
+          pending.delete(id);
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
       });
     },
   };

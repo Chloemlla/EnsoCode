@@ -1,11 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AX_WORKER_EXITED,
+  type AxWorkerHandle,
+  type AxWorkerJob,
   createAxWorkerClient,
   spawnAxWorker,
   spawnAxWorkerThread,
   unwrapAxWorkerMessage,
   wrapUtilityProcess,
 } from './axWorkerClient';
+
+function fakeWorkers() {
+  const spawned: Array<{
+    jobs: AxWorkerJob[];
+    emit: (event: 'message' | 'error' | 'exit', value?: unknown) => void;
+    terminate: ReturnType<typeof vi.fn>;
+  }> = [];
+  const spawn = (): AxWorkerHandle => {
+    const handlers = new Map<string, (value: unknown) => void>();
+    const entry = {
+      jobs: [] as AxWorkerJob[],
+      emit: (event: 'message' | 'error' | 'exit', value?: unknown) => handlers.get(event)?.(value),
+      terminate: vi.fn(),
+    };
+    spawned.push(entry);
+    return {
+      postMessage: (job) => entry.jobs.push(job),
+      terminate: entry.terminate,
+      on: (event, handler) => {
+        handlers.set(event, handler);
+      },
+    };
+  };
+  return { spawned, spawn };
+}
 
 const { FakeWorker, workers } = vi.hoisted(() => {
   const workers: Array<{ filename: string }> = [];
@@ -65,7 +93,7 @@ describe('createAxWorkerClient', () => {
 });
 
 describe('createAxWorkerClient crash isolation', () => {
-  it('worker 异常退出时把挂起的调用变成 AX_TIMEOUT', async () => {
+  it('worker 异常退出时把挂起的调用变成 AX_WORKER_EXITED（区别于超时）', async () => {
     const handlers = new Map<string, (value: unknown) => void>();
     const client = createAxWorkerClient({
       timeoutMs: 1000,
@@ -80,8 +108,52 @@ describe('createAxWorkerClient crash isolation', () => {
       }),
     });
     await expect(client.call({ op: 'snapshot', pid: 1, maxDepth: 1 })).rejects.toThrow(
-      'AX_TIMEOUT'
+      AX_WORKER_EXITED
     );
+  });
+
+  it('旧 worker 的迟到 exit/error 不影响新 worker 的请求，也不产生孤儿', async () => {
+    const { spawned, spawn } = fakeWorkers();
+    const client = createAxWorkerClient({ timeoutMs: 30, spawn });
+    await expect(client.call({ op: 'focused' })).rejects.toThrow('AX_TIMEOUT');
+    expect(spawned[0].terminate).toHaveBeenCalledOnce();
+
+    const second = client.call({ op: 'focused' });
+    expect(spawned).toHaveLength(2);
+    spawned[0].emit('exit', 1);
+    spawned[0].emit('error', new Error('late'));
+    spawned[0].emit('message', { id: spawned[1].jobs[0].id, ok: true, result: 'stale' });
+    spawned[1].emit('message', { id: spawned[1].jobs[0].id, ok: true, result: 'fresh' });
+    await expect(second).resolves.toBe('fresh');
+
+    const third = client.call({ op: 'focused' });
+    expect(spawned).toHaveLength(2);
+    spawned[1].emit('message', { id: spawned[1].jobs[1].id, ok: true, result: 3 });
+    await expect(third).resolves.toBe(3);
+  });
+
+  it('worker 崩溃后下一次调用会重新拉起', async () => {
+    const { spawned, spawn } = fakeWorkers();
+    const client = createAxWorkerClient({ timeoutMs: 1000, spawn });
+    const first = client.call({ op: 'focused' });
+    spawned[0].emit('exit', 1);
+    await expect(first).rejects.toThrow(AX_WORKER_EXITED);
+    const second = client.call({ op: 'focused' });
+    expect(spawned).toHaveLength(2);
+    spawned[1].emit('message', { id: spawned[1].jobs[0].id, ok: true, result: 1 });
+    await expect(second).resolves.toBe(1);
+  });
+
+  it('error 事件只失败本 worker 的请求', async () => {
+    const { spawned, spawn } = fakeWorkers();
+    const client = createAxWorkerClient({ timeoutMs: 1000, spawn });
+    const first = client.call({ op: 'focused' });
+    spawned[0].emit('error', new Error('boom'));
+    await expect(first).rejects.toThrow('boom');
+    const second = client.call({ op: 'focused' });
+    spawned[0].emit('exit', 1);
+    spawned[1].emit('message', { id: spawned[1].jobs[0].id, ok: true, result: 2 });
+    await expect(second).resolves.toBe(2);
   });
 });
 

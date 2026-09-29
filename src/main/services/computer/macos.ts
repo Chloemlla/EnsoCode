@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { AxRegistry } from '@shared/computer/axRegistry';
+import { AxRegistry, axHandleEpoch, isAxStaleHandleError } from '@shared/computer/axRegistry';
 import type { AxTreeNode } from '@shared/computer/axTree';
 import {
   BackgroundUnavailableError,
   ComputerError,
   PermissionError,
+  StaleRefError,
 } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
 import type {
@@ -16,7 +17,8 @@ import type {
 import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
 import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
-import { AX_SNAPSHOT_DEFAULT_DEPTH, AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
+import { AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
+import { AX_WORKER_EXITED } from './axWorkerClient';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { resolveClickRoute } from './clickRoute';
 import { loadMacosNative, type MacosNative } from './macosNative';
@@ -34,13 +36,42 @@ async function capturePermission(): Promise<ComputerPermissionState> {
   return 'unknown';
 }
 
+const AX_DESKTOP_TARGET = 'desktop';
+
+function translateAxError(error: unknown, ref?: string): unknown {
+  if (ref && isAxStaleHandleError(error)) return new StaleRefError(ref);
+  if (error instanceof Error && error.message === AX_WORKER_EXITED) {
+    return new ComputerError(
+      'ax-worker-exited',
+      'AX worker exited unexpectedly; retry, or use screenshot coordinates'
+    );
+  }
+  return error;
+}
+
+async function withAxErrors<T>(run: () => Promise<T>, ref?: string): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw translateAxError(error, ref);
+  }
+}
+
+function skyClickCanHonor(opts?: PointerOptions): boolean {
+  return (
+    (opts?.button ?? 'left').trim().toLowerCase() === 'left' &&
+    (opts?.modifiers?.length ?? 0) === 0 &&
+    (opts?.count ?? 1) <= 2
+  );
+}
+
 function axPermission(): ComputerPermissionState {
   return systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'denied';
 }
 
 export class MacosDesktopBackend implements DesktopBackend {
   private native: MacosNative | null | undefined;
-  private readonly registry = new AxRegistry<string>();
+  private readonly registry = new AxRegistry<string>(axHandleEpoch);
 
   private async nativeOrNull(): Promise<MacosNative | null> {
     if (this.native !== undefined) return this.native;
@@ -216,7 +247,9 @@ export class MacosDesktopBackend implements DesktopBackend {
     const window = (await this.windows()).find((item) => item.id === _target);
     const pid = window?.pid;
     const windowId = window ? Number(window.id) : undefined;
-    const route = resolveClickRoute({ delivery, pid, windowId });
+    const resolved = resolveClickRoute({ delivery, pid, windowId });
+    // skyClick 只支持左键单/双击且不带修饰键；其它组合走 postToPid 以保留按钮/次数/修饰键
+    const route = resolved === 'skyClick' && !skyClickCanHonor(opts) ? 'postToPid' : resolved;
     if (route === 'unavailable') {
       throw new BackgroundUnavailableError(
         'macOS pixel click cannot target a window in background'
@@ -299,15 +332,10 @@ export class MacosDesktopBackend implements DesktopBackend {
   async axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }) {
     const native = await this.requireNative('ax');
     const generation = this.registry.beginSnapshot(target);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const nodes = await Promise.race([
-      native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH)),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('AX_TIMEOUT')), AX_WORKER_TIMEOUT_MS);
-      }),
-    ]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
+    // 超时由 axWorkerClient 负责（到点会终止 worker），这里不再叠一层 race
+    const nodes = await withAxErrors(() =>
+      native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH))
+    );
     const attach = (node: AxTreeNode): AxTreeNode => {
       const ref = this.registry.register(target, generation, node.ref);
       return {
@@ -332,7 +360,7 @@ export class MacosDesktopBackend implements DesktopBackend {
     const native = await this.requireNative('ax');
     const generation = this.registry.beginSnapshot(target);
     try {
-      const nodes = await native.axQuery(target, query);
+      const nodes = await withAxErrors(() => native.axQuery(target, query));
       return nodes.map((node) => ({
         ...node,
         ref: this.registry.register(target, generation, node.ref),
@@ -344,30 +372,39 @@ export class MacosDesktopBackend implements DesktopBackend {
     }
   }
 
+  /** elementAt/focused 的结果与 worker 侧 'desktop' 作用域对齐，登记后返回 eN。 */
+  private registerDesktopNode(node: AxTreeNode | null): AxTreeNode | null {
+    if (!node) return null;
+    const generation = this.registry.beginSnapshot(AX_DESKTOP_TARGET);
+    return { ...node, ref: this.registry.register(AX_DESKTOP_TARGET, generation, node.ref) };
+  }
+
   async axElementAt(screenX: number, screenY: number) {
     const native = await this.requireNative('ax');
-    return native.axElementAt(screenX, screenY);
+    return this.registerDesktopNode(await withAxErrors(() => native.axElementAt(screenX, screenY)));
   }
 
   async axFocused() {
     const native = await this.requireNative('ax');
-    return native.axFocused();
+    return this.registerDesktopNode(await withAxErrors(() => native.axFocused()));
   }
 
   async axNode(ref: string) {
     const handle = this.registry.resolve(ref);
     const native = await this.requireNative('ax');
-    return { ...(await native.axNode(handle)), ref };
+    return { ...(await withAxErrors(() => native.axNode(handle), ref)), ref };
   }
 
   async axAttributes(ref: string) {
     const native = await this.requireNative('ax');
-    return native.axAttributes(this.registry.resolve(ref));
+    const handle = this.registry.resolve(ref);
+    return withAxErrors(() => native.axAttributes(handle), ref);
   }
 
   async axChildren(ref: string) {
     const native = await this.requireNative('ax');
-    const children = await native.axChildren(this.registry.resolve(ref));
+    const handle = this.registry.resolve(ref);
+    const children = await withAxErrors(() => native.axChildren(handle), ref);
     return children.map((child) => ({
       ...child,
       ref: this.registry.adopt(ref, child.ref),
@@ -376,22 +413,26 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async axParent(ref: string) {
     const native = await this.requireNative('ax');
-    return native.axParent(this.registry.resolve(ref));
+    const handle = this.registry.resolve(ref);
+    return withAxErrors(() => native.axParent(handle), ref);
   }
 
   async axPerform(ref: string, action: string) {
     const native = await this.requireNative('ax');
-    await native.axPerform(this.registry.resolve(ref), action);
+    const handle = this.registry.resolve(ref);
+    await withAxErrors(() => native.axPerform(handle, action), ref);
   }
 
   async axSetValue(ref: string, value: string) {
     const native = await this.requireNative('ax');
-    await native.axSetValue(this.registry.resolve(ref), value);
+    const handle = this.registry.resolve(ref);
+    await withAxErrors(() => native.axSetValue(handle, value), ref);
   }
 
   async axFocus(ref: string) {
     const native = await this.requireNative('ax');
-    await native.axFocus(this.registry.resolve(ref));
+    const handle = this.registry.resolve(ref);
+    await withAxErrors(() => native.axFocus(handle), ref);
   }
 
   async axClick(ref: string) {
@@ -423,6 +464,8 @@ export class MacosDesktopBackend implements DesktopBackend {
 
   async launchApp(name: string, opts?: { pane?: string }): Promise<void> {
     const paneUrl = opts?.pane ? resolveSettingsPaneUrl(opts.pane) : undefined;
-    await execFileAsync('open', paneUrl ? [paneUrl] : resolveOpenArgs(name), { timeout: 15_000 });
+    await execFileAsync('/usr/bin/open', paneUrl ? [paneUrl] : resolveOpenArgs(name), {
+      timeout: 15_000,
+    });
   }
 }
