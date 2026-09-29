@@ -179,9 +179,7 @@ export class ComputerHost {
     if (!state) return;
     this.sessions.delete(sessionId);
     state.running?.controller.abort();
-    void (state.running?.done ?? Promise.resolve()).then(() =>
-      disposeComputerGuestVm(state.guest)
-    );
+    void (state.running?.done ?? Promise.resolve()).then(() => disposeComputerGuestVm(state.guest));
   }
 
   /** worker 退出 / 应用退出：停下所有桌面操作 */

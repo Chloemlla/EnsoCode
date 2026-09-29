@@ -311,7 +311,10 @@ export async function runComputerGuest(input: {
   session: ComputerGuestSession;
   settleMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  occupancy?: { beginSynthetic(): void; endSynthetic(): void };
+  occupancy?: {
+    beginSynthetic(input?: { keys?: readonly string[] }): void;
+    endSynthetic(): void;
+  };
   persistVm?: boolean;
 }): Promise<ComputerRunResult> {
   const screenshots: ComputerScreenshot[] = [];
@@ -364,8 +367,8 @@ export async function runComputerGuest(input: {
   const settle = async () => {
     if (settleMs > 0) await abortableDelay(settleMs, signal, sleep);
   };
-  const withSynthetic = async <T>(fn: () => Promise<T>): Promise<T> => {
-    input.occupancy?.beginSynthetic();
+  const withSynthetic = async <T>(fn: () => Promise<T>, keys?: readonly string[]): Promise<T> => {
+    input.occupancy?.beginSynthetic(keys ? { keys } : undefined);
     try {
       return await fn();
     } finally {
@@ -696,8 +699,9 @@ export async function runComputerGuest(input: {
               : Array.isArray(chord)
                 ? chord.filter((key): key is string => typeof key === 'string')
                 : [];
-          await withSynthetic(() =>
-            input.backend.keyChord(String(args.target ?? ''), keys, pointerOpts(args))
+          await withSynthetic(
+            () => input.backend.keyChord(String(args.target ?? ''), keys, pointerOpts(args)),
+            keys
           );
           await settle();
           return {

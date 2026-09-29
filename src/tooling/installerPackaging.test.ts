@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import pkg from '../../package.json';
 
 const yml = readFileSync(path.resolve(__dirname, '../../electron-builder.yml'), 'utf8');
+const lock = readFileSync(path.resolve(__dirname, '../../pnpm-lock.yaml'), 'utf8');
 
 /** Vite 已打进 out/renderer，安装包不得再带一份 production node_modules。 */
 const RENDERER_ONLY_PACKAGES = [
@@ -53,6 +54,7 @@ const MAIN_RUNTIME_PACKAGES = [
   '@rahularya01/pi-cursor',
   'better-sqlite3',
   'electron-updater',
+  'koffi',
   'level',
   'node-datachannel',
   'node-pty',
@@ -122,5 +124,34 @@ describe('installer packaging', () => {
   it('mac dir/local builds keep hardened runtime entitlements for native modules', () => {
     expect(yml).toContain('build/entitlements.mac.plist');
     expect(yml).toContain('hardenedRuntime: true');
+  });
+
+  it('declares Apple Events usage for osascript window activation', () => {
+    const plist = readFileSync(
+      path.resolve(__dirname, '../../build/entitlements.mac.plist'),
+      'utf8'
+    );
+    expect(plist).toMatch(/<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\/>/);
+    expect(yml).toMatch(/^ {4}NSAppleEventsUsageDescription: \S/m);
+  });
+
+  it('pins pnpm store paths to versions present in the lockfile', () => {
+    const pinned = [...yml.matchAll(/from: node_modules\/\.pnpm\/([^/@\s]+)@([^/\s]+)\//g)];
+    expect(pinned.map((m) => m[1])).toEqual(expect.arrayContaining(['koffi', 'node-datachannel']));
+    for (const [, name, version] of pinned) {
+      expect(lock, `${name}@${version} must match pnpm-lock.yaml`).toMatch(
+        new RegExp(`^  ${name}@${version.replace(/\./g, '\\.')}:`, 'm')
+      );
+    }
+  });
+
+  it('copies the koffi platform binding sibling and unpacks its .node', () => {
+    expect(yml).toMatch(
+      /- from: node_modules\/\.pnpm\/koffi@[^/\s]+\/node_modules\/@koromix\n\s+to: node_modules\/@koromix\n/
+    );
+    const unpack = yml.split(/^asarUnpack:/m)[1]?.split(/^[a-z]/m)[0] ?? '';
+    expect(unpack).toContain('- node_modules/@koromix/**/*.node');
+    expect(unpack).not.toContain('node_modules/koffi/**/*.node');
+    expect(yml).toContain("'!node_modules/koffi/{vendor,lib,doc}/**'");
   });
 });

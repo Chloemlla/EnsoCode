@@ -205,9 +205,7 @@ describe('ComputerHost', () => {
     const host = new ComputerHost(() => new FakeDesktopBackend(), undefined, { leaseWaitMs: 30 });
     const a = host.invoke('a', 'run', { code: 'await wait(300); return 1' });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    await expect(host.invoke('b', 'run', { code: 'return 2' })).rejects.toThrow(
-      /another session/i
-    );
+    await expect(host.invoke('b', 'run', { code: 'return 2' })).rejects.toThrow(/another session/i);
     await a;
   });
 

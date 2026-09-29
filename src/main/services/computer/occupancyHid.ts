@@ -7,8 +7,6 @@ const ANY_INPUT_EVENT = 0xffffffff;
 
 type HidFn = (state: number, eventType: number) => number;
 
-let hidFn: HidFn | null | undefined;
-
 function loadHidFn(): HidFn | null {
   if (process.platform !== 'darwin') return null;
   const koffi = require('koffi') as {
@@ -18,16 +16,21 @@ function loadHidFn(): HidFn | null {
   return cg.func('CGEventSourceSecondsSinceLastEventType', 'double', ['int32', 'uint32']);
 }
 
-export function hidSecondsSinceLastEvent(): number {
-  try {
-    if (hidFn === undefined) hidFn = loadHidFn();
-    if (!hidFn) return Number.POSITIVE_INFINITY;
-    const seconds = hidFn(HID_SYSTEM_STATE, ANY_INPUT_EVENT);
-    return typeof seconds === 'number' && Number.isFinite(seconds)
-      ? seconds
-      : Number.POSITIVE_INFINITY;
-  } catch {
-    hidFn = null;
-    return Number.POSITIVE_INFINITY;
-  }
+/** null = 无法检测物理输入（平台不支持或原生加载失败），不可当作空闲。 */
+export function createHidProbe(load: () => HidFn | null): () => number | null {
+  let hidFn: HidFn | null | undefined;
+  return () => {
+    try {
+      if (hidFn === undefined) hidFn = load();
+      if (!hidFn) return null;
+      const seconds = hidFn(HID_SYSTEM_STATE, ANY_INPUT_EVENT);
+      return typeof seconds === 'number' && !Number.isNaN(seconds) ? seconds : null;
+    } catch (error) {
+      if (hidFn === undefined) console.warn('[computer] HID idle probe unavailable', error);
+      hidFn = null;
+      return null;
+    }
+  };
 }
+
+export const hidSecondsSinceLastEvent = createHidProbe(loadHidFn);

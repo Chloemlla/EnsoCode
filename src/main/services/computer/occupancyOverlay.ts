@@ -26,7 +26,8 @@ function layout(win: BrowserWindow): void {
 }
 
 function restoreDock(): void {
-  if (process.platform === 'darwin') app.dock?.show();
+  // 已可见时再 show 会抢焦点
+  if (process.platform === 'darwin' && app.dock && !app.dock.isVisible()) void app.dock.show();
 }
 
 function createWindow(): BrowserWindow {
@@ -69,7 +70,10 @@ export function createElectronOccupancyDeps(): OccupancyDeps {
       restoreDock();
     },
     registerEsc: (handler) => {
-      globalShortcut.register('Escape', handler);
+      if (!globalShortcut.register('Escape', handler)) {
+        console.warn('[computer] Escape hotkey registration failed; Esc cancel unavailable');
+        return () => {};
+      }
       return () => globalShortcut.unregister('Escape');
     },
     hidSeconds: hidSecondsSinceLastEvent,
