@@ -19,14 +19,12 @@ const BUSY_MESSAGE =
 const YIELD_MESSAGE =
   'The user took over the desktop (Esc or physical input). Stop and ask the user before using computer again.';
 
-interface RunningRun {
-  controller: AbortController;
-  done: Promise<void>;
-}
-
 interface SessionState {
   guest: ComputerGuestSession;
-  running?: RunningRun;
+  /** 该 session 所有未结束的 run（含排队中）；新 run 到来或 close 时全部中止 */
+  active: Set<AbortController>;
+  /** 最后一个 run 的收尾；新 run 等它结束再开始，保证同 session 串行 */
+  tail: Promise<void>;
 }
 
 function abortedError(signal: AbortSignal): Error {
@@ -77,33 +75,34 @@ export class ComputerHost {
 
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { guest: createComputerGuestSession() };
+      state = { guest: createComputerGuestSession(), active: new Set(), tail: Promise.resolve() };
       this.sessions.set(sessionId, state);
     }
-    const previous = state.running;
-    if (previous) {
-      previous.controller.abort();
-      await previous.done;
-    }
+    for (const earlier of state.active) earlier.abort();
 
     const controller = new AbortController();
     const onAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onAbort, { once: true });
+    state.active.add(controller);
+    const previous = state.tail;
     const { promise: done, resolve: markDone } = Promise.withResolvers<void>();
-    const running: RunningRun = { controller, done };
-    state.running = running;
+    state.tail = done;
     const guest = state.guest;
     try {
+      await previous;
+      if (controller.signal.aborted) throw abortedError(controller.signal);
+      if (this.sessions.get(sessionId) !== state) throw new Error('Computer session closed');
       const release = await this.acquire(sessionId, controller.signal);
       const occupying = Boolean(this.occupancy) && !normalized.readOnly;
-      const occupancyGen = occupying
-        ? this.occupancy?.start(() => {
-            const error = new Error(YIELD_MESSAGE);
-            error.name = 'ComputerYieldError';
-            controller.abort(error);
-          })
-        : undefined;
+      let occupancyGen: number | undefined;
       try {
+        occupancyGen = occupying
+          ? this.occupancy?.start(() => {
+              const error = new Error(YIELD_MESSAGE);
+              error.name = 'ComputerYieldError';
+              controller.abort(error);
+            })
+          : undefined;
         return await runComputerGuest({
           code: normalized.code,
           readOnly: normalized.readOnly,
@@ -120,7 +119,7 @@ export class ComputerHost {
       }
     } finally {
       signal?.removeEventListener('abort', onAbort);
-      if (state.running === running) state.running = undefined;
+      state.active.delete(controller);
       markDone();
     }
   }
@@ -173,13 +172,13 @@ export class ComputerHost {
     }
   }
 
-  /** 中止该 session 的 run，收尾后释放 VM；之后同 id 再调用会从空 VM 开始 */
+  /** 中止该 session 的 run（含排队中的），收尾后释放 VM；之后同 id 再调用会从空 VM 开始 */
   close(sessionId: string): void {
     const state = this.sessions.get(sessionId);
     if (!state) return;
     this.sessions.delete(sessionId);
-    state.running?.controller.abort();
-    void (state.running?.done ?? Promise.resolve()).then(() => disposeComputerGuestVm(state.guest));
+    for (const controller of state.active) controller.abort();
+    void state.tail.then(() => disposeComputerGuestVm(state.guest));
   }
 
   /** worker 退出 / 应用退出：停下所有桌面操作 */

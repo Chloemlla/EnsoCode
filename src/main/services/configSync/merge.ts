@@ -805,6 +805,14 @@ export function planImport(
   ] as const) {
     if (key in bundle.state) state[key] = clone(bundle.state[key]);
   }
+  // computer 需本机系统授权且键鼠不可撤回：导入只沿用本机开关，不随配置包打开或关闭
+  if (Array.isArray(state.disabledBuiltinTools)) {
+    const localOff = !Array.isArray(current.disabledBuiltinTools)
+      ? true
+      : current.disabledBuiltinTools.includes('computer');
+    const next = state.disabledBuiltinTools.filter((id) => id !== 'computer');
+    state.disabledBuiltinTools = localOff ? [...next, 'computer'] : next;
+  }
 
   const availableModels = new Map(
     records(state.providers).map((provider) => [

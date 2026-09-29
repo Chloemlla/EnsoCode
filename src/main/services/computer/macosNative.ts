@@ -391,6 +391,8 @@ async function load(): Promise<MacosNative | null> {
    * run 结束（输入已被消费）后再恢复。
    */
   let layoutRestore: { original: unknown } | null = null;
+  /** endInput 递增：等输入法切换期间 run 已被中止时，挂起的输入不再发送 */
+  let inputEpoch = 0;
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const currentSourceId = (): string => {
     const now = TISCopyCurrentKeyboardInputSource();
@@ -423,7 +425,9 @@ async function load(): Promise<MacosNative | null> {
     }
   };
   const withEnglishLayout = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    const epoch = inputEpoch;
     await ensureEnglishLayout();
+    if (epoch !== inputEpoch) throw new Error('Computer action aborted');
     return fn();
   };
 
@@ -685,6 +689,7 @@ async function load(): Promise<MacosNative | null> {
       });
     },
     async endInput() {
+      inputEpoch += 1;
       const restore = layoutRestore;
       layoutRestore = null;
       if (!restore?.original) return;

@@ -219,4 +219,31 @@ describe('ComputerHost', () => {
     const after = await host.invoke('s1', 'run', { code: 'return typeof globalThis.mark' });
     expect(after.returnValue).toBe('undefined');
   });
+
+  it('同 session 连续三次调用：前两次被中止，只有最后一次执行', async () => {
+    const host = new ComputerHost(() => new FakeDesktopBackend());
+    const first = host.invoke('s1', 'run', { code: 'await wait(8000); return 1' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = host.invoke('s1', 'run', { code: 'return 2' });
+    const third = host.invoke('s1', 'run', { code: 'return 3' });
+    await expect(first).rejects.toThrow(/abort/);
+    await expect(second).rejects.toThrow(/abort/);
+    await expect(third).resolves.toMatchObject({ returnValue: 3 });
+  });
+
+  it('排队中的 run 遇到 close 不再执行', async () => {
+    const backend = new FakeDesktopBackend();
+    const host = new ComputerHost(() => backend);
+    const first = host.invoke('s1', 'run', {
+      code: 'const w = await desktop.window("w1"); await w.screenshot(); await wait(8000)',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const queued = host.invoke('s1', 'run', {
+      code: 'const w = await desktop.window("w1"); await w.screenshot(); await w.click(1, 1)',
+    });
+    host.close('s1');
+    await expect(first).rejects.toThrow(/abort/);
+    await expect(queued).rejects.toThrow(/abort|closed/);
+    expect(backend.clicks).toHaveLength(0);
+  });
 });
