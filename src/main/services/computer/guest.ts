@@ -278,6 +278,9 @@ globalThis.console = { log: __noConsole, info: __noConsole, warn: __noConsole, e
 `;
 
 const ABORTED_MESSAGE = 'Computer action aborted';
+/** 单次 run 回给模型的截图与文本上限：控制上下文与跨进程/配对帧体积 */
+export const COMPUTER_MAX_SCREENSHOTS_PER_RUN = 4;
+const MAX_RESULT_TEXT_CHARS = 32_000;
 /** 送达前先确认没有 Touch ID / 密码授权框：这些输入不可撤回 */
 const INPUT_METHODS = new Set([
   'click',
@@ -341,9 +344,8 @@ export async function runComputerGuest(input: {
   });
   aborted.catch(() => {});
 
-  const bridge: GuestHostBridge = persist
-    ? (session.host ??= { queue: [], nextId: 0 })
-    : { queue: [], nextId: 0 };
+  if (persist) session.host ??= { queue: [], nextId: 0 };
+  const bridge: GuestHostBridge = persist && session.host ? session.host : { queue: [], nextId: 0 };
   bridge.queue.length = 0;
   const queue = bridge.queue;
   const clock: GuestClock = {
@@ -733,7 +735,8 @@ export async function runComputerGuest(input: {
               (describeAxOutcome({ trusted: true, status: 0, nodeCount: 0 }) ?? '');
             await throwIfProtected(text);
             const target = String(args.target ?? '');
-            const disableDiff = args.diff === false || args.disableDiff === true;
+            // diff 省略未变行的新 ref，而旧 ref 两代后失效：只在显式要求时给 diff
+            const disableDiff = args.diff !== true;
             session.lastAx ??= new Map();
             const prev = session.lastAx.get(target);
             session.lastAx.set(target, text);
@@ -876,10 +879,17 @@ export async function runComputerGuest(input: {
     settled.value.dispose();
     if (typeof returnValue === 'string' && returnValue) logs.push(returnValue);
     else if (returnValue !== undefined) logs.push(JSON.stringify(returnValue));
+    const omitted = screenshots.length - COMPUTER_MAX_SCREENSHOTS_PER_RUN;
+    if (omitted > 0)
+      logs.push(`(${omitted} earlier screenshots omitted; only the latest are shown)`);
+    let text = logs.join('\n');
+    if (text.length > MAX_RESULT_TEXT_CHARS) {
+      text = `${text.slice(0, MAX_RESULT_TEXT_CHARS)}\n… (${text.length - MAX_RESULT_TEXT_CHARS} characters truncated)`;
+    }
     return {
-      text: logs.join('\n'),
+      text,
       returnValue,
-      screenshots,
+      screenshots: omitted > 0 ? screenshots.slice(omitted) : screenshots,
       capabilities,
     };
   } finally {

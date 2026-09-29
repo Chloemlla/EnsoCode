@@ -26,5 +26,10 @@ export function resolveWinLaunch(name: string): { target: string; app: boolean }
       return { target: group.command, app: !group.command.startsWith('ms-settings:') };
     }
   }
-  return { target: name.trim(), app: true };
+  // 未知名字经 cmd /c start 启动：只收字母数字、空格与 . _ -，且不能以开关开头
+  const target = name.trim();
+  if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u.test(target)) {
+    throw new Error(`Unsupported app name: ${JSON.stringify(target)}`);
+  }
+  return { target, app: true };
 }

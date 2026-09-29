@@ -3,7 +3,7 @@ import type { ComputerCapabilities } from '@shared/computer/types';
 import type { DesktopBackend } from './backend';
 
 export class UnsupportedDesktopBackend implements DesktopBackend {
-  constructor(private readonly platform = process.platform) {}
+  constructor(private readonly platform: string = process.platform) {}
 
   async capabilities(): Promise<ComputerCapabilities> {
     return {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { FakeDesktopBackend } from './fakeBackend';
-import { createComputerGuestSession, runComputerGuest } from './guest';
+import {
+  COMPUTER_MAX_SCREENSHOTS_PER_RUN,
+  createComputerGuestSession,
+  runComputerGuest,
+} from './guest';
 
 async function run(code: string, opts: { readOnly?: boolean; backend?: FakeDesktopBackend } = {}) {
   const backend = opts.backend ?? new FakeDesktopBackend();
@@ -345,7 +349,7 @@ describe('runComputerGuest', () => {
     await expect(pending).rejects.toThrow(/abort/);
   });
 
-  it('第二次 ax 默认 diff，结构相同则 unchanged', async () => {
+  it('ax 默认整树（带新 ref）；显式 diff 时结构相同则 unchanged', async () => {
     const session = createComputerGuestSession();
     const backend = new FakeDesktopBackend();
     const once = (code: string) =>
@@ -360,7 +364,11 @@ describe('runComputerGuest', () => {
     const first = await once('const win = await desktop.window("w1"); return await win.ax()');
     expect(String(first.returnValue)).toMatch(/\[ref=e/);
     const second = await once('const win = await desktop.window("w1"); return await win.ax()');
-    expect(String(second.returnValue)).toBe('(ax unchanged)');
+    expect(String(second.returnValue)).toMatch(/\[ref=e/);
+    const third = await once(
+      'const win = await desktop.window("w1"); return await win.ax({ diff: true })'
+    );
+    expect(String(third.returnValue)).toBe('(ax unchanged)');
   });
 
   it('find description 深色不必整树', async () => {
@@ -405,7 +413,11 @@ describe('runComputerGuest 生命周期', () => {
 
   it('await 永不 resolve 的 Promise 立即失败，不空转', async () => {
     await expect(
-      runComputerGuest({ ...base(), code: 'await new Promise(() => {}); return 1', timeoutMs: 5_000 })
+      runComputerGuest({
+        ...base(),
+        code: 'await new Promise(() => {}); return 1',
+        timeoutMs: 5_000,
+      })
     ).rejects.toThrow(/never resolves/);
   });
 
@@ -484,5 +496,19 @@ describe('runComputerGuest 生命周期', () => {
       run(`const win = await desktop.window('w1'); await win.type('secret')`, { backend })
     ).rejects.toThrow(/Touch ID or a password/);
     expect(typed).toEqual([]);
+  });
+
+  it('单次 run 只回最近几张截图，并说明省略数量', async () => {
+    const { result } = await run(
+      `const win = await desktop.window('w1'); for (let i = 0; i < 9; i++) await win.screenshot(); return 'ok'`
+    );
+    expect(result.screenshots).toHaveLength(COMPUTER_MAX_SCREENSHOTS_PER_RUN);
+    expect(result.text).toMatch(/5 earlier screenshots omitted/);
+  });
+
+  it('超长返回文本截断', async () => {
+    const { result } = await run(`return 'x'.repeat(200000)`);
+    expect(result.text.length).toBeLessThan(40_000);
+    expect(result.text).toMatch(/truncated/);
   });
 });

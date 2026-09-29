@@ -50,4 +50,12 @@ describe('computerPermissionGuideKind', () => {
       )
     ).toBe('unsupported');
   });
+
+  it('AX 不适用（unsupported）不算缺权限', () => {
+    expect(
+      computerPermissionGuideKind(
+        caps({ platform: 'win32', capturePermission: 'granted', axPermission: 'unsupported' })
+      )
+    ).toBe('ready');
+  });
 });

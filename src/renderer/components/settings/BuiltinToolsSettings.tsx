@@ -226,48 +226,67 @@ export function BuiltinToolsSettings() {
             ) : null}
             {tool.id === 'computer' && computerEnabled ? (
               <div className="space-y-2" data-settings-row="tools.computer">
-                <p className="text-muted-foreground text-xs">
-                  {t(
-                    'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.'
-                  )}
-                </p>
-                {capabilities && (
+                {capabilities && computerPermissionGuideKind(capabilities) === 'unsupported' ? (
                   <p className="text-muted-foreground text-xs">
-                    {t(
-                      capabilities.capturePermission === 'granted'
-                        ? 'Capture: granted'
-                        : 'Capture: denied'
-                    )}
-                    {' · '}
-                    {t(
-                      capabilities.axPermission === 'granted'
-                        ? 'Input/AX: granted'
-                        : 'Input/AX: denied'
-                    )}
-                    {capabilities.detail ? ` · ${capabilities.detail}` : ''}
+                    {t('This platform cannot operate the desktop yet.')}
                   </p>
+                ) : (
+                  <>
+                    {capabilities?.platform === 'darwin' && (
+                      <p className="text-muted-foreground text-xs">
+                        {t(
+                          'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.'
+                        )}
+                      </p>
+                    )}
+                    {capabilities && (
+                      <p className="text-muted-foreground text-xs">
+                        {t(
+                          capabilities.capturePermission === 'granted'
+                            ? 'Capture: granted'
+                            : 'Capture: denied'
+                        )}
+                        {capabilities.axPermission !== 'unsupported' && (
+                          <>
+                            {' · '}
+                            {t(
+                              capabilities.axPermission === 'granted'
+                                ? 'Input/AX: granted'
+                                : 'Input/AX: denied'
+                            )}
+                          </>
+                        )}
+                      </p>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setGuideOpen(true)}>
+                        {t('Show permission guide')}
+                      </Button>
+                      {capabilities?.platform === 'darwin' && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              void window.electronAPI.computer.openPermissions('screen')
+                            }
+                          >
+                            {t('Open Screen Recording settings')}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              void window.electronAPI.computer.openPermissions('accessibility')
+                            }
+                          >
+                            {t('Open Accessibility settings')}
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </>
                 )}
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setGuideOpen(true)}>
-                    {t('Show permission guide')}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void window.electronAPI.computer.openPermissions('screen')}
-                  >
-                    {t('Open Screen Recording settings')}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void window.electronAPI.computer.openPermissions('accessibility')
-                    }
-                  >
-                    {t('Open Accessibility settings')}
-                  </Button>
-                </div>
               </div>
             ) : null}
             {tool.id === 'browser' ? (
@@ -392,7 +411,7 @@ function ComputerPermissionGuideDialog({
               </p>
             </div>
           )}
-          {capabilities && kind !== 'unsupported' && (
+          {capabilities?.platform === 'darwin' && kind !== 'unsupported' && (
             <div className="space-y-2">
               <p className="text-muted-foreground text-xs">
                 {t(

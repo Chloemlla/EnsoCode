@@ -81,6 +81,7 @@ import agentWorkerPath from '../../agent/index?modulePath';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import type { ResolvedPlugins } from './claudePlugins';
+import { isComputerPlatformSupported } from './computer/support';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
@@ -594,6 +595,10 @@ export function spawnSession(
   });
   for (const id of options?.extraDisabledTools ?? []) {
     if (!disabledTools.includes(id)) disabledTools.push(id);
+  }
+  // 当前平台不能操作桌面时不下发 computer，避免模型反复调用必失败的工具
+  if (!isComputerPlatformSupported() && !disabledTools.includes('computer')) {
+    disabledTools.push('computer');
   }
   const loadHarnessAssets = state?.loadHarnessAssets === true;
   const trustedProjectCode = projectTrustedCode(state?.projects, projectId);

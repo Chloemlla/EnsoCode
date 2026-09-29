@@ -119,6 +119,7 @@ describe('createComputerTool', () => {
       },
     });
     const out = await pending;
+    expect(JSON.stringify(out.details)).not.toContain('AAAA');
     expect(out.content).toEqual([
       { type: 'image', data: 'AAAA', mimeType: 'image/png' },
       {
@@ -169,7 +170,10 @@ describe('withComputerApproval', () => {
   it('审批展示完整代码，不截断到开头几百字', async () => {
     const onRequest = vi.fn();
     const gate = new ApprovalGate('supervised', onRequest, () => {});
-    const tool = withComputerApproval(gate, createComputerTool(new ComputerInvoker(identity, vi.fn())));
+    const tool = withComputerApproval(
+      gate,
+      createComputerTool(new ComputerInvoker(identity, vi.fn()))
+    );
     const code = `${'// padding\n'.repeat(60)}await desktop.app("Terminal")`;
     void tool.execute('c1', { code }, undefined, undefined, undefined as never).catch(() => {});
     expect(onRequest.mock.calls[0]?.[0]?.summary).toBe(code);
