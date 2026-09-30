@@ -44,9 +44,15 @@ export function matchWindow(window: ComputerWindowInfo, filter: Record<string, u
   return true;
 }
 
+/** 输入法指示器、补全气泡等也是该 App 的窗口；有正常大小的窗口时不选它们 */
+function isSubstantial(window: ComputerWindowInfo): boolean {
+  return window.width >= 120 && window.height >= 80;
+}
+
 export function pickMatchedWindow(matched: ComputerWindowInfo[]): ComputerWindowInfo | undefined {
-  if (matched.length === 0) return undefined;
-  return matched.find((window) => window.focused) ?? matched[0];
+  const substantial = matched.filter(isSubstantial);
+  const pool = substantial.length > 0 ? substantial : matched;
+  return pool.find((window) => window.focused) ?? pool[0];
 }
 
 export function resolveWindow(

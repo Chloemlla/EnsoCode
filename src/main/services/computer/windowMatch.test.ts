@@ -141,4 +141,20 @@ describe('windowMatch', () => {
     expect(matchWindow(settings, { app: '系统设置' })).toBe(true);
     expect(resolveWindow([settings], 'System Settings')?.id).toBe('s1');
   });
+
+  it('同 App 有输入法指示器等小浮窗时选真正的窗口', () => {
+    const doc: ComputerWindowInfo = {
+      id: 'doc',
+      app: '文本编辑',
+      title: 't.txt',
+      x: 146,
+      y: 71,
+      width: 656,
+      height: 422,
+    };
+    const bubble: ComputerWindowInfo = { ...doc, id: 'bubble', title: '', width: 56, height: 22 };
+    expect(pickMatchedWindow([bubble, doc])?.id).toBe('doc');
+    expect(pickMatchedWindow([{ ...bubble, focused: true }, doc])?.id).toBe('doc');
+    expect(pickMatchedWindow([bubble])?.id).toBe('bubble');
+  });
 });
