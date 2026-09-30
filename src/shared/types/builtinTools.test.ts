@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  addComputerDefaultOff,
   BUILTIN_TOOLS,
   DEFAULT_DISABLED_BUILTIN_TOOLS,
   effectiveDisabledBuiltinTools,
@@ -36,7 +37,7 @@ describe('isBuiltinToolEnabledForProject', () => {
 
 describe('effectiveDisabledBuiltinTools', () => {
   it('缺字段时用默认关闭列表：memory 默认关，其余全开', () => {
-    expect(effectiveDisabledBuiltinTools(undefined)).toEqual(['memory']);
+    expect(effectiveDisabledBuiltinTools(undefined)).toEqual(['memory', 'computer']);
     for (const id of DEFAULT_DISABLED_BUILTIN_TOOLS) {
       expect(
         BUILTIN_TOOLS.some((tool) => tool.id === id),
@@ -104,5 +105,32 @@ describe('projectDisabledBuiltinTools', () => {
     expect(projectDisabledBuiltinTools(projects, 'missing')).toBeUndefined();
     expect(projectDisabledBuiltinTools(projects, undefined)).toBeUndefined();
     expect(projectDisabledBuiltinTools(undefined, 'p1')).toBeUndefined();
+  });
+});
+
+describe('addComputerDefaultOff', () => {
+  it('全局与项目覆盖的已落盘禁用列表都补上 computer，不捏造缺失字段', () => {
+    expect(
+      addComputerDefaultOff({
+        theme: 'dark',
+        disabledBuiltinTools: ['memory'],
+        projects: [
+          { id: 'p1', disabledBuiltinTools: ['browser'] },
+          { id: 'p2', disabledBuiltinTools: ['computer'] },
+          { id: 'p3' },
+          null,
+        ],
+      })
+    ).toEqual({
+      theme: 'dark',
+      disabledBuiltinTools: ['memory', 'computer'],
+      projects: [
+        { id: 'p1', disabledBuiltinTools: ['browser', 'computer'] },
+        { id: 'p2', disabledBuiltinTools: ['computer'] },
+        { id: 'p3' },
+        null,
+      ],
+    });
+    expect(addComputerDefaultOff({ theme: 'dark' })).toEqual({ theme: 'dark' });
   });
 });

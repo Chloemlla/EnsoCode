@@ -1,7 +1,11 @@
 import { type AccentColor, resolveAccentColor } from '@shared/accentColor';
 import { resolveCompactStrategy } from '@shared/compactStrategy';
 import { type EditMode, resolveEditMode } from '@shared/types';
-import { effectiveSubagentAllowedModes } from '@shared/types/builtinTools';
+import {
+  addComputerDefaultOff,
+  COMPUTER_DEFAULT_OFF_SETTINGS_VERSION,
+  effectiveSubagentAllowedModes,
+} from '@shared/types/builtinTools';
 import { isSpeechModelId } from '@shared/types/speech';
 
 /**
@@ -16,7 +20,7 @@ import { isSpeechModelId } from '@shared/types/speech';
  */
 
 /** 当前持久化数据版本；改数据形状时 +1 并在 `migrateSettings` 里加一段 */
-export const SETTINGS_VERSION = 13;
+export const SETTINGS_VERSION = 14;
 
 export function mergeSettingsState<T extends { editMode: EditMode; accentColor: AccentColor }>(
   persisted: unknown,
@@ -123,6 +127,9 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
   }
   if (version < 13) {
     state = migrateAgentToolModes(state);
+  }
+  if (version < COMPUTER_DEFAULT_OFF_SETTINGS_VERSION) {
+    state = addComputerDefaultOff(state);
   }
   return state;
 }

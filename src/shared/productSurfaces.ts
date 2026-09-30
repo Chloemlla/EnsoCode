@@ -503,6 +503,11 @@ export const PRODUCT_SURFACE_INVENTORY = {
     kind: 'action',
     label: 'Search and capture long-term memory',
   },
+  'coding-tools.computer': {
+    domain: 'coding-tools',
+    kind: 'action',
+    label: 'Use host desktop computer',
+  },
   'coding-tools.plan': {
     domain: 'coding-tools',
     kind: 'action',

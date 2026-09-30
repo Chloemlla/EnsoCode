@@ -317,6 +317,8 @@ export const IPC_CHANNELS = {
   BROWSER_DESIGN_MODE_EVENT: 'browser:design-mode-event',
 
   // Auto updater
+  COMPUTER_CAPABILITIES: 'computer:capabilities',
+  COMPUTER_OPEN_PERMISSIONS: 'computer:open-permissions',
   UPDATER_CHECK: 'updater:check',
   UPDATER_DOWNLOAD_UPDATE: 'updater:downloadUpdate',
   UPDATER_QUIT_AND_INSTALL: 'updater:quitAndInstall',

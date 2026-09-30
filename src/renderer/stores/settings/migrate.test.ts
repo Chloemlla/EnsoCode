@@ -133,7 +133,7 @@ describe('设置持久化迁移', () => {
   it('v7 → v8 把已落盘的空 disabledBuiltinTools 补上 memory 默认关', () => {
     expect(migrateSettings({ theme: 'dark', disabledBuiltinTools: [] }, 7)).toEqual({
       theme: 'dark',
-      disabledBuiltinTools: ['memory'],
+      disabledBuiltinTools: ['memory', 'computer'],
       subagentAllowedModes: ['task', 'coworker'],
       editMode: 'apply_patch',
     });
@@ -141,7 +141,7 @@ describe('设置持久化迁移', () => {
 
   it('v7 → v8 已有其它禁用项时只追加 memory，不覆盖用户选择', () => {
     expect(migrateSettings({ disabledBuiltinTools: ['browser'] }, 7)).toEqual({
-      disabledBuiltinTools: ['browser', 'memory'],
+      disabledBuiltinTools: ['browser', 'memory', 'computer'],
       subagentAllowedModes: ['task', 'coworker'],
       editMode: 'apply_patch',
     });
@@ -150,8 +150,7 @@ describe('设置持久化迁移', () => {
   it('v7 → v8 已经关掉 memory 则不重复追加', () => {
     const state = { disabledBuiltinTools: ['memory', 'browser'] };
     expect(migrateSettings(state, 7)).toEqual({
-      ...state,
-      disabledBuiltinTools: ['memory', 'browser'],
+      disabledBuiltinTools: ['memory', 'browser', 'computer'],
       subagentAllowedModes: ['task', 'coworker'],
       editMode: 'apply_patch',
     });
@@ -225,7 +224,7 @@ describe('设置持久化迁移', () => {
     'v12 → v13 把旧 task/coworker 开关迁为统一 mode 掩码（%j）',
     (legacy, unifiedDisabled, modes) => {
       expect(migrateSettings({ disabledBuiltinTools: [...legacy] }, 12)).toEqual({
-        disabledBuiltinTools: unifiedDisabled,
+        disabledBuiltinTools: [...unifiedDisabled, 'computer'],
         subagentAllowedModes: modes,
       });
     }
@@ -245,17 +244,17 @@ describe('设置持久化迁移', () => {
         12
       )
     ).toEqual({
-      disabledBuiltinTools: ['browser'],
+      disabledBuiltinTools: ['browser', 'computer'],
       subagentAllowedModes: ['task', 'coworker'],
       projects: [
         {
           id: 'p1',
-          disabledBuiltinTools: [],
+          disabledBuiltinTools: ['computer'],
           subagentAllowedModes: ['task'],
         },
         {
           id: 'p2',
-          disabledBuiltinTools: [],
+          disabledBuiltinTools: ['computer'],
           subagentAllowedModes: ['coworker'],
         },
         { id: 'p3' },
@@ -308,6 +307,19 @@ describe('设置持久化迁移', () => {
   it('已是当前版本时原样返回，不重复搬运', () => {
     const current = { providers: [{ id: 'p1', oauthAccountKey: 'anthropic#2' }] };
     expect(migrateSettings(current, SETTINGS_VERSION)).toBe(current);
+  });
+
+  it('v13 → v14 把已落盘的 disabledBuiltinTools 补上 computer 默认关', () => {
+    expect(migrateSettings({ disabledBuiltinTools: ['memory'] }, 13)).toEqual({
+      disabledBuiltinTools: ['memory', 'computer'],
+    });
+    expect(migrateSettings({ disabledBuiltinTools: ['memory', 'computer'] }, 13)).toEqual({
+      disabledBuiltinTools: ['memory', 'computer'],
+    });
+    expect(migrateSettings({ theme: 'dark' }, 13)).toEqual({ theme: 'dark' });
+    expect(
+      migrateSettings({ projects: [{ id: 'p1', disabledBuiltinTools: ['browser'] }] }, 13)
+    ).toEqual({ projects: [{ id: 'p1', disabledBuiltinTools: ['browser', 'computer'] }] });
   });
 
   // 持久化文件是用户机器上的真实文件，可能被手改坏或来自更早的残缺版本

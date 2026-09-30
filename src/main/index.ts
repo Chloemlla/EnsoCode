@@ -17,6 +17,7 @@ import {
   shouldQuitOnWindowAllClosed,
 } from './services/appServerMode';
 import { browserHost } from './services/browserHost';
+import { computerHost } from './services/computerHost';
 import { releaseLocalChatSlot } from './services/llama/chat';
 import { disposeLlamaRuntime, llamaRuntimeActive } from './services/llama/runtime';
 import {
@@ -166,6 +167,7 @@ if (!gotTheLock) {
     stopPairGuest();
     // 内嵌浏览器 Cookie / storage 落盘后再关 guest 页
     void browserHost.dispose();
+    computerHost.closeAll();
     closeMemoryDb();
   });
   // node-pty TSFN / llama AsyncWorker 在 FreeEnvironment 期间回调会 SIGABRT；

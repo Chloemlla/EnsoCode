@@ -35,6 +35,15 @@ files:
   # require('@node-datachannel/<platform>') 在安装包里找不到（Windows 直连会降级中继）
   - from: node_modules/.pnpm/node-datachannel@0.33.2/node_modules/@node-datachannel
     to: node_modules/@node-datachannel
+  # koffi 同理：绑定在 optional 兄弟包 @koromix/koffi-<platform>-<arch>，
+  # koffi 按 require('@koromix/...') 与 node_modules/@koromix 相对路径查找
+  - from: node_modules/.pnpm/koffi@3.3.1/node_modules/@koromix
+    to: node_modules/@koromix
+  # 头文件、C++ 源码、文档与安装脚本；运行时只用 index/indirect 与 src/koffi 下的 js
+  - '!node_modules/koffi/{vendor,lib,doc}/**'
+  - '!node_modules/koffi/cnoke.cjs'
+  - '!node_modules/koffi/src/koffi/src/trampolines.cjs'
+  - '!node_modules/koffi/src/**/*.{cc,hh,inc,def,S,asm,txt}'
   # 收集器在 Windows 上不跟进 pnpm junction，漏掉 sqlite-vec 平台包（向量检索退回扫 BLOB）；
   # 直接拷真实目录供 require.resolve 定位（dll 本体见 extraResources），其他平台没有该目录时跳过
   - from: node_modules/.pnpm/sqlite-vec-windows-x64@0.1.9/node_modules/sqlite-vec-windows-x64
@@ -77,17 +86,22 @@ asarUnpack:
   # onnxruntime-node 的 .node 绑定与 bin/ 下的 ORT 动态库同样不能从 asar 内加载（onnx.ts 动态 require）
   - node_modules/onnxruntime-node/**/*.node
   - node_modules/onnxruntime-node/bin/**
+  # koffi 绑定在 @koromix 平台包内
+  - node_modules/@koromix/**/*.node
   # node-datachannel 平台预编译；asar 内 dlopen 失败
   - node_modules/@node-datachannel/**/*.node
   # ripgrep 二进制不能从 asar 内执行
   - node_modules/@vscode/ripgrep/bin/**
 mac:
   category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
   # electron-builder 默认三项 + 麦克风
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: EnsoCode uses the microphone for voice input. Speech is transcribed locally on this Mac.
+    NSAppleEventsUsageDescription: EnsoCode uses Apple Events to activate app windows for the computer tool.
   target:
     - dmg
     - zip

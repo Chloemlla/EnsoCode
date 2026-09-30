@@ -1839,6 +1839,52 @@ describe('memory-invoke / memory-result', () => {
   });
 });
 
+describe('computer-invoke / computer-result', () => {
+  const invoke = {
+    type: 'computer-invoke',
+    identity: parent,
+    seq: 5,
+    requestId: 'cu-1',
+    op: 'run',
+    params: { code: 'return 1', readOnly: true, timeoutSec: 12 },
+  };
+  const result = {
+    type: 'computer-result',
+    identity: parent,
+    requestId: 'cu-1',
+    ok: true,
+    result: { text: '1', screenshots: [] },
+  };
+
+  it('computer-invoke 只接受 run', () => {
+    expect(parseAgentWorkerEvent(invoke)).toEqual(invoke);
+    expect(parseAgentWorkerEvent({ ...invoke, identity: child })).not.toBeNull();
+    expect(parseAgentWorkerEvent({ ...invoke, op: 'click' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...invoke, extra: 1 })).toBeNull();
+  });
+
+  it('computer-cancel 只带 requestId', () => {
+    const cancel = { type: 'computer-cancel', identity: parent, seq: 6, requestId: 'cu-1' };
+    expect(parseAgentWorkerEvent(cancel)).toEqual(cancel);
+    expect(parseAgentWorkerEvent({ ...cancel, requestId: '' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...cancel, extra: 1 })).toBeNull();
+  });
+
+  it('computer-result 成功带 result，失败带 error，字段互斥', () => {
+    expect(parseAgentCommand(result)).toEqual(result);
+    const failed = {
+      type: 'computer-result',
+      identity: parent,
+      requestId: 'cu-1',
+      ok: false,
+      error: 'boom',
+    };
+    expect(parseAgentCommand(failed)).toEqual(failed);
+    expect(parseAgentCommand({ ...result, ok: false })).toBeNull();
+    expect(parseAgentCommand({ ...failed, ok: true })).toBeNull();
+  });
+});
+
 describe('tool-output 事件跨进程边界', () => {
   const event = {
     type: 'tool-output',

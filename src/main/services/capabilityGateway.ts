@@ -37,6 +37,7 @@ import {
   type Preset,
   type SshConnection,
 } from '@shared/types';
+import { persistedSettingsState } from '@shared/types/builtinTools';
 import type { ModelMetaResult } from '@shared/types/modelMeta';
 import type {
   OauthAccountUsage,
@@ -197,8 +198,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function settingsState(settings: Record<string, unknown> | null): Record<string, unknown> {
-  const persisted = asRecord(settings?.['enso-settings']);
-  return asRecord(persisted?.state) ?? {};
+  return persistedSettingsState(settings?.['enso-settings']) ?? {};
 }
 
 function providersOf(services: CapabilityDomainServices): ModelProvider[] {
@@ -1226,6 +1226,11 @@ export function createCapabilityHandlers(
       if (!id || typeof params.enabled !== 'boolean') return invalid('id and enabled are required');
       if (!BUILTIN_TOOLS.some((tool) => tool.id === id))
         return invalid(`Unknown built-in tool: ${id}`);
+      // 桌面键鼠不可撤回且需系统授权：只能由用户在设置页打开
+      if (id === 'computer' && params.enabled)
+        return invalid(
+          'The computer tool can only be turned on by the user in Settings → Built-in tools.'
+        );
       const disabled = new Set(
         effectiveDisabledBuiltinTools(settingsState(services.readSettings()).disabledBuiltinTools)
       );

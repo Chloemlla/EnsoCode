@@ -51,6 +51,7 @@ vi.mock('./services/localImageProtocol', () => ({
   registerLocalImageSchemePrivileges: vi.fn(),
 }));
 vi.mock('./services/appMenu', () => ({ installAppMenu: vi.fn() }));
+vi.mock('./services/computerHost', () => ({ computerHost: { closeAll: vi.fn() } }));
 vi.mock('./services/pairHost', () => ({
   startPairHost: vi.fn(() => mocks.order.push('pair')),
   stopPairHost: vi.fn(),

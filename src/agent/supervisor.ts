@@ -196,6 +196,7 @@ import { createTodoTool, TodoStaleReminder } from './todo';
 import { decorateSessionTools } from './toolDecorators';
 import { ToolOutputBudget } from './toolOutputBudget';
 import { BrowserInvoker, createBrowserTools, withNavigateApproval } from './tools/browser';
+import { ComputerInvoker, createComputerTool, withComputerApproval } from './tools/computer';
 import { createEnsoAppTool, EnsoAppInvoker } from './tools/ensoApp';
 import { createEnsoCapabilitiesTool } from './tools/ensoCapabilities';
 import { createMemoryTools, MemoryInvoker } from './tools/memory';
@@ -263,6 +264,7 @@ interface ManagedSession {
   memory?: MemoryInvoker;
   agentControl?: AgentControlInvoker;
   adaptiveDowngraded: boolean;
+  computer?: ComputerInvoker;
   /** 最近一次 auto_retry_start 携带的原始错误（取消重试时的终态错误文案） */
   lastRetryError?: string;
   /** 已见终态 agent_end、待 agent_settled 收口；failTurn 等提前收口时清掉，settled 不再重复收 */
@@ -785,6 +787,7 @@ export class SessionSupervisor {
         (managed.agentControl?.pendingCount ?? 0) > 0 ||
         (managed.workflowRuns?.size ?? 0) > 0 ||
         managed.pendingTaskReminders.length > 0 ||
+        (managed.computer?.pendingCount ?? 0) > 0 ||
         this.bgTasks.snapshot(id).some((task) => task.status === 'running'),
       hasChildren:
         managed.coworkers.size > 0 ||
@@ -841,6 +844,7 @@ export class SessionSupervisor {
     managed.browser?.cancelAll('Session released');
     managed.memory?.cancelAll('Session released');
     managed.agentControl?.close('Session released');
+    managed.computer?.cancelAll('Session released');
     try {
       await managed.session.abort();
     } catch {}
@@ -885,6 +889,7 @@ export class SessionSupervisor {
                 (managed.ensoApp?.pendingCount ?? 0) > 0 ||
                 (managed.browser?.pendingCount ?? 0) > 0 ||
                 (managed.agentControl?.pendingCount ?? 0) > 0 ||
+                (managed.computer?.pendingCount ?? 0) > 0 ||
                 this.bgTasks
                   .snapshot(managed.identity.sessionId)
                   .some((task) => task.status === 'running')
@@ -980,7 +985,9 @@ export class SessionSupervisor {
     const identity =
       command.type === 'capability-result'
         ? command.child
-        : command.type === 'browser-result' || command.type === 'memory-result'
+        : command.type === 'browser-result' ||
+            command.type === 'memory-result' ||
+            command.type === 'computer-result'
           ? command.identity
           : command.type === 'dismiss-child' ||
               command.type === 'dismiss-coworker' ||
@@ -1319,6 +1326,13 @@ export class SessionSupervisor {
         }
         return;
       }
+      case 'computer-result': {
+        const managed = this.must(command.identity);
+        if (!managed.computer?.resolve(command)) {
+          console.warn(`[computer] dropped result for unknown request ${command.requestId}`);
+        }
+        return;
+      }
       case 'append-session-custom-entry': {
         const managed = this.must(command.identity);
         managed.session.sessionManager.appendCustomEntry('enso-agent-session', command.entry);
@@ -1494,6 +1508,7 @@ export class SessionSupervisor {
         managed.browser?.cancelAll('Browser action aborted');
         managed.memory?.cancelAll('Memory action aborted');
         managed.currentTurnId = undefined;
+        managed.computer?.cancelAll('Computer action aborted');
         // 立即收口投影：不 await session.abort()（内部 waitForIdle 会一直等到工具/流
         // 真正结束，工具不响应 signal 时永远等不到，UI 就卡在 running 上）。
         // 中断信号发出即视为本轮终止，后续 agent_end 回流由 status 守卫幂等吸收。
@@ -2123,6 +2138,36 @@ export class SessionSupervisor {
       customDir: this.options.workflowDir,
     });
     const workflowRuns = new Map<string, AbortController>();
+    const computer =
+      toolEnabled('computer') && !remote
+        ? new ComputerInvoker(
+            identity,
+            (request) => {
+              const managed = managedRef ?? this.sessions.get(sessionId);
+              if (!managed) throw new Error('Session is not ready for computer actions.');
+              this.options.emit({
+                type: 'computer-invoke',
+                identity: managed.identity,
+                seq: ++managed.seq,
+                requestId: request.requestId,
+                op: request.op,
+                params: request.params,
+              });
+            },
+            {
+              emitCancel: (requestId) => {
+                const managed = managedRef ?? this.sessions.get(sessionId);
+                if (!managed) return;
+                this.options.emit({
+                  type: 'computer-cancel',
+                  identity: managed.identity,
+                  seq: ++managed.seq,
+                  requestId,
+                });
+              },
+            }
+          )
+        : undefined;
     const sessionTools = [
       ...buildCoreTools(),
       ...(browser
@@ -2131,6 +2176,7 @@ export class SessionSupervisor {
       ...(memory ? createMemoryTools(memory, { language: memoryLanguage }) : []),
       ...(toolEnabled('web') ? createWebTools() : []),
       ...(toolEnabled('todo') ? [createTodoTool((todos) => todoReminder.update(todos))] : []),
+      ...(computer ? [withComputerApproval(gate, createComputerTool(computer))] : []),
       ...(toolEnabled('ask_user') ? [createAskTool(askManager)] : []),
       ...(toolEnabled('subagent') ? [unifiedSubagentTool] : []),
       ...(toolEnabled('workflow') && toolEnabled('subagent')
@@ -2250,6 +2296,7 @@ export class SessionSupervisor {
       if (planMode !== undefined) plan.setActive(planMode);
       else this.emitPlanState(managed);
     }
+    managedRef.computer = computer;
     this.options.emit({
       type: 'parent-ready',
       identity,
@@ -3723,6 +3770,7 @@ export class SessionSupervisor {
       managed.memory?.cancelAll('Enso worker shutdown');
       managed.agentControl?.close('Enso worker shutdown');
       managed.currentTurnId = undefined;
+      managed.computer?.cancelAll('Enso worker shutdown');
       // pi 的 bash 是 detached 进程组，只在中断信号上 killProcessTree；SDK 未导出退出清理，
       // 这里同步触发中断（不等 waitForIdle），否则 worker 退出后命令成孤儿进程
       void managed.session.abort().catch(() => {});

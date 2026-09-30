@@ -9,6 +9,7 @@ import { createSubmitPlanTool } from './planMode';
 import { createUnifiedSubagentTool } from './subagent';
 import { createTodoTool } from './todo';
 import { BrowserInvoker, createBrowserTools } from './tools/browser';
+import { ComputerInvoker, createComputerTool } from './tools/computer';
 import { createMemoryTools, MemoryInvoker } from './tools/memory';
 import { createWebTools } from './tools/web';
 
@@ -67,5 +68,6 @@ export function snapshotBuiltinOccupancyTools(input?: {
       knownIds: () => [],
     } as never).map(fields),
     isolated_sandbox: [fields(createIsolatedSandboxTool({ getTools: () => [] }))],
+    computer: [fields(createComputerTool(new ComputerInvoker(noopIdentity, () => {})))],
   };
 }

@@ -38,6 +38,7 @@ const FORBIDDEN_GUEST_TOOLS = new Set([
   'todo',
   'task_output',
   'task_stop',
+  'computer',
 ]);
 
 const SHELL_HEAD =

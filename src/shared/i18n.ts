@@ -1340,6 +1340,29 @@ export const zhTranslations: Record<string, string> = {
     '保存后不再加载，从下一个会话开始生效。',
   'Web search': '联网搜索',
   'Web fetch': '网页抓取',
+  Computer: '电脑操控',
+  'Host desktop: list windows, screenshot, accessibility tree, and input. Default off. Not the built-in browser.':
+    '宿主桌面:列窗口、截图、无障碍树与键鼠。默认关闭。不是内嵌浏览器。',
+  'Operate the host desktop with screenshots, accessibility, and input.':
+    '用截图、无障碍树和键鼠操作宿主桌面。',
+  'Enso never receives host-desktop computer tools.': 'Enso 不会拿到宿主桌面 computer 工具。',
+  'Ask the coding agent to use the computer tool.': '请让编程 agent 使用 computer 工具。',
+  'Screen Recording': '屏幕录制',
+  Accessibility: '辅助功能',
+  'Open Screen Recording settings': '打开屏幕录制设置',
+  'Open Accessibility settings': '打开辅助功能设置',
+  'Computer needs Screen Recording to capture windows and Accessibility to inspect or click them. Grant both to EnsoCode, then restart the app.':
+    '电脑操控需要屏幕录制才能截窗，需要辅助功能才能读无障碍树或点击。请把这两项授权给 EnsoCode，然后重启应用。',
+  'Grant Computer permissions': '授权电脑操控权限',
+  'Show permission guide': '打开权限引导',
+  'The agent can screenshot windows and control the mouse and keyboard. Grant Screen Recording and Accessibility to EnsoCode, then restart. Only new sessions pick up the tool.':
+    'Agent 可以截取窗口并控制键鼠。请把屏幕录制和辅助功能授权给 EnsoCode，然后重启。只有新会话会拿到这个工具。',
+  'Computer is ready. Start a new session to use it.': '电脑操控已就绪。开一个新会话即可使用。',
+  'Capture: granted': '截屏:已授权',
+  'Capture: denied': '截屏:未授权',
+  'Input/AX: granted': '键鼠/AX:已授权',
+  'Input/AX: denied': '键鼠/AX:未授权',
+  'This platform cannot operate the desktop yet.': '当前系统还不能操作桌面。',
   'QuickJS sandbox: write JavaScript that calls session tools (including edits) in one cell':
     'QuickJS 沙箱:用 JavaScript 在一个 cell 里调用会话工具(含编辑)',
   '(log unavailable)': '(日志不可用)',
