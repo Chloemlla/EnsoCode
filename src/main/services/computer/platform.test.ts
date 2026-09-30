@@ -22,22 +22,17 @@ import { UnsupportedDesktopBackend } from './unsupported';
 import { WindowsDesktopBackend } from './win32';
 
 describe('createDesktopBackend', () => {
-  it('本版只有 macOS 默认可用，Windows 需显式开启实验开关', () => {
-    expect(createDesktopBackend('darwin', {})).toBeInstanceOf(MacosDesktopBackend);
-    expect(createDesktopBackend('win32', {})).toBeInstanceOf(UnsupportedDesktopBackend);
-    expect(createDesktopBackend('linux', {})).toBeInstanceOf(UnsupportedDesktopBackend);
-    const experimental = { ENSO_EXPERIMENTAL_COMPUTER_WINDOWS: '1' };
-    expect(createDesktopBackend('win32', experimental)).toBeInstanceOf(WindowsDesktopBackend);
-    expect(isComputerPlatformSupported('darwin', {})).toBe(true);
-    expect(isComputerPlatformSupported('win32', {})).toBe(false);
-    expect(isComputerPlatformSupported('win32', experimental)).toBe(true);
-    expect(isComputerPlatformSupported('linux', experimental)).toBe(false);
+  it('macOS 与 Windows 可用，其它平台不支持', () => {
+    expect(createDesktopBackend('darwin')).toBeInstanceOf(MacosDesktopBackend);
+    expect(createDesktopBackend('win32')).toBeInstanceOf(WindowsDesktopBackend);
+    expect(createDesktopBackend('linux')).toBeInstanceOf(UnsupportedDesktopBackend);
+    expect(isComputerPlatformSupported('darwin')).toBe(true);
+    expect(isComputerPlatformSupported('win32')).toBe(true);
+    expect(isComputerPlatformSupported('linux')).toBe(false);
   });
 
-  it('Windows（实验）能截图，但还没有 AX', async () => {
-    const caps = await createDesktopBackend('win32', {
-      ENSO_EXPERIMENTAL_COMPUTER_WINDOWS: '1',
-    }).capabilities();
+  it('Windows 能截图，但还没有 AX', async () => {
+    const caps = await createDesktopBackend('win32').capabilities();
     expect(caps.platform).toBe('win32');
     expect(caps.capture).toBe(true);
     expect(caps.ax).toBe(false);
