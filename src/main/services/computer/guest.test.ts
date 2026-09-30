@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { withAxErrors } from './axErrors';
+import { AX_WORKER_EXITED } from './axWorkerClient';
 import { FakeDesktopBackend } from './fakeBackend';
 import {
   COMPUTER_MAX_SCREENSHOTS_PER_RUN,
@@ -172,6 +174,17 @@ describe('runComputerGuest', () => {
       { backend, readOnly: true }
     );
     expect(result.returnValue).toMatchObject({ width: 100, height: 50, target: 'w1' });
+    expect(String((result.returnValue as { ax: string }).ax)).toMatch(/worker-exited/);
+    expect(result.screenshots).toHaveLength(1);
+  });
+
+  it('后端已翻译成 ax-worker-exited 时 getState 同样软失败', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.axSnapshot = () => withAxErrors(() => Promise.reject(new Error(AX_WORKER_EXITED)));
+    const { result } = await run(
+      `const win = await desktop.window('w1'); return await win.getState()`,
+      { backend, readOnly: true }
+    );
     expect(String((result.returnValue as { ax: string }).ax)).toMatch(/worker-exited/);
     expect(result.screenshots).toHaveLength(1);
   });

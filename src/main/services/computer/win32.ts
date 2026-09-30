@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { AxRegistry, axHandleEpoch, isAxStaleHandleError } from '@shared/computer/axRegistry';
+import { AxRegistry, axHandleEpoch } from '@shared/computer/axRegistry';
 import type { AxTreeNode } from '@shared/computer/axTree';
-import { BackgroundUnavailableError, ComputerError, StaleRefError } from '@shared/computer/errors';
+import { BackgroundUnavailableError, ComputerError } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
 import type { ComputerCapabilities, ComputerWindowInfo } from '@shared/computer/types';
 import {
@@ -13,6 +13,7 @@ import {
   screen,
   shell,
 } from 'electron';
+import { withAxErrors } from './axErrors';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
 import { AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
@@ -257,19 +258,10 @@ export class WindowsDesktopBackend implements DesktopBackend {
     await execFileAsync('cmd.exe', ['/c', 'start', '', launch.target], { windowsHide: true });
   }
 
-  private async withAxErrors<T>(run: () => Promise<T>, ref?: string): Promise<T> {
-    try {
-      return await run();
-    } catch (error) {
-      if (ref && isAxStaleHandleError(error)) throw new StaleRefError(ref);
-      throw error;
-    }
-  }
-
   async axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }) {
     const native = await this.requireNative();
     const generation = this.registry.beginSnapshot(target);
-    const nodes = await this.withAxErrors(() =>
+    const nodes = await withAxErrors(() =>
       native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH))
     );
     const attach = (node: AxTreeNode): AxTreeNode => {
@@ -292,7 +284,7 @@ export class WindowsDesktopBackend implements DesktopBackend {
     const native = await this.requireNative();
     const generation = this.registry.beginSnapshot(target);
     try {
-      const nodes = await this.withAxErrors(() => native.axQuery(target, query));
+      const nodes = await withAxErrors(() => native.axQuery(target, query));
       return nodes.map((node) => ({
         ...node,
         ref: this.registry.register(target, generation, node.ref),
@@ -312,32 +304,30 @@ export class WindowsDesktopBackend implements DesktopBackend {
 
   async axElementAt(screenX: number, screenY: number) {
     const native = await this.requireNative();
-    return this.registerDesktopNode(
-      await this.withAxErrors(() => native.axElementAt(screenX, screenY))
-    );
+    return this.registerDesktopNode(await withAxErrors(() => native.axElementAt(screenX, screenY)));
   }
 
   async axFocused() {
     const native = await this.requireNative();
-    return this.registerDesktopNode(await this.withAxErrors(() => native.axFocused()));
+    return this.registerDesktopNode(await withAxErrors(() => native.axFocused()));
   }
 
   async axNode(ref: string) {
     const handle = this.registry.resolve(ref);
     const native = await this.requireNative();
-    return { ...(await this.withAxErrors(() => native.axNode(handle), ref)), ref };
+    return { ...(await withAxErrors(() => native.axNode(handle), ref)), ref };
   }
 
   async axAttributes(ref: string) {
     const native = await this.requireNative();
     const handle = this.registry.resolve(ref);
-    return this.withAxErrors(() => native.axAttributes(handle), ref);
+    return withAxErrors(() => native.axAttributes(handle), ref);
   }
 
   async axChildren(ref: string) {
     const native = await this.requireNative();
     const handle = this.registry.resolve(ref);
-    const children = await this.withAxErrors(() => native.axChildren(handle), ref);
+    const children = await withAxErrors(() => native.axChildren(handle), ref);
     return children.map((child) => ({
       ...child,
       ref: this.registry.adopt(ref, child.ref),
@@ -351,19 +341,19 @@ export class WindowsDesktopBackend implements DesktopBackend {
   async axPerform(ref: string, action: string) {
     const native = await this.requireNative();
     const handle = this.registry.resolve(ref);
-    await this.withAxErrors(() => native.axPerform(handle, action), ref);
+    await withAxErrors(() => native.axPerform(handle, action), ref);
   }
 
   async axSetValue(ref: string, value: string) {
     const native = await this.requireNative();
     const handle = this.registry.resolve(ref);
-    await this.withAxErrors(() => native.axSetValue(handle, value), ref);
+    await withAxErrors(() => native.axSetValue(handle, value), ref);
   }
 
   async axFocus(ref: string) {
     const native = await this.requireNative();
     const handle = this.registry.resolve(ref);
-    await this.withAxErrors(() => native.axFocus(handle), ref);
+    await withAxErrors(() => native.axFocus(handle), ref);
   }
 
   async axClick(ref: string) {

@@ -1,12 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { AxRegistry, axHandleEpoch, isAxStaleHandleError } from '@shared/computer/axRegistry';
+import { AxRegistry, axHandleEpoch } from '@shared/computer/axRegistry';
 import type { AxTreeNode } from '@shared/computer/axTree';
 import {
   BackgroundUnavailableError,
   ComputerError,
   PermissionError,
-  StaleRefError,
 } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
 import type {
@@ -16,9 +15,9 @@ import type {
 } from '@shared/computer/types';
 import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
 import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
+import { withAxErrors } from './axErrors';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
 import { AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
-import { AX_WORKER_EXITED } from './axWorkerClient';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { resolveClickRoute } from './clickRoute';
 import { loadMacosNative, type MacosNative } from './macosNative';
@@ -37,25 +36,6 @@ async function capturePermission(): Promise<ComputerPermissionState> {
 }
 
 const AX_DESKTOP_TARGET = 'desktop';
-
-function translateAxError(error: unknown, ref?: string): unknown {
-  if (ref && isAxStaleHandleError(error)) return new StaleRefError(ref);
-  if (error instanceof Error && error.message === AX_WORKER_EXITED) {
-    return new ComputerError(
-      'ax-worker-exited',
-      'AX worker exited unexpectedly; retry, or use screenshot coordinates'
-    );
-  }
-  return error;
-}
-
-async function withAxErrors<T>(run: () => Promise<T>, ref?: string): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    throw translateAxError(error, ref);
-  }
-}
 
 function skyClickCanHonor(opts?: PointerOptions): boolean {
   return (
