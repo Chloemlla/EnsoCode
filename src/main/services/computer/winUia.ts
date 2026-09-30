@@ -102,40 +102,74 @@ export function createWinUiaBridge(raw: WinUiaRaw): AxJobBridge {
     }
   };
 
+  const bfs = (
+    root: unknown,
+    at: { scope: string; generation: number },
+    query: Parameters<AxJobBridge['query']>[1],
+    startedAt: number
+  ): AxTreeNode[] => {
+    const found: AxTreeNode[] = [];
+    const limit = query.limit ?? 20;
+    const counter = { nodes: 0 };
+    const queue: unknown[] = [root];
+    raw.retain(root);
+    const owned = [root];
+    try {
+      while (queue.length > 0 && found.length < limit) {
+        if (axWalkDecision({ startedAt, nodeCount: counter.nodes }) !== 'continue') break;
+        const el = queue.shift();
+        if (!el) break;
+        counter.nodes += 1;
+        const lite = raw.describe(el);
+        if (axNodeMatchesQuery(lite, query)) found.push(describeNew(el, at));
+        if (found.length >= limit) break;
+        if (!axQueryShouldExpand(lite.role ?? 'AXUnknown')) continue;
+        const kids = raw.children(el);
+        owned.push(...kids);
+        queue.push(...kids.slice(0, AX_SNAPSHOT_MAX_CHILDREN));
+      }
+      return found;
+    } finally {
+      for (const el of owned) raw.release(el);
+    }
+  };
+
+  // Chromium/Electron 在第一个 UIA 客户端连上时才开始建无障碍树，第一次走树只看得到外壳；
+  // 每个窗口首次访问时在同一时间预算内再走一遍，取节点多的那次
+  const warmed = new Set<number>();
+  const firstVisit = (hwnd: number) => {
+    if (warmed.has(hwnd)) return false;
+    warmed.add(hwnd);
+    return true;
+  };
+  const hasBudget = (startedAt: number) =>
+    axWalkDecision({ startedAt, nodeCount: 0 }) === 'continue';
+
   return {
     async snapshot(hwnd, maxDepth) {
+      const first = firstVisit(hwnd);
       return withRoot(hwnd, async (root, at) => {
         const startedAt = Date.now();
-        return [await walk(root, 0, maxDepth, startedAt, { nodes: 0 }, at)];
+        const counter = { nodes: 0 };
+        const tree = await walk(root, 0, maxDepth, startedAt, counter, at);
+        if (!first || !hasBudget(startedAt)) return [tree];
+        const again = { nodes: 0 };
+        try {
+          const retry = await walk(root, 0, maxDepth, startedAt, again, at);
+          return [again.nodes > counter.nodes ? retry : tree];
+        } catch {
+          return [tree];
+        }
       });
     },
     async query(hwnd, query) {
+      const first = firstVisit(hwnd);
       return withRoot(hwnd, async (root, at) => {
-        const found: AxTreeNode[] = [];
-        const limit = query.limit ?? 20;
         const startedAt = Date.now();
-        const counter = { nodes: 0 };
-        const queue: unknown[] = [root];
-        raw.retain(root);
-        const owned = [root];
-        try {
-          while (queue.length > 0 && found.length < limit) {
-            if (axWalkDecision({ startedAt, nodeCount: counter.nodes }) !== 'continue') break;
-            const el = queue.shift();
-            if (!el) break;
-            counter.nodes += 1;
-            const lite = raw.describe(el);
-            if (axNodeMatchesQuery(lite, query)) found.push(describeNew(el, at));
-            if (found.length >= limit) break;
-            if (!axQueryShouldExpand(lite.role ?? 'AXUnknown')) continue;
-            const kids = raw.children(el);
-            owned.push(...kids);
-            queue.push(...kids.slice(0, AX_SNAPSHOT_MAX_CHILDREN));
-          }
-          return found;
-        } finally {
-          for (const el of owned) raw.release(el);
-        }
+        const found = bfs(root, at, query, startedAt);
+        if (!first || found.length >= (query.limit ?? 20) || !hasBudget(startedAt)) return found;
+        const again = bfs(root, at, query, startedAt);
+        return again.length > found.length ? again : found;
       });
     },
     async elementAt(x, y) {

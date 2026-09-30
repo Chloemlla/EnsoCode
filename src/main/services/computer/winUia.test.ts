@@ -112,3 +112,50 @@ describe('createWinUiaBridge', () => {
     expect(nodes[0].role).toBe('AXWindow');
   });
 });
+
+// Chromium/Electron 在第一个 UIA 客户端连上时才开始建无障碍树：第一次只看得到外壳
+function lazyRaw(root: FakeEl) {
+  const raw = fakeRaw(root);
+  const seen = new Set<unknown>();
+  const calls = { children: 0 };
+  const children = raw.children;
+  raw.children = (el) => {
+    calls.children += 1;
+    if (!seen.has(el)) {
+      seen.add(el);
+      return [];
+    }
+    return children(el);
+  };
+  return { raw, calls };
+}
+
+describe('createWinUiaBridge 首次访问懒建树的窗口', () => {
+  const tree: FakeEl = {
+    id: 'win',
+    role: 'AXWindow',
+    title: 'App',
+    kids: [{ id: 'btn', role: 'AXButton', title: 'Save', actions: ['press'] }],
+  };
+
+  it('第一次 snapshot 就返回完整子树', async () => {
+    const { raw } = lazyRaw(tree);
+    const nodes = await createWinUiaBridge(raw).snapshot(42, 2);
+    expect(nodes[0].children?.map((child) => child.title)).toEqual(['Save']);
+  });
+
+  it('同一窗口之后的 snapshot 只走一遍树', async () => {
+    const { raw, calls } = lazyRaw(tree);
+    const ax = createWinUiaBridge(raw);
+    await ax.snapshot(42, 2);
+    const before = calls.children;
+    await ax.snapshot(42, 2);
+    expect(calls.children - before).toBe(2);
+  });
+
+  it('第一次 query 也能找到懒建出来的控件', async () => {
+    const { raw } = lazyRaw(tree);
+    const found = await createWinUiaBridge(raw).query(42, { title: 'save', limit: 8 });
+    expect(found.map((node) => node.title)).toEqual(['Save']);
+  });
+});
