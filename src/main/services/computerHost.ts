@@ -93,16 +93,21 @@ export class ComputerHost {
       if (controller.signal.aborted) throw abortedError(controller.signal);
       if (this.sessions.get(sessionId) !== state) throw new Error('Computer session closed');
       const release = await this.acquire(sessionId, controller.signal);
-      const occupying = Boolean(this.occupancy) && !normalized.readOnly;
+      const occupancy = normalized.readOnly ? undefined : this.occupancy;
       let occupancyGen: number | undefined;
+      // 后台投递不碰用户的鼠标键盘；第一次前台接管时才亮横幅、挂 Esc 与用户输入检测
+      const lazyOccupancy = occupancy && {
+        beginSynthetic: (synthetic?: { keys?: readonly string[] }) => {
+          occupancyGen ??= occupancy.start(() => {
+            const error = new Error(YIELD_MESSAGE);
+            error.name = 'ComputerYieldError';
+            controller.abort(error);
+          });
+          occupancy.beginSynthetic(synthetic);
+        },
+        endSynthetic: () => occupancy.endSynthetic(),
+      };
       try {
-        occupancyGen = occupying
-          ? this.occupancy?.start(() => {
-              const error = new Error(YIELD_MESSAGE);
-              error.name = 'ComputerYieldError';
-              controller.abort(error);
-            })
-          : undefined;
         return await runComputerGuest({
           code: normalized.code,
           readOnly: normalized.readOnly,
@@ -110,7 +115,7 @@ export class ComputerHost {
           signal: controller.signal,
           backend: this.sharedBackend(),
           session: guest,
-          occupancy: occupying ? this.occupancy : undefined,
+          occupancy: lazyOccupancy,
           persistVm: true,
         });
       } finally {

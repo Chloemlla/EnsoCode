@@ -132,12 +132,31 @@ describe('ComputerHost', () => {
     });
     const host = new ComputerHost(() => new FakeDesktopBackend(), occupancy);
     const pending = host.invoke('s1', 'run', {
-      code: 'await wait(8000); return 1',
+      code: 'const w = await desktop.window("w1"); await w.raise(); await wait(8000); return 1',
       timeout: 10,
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     esc();
     await expect(pending).rejects.toThrow(/took over/);
+    expect(events).toEqual(['show', 'hide']);
+  });
+
+  it('只做截图/后台操作不占用桌面，前台输入时才占用', async () => {
+    const events: string[] = [];
+    const occupancy = new ComputerOccupancy({
+      show: () => events.push('show'),
+      hide: () => events.push('hide'),
+      registerEsc: () => () => {},
+      pollMs: 0,
+    });
+    const host = new ComputerHost(() => new FakeDesktopBackend(), occupancy);
+    await host.invoke('s1', 'run', {
+      code: 'const w = await desktop.window("w1"); await w.screenshot(); await w.click(1, 1, { delivery: "background" })',
+    });
+    expect(events).toEqual([]);
+    await host.invoke('s1', 'run', {
+      code: 'const w = await desktop.window("w1"); await w.press("Enter")',
+    });
     expect(events).toEqual(['show', 'hide']);
   });
 

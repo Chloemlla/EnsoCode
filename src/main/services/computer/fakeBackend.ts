@@ -64,16 +64,44 @@ export class FakeDesktopBackend implements DesktopBackend {
     };
   }
 
+  readonly inputs: Array<{ method: string; delivery?: string }> = [];
+  readonly raised: string[] = [];
+  raiseFails = false;
+
   async click(target: string, screenX: number, screenY: number, opts?: PointerOptions) {
     this.clicks.push({ target, x: screenX, y: screenY, delivery: opts?.delivery });
   }
 
-  async move() {}
-  async drag() {}
-  async scroll() {}
-  async typeText() {}
-  async keyChord() {}
-  async raise() {}
+  async move(_target: string, _x: number, _y: number, opts?: PointerOptions) {
+    this.inputs.push({ method: 'move', delivery: opts?.delivery });
+  }
+  async drag(_target: string, _points: unknown, opts?: PointerOptions) {
+    this.inputs.push({ method: 'drag', delivery: opts?.delivery });
+  }
+  async scroll(
+    _target: string,
+    _x: number,
+    _y: number,
+    _dx: number,
+    _dy: number,
+    opts?: PointerOptions
+  ) {
+    this.inputs.push({ method: 'scroll', delivery: opts?.delivery });
+  }
+  async typeText(_target: string, _text: string, opts?: PointerOptions) {
+    this.inputs.push({ method: 'type', delivery: opts?.delivery });
+  }
+  async keyChord(_target: string, _keys: string[], opts?: PointerOptions) {
+    this.inputs.push({ method: 'press', delivery: opts?.delivery });
+  }
+  async raise(windowId: string) {
+    this.raised.push(windowId);
+    if (this.raiseFails) return;
+    this.windowsList = this.windowsList.map((window) => ({
+      ...window,
+      focused: window.id === windowId,
+    }));
+  }
 
   async launchApp(name: string, opts?: { pane?: string }) {
     this.launches.push(name);

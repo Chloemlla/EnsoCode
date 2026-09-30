@@ -10,6 +10,7 @@ import { JSException, type JSValueHandle, QuickJS } from 'quickjs-wasi';
 import { describeAxOutcome } from './axStatus';
 import type { DesktopBackend, PointerOptions } from './backend';
 import { cropPngAround } from './clickCrop';
+import { hiddenBehindOthers } from './coverage';
 import { resolveMacKey } from './macKey';
 import { isProtectedAuthText, PROTECTED_SETTING_MESSAGE } from './protectedSetting';
 import { normalizeScrollDelta } from './scrollDelta';
@@ -87,9 +88,17 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function pointerOpts(raw: unknown): PointerOptions | undefined {
+type Delivery = NonNullable<PointerOptions['delivery']>;
+
+const NOT_FRONT_MESSAGE = (target: string) =>
+  `window '${target}' could not be brought to the front; input was not sent so it cannot land in another app. Ask the user to bring it forward.`;
+
+const HIDDEN_WINDOW_NOTE =
+  'window is covered by other windows; Chrome/Electron-based apps stop repainting while covered, so this image may be stale — verify with ax()/el.value, or raise() it if you must see it';
+
+function pointerOpts(raw: unknown): PointerOptions {
   const record = asRecord(raw);
-  const delivery = record.delivery === 'background' ? 'background' : 'foreground';
+  const delivery: Delivery = record.delivery === 'background' ? 'background' : 'foreground';
   return {
     delivery,
     ...(typeof record.button === 'string' ? { button: record.button } : {}),
@@ -375,6 +384,35 @@ export async function runComputerGuest(input: {
       input.occupancy?.endSynthetic();
     }
   };
+  /**
+   * 显式 background 只交给后端（不接管桌面）；默认前台接管。
+   * 前台键鼠落在最前面的窗口上：先把目标提上来并确认，否则宁可失败也不打进用户正在用的 App。
+   */
+  const deliver = async (
+    raw: unknown,
+    fn: (opts: PointerOptions) => Promise<void>,
+    target?: string,
+    keys?: readonly string[]
+  ): Promise<Delivery> => {
+    const opts = pointerOpts(raw);
+    if (opts.delivery === 'background') {
+      await fn(opts);
+      return 'background';
+    }
+    await withSynthetic(async () => {
+      if (target && target !== 'desktop') {
+        const front = async () =>
+          (await input.backend.windows()).find((item) => item.id === target)?.focused === true;
+        if (!(await front())) {
+          await input.backend.raise(target);
+          await settle();
+          if (!(await front())) throw new Error(NOT_FRONT_MESSAGE(target));
+        }
+      }
+      await fn(opts);
+    }, keys);
+    return 'foreground';
+  };
   const throwIfProtected = async (axText?: string) => {
     const listed = await input.backend.windows();
     const blob = [axText ?? '', ...listed.map((window) => `${window.app}\n${window.title}`)].join(
@@ -550,6 +588,8 @@ export async function runComputerGuest(input: {
           const scale = frame.width > 0 ? frame.sourceWidth / frame.width : 1;
           const hash = pixelFingerprint(shot.data);
           input.session.lastHash.set(target, hash);
+          const hidden =
+            target !== 'desktop' && hiddenBehindOthers(await input.backend.windows(), target);
           return {
             width: frame.width,
             height: frame.height,
@@ -558,6 +598,7 @@ export async function runComputerGuest(input: {
             scale: Number(scale.toFixed(2)),
             hash,
             target,
+            ...(hidden ? { hidden: HIDDEN_WINDOW_NOTE } : {}),
           };
         }
         case 'getState': {
@@ -573,15 +614,14 @@ export async function runComputerGuest(input: {
             Number(args.x),
             Number(args.y)
           );
-          const opts = pointerOpts(args);
-          if (method === 'move')
-            await withSynthetic(() =>
-              input.backend.move(target, mapped.screenX, mapped.screenY, opts)
-            );
-          else
-            await withSynthetic(() =>
-              input.backend.click(target, mapped.screenX, mapped.screenY, opts)
-            );
+          const delivery = await deliver(
+            args,
+            (opts) =>
+              method === 'move'
+                ? input.backend.move(target, mapped.screenX, mapped.screenY, opts)
+                : input.backend.click(target, mapped.screenX, mapped.screenY, opts),
+            target
+          );
           if (method === 'click') await settle();
           if (method === 'click') await throwIfProtected();
           const probe: Partial<Awaited<ReturnType<typeof probePixels>>> =
@@ -608,7 +648,7 @@ export async function runComputerGuest(input: {
             y: Number(args.y),
             screenX: mapped.screenX,
             screenY: mapped.screenY,
-            delivery: opts?.delivery ?? 'foreground',
+            delivery,
             clickSpace: target,
             hashNote: 'afterHash is immediate; next screenshot() is the current frame',
             ...hashProbe,
@@ -626,12 +666,15 @@ export async function runComputerGuest(input: {
               Number(record.y)
             );
           });
-          await withSynthetic(() =>
-            input.backend.drag(
-              target,
-              mapped.map((point) => ({ x: point.screenX, y: point.screenY })),
-              pointerOpts(args)
-            )
+          await deliver(
+            args,
+            (opts) =>
+              input.backend.drag(
+                target,
+                mapped.map((point) => ({ x: point.screenX, y: point.screenY })),
+                opts
+              ),
+            target
           );
           await settle();
           return { ok: true };
@@ -645,15 +688,18 @@ export async function runComputerGuest(input: {
             Number(args.y)
           );
           const delta = normalizeScrollDelta(args);
-          await withSynthetic(() =>
-            input.backend.scroll(
-              target,
-              mapped.screenX,
-              mapped.screenY,
-              delta.dx,
-              delta.dy,
-              pointerOpts(args)
-            )
+          const delivery = await deliver(
+            args,
+            (opts) =>
+              input.backend.scroll(
+                target,
+                mapped.screenX,
+                mapped.screenY,
+                delta.dx,
+                delta.dy,
+                opts
+              ),
+            target
           );
           await settle();
           const probe = await probePixels(input.backend, input.session, target);
@@ -667,27 +713,27 @@ export async function runComputerGuest(input: {
             screenY: mapped.screenY,
             dx: delta.dx,
             dy: delta.dy,
-            delivery: pointerOpts(args)?.delivery ?? 'foreground',
+            delivery,
             hashNote: 'afterHash is immediate; next screenshot() is the current frame',
             ...hashProbe,
           };
         }
-        case 'type':
-          await withSynthetic(() =>
-            input.backend.typeText(
-              String(args.target ?? ''),
-              String(args.text ?? ''),
-              pointerOpts(args)
-            )
+        case 'type': {
+          const target = String(args.target ?? '');
+          const delivery = await deliver(
+            args,
+            (opts) => input.backend.typeText(target, String(args.text ?? ''), opts),
+            target
           );
           await settle();
           return {
             ok: true,
             target: String(args.target ?? ''),
             chars: String(args.text ?? '').length,
-            delivery: pointerOpts(args)?.delivery ?? 'foreground',
+            delivery,
             ax: 'no AX, assumed keystrokes delivered',
           };
+        }
         case 'press': {
           const chord = args.chord;
           const keys =
@@ -699,8 +745,11 @@ export async function runComputerGuest(input: {
               : Array.isArray(chord)
                 ? chord.filter((key): key is string => typeof key === 'string')
                 : [];
-          await withSynthetic(
-            () => input.backend.keyChord(String(args.target ?? ''), keys, pointerOpts(args)),
+          const target = String(args.target ?? '');
+          const delivery = await deliver(
+            args,
+            (opts) => input.backend.keyChord(target, keys, opts),
+            target,
             keys
           );
           await settle();
@@ -713,12 +762,12 @@ export async function runComputerGuest(input: {
               return { key, code: resolved.code ?? null, modifier: resolved.modifier };
             }),
             unmapped: keys.filter((key) => resolveMacKey(key).code === undefined),
-            delivery: pointerOpts(args)?.delivery ?? 'foreground',
+            delivery,
           };
         }
         case 'raise': {
           const raised = String(args.target ?? '');
-          await input.backend.raise(raised);
+          await withSynthetic(() => input.backend.raise(raised));
           input.session.lastFocusedId = raised;
           await settle();
           const raisedWindows = await input.backend.windows();

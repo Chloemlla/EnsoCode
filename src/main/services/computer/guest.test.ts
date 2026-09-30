@@ -532,3 +532,103 @@ describe('runComputerGuest 生命周期', () => {
     expect(ended).toBe(2);
   });
 });
+
+describe('投递方式与桌面接管', () => {
+  const tracker = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      beginSynthetic: () => {
+        calls.push('begin');
+      },
+      endSynthetic: () => {
+        calls.push('end');
+      },
+    };
+  };
+  const runWith = (code: string, backend: FakeDesktopBackend, occupancy = tracker()) =>
+    runComputerGuest({
+      code,
+      readOnly: false,
+      timeoutMs: 10_000,
+      backend,
+      session: createComputerGuestSession(),
+      settleMs: 0,
+      occupancy,
+    });
+  const script = `
+    const w = await desktop.window('w1');
+    await w.screenshot();
+    const click = await w.click(1, 1);
+    const typed = await w.type('hi');
+    const pressed = await w.press('Enter');
+    return [click.delivery, typed.delivery, pressed.delivery];
+  `;
+
+  it('默认前台接管；显式 background 不接管', async () => {
+    const backend = new FakeDesktopBackend();
+    const occupancy = tracker();
+    const result = await runWith(script, backend, occupancy);
+    expect(result.returnValue).toEqual(['foreground', 'foreground', 'foreground']);
+    expect(occupancy.calls).toEqual(['begin', 'end', 'begin', 'end', 'begin', 'end']);
+    const quiet = tracker();
+    await runWith(
+      `const w = await desktop.window('w1'); await w.screenshot(); return (await w.click(1, 1, { delivery: 'background' })).delivery`,
+      backend,
+      quiet
+    );
+    expect(backend.clicks.at(-1)?.delivery).toBe('background');
+    expect(quiet.calls).toEqual([]);
+  });
+
+  it('前台输入前先把目标窗口提到最前；已在最前则不动', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList[0] = { ...backend.windowsList[0], focused: false };
+    await runWith(
+      `const w = await desktop.window('w1'); await w.press('cmd+a'); await w.type('x')`,
+      backend
+    );
+    expect(backend.raised).toEqual(['w1']);
+    expect(backend.inputs.map((item) => item.method)).toEqual(['press', 'type']);
+  });
+
+  it('目标窗口提不到最前时不发送输入，免得打进用户正在用的 App', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.windowsList[0] = { ...backend.windowsList[0], focused: false };
+    backend.raiseFails = true;
+    await expect(
+      runWith(`const w = await desktop.window('w1'); await w.type('secret')`, backend)
+    ).rejects.toThrow(/could not be brought to the front/);
+    expect(backend.inputs).toEqual([]);
+  });
+
+  it('raise 会抢前台，算接管', async () => {
+    const occupancy = tracker();
+    await runWith(
+      `const w = await desktop.window('w1'); await w.raise()`,
+      new FakeDesktopBackend(),
+      occupancy
+    );
+    expect(occupancy.calls).toEqual(['begin', 'end']);
+  });
+});
+
+describe('被遮挡窗口的截图', () => {
+  it('窗口整体被前面的窗口盖住时提示截图可能过期', async () => {
+    const backend = new FakeDesktopBackend();
+    const w1 = backend.windowsList[0];
+    backend.windowsList = [
+      { id: 'cover', app: 'Other', title: '', x: -10, y: -10, width: 5000, height: 5000 },
+      { ...w1, focused: false },
+    ];
+    const { result } = await run(
+      `const w = await desktop.window('w1'); return await w.screenshot({ silent: true })`,
+      { backend }
+    );
+    expect(result.returnValue).toMatchObject({ hidden: expect.stringMatching(/stale/) });
+    const visible = await run(
+      `const w = await desktop.window('w1'); return await w.screenshot({ silent: true })`
+    );
+    expect(visible.result.returnValue).not.toHaveProperty('hidden');
+  });
+});
