@@ -3,9 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createWetypeChannelPool,
   loadWetypeIdentity,
   openWetypeStream,
   saveWetypeIdentity,
+  type WetypePooledChannel,
   type WetypeVoiceChannel,
   type WetypeVoicePacket,
 } from './wetype';
@@ -167,5 +169,164 @@ describe('wetype identity', () => {
     expect(loadWetypeIdentity(file)).toBeNull();
     fs.writeFileSync(file, '{');
     expect(loadWetypeIdentity(file)).toBeNull();
+  });
+});
+
+function pooledFake(id: number, failFirst = false) {
+  const state = { id, alive: true, closed: false, sent: 0, notified: 0, notifyFails: false };
+  let gate: (() => void) | null = null;
+  const channel: WetypePooledChannel & { state: typeof state; hold(): void; releaseHold(): void } =
+    {
+      state,
+      alive: () => state.alive && !state.closed,
+      send: async () => {
+        state.sent++;
+        if (gate) await new Promise<void>((resolve) => (gate = resolve));
+        if (failFirst && state.sent === 1) throw new Error('stale');
+        return { text: `c${id}`, polished: '' };
+      },
+      notify: async () => {
+        state.notified++;
+        if (gate) await new Promise<void>((resolve) => (gate = resolve));
+        if (state.notifyFails) throw new Error('notify failed');
+      },
+      close: () => {
+        state.closed = true;
+      },
+      hold: () => {
+        gate = () => {};
+      },
+      releaseHold: () => {
+        const open = gate;
+        gate = null;
+        open?.();
+      },
+    };
+  return channel;
+}
+
+function poolWith(factory: (n: number) => ReturnType<typeof pooledFake>, keepaliveMs = 60_000) {
+  const opened: ReturnType<typeof pooledFake>[] = [];
+  const pool = createWetypeChannelPool({
+    keepaliveMs,
+    open: async () => {
+      const channel = factory(opened.length);
+      opened.push(channel);
+      return channel;
+    },
+  });
+  return { pool, opened };
+}
+
+const packet: WetypeVoicePacket = { voiceId: 'v', seq: 1, totalBytes: 1, isEnd: false };
+const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('wetype channel pool', () => {
+  it('hands a prewarmed channel to the next lease and keeps it for reuse after close', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n));
+    pool.prewarm();
+    pool.prewarm();
+    const first = await pool.lease();
+    expect(opened).toHaveLength(1);
+    await expect(first.send(packet)).resolves.toMatchObject({ text: 'c0' });
+    first.close();
+    await expect(first.send(packet)).rejects.toThrow('released');
+    const second = await pool.lease();
+    await expect(second.send(packet)).resolves.toMatchObject({ text: 'c0' });
+    expect(opened).toHaveLength(1);
+    expect(opened[0].state.closed).toBe(false);
+  });
+
+  it('opens a fresh channel when the spare died while idle', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n));
+    pool.prewarm();
+    await Promise.resolve();
+    (await pool.lease()).close();
+    opened[0].state.alive = false;
+    const lease = await pool.lease();
+    await expect(lease.send(packet)).resolves.toMatchObject({ text: 'c1' });
+    expect(opened[0].state.closed).toBe(true);
+  });
+
+  it('retries the first packet on a fresh channel when the reused one fails', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n, n === 0));
+    pool.prewarm();
+    const lease = await pool.lease();
+    await expect(lease.send(packet)).resolves.toMatchObject({ text: 'c1' });
+    expect(opened[0].state.closed).toBe(true);
+    lease.close();
+    expect(opened[1].state.closed).toBe(false);
+  });
+
+  it('does not retry on a channel opened on demand', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n, true));
+    const lease = await pool.lease();
+    await expect(lease.send(packet)).rejects.toThrow('stale');
+    lease.close();
+    expect(opened).toHaveLength(1);
+    expect(opened[0].state.closed).toBe(true);
+  });
+
+  it('closes instead of pooling a channel released mid-request', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n));
+    const lease = await pool.lease();
+    opened[0].hold();
+    const inFlight = lease.send(packet);
+    lease.close();
+    expect(opened[0].state.closed).toBe(true);
+    opened[0].releaseHold();
+    await inFlight.catch(() => {});
+    await pool.lease();
+    expect(opened).toHaveLength(2);
+  });
+
+  it('keeps the idle spare alive with a notify every interval, and stops once leased', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n), 5);
+    pool.prewarm();
+    await tick(18);
+    const beats = opened[0].state.notified;
+    expect(beats).toBeGreaterThanOrEqual(2);
+    const lease = await pool.lease();
+    await tick(15);
+    expect(opened[0].state.notified).toBe(beats);
+    await expect(lease.send(packet)).resolves.toMatchObject({ text: 'c0' });
+  });
+
+  it('drops the spare when a keepalive notify fails', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n), 5);
+    pool.prewarm();
+    await tick();
+    opened[0].state.notifyFails = true;
+    await tick(10);
+    expect(opened[0].state.closed).toBe(true);
+    await expect((await pool.lease()).send(packet)).resolves.toMatchObject({ text: 'c1' });
+  });
+
+  it('waits for an in-flight keepalive before handing the spare out', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n), 5);
+    pool.prewarm();
+    await tick();
+    opened[0].hold();
+    await tick(8);
+    expect(opened[0].state.notified).toBe(1);
+    let leased = false;
+    const pending = pool.lease().then((lease) => {
+      leased = true;
+      return lease;
+    });
+    await tick();
+    expect(leased).toBe(false);
+    opened[0].releaseHold();
+    await expect((await pending).send(packet)).resolves.toMatchObject({ text: 'c0' });
+  });
+
+  it('closes the spare on dispose', async () => {
+    const { pool, opened } = poolWith((n) => pooledFake(n));
+    pool.prewarm();
+    pool.dispose();
+    await tick();
+    expect(opened[0].state.closed).toBe(true);
+    pool.prewarm();
+    expect(opened).toHaveLength(1);
   });
 });

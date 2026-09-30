@@ -39,6 +39,8 @@ import { createPauseSegmenter } from './segment';
 import { acceptCorrection, joinSegments, normalizeTranscript } from './text';
 
 const IDLE_UNLOAD_MS = 10 * 60_000;
+/** 原版 WeType 语音通道的 Notify 保活间隔 */
+const WETYPE_KEEPALIVE_MS = 180_000;
 const CORRECTION_TIMEOUT_MS = 20_000;
 const MAX_SAMPLES = SPEECH_SAMPLE_RATE * SPEECH_MAX_SECONDS;
 
@@ -367,12 +369,19 @@ function loadEngine(): Promise<SpeechEngine> {
 
 async function createEngine(spec: SpeechModelSpec, dir: string): Promise<SpeechEngine> {
   if (spec.id === 'wetype') {
-    const { openWetypeChannel, openWetypeStream } = await import('./wetype');
+    const { createWetypeChannelPool, openWetypeChannel, openWetypeStream } = await import(
+      './wetype'
+    );
     const identityFile = path.join(speechRoot(), 'wetype.json');
+    const pool = createWetypeChannelPool({
+      open: () => openWetypeChannel(identityFile),
+      keepaliveMs: WETYPE_KEEPALIVE_MS,
+    });
     return {
       transcribe: () => Promise.reject(new Error('cloud speech model only streams')),
-      openStream: () => openWetypeStream({ openChannel: () => openWetypeChannel(identityFile) }),
-      dispose: () => {},
+      openStream: () => openWetypeStream({ openChannel: pool.lease }),
+      prewarm: pool.prewarm,
+      dispose: pool.dispose,
     };
   }
   if (spec.remote) {
@@ -432,6 +441,16 @@ function rejectedSession(error: SpeechErrorCode): VoiceSession {
     finish: () => Promise.resolve({ ok: false, error }),
     cancel: () => {},
   };
+}
+
+/** 用户即将开录（按下麦克风）：云端模型提前建连，省掉首字前的握手 */
+export function prewarmSpeech(): void {
+  if (!enabled || !SPEECH_MODELS[selected].remote || !modelReady(selected)) return;
+  void loadEngine().then(
+    (ready) => ready.prewarm?.(),
+    () => {}
+  );
+  scheduleIdleUnload();
 }
 
 /**

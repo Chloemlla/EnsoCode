@@ -35,7 +35,7 @@ const PLATFORM = '2';
 const DEVICE_MODEL = 'Mac16,12';
 const CMD_DH = 2147483646;
 const CMD_UIN = 0x7ffffdfd;
-/** Notify：握手收尾发一次 */
+/** Notify：握手收尾各发一次，原版长连接每 180s 一发保活 */
 const CMD_NOTIFY = 8074;
 const CMD_VOICE = 4548;
 const OPUS_HEADER = concatBytes(utf8('#!OPUS_RAW_V1'), Uint8Array.of(2, 1, 0));
@@ -64,6 +64,11 @@ export interface WetypeVoiceChannel {
   close(): void;
 }
 
+export interface WetypePooledChannel extends WetypeVoiceChannel {
+  alive(): boolean;
+  notify(): Promise<void>;
+}
+
 interface OpusEncoder {
   encode(pcm: Float32Array): Uint8Array;
   free(): void;
@@ -72,6 +77,7 @@ interface OpusEncoder {
 interface Socket {
   send(data: Uint8Array<ArrayBuffer>): void;
   recv(): Promise<Uint8Array>;
+  alive(): boolean;
   close(): void;
 }
 
@@ -134,6 +140,7 @@ function connectSocket(): Promise<Socket> {
           });
         },
         close: () => ws.close(),
+        alive: () => ws.readyState === WebSocket.OPEN,
       });
     ws.onmessage = (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
@@ -313,7 +320,7 @@ class WetypeClient {
 }
 
 /** 建连 + 握手；身份在服务端签发后落盘，下次复用同一 UIN */
-export async function openWetypeChannel(identityFile: string): Promise<WetypeVoiceChannel> {
+export async function openWetypeChannel(identityFile: string): Promise<WetypePooledChannel> {
   const socket = await connectSocket();
   try {
     const client = new WetypeClient(socket);
@@ -324,12 +331,125 @@ export async function openWetypeChannel(identityFile: string): Promise<WetypeVoi
     }
     return {
       send: (packet) => client.voice(packet),
+      notify: () => client.notify(),
+      alive: () => socket.alive(),
       close: () => socket.close(),
     };
   } catch (error) {
     socket.close();
     throw error;
   }
+}
+
+/**
+ * 握手约 400ms：按下麦克风时预热一条，会话结束后留作备用。
+ * 不发数据的连接 10–20 分钟会被断开，备用期间按原版节奏发 Notify 保活；保活失败即丢弃。
+ * 备用连接仍可能失效，首包失败时换新连接重发一次。备用寿命由引擎空闲卸载兜底。
+ */
+export function createWetypeChannelPool(options: {
+  open: () => Promise<WetypePooledChannel>;
+  keepaliveMs: number;
+}) {
+  let spare: Promise<WetypePooledChannel> | null = null;
+  let keepalive: NodeJS.Timeout | null = null;
+  /** 连接一问一答：保活在途时，出借要等它回来 */
+  let notifying: Promise<void> | null = null;
+  let disposed = false;
+
+  const discard = (pending: Promise<WetypePooledChannel>) =>
+    void pending.then(
+      (channel) => channel.close(),
+      () => {}
+    );
+  const clearSpare = () => {
+    if (keepalive) clearInterval(keepalive);
+    keepalive = null;
+    const pending = spare;
+    spare = null;
+    return pending;
+  };
+  const keep = (pending: Promise<WetypePooledChannel>) => {
+    spare = pending;
+    void pending.then(
+      (channel) => {
+        if (spare !== pending) return;
+        keepalive = setInterval(() => {
+          if (notifying) return;
+          const beat: Promise<void> = channel
+            .notify()
+            .catch(() => {
+              if (spare === pending) clearSpare();
+              channel.close();
+            })
+            .finally(() => {
+              if (notifying === beat) notifying = null;
+            });
+          notifying = beat;
+        }, options.keepaliveMs);
+        keepalive.unref?.();
+      },
+      () => {
+        if (spare === pending) clearSpare();
+      }
+    );
+  };
+  const take = async (): Promise<{ channel: WetypePooledChannel; reused: boolean }> => {
+    const pending = clearSpare();
+    if (pending && notifying) await notifying;
+    const channel = pending ? await pending.catch(() => null) : null;
+    if (channel?.alive()) return { channel, reused: true };
+    channel?.close();
+    return { channel: await options.open(), reused: false };
+  };
+
+  return {
+    prewarm: () => {
+      if (!disposed && !spare) keep(options.open());
+    },
+    lease: async (): Promise<WetypeVoiceChannel> => {
+      let { channel, reused } = await take();
+      let inFlight = 0;
+      let broken = false;
+      let released = false;
+      return {
+        send: async (packet) => {
+          if (released) throw new Error('wetype channel released');
+          inFlight++;
+          try {
+            return await channel.send(packet);
+          } catch (error) {
+            if (!reused || released) {
+              broken = true;
+              throw error;
+            }
+            channel.close();
+            reused = false;
+            try {
+              channel = await options.open();
+              return await channel.send(packet);
+            } catch (retryError) {
+              broken = true;
+              throw retryError;
+            }
+          } finally {
+            reused = false;
+            inFlight--;
+          }
+        },
+        close: () => {
+          if (released) return;
+          released = true;
+          if (disposed || broken || inFlight > 0 || spare || !channel.alive()) channel.close();
+          else keep(Promise.resolve(channel));
+        },
+      };
+    },
+    dispose: () => {
+      disposed = true;
+      const pending = clearSpare();
+      if (pending) discard(pending);
+    },
+  };
 }
 
 async function createOpusEncoder(): Promise<OpusEncoder> {
