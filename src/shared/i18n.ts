@@ -1029,6 +1029,10 @@ export const zhTranslations: Record<string, string> = {
   'Audio is uploaded to Google. On the free tier Google may use it to improve its products.':
     '音频会上传到 Google；免费层级下 Google 可能用它改进产品。',
   'Enter a Gemini API key below first.': '需先在下方填写 Gemini API Key。',
+  WeType: '微信输入法',
+  'WeChat Keyboard cloud recognition. Chinese and English, no setup needed.':
+    '微信输入法云端识别，支持中文和英文，无需配置。',
+  'Audio is uploaded to Tencent WeChat Keyboard servers.': '音频会上传到腾讯微信输入法服务器。',
   'Gemini API key': 'Gemini API Key',
   'Create one for free in Google AI Studio.': '可在 Google AI Studio 免费创建。',
   Cloud: '云端',

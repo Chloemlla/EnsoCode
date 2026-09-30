@@ -145,6 +145,7 @@ function modelSupported(id: SpeechModelId): boolean {
 
 function modelReady(id: SpeechModelId): boolean {
   const spec = SPEECH_MODELS[id];
+  if (id === 'wetype') return true;
   if (spec.remote) return geminiApiKey !== null;
   if (id === 'hanbao') {
     return (
@@ -365,6 +366,15 @@ function loadEngine(): Promise<SpeechEngine> {
 }
 
 async function createEngine(spec: SpeechModelSpec, dir: string): Promise<SpeechEngine> {
+  if (spec.id === 'wetype') {
+    const { openWetypeChannel, openWetypeStream } = await import('./wetype');
+    const identityFile = path.join(speechRoot(), 'wetype.json');
+    return {
+      transcribe: () => Promise.reject(new Error('cloud speech model only streams')),
+      openStream: () => openWetypeStream({ openChannel: () => openWetypeChannel(identityFile) }),
+      dispose: () => {},
+    };
+  }
   if (spec.remote) {
     // 凭证与词表在开录时读取：改设置不必重建引擎
     return {

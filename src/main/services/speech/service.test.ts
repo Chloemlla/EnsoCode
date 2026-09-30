@@ -314,7 +314,16 @@ describe('speech status', () => {
       ['sense-voice', false, 'missing'],
       ['hanbao', true, 'missing'],
       ['gemini-live', true, 'missing'],
+      ['wetype', true, 'ready'],
     ]);
+  });
+
+  it('offers the WeType cloud model without credentials or downloads', async () => {
+    syncSpeechFromSettings({ voiceInputEnabled: true, voiceModel: 'wetype' });
+    expect(getSpeechStatus().state).toBe('ready');
+    expect(speechAvailable()).toBe(true);
+    await expect(startSpeechDownload('wetype')).resolves.toBe(false);
+    await expect(deleteSpeechModel('wetype')).resolves.toBe(false);
   });
 
   describe('Gemini cloud model', () => {
