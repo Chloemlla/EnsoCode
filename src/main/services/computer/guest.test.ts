@@ -150,6 +150,32 @@ describe('runComputerGuest', () => {
     expect(String(result.returnValue)).toMatch(/timeout/);
   });
 
+  it('AX worker 退出时 ax() 返回说明，而不是整次 run 失败', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.axSnapshot = async () => {
+      throw new Error('AX_WORKER_EXITED');
+    };
+    const { result } = await run(`const win = await desktop.window('w1'); return await win.ax()`, {
+      backend,
+      readOnly: true,
+    });
+    expect(String(result.returnValue)).toMatch(/worker-exited/);
+  });
+
+  it('getState 在 AX worker 退出时仍返回截图', async () => {
+    const backend = new FakeDesktopBackend();
+    backend.axSnapshot = async () => {
+      throw new Error('AX_WORKER_EXITED');
+    };
+    const { result } = await run(
+      `const win = await desktop.window('w1'); return await win.getState()`,
+      { backend, readOnly: true }
+    );
+    expect(result.returnValue).toMatchObject({ width: 100, height: 50, target: 'w1' });
+    expect(String((result.returnValue as { ax: string }).ax)).toMatch(/worker-exited/);
+    expect(result.screenshots).toHaveLength(1);
+  });
+
   it('clipboard 是对象，raise 后 window() 的 focused 仍为 true', async () => {
     const backend = new FakeDesktopBackend();
     backend.windowsList[0] = { ...backend.windowsList[0], focused: false };

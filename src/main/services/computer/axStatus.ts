@@ -20,3 +20,7 @@ export function describeAxOutcome(input: {
   }
   return null;
 }
+
+export function describeAxWorkerExited(): string {
+  return 'AX worker-exited — retry ax(), or use screenshot coordinates. click(x,y) uses the latest screenshot pixels.';
+}

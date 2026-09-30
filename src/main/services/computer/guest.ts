@@ -7,7 +7,8 @@ import { COORDINATE_SAFE_MAX_HEIGHT, COORDINATE_SAFE_MAX_WIDTH } from '@shared/c
 import { isReadOnlyAllowed } from '@shared/computer/readOnly';
 import type { ComputerRunResult, ComputerScreenshot } from '@shared/computer/types';
 import { JSException, type JSValueHandle, QuickJS } from 'quickjs-wasi';
-import { describeAxOutcome } from './axStatus';
+import { describeAxOutcome, describeAxWorkerExited } from './axStatus';
+import { AX_WORKER_EXITED } from './axWorkerClient';
 import type { DesktopBackend, PointerOptions } from './backend';
 import { cropPngAround } from './clickCrop';
 import { hiddenBehindOthers } from './coverage';
@@ -806,6 +807,9 @@ export async function runComputerGuest(input: {
             }
             if (message === 'AX_TIMEOUT') {
               return describeAxOutcome({ trusted: true, status: -25204, nodeCount: 0 });
+            }
+            if (message === AX_WORKER_EXITED || message.includes('AX worker exited')) {
+              return describeAxWorkerExited();
             }
             if (message.startsWith('AX_STATUS_')) {
               return describeAxOutcome({

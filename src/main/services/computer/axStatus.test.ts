@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeAxOutcome } from './axStatus';
+import { describeAxOutcome, describeAxWorkerExited } from './axStatus';
 
 describe('describeAxOutcome', () => {
   it('TCC 未授权和空树、超时分开说', () => {
@@ -13,5 +13,10 @@ describe('describeAxOutcome', () => {
 
   it('有节点时不报失败', () => {
     expect(describeAxOutcome({ trusted: true, status: 0, nodeCount: 3 })).toBeNull();
+  });
+
+  it('worker 退出和超时分开说', () => {
+    expect(describeAxWorkerExited()).toMatch(/worker-exited/);
+    expect(describeAxWorkerExited()).toMatch(/screenshot coordinates/);
   });
 });
