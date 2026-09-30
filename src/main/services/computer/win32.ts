@@ -3,12 +3,24 @@ import { promisify } from 'node:util';
 import { BackgroundUnavailableError, ComputerError } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
 import type { ComputerCapabilities, ComputerWindowInfo } from '@shared/computer/types';
-import { clipboard, desktopCapturer, type NativeImage, screen, shell } from 'electron';
+import {
+  clipboard,
+  desktopCapturer,
+  type NativeImage,
+  type Rectangle,
+  screen,
+  shell,
+} from 'electron';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadWin32Native, type Win32Native } from './win32Native';
+import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
 import { resolveWinLaunch, resolveWinSettingsPane } from './winLaunch';
 
 const execFileAsync = promisify(execFile);
+
+// 窗口矩形与 SendInput 都是物理像素；Electron 的 display 是 DIP，统一换成物理像素
+const toPhysical = (rect: Rectangle): Rectangle => screen.dipToScreenRect(null, rect);
+const primaryPhysical = () => toPhysical(screen.getPrimaryDisplay().bounds);
 
 export class WindowsDesktopBackend implements DesktopBackend {
   private native: Win32Native | null | undefined;
@@ -40,20 +52,23 @@ export class WindowsDesktopBackend implements DesktopBackend {
       inputPermission: native ? 'granted' : 'unsupported',
       axPermission: 'unsupported',
       detail: native
-        ? 'Windows input uses SendInput. Accessibility tree is not available yet; click the screenshot.'
+        ? 'Windows input uses SendInput and brings the target window to the front. No accessibility tree yet: work from screenshots and click(x, y). cmd in shortcuts means Ctrl.'
         : 'Native input bridge unavailable.',
     };
   }
 
   async displays() {
-    return screen.getAllDisplays().map((display) => ({
-      id: String(display.id),
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height,
-      scaleFactor: display.scaleFactor,
-    }));
+    return screen.getAllDisplays().map((display) => {
+      const bounds = toPhysical(display.bounds);
+      return {
+        id: String(display.id),
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        scaleFactor: display.scaleFactor,
+      };
+    });
   }
 
   async windows(): Promise<ComputerWindowInfo[]> {
@@ -81,13 +96,12 @@ export class WindowsDesktopBackend implements DesktopBackend {
       thumbnailSize: { width: maxWidth, height: maxHeight },
     });
     if (target === 'desktop') {
-      const source = sources[0];
+      const primaryId = String(screen.getPrimaryDisplay().id);
+      const source = sources.find((item) => item.display_id === primaryId) ?? sources[0];
       if (!source) throw new ComputerError('window-not-found', `window '${target}' not found`);
       return this.captureFromImage(source.thumbnail, target, maxWidth, maxHeight);
     }
-    const source =
-      sources.find((item) => item.id === target || item.id.endsWith(target)) ??
-      sources.find((item) => item.name.includes(target));
+    const source = findCapturerWindowSource(sources, target);
     if (source) return this.captureFromImage(source.thumbnail, target, maxWidth, maxHeight);
     return this.captureWindowViaDisplay(target, maxWidth, maxHeight);
   }
@@ -101,11 +115,9 @@ export class WindowsDesktopBackend implements DesktopBackend {
   ): Promise<CaptureBytes> {
     const size = image.getSize();
     const png = image.toPNG();
-    const info =
-      windowInfo ??
-      (await this.windows()).find((window) => window.id === target || target.includes(window.id));
+    const info = windowInfo ?? (await this.windows()).find((window) => window.id === target);
     const scaled = scaleCaptureSize(size.width, size.height, maxWidth, maxHeight);
-    const display = screen.getPrimaryDisplay().bounds;
+    const display = primaryPhysical();
     const rect = captureSourceRect({
       target,
       thumbnailWidth: size.width,
@@ -132,21 +144,36 @@ export class WindowsDesktopBackend implements DesktopBackend {
   ): Promise<CaptureBytes> {
     const info = (await this.windows()).find((window) => window.id === target);
     if (!info) throw new ComputerError('window-not-found', `window '${target}' not found`);
-    const display = screen.getDisplayMatching({
-      x: Math.round(info.x),
-      y: Math.round(info.y),
-      width: Math.max(1, Math.round(info.width)),
-      height: Math.max(1, Math.round(info.height)),
-    });
-    const bounds = display.bounds;
+    const display = screen.getDisplayMatching(
+      screen.screenToDipRect(null, {
+        x: Math.round(info.x),
+        y: Math.round(info.y),
+        width: Math.max(1, Math.round(info.width)),
+        height: Math.max(1, Math.round(info.height)),
+      })
+    );
+    const bounds = toPhysical(display.bounds);
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
       thumbnailSize: { width: bounds.width, height: bounds.height },
     });
-    const screenSource =
-      sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
+    const screenSource = sources.find((item) => item.display_id === String(display.id));
     if (!screenSource) throw new ComputerError('window-not-found', `window '${target}' not found`);
-    return this.captureFromImage(screenSource.thumbnail, target, maxWidth, maxHeight, info);
+    const thumb = screenSource.thumbnail.getSize();
+    const crop = thumbnailCropForWindow({
+      window: info,
+      display: bounds,
+      thumbnailWidth: thumb.width,
+      thumbnailHeight: thumb.height,
+    });
+    if (!crop) throw new ComputerError('window-not-found', `window '${target}' not found`);
+    return this.captureFromImage(
+      screenSource.thumbnail.crop(crop),
+      target,
+      maxWidth,
+      maxHeight,
+      info
+    );
   }
 
   async click(_target: string, screenX: number, screenY: number, opts?: PointerOptions) {
@@ -155,7 +182,11 @@ export class WindowsDesktopBackend implements DesktopBackend {
         'Windows pixel click cannot target a window in background'
       );
     }
-    await (await this.requireNative()).click(screenX, screenY);
+    await (await this.requireNative()).click(screenX, screenY, {
+      button: opts?.button,
+      count: opts?.count,
+      modifiers: opts?.modifiers,
+    });
   }
 
   async move(_target: string, screenX: number, screenY: number, opts?: PointerOptions) {
@@ -201,6 +232,10 @@ export class WindowsDesktopBackend implements DesktopBackend {
 
   async raise(windowId: string) {
     await (await this.requireNative()).raise(windowId);
+  }
+
+  async endRun() {
+    this.native?.endInput();
   }
 
   async launchApp(name: string, opts?: { pane?: string }) {

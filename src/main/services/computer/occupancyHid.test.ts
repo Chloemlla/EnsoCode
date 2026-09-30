@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createHidProbe, hidSecondsSinceLastEvent } from './occupancyHid';
+import { createHidProbe, hidSecondsSinceLastEvent, secondsSinceTick } from './occupancyHid';
 
 describe('createHidProbe', () => {
   it('原生加载失败返回 null（不可检测），不当作空闲', () => {
@@ -28,5 +28,12 @@ describe('createHidProbe', () => {
 
   it.runIf(process.platform === 'darwin')('macOS 上真实加载 CoreGraphics', () => {
     expect(hidSecondsSinceLastEvent()).toEqual(expect.any(Number));
+  });
+});
+
+describe('secondsSinceTick', () => {
+  it('按 32 位毫秒计时算间隔，跨越回绕也正确', () => {
+    expect(secondsSinceTick(5000, 3000)).toBe(2);
+    expect(secondsSinceTick(5, 0xfffffff0)).toBeCloseTo(0.021);
   });
 });

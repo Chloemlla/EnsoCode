@@ -321,7 +321,7 @@ describe('runComputerGuest', () => {
         `,
         { backend }
       )
-    ).rejects.toThrow(/Touch ID or a password/);
+    ).rejects.toThrow(/Touch ID, a password/);
   });
 
   it('read_only 下 app 只解析已有窗口', async () => {
@@ -494,7 +494,7 @@ describe('runComputerGuest 生命周期', () => {
     }) as typeof backend.typeText;
     await expect(
       run(`const win = await desktop.window('w1'); await win.type('secret')`, { backend })
-    ).rejects.toThrow(/Touch ID or a password/);
+    ).rejects.toThrow(/Touch ID, a password/);
     expect(typed).toEqual([]);
   });
 

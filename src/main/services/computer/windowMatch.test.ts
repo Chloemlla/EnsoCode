@@ -157,4 +157,20 @@ describe('windowMatch', () => {
     expect(pickMatchedWindow([{ ...bubble, focused: true }, doc])?.id).toBe('doc');
     expect(pickMatchedWindow([bubble])?.id).toBe('bubble');
   });
+
+  it('Windows 进程名与中文 App 名互认', () => {
+    const win = (app: string): ComputerWindowInfo => ({
+      id: app,
+      app,
+      title: 'x',
+      x: 0,
+      y: 0,
+      width: 500,
+      height: 400,
+    });
+    expect(matchWindow(win('notepad'), { app: '记事本' })).toBe(true);
+    expect(matchWindow(win('explorer'), { app: '文件资源管理器' })).toBe(true);
+    expect(matchWindow(win('msedge'), { app: 'Edge' })).toBe(true);
+    expect(matchWindow(win('WeChat'), { app: '微信' })).toBe(true);
+  });
 });

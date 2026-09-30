@@ -15,6 +15,16 @@ const APP_ALIASES: Record<string, readonly string[]> = {
   vscode: ['visual studio code', 'code'],
   'visual studio code': ['code', 'vscode'],
   'vs code': ['visual studio code', 'code', 'vscode'],
+  // Windows 窗口的 app 是进程名（notepad、explorer、msedge…）
+  notepad: ['记事本'],
+  记事本: ['notepad'],
+  explorer: ['文件资源管理器', '资源管理器', 'file explorer'],
+  文件资源管理器: ['explorer'],
+  资源管理器: ['explorer'],
+  'file explorer': ['explorer'],
+  edge: ['msedge', 'microsoft edge'],
+  'microsoft edge': ['msedge'],
+  msedge: ['edge', 'microsoft edge'],
   ...appLaunchAliases(),
 };
 
