@@ -1261,6 +1261,13 @@ export const CAPABILITY_CATALOG = {
     reason: 'Enso never receives host-desktop computer tools.',
     suggestedAction: 'Ask the coding agent to use the computer tool.',
   }),
+  'coding-tools.plan': unavailable('coding-tools.plan', {
+    description: 'Research read-only and submit an implementation plan for user approval.',
+    risk: 'read',
+    targetContext: 'origin-project',
+    reason: 'Enso never receives the coding-session plan mode tools.',
+    suggestedAction: 'Turn on plan mode in the coding session composer.',
+  }),
 } as const satisfies Record<ProductSurfaceId, CapabilitySpec<ProductSurfaceId, ProductSurfaceId>>;
 
 export type CapabilityCatalog = typeof CAPABILITY_CATALOG;

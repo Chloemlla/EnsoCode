@@ -5,6 +5,7 @@ import {
   DEFAULT_DISABLED_BUILTIN_TOOLS,
   effectiveDisabledBuiltinTools,
   effectiveSubagentAllowedModes,
+  isBuiltinToolEnabledForProject,
   isWorkflowAvailable,
   projectDisabledBuiltinTools,
   resolveDisabledBuiltinTools,
@@ -16,6 +17,21 @@ describe('isWorkflowAvailable', () => {
     expect(isWorkflowAvailable(['memory'])).toBe(true);
     expect(isWorkflowAvailable(['workflow'])).toBe(false);
     expect(isWorkflowAvailable(['subagent'])).toBe(false);
+  });
+});
+
+describe('isBuiltinToolEnabledForProject', () => {
+  const projects = [{ id: 'p1', disabledBuiltinTools: ['plan'] }, { id: 'p2' }];
+
+  it('plan 是可开关的内置工具，默认开启', () => {
+    expect(BUILTIN_TOOLS.some((tool) => tool.id === 'plan')).toBe(true);
+    expect(isBuiltinToolEnabledForProject(undefined, [], 'p2', 'plan')).toBe(true);
+  });
+
+  it('项目覆盖优先，未覆盖跟全局', () => {
+    expect(isBuiltinToolEnabledForProject([], projects, 'p1', 'plan')).toBe(false);
+    expect(isBuiltinToolEnabledForProject(['plan'], projects, 'p2', 'plan')).toBe(false);
+    expect(isBuiltinToolEnabledForProject([], projects, 'p2', 'plan')).toBe(true);
   });
 });
 

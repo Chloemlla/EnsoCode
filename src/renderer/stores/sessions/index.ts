@@ -67,6 +67,7 @@ export interface QueuedMessage {
 }
 
 import { projectSafeJournal } from '@shared/safeJournalProjection';
+import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
@@ -122,6 +123,16 @@ import {
   workspaceFallbackNote,
   workspaceMigratedNote,
 } from './worktree';
+
+function planToolEnabled(projectId: string): boolean {
+  const settings = useSettingsStore.getState();
+  return isBuiltinToolEnabledForProject(
+    settings.disabledBuiltinTools,
+    settings.projects,
+    projectId,
+    'plan'
+  );
+}
 
 /** 离开时盖章；正在看的会话由 viewedId 保热，TTL 从离开起算 */
 const lastViewedAt: Record<string, number> = {};
@@ -3056,6 +3067,9 @@ export const useSessionsStore = create<SessionsState>()(
               get().setPlanMode(id, false);
               return null;
             }
+            if (!planToolEnabled(conversation.projectId)) {
+              return 'plan mode is turned off in built-in tools';
+            }
             get().setPlanMode(id, true);
             if (!arg) return null;
             text = arg;
@@ -3499,6 +3513,7 @@ export const useSessionsStore = create<SessionsState>()(
         setPlanMode(id, active) {
           const conversation = get().conversations[id];
           if (!conversation || conversation.parentId || conversation.btwParentId) return;
+          if (active && !planToolEnabled(conversation.projectId)) return;
           const previous = conversation.planState;
           set((state) =>
             patch(state, id, { planState: { ...(previous ?? EMPTY_PLAN_STATE), active } })

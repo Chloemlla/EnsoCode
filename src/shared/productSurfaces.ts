@@ -508,6 +508,11 @@ export const PRODUCT_SURFACE_INVENTORY = {
     kind: 'action',
     label: 'Use host desktop computer',
   },
+  'coding-tools.plan': {
+    domain: 'coding-tools',
+    kind: 'action',
+    label: 'Submit a plan in plan mode',
+  },
 } as const satisfies Record<string, ProductSurfaceInventoryItem>;
 
 export type ProductSurfaceId = keyof typeof PRODUCT_SURFACE_INVENTORY;

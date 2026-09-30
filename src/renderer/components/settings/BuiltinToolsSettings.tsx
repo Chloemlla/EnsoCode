@@ -6,6 +6,7 @@ import type { BrowserClearKind } from '@shared/types/browser';
 import {
   Box,
   Brain,
+  ClipboardList,
   FilePenLine,
   FoldVertical,
   Globe,
@@ -58,6 +59,7 @@ const TOOL_ICON: Record<string, LucideIcon> = {
   subagent: Users,
   workflow: Workflow,
   todo: ListTodo,
+  plan: ClipboardList,
   ask_user: MessageCircleQuestion,
   browser: Globe,
   web: Search,

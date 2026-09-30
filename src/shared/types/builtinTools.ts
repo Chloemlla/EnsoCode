@@ -22,6 +22,12 @@ export const BUILTIN_TOOLS: BuiltinToolInfo[] = [
   },
   { id: 'todo', name: 'Todo', description: 'Task list: track progress on multi-step work' },
   {
+    id: 'plan',
+    name: 'Plan mode',
+    description:
+      'Plan mode: research read-only, submit a plan for approval, then carry it out after approval',
+  },
+  {
     id: 'ask_user',
     name: 'Ask user',
     description: 'Ask the user a question and wait for an answer (options / timeout)',
@@ -151,6 +157,17 @@ export function resolveDisabledBuiltinTools(
 /** workflow 靠 subagent 派发子代理，两者都开才会下发给会话（与 worker 口径一致） */
 export function isWorkflowAvailable(disabledBuiltinTools: readonly string[]): boolean {
   return !disabledBuiltinTools.includes('workflow') && !disabledBuiltinTools.includes('subagent');
+}
+
+export function isBuiltinToolEnabledForProject(
+  globalDisabled: unknown,
+  projects: unknown,
+  projectId: string | undefined,
+  toolId: string
+): boolean {
+  return !resolveDisabledBuiltinTools(globalDisabled, {
+    disabledBuiltinTools: projectDisabledBuiltinTools(projects, projectId),
+  }).includes(toolId);
 }
 
 /** 从 settings.projects 取出某项目的覆盖列表；缺项目或未覆盖返回 undefined。 */

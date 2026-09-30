@@ -1,9 +1,11 @@
 import type { OccupancyTool } from '@shared/occupancy';
+import { EMPTY_PLAN_STATE } from '@shared/planMode';
 import { BUILTIN_AGENT_TYPES } from '@shared/types';
 import type { AgentTypeSpawnConfig, SubagentModelOption } from '@shared/types/agent';
 import { AskManager, createAskTool } from './ask';
 import { createTaskTools } from './backgroundTasks';
 import { createIsolatedSandboxTool } from './isolatedSandbox';
+import { createSubmitPlanTool } from './planMode';
 import { createUnifiedSubagentTool } from './subagent';
 import { createTodoTool } from './todo';
 import { BrowserInvoker, createBrowserTools } from './tools/browser';
@@ -53,6 +55,9 @@ export function snapshotBuiltinOccupancyTools(input?: {
       ),
     ],
     todo: [fields(createTodoTool())],
+    plan: [
+      fields(createSubmitPlanTool({ state: () => EMPTY_PLAN_STATE, submit: () => {} }, () => '')),
+    ],
     ask_user: [fields(createAskTool(ask))],
     browser: createBrowserTools(browser).map(fields),
     web: createWebTools().map(fields),
