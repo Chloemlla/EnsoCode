@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type BackgroundTaskManager, withBackground } from '../backgroundTasks';
+import { ForegroundDetachedError } from '../foregroundCommand';
 import { toBashRuntimePath, withRtkOptimization } from './index';
 import { bindPowerShellRtk } from './powershell';
 
@@ -100,6 +101,47 @@ if (process.argv[2] === 'gain') process.stdout.write(JSON.stringify({ summary: {
     ]);
     expect(invocations[0].db).toBe(invocations[1].db);
     expect(invocations[0].db).not.toBe(process.env.RTK_DB_PATH);
+  });
+
+  it('前台命令转后台时不提前统计，finalize 交给后台任务结束时执行', async () => {
+    const logPath = path.join(tempDir('enso-rtk-log-'), 'calls.txt');
+    const binaryPath = fakeRtk(`
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(logPath)}, process.argv[2] + '\\n');
+if (process.argv[2] === 'rewrite') { process.stdout.write('rtk git status'); process.exit(3); }
+if (process.argv[2] === 'gain') process.stdout.write(JSON.stringify({ summary: { total_commands: 1, total_input: 100, total_output: 25, total_saved: 75, avg_savings_pct: 75 } }));
+`);
+    let deferred: { details: unknown; finalize?: () => Promise<unknown> } | undefined;
+    const detached = new ForegroundDetachedError('task-1', 'user', 'partial', {
+      adopt: () => 'task-1',
+      attachFinalize: (_taskId, details, finalize) => {
+        deferred = { details, finalize };
+      },
+    });
+    const definition = {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        throw detached;
+      },
+    } as unknown as ToolDefinition;
+    const wrapped = withRtkOptimization(definition, {
+      binaryPath,
+      dataDir: tempDir('enso-rtk-data-'),
+      cwd: process.cwd(),
+    });
+
+    await expect(execute(wrapped, 'git status')).rejects.toBe(detached);
+    expect(readFileSync(logPath, 'utf8')).toBe('rewrite\n');
+    expect(detached.details).toMatchObject({ rtk: { status: 'pending' } });
+    expect(deferred?.finalize).toBeTypeOf('function');
+
+    await expect(deferred?.finalize?.()).resolves.toMatchObject({
+      rtk: { status: 'compressed', inputTokens: 100, outputTokens: 25 },
+    });
+    expect(readFileSync(logPath, 'utf8')).toBe('rewrite\ngain\n');
   });
 
   it('rewrite 未支持时原命令只执行一次且不调用 gain', async () => {

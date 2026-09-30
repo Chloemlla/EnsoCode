@@ -1,10 +1,13 @@
 import {
   type BashOperations,
   createBashToolDefinition,
+  createLocalBashOperations,
+  createLocalPowerShellOperations,
   createPowerShellToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { childProfileShell } from '@shared/childProfileTools';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
+import { withDetachableExec } from './foregroundCommand';
 
 export type SessionShellKind = 'bash' | 'powershell';
 
@@ -28,7 +31,8 @@ export function createSessionCommandTool(input: {
     remote: input.remote,
     preference: input.preference,
   });
-  const options = input.operations ? { operations: input.operations } : undefined;
+  const local = kind === 'powershell' ? createLocalPowerShellOperations : createLocalBashOperations;
+  const options = { operations: withDetachableExec(input.operations ?? local()) };
   return kind === 'powershell'
     ? createPowerShellToolDefinition(input.cwd, options)
     : createBashToolDefinition(input.cwd, options);

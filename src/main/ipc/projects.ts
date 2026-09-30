@@ -8,6 +8,7 @@ import {
   parseSelectProjectAuthorityRequest,
 } from '@shared/types/agent';
 import { app, ipcMain, shell } from 'electron';
+import { listProjectCodeSources } from '../../agent/projectCode';
 import { openInApps } from '../services/openInApps';
 import { getRecentProjects } from '../services/recentProjects';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
@@ -46,6 +47,43 @@ function isDirectory(value: string): boolean {
   }
 }
 
+/** 由权威记录推导项目或会话（含 worktree）在本机的工作目录 */
+function resolveLocalCwd(parsed: {
+  projectId: string;
+  conversationId?: string;
+}): { cwd: string } | { error: string } {
+  const registry = getSourceAuthorityRegistry();
+  const project = registry?.project(parsed.projectId);
+  if (project?.state !== 'active') return { error: 'unavailable' };
+  // ssh 项目的路径在远端，本机打不开
+  if (project.kind === 'ssh') return { error: 'unsupported' };
+  let cwd = project.canonicalPath;
+  if (parsed.conversationId) {
+    const conversation = registry?.conversation(parsed.conversationId);
+    if (
+      conversation?.kind !== 'root' ||
+      conversation.lifecycle === 'ended' ||
+      conversation.projectId !== parsed.projectId
+    ) {
+      return { error: 'unavailable' };
+    }
+    const worktree = sessionWorktree(parsed.conversationId);
+    if (worktree) {
+      if (
+        worktree.conversationId !== parsed.conversationId ||
+        worktree.projectId !== parsed.projectId ||
+        worktree.repoPath !== project.canonicalPath ||
+        typeof worktree.path !== 'string' ||
+        worktree.path.length === 0
+      ) {
+        return { error: 'unavailable' };
+      }
+      cwd = worktree.path;
+    }
+  }
+  return isDirectory(cwd) ? { cwd } : { error: 'unavailable' };
+}
+
 export function registerProjectHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.PROJECTS_GET_RECENT, async () => {
     try {
@@ -63,36 +101,9 @@ export function registerProjectHandlers(): void {
       if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'unavailable' };
       const parsed = parseRevealRequest(request);
       if (!parsed) return { ok: false, error: 'invalid' };
-      const registry = getSourceAuthorityRegistry();
-      const project = registry?.project(parsed.projectId);
-      if (project?.state !== 'active') return { ok: false, error: 'unavailable' };
-      // ssh 项目的路径在远端，本机打不开
-      if (project.kind === 'ssh') return { ok: false, error: 'unsupported' };
-      let cwd = project.canonicalPath;
-      if (parsed.conversationId) {
-        const conversation = registry?.conversation(parsed.conversationId);
-        if (
-          conversation?.kind !== 'root' ||
-          conversation.lifecycle === 'ended' ||
-          conversation.projectId !== parsed.projectId
-        ) {
-          return { ok: false, error: 'unavailable' };
-        }
-        const worktree = sessionWorktree(parsed.conversationId);
-        if (worktree) {
-          if (
-            worktree.conversationId !== parsed.conversationId ||
-            worktree.projectId !== parsed.projectId ||
-            worktree.repoPath !== project.canonicalPath ||
-            typeof worktree.path !== 'string' ||
-            worktree.path.length === 0
-          ) {
-            return { ok: false, error: 'unavailable' };
-          }
-          cwd = worktree.path;
-        }
-      }
-      if (!isDirectory(cwd)) return { ok: false, error: 'unavailable' };
+      const resolved = resolveLocalCwd(parsed);
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      const { cwd } = resolved;
       if (parsed.appId) return openInApps.open(parsed.appId, cwd);
       try {
         const failure = await shell.openPath(cwd);
@@ -109,6 +120,15 @@ export function registerProjectHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS, async (event) =>
     isMainWebContents(event.sender.id) ? openInApps.list() : []
   );
+
+  // 项目内会被 pi 当代码加载的来源；只读，信任记录由渲染层写入项目设置
+  ipcMain.handle(IPC_CHANNELS.PROJECTS_CODE_SOURCES, (event, request: unknown): string[] => {
+    if (!isMainWebContents(event.sender.id)) return [];
+    const parsed = parseRevealRequest(request);
+    if (!parsed || parsed.appId) return [];
+    const resolved = resolveLocalCwd(parsed);
+    return 'cwd' in resolved ? listProjectCodeSources(resolved.cwd) : [];
+  });
 
   ipcMain.handle(IPC_CHANNELS.SOURCE_PROJECT_CREATE, async (event, request: unknown) => {
     const parsed = parseCreateProjectAuthorityRequest(request);

@@ -93,6 +93,7 @@ vi.mock('../services/agentHost', () => ({
   spawnSession: mocks.spawnSession,
   steerSession: mocks.steerSession,
   stopBackgroundTask: vi.fn(),
+  backgroundForegroundTool: vi.fn(),
   summarizeConversationTitle: mocks.summarizeConversationTitle,
 }));
 vi.mock('../services/agentDispatchService', async () => {

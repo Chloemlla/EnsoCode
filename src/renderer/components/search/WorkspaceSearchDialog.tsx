@@ -74,6 +74,7 @@ const SETTINGS_CATEGORY_LABELS: Record<SettingsCategory, string> = {
   appearance: 'Appearance',
   providers: 'Model Providers',
   skills: 'Skills',
+  plugins: 'Plugins',
   mcp: 'MCP Servers',
   instructions: 'Instruction Files',
   presets: 'Presets',

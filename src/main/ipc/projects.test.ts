@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   openPath: vi.fn(),
   listApps: vi.fn(),
   openInApp: vi.fn(),
+  listProjectCodeSources: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -47,6 +48,9 @@ vi.mock('./agent', () => ({
   }),
 }));
 vi.mock('./worktree', () => ({ sessionWorktree: mocks.sessionWorktree }));
+vi.mock('../../agent/projectCode', () => ({
+  listProjectCodeSources: mocks.listProjectCodeSources,
+}));
 vi.mock('../services/recentProjects', () => ({ getRecentProjects: () => [] }));
 vi.mock('../services/openInApps', () => ({
   openInApps: { list: mocks.listApps, open: mocks.openInApp },
@@ -402,5 +406,29 @@ describe('project authority IPC', () => {
       accepted: false,
     });
     expect(mocks.removeConversationSessionFiles).not.toHaveBeenCalled();
+  });
+
+  it('code-sources 按权威记录解析会话 worktree 目录，拒绝非主窗口、ssh 与脏请求', () => {
+    const codeSources = mocks.handlers.get(IPC_CHANNELS.PROJECTS_CODE_SOURCES)!;
+    mocks.statSync.mockReturnValue({ isDirectory: () => true });
+    mocks.listProjectCodeSources.mockReset().mockReturnValue(['.pi/extensions/a.ts']);
+    mocks.sessionWorktree.mockReturnValue({
+      conversationId: 'conversation-1',
+      projectId: 'project-1',
+      repoPath: '/repo/enso',
+      path: '/repo/enso-wt',
+    });
+    expect(
+      codeSources(event(1), { projectId: 'project-1', conversationId: 'conversation-1' })
+    ).toEqual(['.pi/extensions/a.ts']);
+    expect(mocks.listProjectCodeSources).toHaveBeenCalledWith('/repo/enso-wt');
+
+    mocks.listProjectCodeSources.mockClear();
+    expect(codeSources(event(2), { projectId: 'project-1' })).toEqual([]);
+    expect(codeSources(event(1), { projectId: '' })).toEqual([]);
+    expect(codeSources(event(1), { projectId: 'project-1', appId: 'x' })).toEqual([]);
+    mocks.project.mockReturnValue({ state: 'active', kind: 'ssh', canonicalPath: '/remote' });
+    expect(codeSources(event(1), { projectId: 'project-1' })).toEqual([]);
+    expect(mocks.listProjectCodeSources).not.toHaveBeenCalled();
   });
 });

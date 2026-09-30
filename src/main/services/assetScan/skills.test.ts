@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { listProjectSkills, readPluginSkills, readSkillsRoot } from './skills';
+import { listProjectSkills, readSkillsRoot } from './skills';
 
 let tmp: string;
 
@@ -93,48 +93,6 @@ describe('readSkillsRoot', () => {
     fs.writeFileSync(path.join(tmp, 'plain.txt'), 'not a skill');
     fs.symlinkSync(path.join(tmp, 'plain.txt'), path.join(root, 'filelink'));
     expect(readSkillsRoot(root, 'x')).toEqual([]);
-  });
-});
-
-describe('readPluginSkills', () => {
-  it('按 installPath 读取插件包内的技能，并用插件名分组', () => {
-    const installPath = path.join(tmp, 'cache', 'superpowers', '1.0.0');
-    writeSkill(path.join(installPath, 'skills'), 'brainstorming', 'name: brainstorming');
-    writeSkill(path.join(installPath, 'skills'), 'debugging', 'name: debugging');
-
-    const manifest = path.join(tmp, 'installed_plugins.json');
-    fs.writeFileSync(
-      manifest,
-      JSON.stringify({ plugins: { 'superpowers@marketplace': [{ installPath }] } })
-    );
-
-    const skills = readPluginSkills(manifest);
-    expect(skills.map((s) => s.name).sort()).toEqual(['brainstorming', 'debugging']);
-    // "name@marketplace" 只取插件名部分
-    expect(skills[0].groupName).toBe('superpowers');
-  });
-
-  it('清单不存在或损坏时返回空数组', () => {
-    expect(readPluginSkills(path.join(tmp, 'missing.json'))).toEqual([]);
-
-    const broken = path.join(tmp, 'broken.json');
-    fs.writeFileSync(broken, '{ not json');
-    expect(readPluginSkills(broken)).toEqual([]);
-  });
-
-  it('跳过缺少 installPath 的记录', () => {
-    const manifest = path.join(tmp, 'm.json');
-    fs.writeFileSync(manifest, JSON.stringify({ plugins: { 'a@b': [{ version: '1' }] } }));
-    expect(readPluginSkills(manifest)).toEqual([]);
-  });
-
-  it('installPath 指向不存在的目录时不抛错', () => {
-    const manifest = path.join(tmp, 'm.json');
-    fs.writeFileSync(
-      manifest,
-      JSON.stringify({ plugins: { 'a@b': [{ installPath: '/definitely/not/here' }] } })
-    );
-    expect(readPluginSkills(manifest)).toEqual([]);
   });
 });
 

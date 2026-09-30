@@ -14,6 +14,7 @@ import type {
   InstructionEntry,
   McpServerEntry,
   ModelProvider,
+  PluginEntry,
   Preset,
   Project,
   ProjectGroup,
@@ -260,6 +261,8 @@ export interface SettingsState {
 
   // Skills / MCP servers（按引用登记，内容留在源应用目录）
   skills: SkillEntry[];
+  /** 从 Claude Code 导入的插件；组件在 spawn 时由 Main 按 key 现读 */
+  plugins: PluginEntry[];
   mcpServers: McpServerEntry[];
   instructions: InstructionEntry[];
 
@@ -404,6 +407,9 @@ export interface SettingsState {
   /** 一次写入筛选结果的 enabled，避免逐条 persist */
   setSkillsEnabled: (ids: string[], enabled: boolean) => void;
   removeSkill: (id: string) => void;
+  addPlugins: (plugins: PluginEntry[]) => number;
+  setPluginEnabled: (id: string, enabled: boolean) => void;
+  removePlugin: (id: string) => void;
 
   // MCP actions
   /** 按启动命令或 URL 去重，返回实际新增数量 */
@@ -489,6 +495,8 @@ export interface SettingsState {
   setProjectDisabledBuiltinTools: (projectId: string, disabled: string[] | null) => void;
   /** null = 跟随全局；数组是项目级显式权限掩码。 */
   setProjectSubagentAllowedModes: (projectId: string, modes: AgentMode[] | null) => void;
+  /** 记下用户确认过的项目代码来源；null = 撤销信任 */
+  setProjectTrustedCode: (projectId: string, sources: string[] | null) => void;
 
   /** 非法条目不写入，返回 false */
   setUsageModelPricing: (modelId: string, pricing: ModelPricing) => boolean;

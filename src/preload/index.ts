@@ -75,6 +75,7 @@ import type {
   FilesWatchResult,
   FilesWriteResult,
   GitDiffResult,
+  InstalledPluginInfo,
   ListModelsResult,
   LocalAssetScanResult,
   LocalProviderScanResult,
@@ -425,6 +426,8 @@ const electronAPI = {
   assets: {
     scanLocal: (): Promise<LocalAssetScanResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.ASSETS_SCAN_LOCAL),
+    listInstalledPlugins: (): Promise<InstalledPluginInfo[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PLUGINS_LIST_INSTALLED),
     collectImport: (scanId: string, candidateIds: string[]): Promise<CollectedAsset[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.ASSETS_COLLECT_IMPORT, scanId, candidateIds),
     listProjectSkills: (cwd: string): Promise<{ name: string; description: string }[]> =>
@@ -502,6 +505,9 @@ const electronAPI = {
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_REVEAL, request),
     openInApps: (): Promise<OpenInApp[]> => ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS),
+    /** 项目（或会话 worktree）里会被当作代码加载的 pi 扩展/包来源 */
+    codeSources: (request: { projectId: string; conversationId?: string }): Promise<string[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_CODE_SOURCES, request),
   },
 
   git: {
@@ -744,6 +750,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_PLAN_RESPOND, sessionId, response),
     stopTask: (sessionId: string, taskId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_TASK_STOP, sessionId, taskId),
+    backgroundTool: (sessionId: string, toolCallId: string): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_TOOL_BACKGROUND, sessionId, toolCallId),
     stopSubagent: (sessionId: string, agentId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_STOP, sessionId, agentId),
     stopWorkflow: (sessionId: string, runId: string): Promise<AgentActionResult> =>

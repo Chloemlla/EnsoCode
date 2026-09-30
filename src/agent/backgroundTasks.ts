@@ -3,6 +3,13 @@ import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import path from 'node:path';
 import { getPowerShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { BackgroundTaskInfo } from '@shared/types/agent';
+import {
+  bindForegroundCommand,
+  type DetachableProcess,
+  type DetachReason,
+  ForegroundCommand,
+  ForegroundDetachedError,
+} from './foregroundCommand';
 
 /** 内存缓冲上限（超出截头保尾；磁盘 log 始终全量） */
 const MAX_BUFFER = 200_000;
@@ -20,7 +27,7 @@ const KILL_GRACE_MS = 5_000;
 interface Task {
   info: BackgroundTaskInfo;
   sessionId: string;
-  child: ReturnType<typeof spawn>;
+  kill(signal: NodeJS.Signals): void;
   output: string;
   dirty: boolean;
   logPath: string;
@@ -96,6 +103,8 @@ const fmtDuration = (ms: number): string => {
  */
 export class BackgroundTaskManager {
   private tasks = new Map<string, Task>();
+  /** sessionId → toolCallId → 在跑的前台命令（可移交后台） */
+  private foreground = new Map<string, Map<string, ForegroundCommand>>();
   private counter = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -116,6 +125,91 @@ export class BackgroundTaskManager {
       finalize?: () => Promise<unknown>;
     }
   ): string {
+    const taskId = this.reserveId();
+    // detached：独立进程组，kill 时整棵树一起清
+    const child = spawnBackground(command, cwd, spawnOpts);
+    const pid = child.pid;
+    const task = this.register(sessionId, taskId, spawnOpts?.displayCommand ?? command, {
+      details: spawnOpts?.details,
+      finalize: spawnOpts?.finalize,
+      kill: (signal) => {
+        try {
+          if (pid) process.kill(-pid, signal);
+          else child.kill(signal);
+        } catch {
+          child.kill(signal);
+        }
+      },
+    });
+    child.stdout?.on('data', (chunk: Buffer) => this.append(task, chunk));
+    child.stderr?.on('data', (chunk: Buffer) => this.append(task, chunk));
+    child.on('error', (error) => {
+      task.output += `\n[spawn error] ${error.message}`;
+    });
+    // close 在 stdio 全部排空后触发；统计必须看到完整执行并晚于输出收集。
+    child.on('close', (code, signal) => this.exited(task, code, signal));
+    this.announce(task);
+    return taskId;
+  }
+
+  /** 接管前台命令的在跑进程：不重启，已有输出作为任务初始输出 */
+  adopt(
+    sessionId: string,
+    proc: DetachableProcess,
+    opts: { command: string; startedAt: number }
+  ): string {
+    const taskId = this.reserveId();
+    const task = this.register(sessionId, taskId, opts.command, {
+      startedAt: opts.startedAt,
+      kill: () => proc.kill(),
+    });
+    this.append(task, Buffer.from(proc.output()));
+    proc.pipe((chunk) => this.append(task, chunk));
+    proc.done.then(
+      (code) => this.exited(task, code, null),
+      (error: unknown) => {
+        task.output += `\n[${error instanceof Error ? error.message : String(error)}]`;
+        this.exited(task, null, null);
+      }
+    );
+    this.announce(task);
+    return taskId;
+  }
+
+  /** 前台收尾（如 rtk 统计）推迟到后台任务结束；任务已结束则立即执行 */
+  attachFinalize(taskId: string, details: unknown, finalize?: () => Promise<unknown>): void {
+    const task = this.tasks.get(taskId);
+    if (task && task.info.status === 'running' && !task.settling) {
+      task.details = details;
+      task.finalize = finalize;
+      return;
+    }
+    void finalize?.().catch(() => {});
+  }
+
+  trackForeground(sessionId: string, toolCallId: string, command: ForegroundCommand): () => void {
+    const byCall = this.foreground.get(sessionId) ?? new Map<string, ForegroundCommand>();
+    this.foreground.set(sessionId, byCall);
+    byCall.set(toolCallId, command);
+    return () => {
+      if (byCall.get(toolCallId) === command) byCall.delete(toolCallId);
+      if (byCall.size === 0 && this.foreground.get(sessionId) === byCall) {
+        this.foreground.delete(sessionId);
+      }
+    };
+  }
+
+  /** 把指定前台命令移交后台；命令不在跑或配额满时返回 null */
+  backgroundForeground(sessionId: string, toolCallId: string, reason: DetachReason): string | null {
+    return this.foreground.get(sessionId)?.get(toolCallId)?.detach(reason) ?? null;
+  }
+
+  backgroundAllForeground(sessionId: string, reason: DetachReason): string[] {
+    const commands = [...(this.foreground.get(sessionId)?.values() ?? [])];
+    return commands.flatMap((command) => command.detach(reason) ?? []);
+  }
+
+  private reserveId(): string {
     // 配额：先清理已完成，再满则拒绝并教模型下一步
     if (this.tasks.size >= MAX_TASKS) this.pruneFinished();
     if (this.tasks.size >= MAX_TASKS) {
@@ -124,9 +218,20 @@ export class BackgroundTaskManager {
           `Known task ids: [${[...this.tasks.keys()].join(', ')}]`
       );
     }
-    const taskId = `task-${++this.counter}-${Date.now().toString(36)}`;
-    // detached：独立进程组，kill 时整棵树一起清
-    const child = spawnBackground(command, cwd, spawnOpts);
+    return `task-${++this.counter}-${Date.now().toString(36)}`;
+  }
+
+  private register(
+    sessionId: string,
+    taskId: string,
+    command: string,
+    opts: {
+      kill: Task['kill'];
+      details?: unknown;
+      finalize?: () => Promise<unknown>;
+      startedAt?: number;
+    }
+  ): Task {
     const logPath = path.join(this.logDir, `${taskId}.log`);
     let logStream: WriteStream | null = null;
     try {
@@ -137,7 +242,7 @@ export class BackgroundTaskManager {
     }
     const task: Task = {
       sessionId,
-      child,
+      kill: opts.kill,
       output: '',
       dirty: false,
       logPath,
@@ -145,37 +250,37 @@ export class BackgroundTaskManager {
       consumed: false,
       killedByUser: false,
       waiters: [],
-      details: spawnOpts?.details,
-      finalize: spawnOpts?.finalize,
+      details: opts.details,
+      finalize: opts.finalize,
       settling: false,
       info: {
         taskId,
-        command: spawnOpts?.displayCommand ?? command,
+        command,
         status: 'running',
         tail: '',
-        startedAt: Date.now(),
+        startedAt: opts.startedAt ?? Date.now(),
       },
     };
     this.tasks.set(taskId, task);
-    const append = (chunk: Buffer) => {
-      task.output = (task.output + chunk.toString()).slice(-MAX_BUFFER);
-      task.dirty = true;
-      task.logStream?.write(chunk);
-    };
-    child.stdout?.on('data', append);
-    child.stderr?.on('data', append);
-    child.on('error', (error) => {
-      task.output += `\n[spawn error] ${error.message}`;
-    });
-    // close 在 stdio 全部排空后触发；统计必须看到完整执行并晚于输出收集。
-    child.on('close', (code, signal) => {
-      if (task.info.status !== 'running' || task.settling) return;
-      if (signal) task.output += `\n[terminated by ${signal}]`;
-      void this.settle(task, code === 0 ? 'done' : 'failed', code ?? undefined);
-    });
-    this.events.onStarted(sessionId, { ...task.info });
+    return task;
+  }
+
+  private append(task: Task, chunk: Buffer): void {
+    if (chunk.length === 0) return;
+    task.output = (task.output + chunk.toString()).slice(-MAX_BUFFER);
+    task.dirty = true;
+    task.logStream?.write(chunk);
+  }
+
+  private exited(task: Task, code: number | null, signal: NodeJS.Signals | null): void {
+    if (task.info.status !== 'running' || task.settling) return;
+    if (signal) task.output += `\n[terminated by ${signal}]`;
+    void this.settle(task, code === 0 ? 'done' : 'failed', code ?? undefined);
+  }
+
+  private announce(task: Task): void {
+    this.events.onStarted(task.sessionId, { ...task.info });
     this.ensureTimer();
-    return taskId;
   }
 
   private pruneFinished(): void {
@@ -286,18 +391,9 @@ export class BackgroundTaskManager {
     if (task?.info.status !== 'running') return false;
     if (byUser) task.killedByUser = true;
     else task.consumed = true; // 模型自己停的：kill 回执即知情，不再通知
-    const pid = task.child.pid;
-    const signalGroup = (signal: NodeJS.Signals) => {
-      try {
-        if (pid) process.kill(-pid, signal);
-        else task.child.kill(signal);
-      } catch {
-        task.child.kill(signal);
-      }
-    };
-    signalGroup('SIGTERM');
+    task.kill('SIGTERM');
     setTimeout(() => {
-      if (task.info.status === 'running') signalGroup('SIGKILL');
+      if (task.info.status === 'running') task.kill('SIGKILL');
     }, KILL_GRACE_MS).unref?.();
     return true;
   }
@@ -376,10 +472,39 @@ export function withForegroundBashTimeout(params: unknown): Record<string, unkno
       ? { ...(params as Record<string, unknown>) }
       : {};
   if (record.background === true) return record;
-  if (typeof record.timeout === 'number' && Number.isFinite(record.timeout) && record.timeout > 0) {
-    return record;
-  }
+  if (hasExplicitTimeout(record)) return record;
   return { ...record, timeout: DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC };
+}
+
+function hasExplicitTimeout(record: Record<string, unknown>): boolean {
+  return (
+    typeof record.timeout === 'number' && Number.isFinite(record.timeout) && record.timeout > 0
+  );
+}
+
+const DETACH_REASON_TEXT: Record<DetachReason, string> = {
+  user: 'The user moved this command to the background',
+  timeout: `The command exceeded the default ${DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC}s foreground timeout and was moved to the background`,
+  steer: 'The command was moved to the background because the user sent a new message',
+};
+
+function detachedResult(error: ForegroundDetachedError) {
+  const { taskId } = error;
+  const tail = error.output.slice(-TAIL_LIMIT).trimEnd();
+  const text =
+    `${DETACH_REASON_TEXT[error.reason]} as task ${taskId}. ` +
+    'The process is still running — it was not cancelled.\n' +
+    (tail ? `Output so far:\n${tail}\n` : '') +
+    'You will be notified automatically when it finishes — do not rerun it or poll. ' +
+    `task_output("${taskId}") shows a snapshot, task_stop("${taskId}") stops it.`;
+  const details =
+    error.details && typeof error.details === 'object' && !Array.isArray(error.details)
+      ? error.details
+      : {};
+  return {
+    content: [{ type: 'text' as const, text }],
+    details: { ...details, backgroundTaskId: taskId },
+  };
 }
 
 /** 前台命令工具实际生效的超时（毫秒）；background 与非命令工具没有截止时间 */
@@ -409,8 +534,9 @@ export function withBackground(
       timeout: {
         type: 'number',
         description:
-          `Timeout in seconds (default ${DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC} for foreground; ` +
-          'no timeout when background=true)',
+          `Timeout in seconds; an explicit timeout kills the command. Without it, a foreground command ` +
+          `still running after ${DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC}s is moved to the background ` +
+          'instead. No timeout when background=true.',
       },
       background: {
         type: 'boolean',
@@ -471,13 +597,43 @@ export function withBackground(
             'set background: true on this tool instead, which tracks the process and notifies you on completion.'
         );
       }
-      return definition.execute(
-        toolCallId,
-        withForegroundBashTimeout(params),
-        signal,
-        onUpdate,
-        ctx
+      const command = record.command;
+      if (typeof command !== 'string') {
+        return definition.execute(
+          toolCallId,
+          withForegroundBashTimeout(params),
+          signal,
+          onUpdate,
+          ctx
+        );
+      }
+      // 每次调用独立 signal：并行工具共享轮次 signal，不能以它区分调用
+      const callSignal = signal ? AbortSignal.any([signal]) : new AbortController().signal;
+      const startedAt = Date.now();
+      const foreground = new ForegroundCommand(
+        hasExplicitTimeout(record as Record<string, unknown>) ? 'kill' : 'background',
+        {
+          adopt: (proc) => manager.adopt(sessionId, proc, { command, startedAt }),
+          attachFinalize: (taskId, details, finalize) =>
+            manager.attachFinalize(taskId, details, finalize),
+        }
       );
+      bindForegroundCommand(callSignal, foreground);
+      const untrack = manager.trackForeground(sessionId, toolCallId, foreground);
+      try {
+        return await definition.execute(
+          toolCallId,
+          withForegroundBashTimeout(params),
+          callSignal,
+          onUpdate,
+          ctx
+        );
+      } catch (error) {
+        if (error instanceof ForegroundDetachedError) return detachedResult(error);
+        throw error;
+      } finally {
+        untrack();
+      }
     },
   };
 }

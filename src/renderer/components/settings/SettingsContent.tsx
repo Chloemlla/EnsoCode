@@ -10,6 +10,7 @@ import {
   Mic,
   Palette,
   Plug,
+  Puzzle,
   Server,
   Settings,
   Smartphone,
@@ -34,6 +35,7 @@ import { McpSettings } from './McpSettings';
 import { MemoryKnowledge } from './MemoryKnowledge';
 import { MemoryLibrary } from './MemoryLibrary';
 import { MemorySettings } from './MemorySettings';
+import { PluginsSettings } from './PluginsSettings';
 import { PresetsSettings } from './PresetsSettings';
 import { ProvidersSettings } from './ProvidersSettings';
 import { ResourcesSettings } from './ResourcesSettings';
@@ -95,6 +97,7 @@ export function SettingsContent() {
     { id: 'workflows', icon: Workflow, label: t('Workflows') },
     { id: 'memory', icon: Brain, label: t('Memory') },
     { id: 'skills', icon: Sparkles, label: t('Skills') },
+    { id: 'plugins', icon: Puzzle, label: t('Plugins') },
     { id: 'mcp', icon: Plug, label: t('MCP Servers') },
     { id: 'instructions', icon: FileText, label: t('Instruction Files') },
     { id: 'phone', icon: Smartphone, label: t('Devices') },
@@ -139,6 +142,7 @@ export function SettingsContent() {
         {activeCategory === 'appearance' && <AppearanceSettings />}
         {activeCategory === 'providers' && <ProvidersSettings />}
         {activeCategory === 'skills' && <SkillsSettings />}
+        {activeCategory === 'plugins' && <PluginsSettings />}
         {activeCategory === 'mcp' && <McpSettings />}
         {activeCategory === 'instructions' && <InstructionsSettings />}
         {activeCategory === 'presets' && <PresetsSettings />}

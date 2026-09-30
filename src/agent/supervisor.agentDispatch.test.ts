@@ -86,6 +86,7 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
   };
 });
 
+import type { BackgroundTaskManager } from './backgroundTasks';
 import { SessionSupervisor } from './supervisor';
 
 const parent = {
@@ -1015,6 +1016,26 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       await settle();
       userMessage('ok');
       expect(settled()).toEqual(['s2']);
+      await supervisor.shutdown();
+    });
+
+    it('用户插话后把本会话前台命令转后台；拒收的插话不转；tool-background 按调用 id 转', async () => {
+      const { supervisor, piSession } = await spawned();
+      const bg = (supervisor as unknown as { bgTasks: BackgroundTaskManager }).bgTasks;
+      const all = vi.spyOn(bg, 'backgroundAllForeground');
+      const one = vi.spyOn(bg, 'backgroundForeground');
+      piSession.steer.mockRejectedValueOnce(new Error('boom'));
+      supervisor.handleCommand({ type: 'steer', identity: parent, text: 'bad' });
+      await settle();
+      expect(all).not.toHaveBeenCalled();
+
+      supervisor.handleCommand({ type: 'steer', identity: parent, text: 'hey' });
+      await settle();
+      expect(all).toHaveBeenCalledWith(parent.sessionId, 'steer');
+
+      supervisor.handleCommand({ type: 'tool-background', identity: parent, toolCallId: 'call-1' });
+      await settle();
+      expect(one).toHaveBeenCalledWith(parent.sessionId, 'call-1', 'user');
       await supervisor.shutdown();
     });
   });

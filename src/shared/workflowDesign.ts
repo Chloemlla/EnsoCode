@@ -2,7 +2,7 @@ import type { WorkflowDesign, WorkflowDesignPhase, WorkflowDesignStep } from './
 
 /** 与 workflow 运行时 MAX_AGENTS 一致 */
 const MAX_STEPS = 32;
-const AGENT_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const AGENT_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/;
 const ARG_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,31}$/;
 const PLACEHOLDER_RE = /\{\{\s*(?:args\.([A-Za-z_][A-Za-z0-9_]{0,31})|(prev))\s*\}\}/g;
 

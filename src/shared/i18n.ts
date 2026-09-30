@@ -186,10 +186,11 @@ export const zhTranslations: Record<string, string> = {
   'Automatically unfold the thinking block while the model is still reasoning. It collapses again when reasoning ends.':
     '模型思考时自动展开推理内容；思考结束后仍自动收起',
   'Context compaction strategy': '上下文压缩策略',
-  'Standard uses default compact. Smart compaction uses Enso verified summary at compact time. Continuous memory records observations in the background so compact keeps more context; both fall back to default compact on failure and take effect on the next session.':
-    '标准使用默认压缩。智能压缩在压缩时用 Enso 验证式摘要。持续记忆在后台持续记录观察，压缩时保留更多上下文；两者失败都回退默认压缩，下一个会话生效。',
+  'Standard uses default compact. Smart compaction uses Enso verified summary at compact time. Codex native compaction additionally stores an official Codex checkpoint on Codex models and uses smart compaction otherwise. Continuous memory records observations in the background so compact keeps more context; all fall back to default compact on failure and take effect on the next session.':
+    '标准使用默认压缩。智能压缩在压缩时用 Enso 验证式摘要。Codex 原生压缩在 Codex 模型上额外保存官方 Codex checkpoint，其他模型按智能压缩处理。持续记忆在后台持续记录观察，压缩时保留更多上下文；失败都回退默认压缩，下一个会话生效。',
   Standard: '标准',
   'Smart compaction': '智能压缩',
+  'Codex native compaction': 'Codex 原生压缩',
   'Continuous memory (experimental)': '持续记忆（实验性）',
   'Summary model': '摘要模型',
   'Background memory model': '后台记忆模型',
@@ -1021,6 +1022,8 @@ export const zhTranslations: Record<string, string> = {
   'Best with mixed Chinese-English and code terms. Slower and uses more memory.':
     '中英混说和代码术语识别最好，但较慢且更占内存。',
   'Chinese, English, Japanese, Korean and Cantonese.': '支持中文、英文、日语、韩语和粤语。',
+  Hanbao: '憨包',
+  'Runs fully offline. Chinese and English.': '完全离线运行，支持中文和英文。',
   'Google cloud recognition, most accurate with mixed Chinese-English and code terms. Needs a Gemini API key.':
     'Google 云端识别，中英混说和代码术语最准；需要 Gemini API Key。',
   'Audio is uploaded to Google. On the free tier Google may use it to improve its products.':
@@ -1225,6 +1228,8 @@ export const zhTranslations: Record<string, string> = {
     '此操作不可撤销。归档可以让它不再出现在检索里,同时保留内容。',
   'Long-term memory: the agent can search, capture and consolidate durable decisions, preferences and lessons across sessions':
     '长期记忆:agent 可跨会话检索、记录与归纳持久的决策、偏好与经验',
+  'Plan mode: research read-only, submit a plan for approval, then carry it out after approval':
+    'Plan 模式：只读调研并提交计划，审批通过后再执行',
   'Run JavaScript in an isolated sandbox that can call session tools. Intermediate reads and edits stay out of the chat; only the returned value is added to the conversation.':
     '在隔离沙箱里跑 JavaScript，并可调用会话工具。中间的读取和修改不会进对话，只有返回值会留下。',
   Workflow: '工作流',
@@ -1309,6 +1314,32 @@ export const zhTranslations: Record<string, string> = {
     '后台 shell 任务:长命令挂后台跑,完成时通知',
   "Built-in browser: open pages in Enso's own Chromium, read snapshots, click and type by ref":
     '内嵌浏览器:在 Enso 自带 Chromium 里打开页面,读快照,按 ref 点击与输入',
+  "Web search and fetch: search with the session model's built-in search (falls back to a keyless service) and read public pages as markdown":
+    '联网搜索与抓取:优先用会话模型自带的搜索(不支持时降级到免 key 服务),并把公开网页读成 markdown',
+  'This project ships pi extension code that runs with your permissions. It was not loaded. Trust it only if you trust this repository.':
+    '此项目带有 pi 扩展代码，会以你的权限运行，已阻止加载。只有信任这个仓库时才加载。',
+  'Trust and load': '信任并加载',
+  Plugins: '插件',
+  Commands: '命令',
+  '{{count}} enabled': '已启用 {{count}} 个',
+  'No supported components': '没有可用组件',
+  'MCP servers (run when a session starts)': 'MCP 服务器（会话启动时运行）',
+  'Hooks (run automatically on local sessions)': 'Hooks（本地会话中自动运行）',
+  'Not supported': '暂不支持',
+  'Plugins installed in Claude Code. Each one is switched on or off as a whole here; changes apply to new sessions.':
+    'Claude Code 里已安装的插件，在这里按整包开关，新会话生效。',
+  'No Claude Code plugins found': '没有找到 Claude Code 插件',
+  'Install plugins with /plugin in Claude Code, then rescan.':
+    '在 Claude Code 里用 /plugin 安装插件后重新扫描。',
+  'No longer installed in Claude Code': 'Claude Code 中已卸载',
+  'Project extensions trusted. They load in new sessions and after this one restarts.':
+    '已信任项目扩展，新会话和本会话重新启动后加载。',
+  'Trusted project extensions': '已信任的项目扩展',
+  'Revoke trust': '撤销信任',
+  'No longer loaded after saving, starting with the next session.':
+    '保存后不再加载，从下一个会话开始生效。',
+  'Web search': '联网搜索',
+  'Web fetch': '网页抓取',
   'QuickJS sandbox: write JavaScript that calls session tools (including edits) in one cell':
     'QuickJS 沙箱:用 JavaScript 在一个 cell 里调用会话工具(含编辑)',
   '(log unavailable)': '(日志不可用)',
@@ -1403,6 +1434,9 @@ export const zhTranslations: Record<string, string> = {
   Stop: '停止',
   'Attach image': '添加图片',
   'Stop task': '停止任务',
+  'Move to background': '转为后台',
+  'Moving to background…': '正在转后台…',
+  'Moved to background': '已转后台',
   'Stop subagent': '停止子代理',
   'Dismiss coworker': '解雇 coworker',
   'Hire coworker': '雇佣 coworker',
@@ -1842,6 +1876,13 @@ export const zhTranslations: Record<string, string> = {
   'Export password is too short.': '导出密码太短。',
   'Configuration package is too large.': '配置包过大。',
   'Unable to export configuration.': '无法导出配置。',
+  'A preset uses a system prompt that is missing or empty.': '有预设引用的系统提示词不存在或为空。',
+  'Could not write the export file. Check that the folder is writable.':
+    '无法写入导出文件，请确认所选文件夹可写。',
+  'The selected file is a symbolic link. Choose a different location.':
+    '所选文件是符号链接，请换一个位置保存。',
+  'These instructions were skipped because their source files are missing or unreadable:':
+    '以下指令的源文件已丢失或无法读取，未包含在配置包中：',
   'Skill, instruction, and system prompt contents require an encrypted export.':
     '技能、指令和系统提示词正文需要使用加密导出。',
   'Invalid import request.': '导入请求无效。',

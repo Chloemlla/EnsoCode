@@ -3,7 +3,6 @@ import type { InstructionEntry, McpServerEntry, SkillEntry } from './assets';
 /** 支持扫描的技能 / MCP / 指令文件来源 */
 export const ASSET_SOURCE_IDS = [
   'claude-code',
-  'claude-plugins',
   'claude-desktop',
   'codex',
   'cursor',

@@ -51,6 +51,7 @@ import {
   abortSession,
   agentTypeRegistrySnapshot,
   appendSessionCustomEntry,
+  backgroundForegroundTool,
   compactSession,
   completeText,
   dismissChildSession,
@@ -1689,6 +1690,17 @@ export function registerAgentHandlers(): void {
         return { ok: false, error: 'invalid task stop or stale generation' };
       }
       return stopBackgroundTask(identity, taskId);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_TOOL_BACKGROUND,
+    (_event, sessionId: unknown, toolCallId: unknown): AgentActionResult => {
+      const identity = exactIdentity(sessionId);
+      if (!identity || !isNonEmptyString(toolCallId) || toolCallId.length > 512) {
+        return { ok: false, error: 'invalid tool background request or stale generation' };
+      }
+      return backgroundForegroundTool(identity, toolCallId);
     }
   );
 

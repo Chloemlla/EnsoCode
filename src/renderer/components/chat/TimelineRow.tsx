@@ -3,6 +3,7 @@ import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/pl
 import type { AgentSessionCustomEntry, TodoItem, TurnPerf } from '@shared/types/agent';
 import { parseWorkflowPresetMessage } from '@shared/workflowPresetMessage';
 import {
+  ArrowDownToLine,
   Bot,
   BoxSelect,
   Brain,
@@ -1448,7 +1449,10 @@ function ToolGroupRow({
   return (
     <>
       {head}
-      <div className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card text-sm shadow-xs">
+      <div
+        data-slot="tool-details"
+        className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card text-sm shadow-xs"
+      >
         {explore.goal && (
           <div className="border-b border-border/60 px-3 py-2">
             <div className="mb-0.5 text-[11px] text-muted-foreground">{t('Goal')}</div>
@@ -1642,6 +1646,7 @@ function SandboxOutput({
 /** 单行工具摘要：状态点/图标 + 工具名 + 参数摘要；edit 展开为 diff,write 展开为写入内容,其余为输出 */
 function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const { t } = useI18n();
+  const host = useChatHost();
   const compactReadOnly = useSettingsStore((s) => s.compactReadOnlyTools);
   const expandLiveEdits = useSettingsStore((s) => s.expandLiveEdits);
   const compact = compactReadOnly && item.name !== 'bash' && isReadOnlyTool(item);
@@ -1725,6 +1730,14 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
                 ? headerSummary
                 : null}
           </span>
+          {item.backgroundTaskId && (
+            <span
+              className="shrink-0 text-[11px] text-muted-foreground"
+              title={item.backgroundTaskId}
+            >
+              {t('Moved to background')}
+            </span>
+          )}
           {item.state === 'reviewing' ? (
             <span className="t-shimmer shrink-0 text-[11px]" data-text={t('Assistant reviewing…')}>
               {t('Assistant reviewing…')}
@@ -1753,6 +1766,9 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
             />
           )}
         </button>
+        {item.state === 'running' && item.callId && !host && (
+          <MoveToBackgroundButton callId={item.callId} />
+        )}
         {(hasDiff || hasWrite || hasFileChanges) && (item.state === 'ok' || hasFileChanges) && (
           <button
             type="button"
@@ -1766,7 +1782,10 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
       </div>
       {expanded && expandable && (
         // 展开内容收进与工具名对齐的卡片，左侧留给时间线竖线
-        <div className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card shadow-xs">
+        <div
+          data-slot="tool-details"
+          className="t-acc-reveal mt-1 mb-1.5 ml-[30px] overflow-hidden rounded-lg border border-border/70 bg-card shadow-xs"
+        >
           {mcp && (
             <div className="truncate border-b border-border/60 px-3 py-1 font-mono text-[10px] text-muted-foreground">
               {mcp.server}.{mcp.tool}
@@ -1948,6 +1967,40 @@ function TodoRow({ todos }: { todos: TodoItem[] }) {
 
 /** 切会话会卸载时间线，挂载时刻不能当起点。有 since 用打点；否则按会话+行 key 记住第一次出现的时刻。 */
 const elapsedStartByKey = new Map<string, number>();
+
+/** 运行中的前台命令移交为后台任务；worker 拒绝（已结束/配额满）时稍后恢复可点 */
+function MoveToBackgroundButton({ callId }: { callId: string }) {
+  const { t } = useI18n();
+  const sessionId = useSessionsStore((state) => displayedConversation(state)?.id ?? '');
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setTimeout(() => setPending(false), 5000);
+    return () => clearTimeout(timer);
+  }, [pending]);
+  if (!sessionId) return null;
+  const label = pending ? t('Moving to background…') : t('Move to background');
+  return (
+    <button
+      type="button"
+      disabled={pending}
+      title={label}
+      className="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
+      onClick={() => {
+        setPending(true);
+        void window.electronAPI.agent.backgroundTool(sessionId, callId).then(
+          (result) => {
+            if (!result.ok) setPending(false);
+          },
+          () => setPending(false)
+        );
+      }}
+    >
+      <ArrowDownToLine className="h-3 w-3" />
+      {label}
+    </button>
+  );
+}
 
 function RunningElapsed({ itemKey, since }: { itemKey: string; since?: number }) {
   const host = useChatHost();

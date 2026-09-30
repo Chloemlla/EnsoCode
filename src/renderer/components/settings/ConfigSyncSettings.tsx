@@ -170,6 +170,7 @@ function ExportDialog({
   const [error, setError] = React.useState<string | null>(null);
   const [cancelled, setCancelled] = React.useState(false);
   const [filePath, setFilePath] = React.useState<string | null>(null);
+  const [skippedInstructions, setSkippedInstructions] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -180,6 +181,7 @@ function ExportDialog({
     setError(null);
     setCancelled(false);
     setFilePath(null);
+    setSkippedInstructions([]);
   }, [open]);
 
   const close = () => {
@@ -215,6 +217,7 @@ function ExportDialog({
         return;
       }
       setFilePath(result.filePath);
+      setSkippedInstructions(result.skippedInstructions ?? []);
     } catch {
       setPassword('');
       setConfirmation('');
@@ -236,14 +239,29 @@ function ExportDialog({
 
         <DialogPanel className="max-h-[55vh] space-y-4">
           {filePath ? (
-            <Alert variant="success">
-              <CircleCheck />
-              <AlertTitle>{t('Configuration exported')}</AlertTitle>
-              <AlertDescription>
-                <p>{t('Saved package:')}</p>
-                <p className="break-all font-mono text-xs text-foreground">{filePath}</p>
-              </AlertDescription>
-            </Alert>
+            <>
+              <Alert variant="success">
+                <CircleCheck />
+                <AlertTitle>{t('Configuration exported')}</AlertTitle>
+                <AlertDescription>
+                  <p>{t('Saved package:')}</p>
+                  <p className="break-all font-mono text-xs text-foreground">{filePath}</p>
+                </AlertDescription>
+              </Alert>
+              {skippedInstructions.length > 0 && (
+                <Alert variant="warning">
+                  <TriangleAlert />
+                  <AlertDescription>
+                    <p>
+                      {t(
+                        'These instructions were skipped because their source files are missing or unreadable:'
+                      )}
+                    </p>
+                    <p className="break-all text-foreground">{skippedInstructions.join(', ')}</p>
+                  </AlertDescription>
+                </Alert>
+              )}
+            </>
           ) : (
             <>
               <Alert variant="warning">

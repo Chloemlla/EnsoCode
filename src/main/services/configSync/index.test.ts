@@ -289,10 +289,9 @@ describe('config sync sender-bound import flow', () => {
     writeFileSync(target, 'keep-private-data');
     symlinkSync(target, link);
 
-    await expect(
-      service.exportConfigToPath({ includeSecrets: false }, link)
-    ).resolves.toMatchObject({
+    await expect(service.exportConfigToPath({ includeSecrets: false }, link)).resolves.toEqual({
       ok: false,
+      error: 'The selected file is a symbolic link. Choose a different location.',
     });
     expect(readFileSync(target, 'utf8')).toBe('keep-private-data');
   });
@@ -447,6 +446,104 @@ describe('config sync sender-bound import flow', () => {
     expect(decoded.state.presets[0]?.skillIds).toEqual(['good3']);
     settings.patchSettingsState('presets', []);
     settings.patchSettingsState('skills', []);
+  });
+
+  it('源文件丢失的指令被跳过并报告，preset 引用随之剔除', async () => {
+    settings.patchSettingsState('skills', []);
+    const goodSource = join(userData, 'good-instruction.md');
+    writeFileSync(goodSource, '# good instruction');
+    settings.patchSettingsState('instructions', [
+      {
+        id: 'good-instruction',
+        name: 'Good',
+        source: 'Codex',
+        sourcePath: goodSource,
+        local: false,
+        bytes: 1,
+        enabled: true,
+      },
+      {
+        id: 'gone-instruction',
+        name: 'Gone',
+        source: 'Codex',
+        sourcePath: join(userData, 'deleted-project', 'AGENTS.md'),
+        local: false,
+        bytes: 1,
+        enabled: true,
+      },
+    ]);
+    settings.patchSettingsState('presets', [
+      {
+        id: 'keep',
+        name: 'Keep',
+        skillIds: [],
+        mcpServerIds: [],
+        instructionId: 'good-instruction',
+      },
+      {
+        id: 'drop',
+        name: 'Drop',
+        skillIds: [],
+        mcpServerIds: [],
+        instructionId: 'gone-instruction',
+      },
+    ]);
+
+    const exported = join(userData, 'skipped-instruction.enso-config');
+    await expect(
+      service.exportConfigToPath({ includeSecrets: true, password: 'correct horse' }, exported)
+    ).resolves.toEqual({ ok: true, filePath: exported, skippedInstructions: ['Gone'] });
+
+    const decoded = validateBundle(await decodeBundle(readFileSync(exported), 'correct horse'));
+    expect(decoded.state.instructions.map((item) => item.id)).toEqual(['good-instruction']);
+    expect(decoded.resources.instructions.map((item) => item.id)).toEqual(['good-instruction']);
+    expect(decoded.state.presets.map((preset) => preset.instructionId)).toEqual([
+      'good-instruction',
+      undefined,
+    ]);
+    settings.patchSettingsState('presets', []);
+    settings.patchSettingsState('instructions', []);
+  });
+
+  it('preset 引用的系统提示词缺失时给出具体原因', async () => {
+    settings.patchSettingsState('skills', []);
+    settings.patchSettingsState('instructions', []);
+    settings.patchSettingsState('presets', [
+      {
+        id: 'prompt-preset',
+        name: 'Prompt',
+        skillIds: [],
+        mcpServerIds: [],
+        systemPromptId: '0f0f0f0f-1111-4222-8333-444444444444',
+      },
+    ]);
+
+    await expect(
+      service.exportConfigToPath(
+        { includeSecrets: true, password: 'correct horse' },
+        join(userData, 'missing-prompt.enso-config')
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: 'A preset uses a system prompt that is missing or empty.',
+    });
+    settings.patchSettingsState('presets', []);
+  });
+
+  it('目标位置无法写入时给出具体原因', async () => {
+    settings.patchSettingsState('skills', []);
+    settings.patchSettingsState('instructions', []);
+    settings.patchSettingsState('presets', []);
+
+    await expect(
+      service.exportConfigToPath(
+        { includeSecrets: false },
+        join(userData, 'no-such-folder', 'out.enso-config')
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: 'Could not write the export file. Check that the folder is writable.',
+    });
   });
 
   it('planImport 失败不得报成密码错误', async () => {

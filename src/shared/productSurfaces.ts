@@ -488,6 +488,11 @@ export const PRODUCT_SURFACE_INVENTORY = {
     kind: 'action',
     label: 'Use built-in browser',
   },
+  'coding-tools.web': {
+    domain: 'coding-tools',
+    kind: 'action',
+    label: 'Search and fetch the web',
+  },
   'coding-tools.isolated-sandbox': {
     domain: 'coding-tools',
     kind: 'action',
@@ -497,6 +502,11 @@ export const PRODUCT_SURFACE_INVENTORY = {
     domain: 'coding-tools',
     kind: 'action',
     label: 'Search and capture long-term memory',
+  },
+  'coding-tools.plan': {
+    domain: 'coding-tools',
+    kind: 'action',
+    label: 'Submit a plan in plan mode',
   },
 } as const satisfies Record<string, ProductSurfaceInventoryItem>;
 

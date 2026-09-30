@@ -1,5 +1,10 @@
 import { parseRtkToolStats } from '@shared/rtk';
-import type { ProjectedMessage, ProjectedPart, TodoItem } from '@shared/types/agent';
+import {
+  isBackgroundTaskId,
+  type ProjectedMessage,
+  type ProjectedPart,
+  type TodoItem,
+} from '@shared/types/agent';
 import {
   PROJECTED_APPLY_PATCH_PATH_COUNT_LIMIT,
   PROJECTED_APPLY_PATCH_PATH_TEXT_LIMIT,
@@ -178,6 +183,14 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
   ) {
     const rtk = parseRtkToolStats(value.details.rtk);
     if (rtk) projected.rtk = rtk;
+  }
+  if (
+    value.role === 'toolResult' &&
+    (value.toolName === 'bash' || value.toolName === 'powershell') &&
+    isRecord(value.details) &&
+    isBackgroundTaskId(value.details.backgroundTaskId)
+  ) {
+    projected.backgroundTaskId = value.details.backgroundTaskId;
   }
   if (value.role === 'toolResult' && value.toolName === 'todo') {
     const todos = projectTodos(value.details);

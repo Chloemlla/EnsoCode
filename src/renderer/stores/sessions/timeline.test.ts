@@ -817,6 +817,33 @@ describe('buildTimeline', () => {
     expect(timeline[1]).toMatchObject({ kind: 'tool', rtk });
   });
 
+  it('运行中的命令行带调用 id 供转后台；转后台的结果带任务 id', () => {
+    const call = (id: string, name: string): TimelineMessage => ({
+      role: 'assistant',
+      content: [{ type: 'toolCall', id, name, arguments: { command: 'sleep 99' } }],
+    });
+    const running = buildTimeline([user('跑'), call('t1', 'bash')], true);
+    expect(running[1]).toMatchObject({ kind: 'tool', state: 'running', callId: 't1' });
+    expect(buildTimeline([user('读'), call('r1', 'read')], true)[1]).not.toHaveProperty('callId');
+
+    const moved = buildTimeline(
+      [
+        user('跑'),
+        call('t1', 'powershell'),
+        {
+          role: 'toolResult',
+          toolCallId: 't1',
+          toolName: 'powershell',
+          content: [{ type: 'text', text: 'moved' }],
+          backgroundTaskId: 'task-1-abc',
+        },
+      ],
+      false
+    );
+    expect(moved[1]).toMatchObject({ kind: 'tool', state: 'ok', backgroundTaskId: 'task-1-abc' });
+    expect(moved[1]).not.toHaveProperty('callId');
+  });
+
   it('exec 摘要用首行 JS，source 保留全文，结果 JSON 解析为 value/calls', () => {
     const code = 'const pkg = await read({ path: "package.json" });\nreturn pkg;';
     const output = JSON.stringify({

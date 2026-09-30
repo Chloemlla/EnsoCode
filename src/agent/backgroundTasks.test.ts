@@ -15,6 +15,8 @@ import {
   withBackground,
   withForegroundBashTimeout,
 } from './backgroundTasks';
+import { ForegroundDetachedError } from './foregroundCommand';
+import { createSessionCommandTool } from './sessionShell';
 
 const makeManager = () => {
   const notified: string[] = [];
@@ -335,5 +337,122 @@ describe('BackgroundTaskManager', () => {
     await until(() => ended.includes(byUser));
     expect(notified).toHaveLength(1);
     expect(notified[0]).toContain('do not restart');
+  });
+});
+
+describe('前台命令转后台', () => {
+  const shell = (manager: BackgroundTaskManager, sessionId = 's1') =>
+    withBackground(
+      createSessionCommandTool({ cwd: process.cwd() }) as unknown as ToolDefinition,
+      manager,
+      sessionId,
+      process.cwd()
+    );
+  const run = (tool: ToolDefinition, toolCallId: string, command: string) => {
+    const updates: string[] = [];
+    const pending = tool.execute(
+      toolCallId,
+      { command },
+      undefined,
+      (update) => updates.push(JSON.stringify(update)),
+      undefined as never
+    );
+    return { pending, updates };
+  };
+
+  it('用户转后台：工具立即返回任务回执，同一进程继续跑完并通知模型', async () => {
+    const { manager, started, ended, notified } = makeManager();
+    const { pending, updates } = run(
+      shell(manager),
+      't1',
+      'echo before-bg; sleep 0.5; echo after-bg'
+    );
+    await until(() => updates.join('').includes('before-bg'));
+
+    const taskId = manager.backgroundForeground('s1', 't1', 'user');
+    expect(taskId).toMatch(/^task-/);
+    const result = await pending;
+    const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+    expect(text).toContain('The user moved this command to the background');
+    expect(text).toContain(taskId as string);
+    expect(text).toContain('before-bg');
+    expect(result.details).toMatchObject({ backgroundTaskId: taskId });
+    expect(started[0]).toMatchObject({
+      taskId,
+      command: 'echo before-bg; sleep 0.5; echo after-bg',
+      status: 'running',
+    });
+
+    await until(() => ended.includes(taskId as string));
+    const read = await manager.read(taskId as string);
+    expect(read?.status).toBe('done');
+    expect(read?.output).toContain('before-bg');
+    expect(read?.output).toContain('after-bg');
+    expect(notified[0]).toContain(`Background task ${taskId} finished (exit 0`);
+  });
+
+  it('中途发消息只把本会话的前台命令转后台', async () => {
+    const { manager, ended } = makeManager();
+    const mine = run(shell(manager, 's1'), 'a', 'echo mine; sleep 30');
+    const other = run(shell(manager, 's2'), 'b', 'echo other; sleep 30');
+    await until(() => mine.updates.join('').includes('mine'));
+    await until(() => other.updates.join('').includes('other'));
+
+    const moved = manager.backgroundAllForeground('s1', 'steer');
+    expect(moved).toHaveLength(1);
+    const text = JSON.stringify((await mine.pending).content);
+    expect(text).toContain('because the user sent a new message');
+    expect(manager.backgroundForeground('s1', 'a', 'user')).toBeNull();
+
+    manager.stop(moved[0], true);
+    await until(() => ended.includes(moved[0]));
+    expect((await manager.read(moved[0]))?.status).toBe('failed');
+    expect(manager.backgroundAllForeground('s1', 'steer')).toEqual([]);
+    expect(manager.backgroundForeground('s2', 'b', 'user')).toMatch(/^task-/);
+    await other.pending;
+    manager.stopAll();
+  });
+
+  it('命令已结束后请求转后台为 no-op', async () => {
+    const { manager, started } = makeManager();
+    const tool = shell(manager);
+    await tool.execute('t1', { command: 'echo quick' }, undefined, undefined, undefined as never);
+    expect(manager.backgroundForeground('s1', 't1', 'user')).toBeNull();
+    expect(started).toHaveLength(0);
+  });
+
+  it('包装层推迟的 finalize 在后台任务结束时执行并更新 details', async () => {
+    const { manager, ended } = makeManager();
+    const base = createSessionCommandTool({ cwd: process.cwd() }) as unknown as ToolDefinition;
+    let finalized = 0;
+    const deferring: ToolDefinition = {
+      ...base,
+      async execute(...args) {
+        try {
+          return await base.execute(...args);
+        } catch (error) {
+          if (error instanceof ForegroundDetachedError) {
+            error.defer({ stage: 'pending' }, async () => {
+              finalized += 1;
+              return { stage: 'final' };
+            });
+          }
+          throw error;
+        }
+      },
+    };
+    const { pending, updates } = run(
+      withBackground(deferring, manager, 's1', process.cwd()),
+      't1',
+      'echo go; sleep 0.3'
+    );
+    await until(() => updates.join('').includes('go'));
+    const taskId = manager.backgroundForeground('s1', 't1', 'user') as string;
+    const result = await pending;
+    expect(result.details).toEqual({ stage: 'pending', backgroundTaskId: taskId });
+    expect(finalized).toBe(0);
+    await until(() => ended.includes(taskId));
+    expect(finalized).toBe(1);
+    expect((await manager.read(taskId))?.details).toEqual({ stage: 'final' });
   });
 });

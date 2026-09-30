@@ -15,14 +15,13 @@ import { readCcSwitchMcp, readCcSwitchPrompts, readCcSwitchSkills } from './ccSw
 import { readEnsoAiMcp, readEnsoAiPrompts } from './ensoAi';
 import { type DiscoveredInstruction, readInstructionFiles } from './instructions';
 import { type DiscoveredMcpServer, readClaudeMcp, readCodexMcp, readJsonMcp } from './mcp';
-import { type DiscoveredSkill, displayPath, readPluginSkills, readSkillsRoot } from './skills';
+import { type DiscoveredSkill, displayPath, readSkillsRoot } from './skills';
 
 const HOME = os.homedir();
 const home = (...parts: string[]) => path.join(HOME, ...parts);
 
 const SOURCE_NAMES: Record<AssetSourceId, string> = {
   'claude-code': 'Claude Code',
-  'claude-plugins': 'Claude Code 插件',
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
   cursor: 'Cursor',
@@ -62,10 +61,6 @@ function sourceSpec(sourceId: AssetSourceId): SourceSpec {
         readMcp: () => (fs.existsSync(mcpFile) ? readClaudeMcp(mcpFile) : []),
         readInstructions: () => readInstructionFiles(dir, displayPath),
       };
-    }
-    case 'claude-plugins': {
-      const file = home('.claude', 'plugins', 'installed_plugins.json');
-      return { probe: file, readSkills: () => readPluginSkills(file) };
     }
     case 'claude-desktop': {
       const file = claudeDesktopConfig();

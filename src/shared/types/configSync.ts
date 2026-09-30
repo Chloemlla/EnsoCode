@@ -26,7 +26,7 @@ export interface ConfigSyncExportOptions {
 }
 
 export type ConfigSyncExportResult =
-  | { ok: true; filePath: string }
+  | { ok: true; filePath: string; skippedInstructions?: string[] }
   | { ok: false; error: string; cancelled?: boolean };
 
 export type ConfigSyncOpenResult =

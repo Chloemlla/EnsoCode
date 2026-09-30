@@ -30,6 +30,7 @@
 | [history-paging-stuck-at-top.md](history-paging-stuck-at-top.md) | 长会话上滑翻一两页就停，顶部钉着「上下文已压缩」；或每翻一页跳回底部 |
 | [coworker-adopt-phantom-run.md](coworker-adopt-phantom-run.md) | subagent 雇的 coworker 回复完了 Run 仍一直「进行中」，send 带 wait:true 永远不返回；单测全绿 |
 | [coworker-restart-adopt.md](coworker-restart-adopt.md) | 重启后 coworker 的 tab 还在，subagent list 却是空的，给原 agentId 发消息报 not-found |
+| [pi-project-trust-default.md](pi-project-trust-default.md) | 无报错；打开带 `.pi/extensions` 或项目包的仓库，其代码即在 worker 里运行、缺包还会自动安装 |
 
 ## 共同教训
 

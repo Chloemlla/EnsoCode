@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { RtkToolStats } from '@shared/rtk';
 import { attachBackgroundCommandHooks, type PreparedBackgroundCommand } from '../backgroundTasks';
+import { ForegroundDetachedError } from '../foregroundCommand';
 import {
   bindPowerShellRtk,
   isPowerShellRtkCandidate,
@@ -619,6 +620,10 @@ export function withRtkOptimization(
         const rtk = (finalDetails as { rtk: RtkToolStats }).rtk;
         return { ...result, details: mergeDetails(result.details, rtk) };
       } catch (error) {
+        if (error instanceof ForegroundDetachedError) {
+          error.defer(prepared.details, prepared.finalize);
+          throw error;
+        }
         try {
           await prepared.finalize?.();
         } catch {

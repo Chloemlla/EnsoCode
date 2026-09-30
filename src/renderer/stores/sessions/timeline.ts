@@ -81,6 +81,10 @@ export type TimelineItem =
       nestedPending?: number;
       /** RTK 对本次工具调用的真实处理结果；无元数据时缺省 */
       rtk?: RtkToolStats;
+      /** 运行中的 bash/powershell 调用 id（转后台用）；其它缺省 */
+      callId?: string;
+      /** 前台命令被移交为后台任务时的任务 id；其它缺省 */
+      backgroundTaskId?: string;
       /** submit_plan 提交的计划；其它工具缺省 */
       plan?: { title: string; text: string } | null;
       /** 联系主 agent / 队员、子代理 send 发出的正文，或子代理 spawn 交代的任务；其它工具缺省 */
@@ -763,6 +767,7 @@ function buildMessageTimeline(
       fileChanges: ProjectedFileChange[] | null;
       applyPatchOutcome: ProjectedApplyPatchOutcome | null;
       rtk?: RtkToolStats;
+      backgroundTaskId?: string;
     }
   >();
   for (const message of messages) {
@@ -777,6 +782,7 @@ function buildMessageTimeline(
         fileChanges: message.fileChanges ?? null,
         applyPatchOutcome: message.applyPatchOutcome ?? null,
         rtk: message.rtk,
+        backgroundTaskId: message.backgroundTaskId,
       });
     }
   }
@@ -1039,6 +1045,11 @@ function buildMessageTimeline(
               : result?.fileChanges?.length
                 ? result.fileChanges.map((change) => change.path)
                 : patchPathsFromArgs(part.arguments);
+          const liveCommand =
+            !result &&
+            running &&
+            messageIndex === lastTurnIndex &&
+            (part.name === 'bash' || part.name === 'powershell');
           items.push({
             kind: 'tool',
             key,
@@ -1080,6 +1091,8 @@ function buildMessageTimeline(
             durationMs: result?.durationMs ?? null,
             agentMeta: result?.agentMeta ?? null,
             ...(result?.rtk ? { rtk: result.rtk } : {}),
+            ...(liveCommand ? { callId: part.id } : {}),
+            ...(result?.backgroundTaskId ? { backgroundTaskId: result.backgroundTaskId } : {}),
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
               : {}),

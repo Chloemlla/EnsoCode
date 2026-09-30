@@ -436,11 +436,15 @@ export class McpManager {
         if (!server.url) throw new Error('http server missing url');
         return new StreamableHTTPClientTransport(new URL(server.url), {
           authProvider: provider,
+          ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }
       case 'sse': {
         if (!server.url) throw new Error('sse server missing url');
-        return new SSEClientTransport(new URL(server.url), { authProvider: provider });
+        return new SSEClientTransport(new URL(server.url), {
+          authProvider: provider,
+          ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
+        });
       }
       default:
         throw new Error(`unknown transport: ${server.transport}`);

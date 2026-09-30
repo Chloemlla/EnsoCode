@@ -24,6 +24,28 @@ describe('projectMessage', () => {
     ).not.toHaveProperty('rtk');
   });
 
+  it('转后台的命令结果投影后台任务 id，非命令工具与脏值不投影', () => {
+    for (const toolName of ['bash', 'powershell']) {
+      expect(
+        projectMessage({
+          role: 'toolResult',
+          toolName,
+          content: [],
+          details: { backgroundTaskId: 'task-1-abc' },
+        })
+      ).toEqual({ role: 'toolResult', toolName, content: [], backgroundTaskId: 'task-1-abc' });
+    }
+    for (const [toolName, backgroundTaskId] of [
+      ['read', 'task-1'],
+      ['bash', ''],
+      ['bash', 3],
+    ] as const) {
+      expect(
+        projectMessage({ role: 'toolResult', toolName, content: [], details: { backgroundTaskId } })
+      ).not.toHaveProperty('backgroundTaskId');
+    }
+  });
+
   it('assistant 消息只保留白名单字段，provider 原始数据不出 worker', () => {
     const projected = projectMessage({
       role: 'assistant',

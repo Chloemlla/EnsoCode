@@ -40,6 +40,21 @@ export interface Project {
   disabledBuiltinTools?: string[];
   /** 本项目允许统一 subagent 工具创建的 Agent 模式；缺省跟随全局。 */
   subagentAllowedModes?: ('task' | 'coworker')[];
+  /** 用户确认过的项目代码来源（.pi/extensions、项目包等）；出现新来源时须重新确认 */
+  trustedProjectCode?: string[];
+}
+
+/** 从 settings.projects 取出某项目已信任的代码来源；缺项目或坏配置返回空。 */
+export function projectTrustedCode(projects: unknown, projectId: string | undefined): string[] {
+  if (!projectId || !Array.isArray(projects)) return [];
+  const record = projects.find(
+    (entry): entry is { id: unknown; trustedProjectCode?: unknown } =>
+      Boolean(entry) && typeof entry === 'object' && (entry as { id?: unknown }).id === projectId
+  );
+  const list = record?.trustedProjectCode;
+  return Array.isArray(list)
+    ? list.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
 }
 
 /** 从本地编辑器 / 编程应用读到的最近打开目录 */

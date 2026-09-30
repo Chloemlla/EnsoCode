@@ -21,6 +21,7 @@ import type {
   WorkspaceLockEvent,
 } from '@shared/types/agent';
 import { type AgentTypeEntry, BUILTIN_AGENT_TYPES } from '@shared/types/assets';
+import { withPluginAgentTypes } from './pluginRuntime';
 
 export const MAX_ORIGIN_COWORKERS = DEFAULT_MAX_ACTIVE_COWORKERS;
 
@@ -546,9 +547,10 @@ export class AgentSessionIndex {
     const disabledBuiltinAgentTypes = Array.isArray(state.disabledBuiltinAgentTypes)
       ? state.disabledBuiltinAgentTypes.filter((name): name is string => typeof name === 'string')
       : [];
-    const customAgentTypes = Array.isArray(state.agentTypes)
-      ? state.agentTypes.filter(isAgentTypeEntry)
-      : [];
+    const customAgentTypes = withPluginAgentTypes(
+      Array.isArray(state.agentTypes) ? state.agentTypes.filter(isAgentTypeEntry) : [],
+      state
+    );
     const snapshot = buildAgentTypeRegistrySnapshot({
       revision: 0,
       disabledBuiltinAgentTypes,

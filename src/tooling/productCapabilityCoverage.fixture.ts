@@ -108,6 +108,7 @@ export const SETTINGS_DATA_COVERAGE = {
   approvalReviewer: excluded('Assistant approval reviewer model; desktop settings only.'),
   lastApprovalMode: excluded('Last used approval mode is a desktop session preference.'),
   skills: surfaces('skills.list'),
+  plugins: excluded('Desktop-only Claude Code plugin import; plugin code runs on this device.'),
   mcpServers: surfaces('mcp.list'),
   instructions: surfaces('instructions.list'),
   presets: surfaces('presets.list'),
@@ -258,6 +259,11 @@ export const SETTINGS_ACTION_COVERAGE = {
   updateSkill: surfaces('skills.toggle'),
   setSkillsEnabled: surfaces('skills.toggle'),
   removeSkill: surfaces('skills.remove'),
+  addPlugins: excluded('Desktop-only Claude Code plugin import; plugin code runs on this device.'),
+  setPluginEnabled: excluded(
+    'Desktop-only Claude Code plugin toggle; plugin hooks and MCP servers run on this device.'
+  ),
+  removePlugin: excluded('Desktop-only Claude Code plugin removal.'),
   addMcpServers: surfaces('mcp.import-local'),
   updateMcpServer: surfaces('mcp.edit', 'mcp.toggle'),
   setMcpServersEnabled: surfaces('mcp.toggle'),
@@ -293,6 +299,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   setProjectDefaultModel: surfaces('projects.list'),
   setProjectDisabledBuiltinTools: surfaces('projects.list'),
   setProjectSubagentAllowedModes: surfaces('projects.list'),
+  setProjectTrustedCode: excluded(
+    'Trusting project pi extensions is a desktop-only security review.'
+  ),
   removeProject: surfaces('projects.remove'),
   setUsageModelPricing: excluded(
     'Local usage cost override for Settings → Usage; desktop-only estimate, not an Enso capability.'
@@ -324,8 +333,10 @@ export const BUILTIN_TOOL_COVERAGE: Readonly<Record<string, CoverageDisposition>
   ask_user: surfaces('coding-tools.ask-user'),
   background_tasks: surfaces('coding-tools.background-task'),
   browser: surfaces('coding-tools.browser'),
+  web: surfaces('coding-tools.web'),
   isolated_sandbox: surfaces('coding-tools.isolated-sandbox'),
   memory: surfaces('coding-tools.memory'),
+  plan: surfaces('coding-tools.plan'),
 };
 
 export const BUILTIN_AGENT_TYPE_COVERAGE: Readonly<Record<string, CoverageDisposition>> = {
@@ -389,6 +400,9 @@ export const IPC_PRODUCT_COVERAGE = {
   OAUTH_CREDENTIALS_CHANGED: excluded(
     'Cross-window OAuth credential invalidation transport; refresh resolves the product state.'
   ),
+  PLUGINS_LIST_INSTALLED: excluded(
+    'Desktop-only review of Claude Code plugins before importing them.'
+  ),
   ASSETS_SCAN_LOCAL: surfaces(
     'skills.import-local',
     'mcp.import-local',
@@ -449,6 +463,9 @@ export const IPC_PRODUCT_COVERAGE = {
     'Renderer reports the currently viewed conversation id so Main can suppress redundant system notifications; no execution rights.'
   ),
   AGENT_TASK_STOP: surfaces('conversations.background-task.stop'),
+  AGENT_TOOL_BACKGROUND: excluded(
+    'Desktop tool-row control that moves a running foreground shell command into a background task; renderer-only, not an Enso capability.'
+  ),
   AGENT_WORKFLOW_STOP: excluded('Side panel control to stop a running workflow run.'),
   AGENT_SUBAGENT_STOP: excluded(
     'Desktop TaskBar control to abort a stuck or running subagent; renderer-only, not an Enso capability.'
@@ -506,6 +523,9 @@ export const IPC_PRODUCT_COVERAGE = {
   PROJECTS_GET_RECENT: surfaces('projects.recent'),
   PROJECTS_REVEAL: surfaces('projects.list'),
   PROJECTS_OPEN_IN_APPS: surfaces('projects.list'),
+  PROJECTS_CODE_SOURCES: excluded(
+    'Desktop-only review of project pi extensions before trusting them.'
+  ),
   FILES_SEARCH: surfaces('conversations.file-mention.attach'),
   FILES_READ: excluded('Internal bounded file reader used by reviewed UI flows.'),
   GIT_DIFF_HEAD: excluded('Internal git working-tree reader for the Changes panel.'),

@@ -30,6 +30,7 @@ import { proxyEnvPatchFromEnv } from '@shared/proxy';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
 import {
   projectDisabledBuiltinTools,
+  projectTrustedCode,
   resolveDisabledBuiltinTools,
   resolveEditMode,
 } from '@shared/types';
@@ -78,10 +79,12 @@ import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
 import agentWorkerPath from '../../agent/index?modulePath';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
+import type { ResolvedPlugins } from './claudePlugins';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
 import { PendingReloadRegistry } from './pendingReloads';
+import { enabledPlugins, type RuntimeAgentType, withPluginAgentTypes } from './pluginRuntime';
 import { killAndWaitExit } from './processExit';
 import { bundledRtkPath } from './rtkBinary';
 import { pickSubagentModelRefs } from './subagentModels';
@@ -348,9 +351,10 @@ export function agentTypeRegistrySnapshot(): AgentTypeRegistrySnapshot {
   const disabledBuiltinAgentTypes = Array.isArray(state?.disabledBuiltinAgentTypes)
     ? state.disabledBuiltinAgentTypes.filter((name): name is string => typeof name === 'string')
     : [];
-  const customAgentTypes = Array.isArray(state?.agentTypes)
-    ? state.agentTypes.filter(isAgentTypeEntry)
-    : [];
+  const customAgentTypes = withPluginAgentTypes(
+    Array.isArray(state?.agentTypes) ? state.agentTypes.filter(isAgentTypeEntry) : [],
+    state
+  );
   return buildAgentTypeRegistrySnapshot({
     revision: settingsRevision(state),
     disabledBuiltinAgentTypes,
@@ -449,15 +453,16 @@ export function resolveAgentTypeSpawnConfig(
   }
 
   const state = readSettingsState();
-  let definition: Omit<AgentTypeEntry, 'id'> | AgentTypeEntry | undefined;
+  let definition: Omit<AgentTypeEntry, 'id'> | RuntimeAgentType | undefined;
   if (typeKey.startsWith('builtin:')) {
     const name = typeKey.slice('builtin:'.length);
     definition = BUILTIN_AGENT_TYPES.find((entry) => entry.name === name);
   } else {
     const id = typeKey.slice('custom:'.length);
-    definition = Array.isArray(state?.agentTypes)
-      ? state.agentTypes.filter(isAgentTypeEntry).find((entry) => entry.id === id)
-      : undefined;
+    definition = withPluginAgentTypes(
+      Array.isArray(state?.agentTypes) ? state.agentTypes.filter(isAgentTypeEntry) : [],
+      state
+    ).find((entry) => entry.id === id);
   }
   if (!definition || isReservedAgentTypeName(definition.name)) {
     return { ok: false, error: 'Agent type definition is invalid.' };
@@ -565,15 +570,24 @@ export function spawnSession(
   const instruction = resolveGlobalInstruction(
     preset ? { instructionId: preset.instructionId } : undefined
   );
-  const skillPaths = enabledSkillPaths(preset);
+  const state = readSettingsState();
+  // Claude 插件：按各自开关现读安装目录，不受预设影响
+  const plugins = enabledPlugins(state);
+  const skillPaths = [...enabledSkillPaths(preset), ...plugins.skillPaths];
   const mcpServers = enabledMcpServers(preset);
+  const mcpNames = new Set(mcpServers.map((server) => server.name));
+  for (const server of plugins.mcpServers) {
+    if (!mcpNames.has(server.name)) mcpServers.push(server);
+    mcpNames.add(server.name);
+  }
+  // hooks 在本机起进程，远程会话的 cwd 不在本机
+  const pluginHooks = remote ? [] : plugins.hooks;
   const subagentModels = options?.omitDispatchTools
     ? []
     : configuredSubagentModels(authenticatedAccountKeys);
   const agentTypes = options?.omitDispatchTools
     ? []
-    : configuredAgentTypes(authenticatedAccountKeys, subagentModels.length > 0);
-  const state = readSettingsState();
+    : configuredAgentTypes(authenticatedAccountKeys, subagentModels.length > 0, plugins);
   const disabledTools = resolveDisabledBuiltinTools(state?.disabledBuiltinTools, {
     disabledBuiltinTools: projectDisabledBuiltinTools(state?.projects, projectId),
   });
@@ -581,6 +595,7 @@ export function spawnSession(
     if (!disabledTools.includes(id)) disabledTools.push(id);
   }
   const loadHarnessAssets = state?.loadHarnessAssets === true;
+  const trustedProjectCode = projectTrustedCode(state?.projects, projectId);
   const windowsLocalShell = parseWindowsLocalShell(state?.windowsLocalShell);
   const exploreFoldEnabled = state?.exploreFoldEnabled === true;
   const editMode = resolveEditMode(state?.editMode, state?.hashlineEditEnabled);
@@ -616,6 +631,7 @@ export function spawnSession(
     ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
     ...(preset || request.loadLocalSkills === false ? { loadLocalSkills: false } : {}),
     ...(loadHarnessAssets ? { loadHarnessAssets: true } : {}),
+    ...(trustedProjectCode.length > 0 ? { trustedProjectCode } : {}),
     ...(windowsLocalShell !== 'auto' ? { windowsLocalShell } : {}),
     rtkEnabled: state?.rtkEnabled !== false,
     ...(exploreFoldEnabled ? { exploreFoldEnabled: true } : {}),
@@ -627,6 +643,8 @@ export function spawnSession(
     ...(disabledTools.includes('memory') ? {} : { memoryLanguage }),
     ...(skillPaths.length > 0 ? { skillPaths } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
+    ...(plugins.commands.length > 0 ? { pluginCommands: plugins.commands } : {}),
+    ...(pluginHooks.length > 0 ? { pluginHooks } : {}),
     ...(request.approvalMode ? { approvalMode: request.approvalMode } : {}),
     ...(request.planMode !== undefined ? { planMode: request.planMode } : {}),
     ...(approvalReviewerConfig ? { approvalReviewer: approvalReviewerConfig } : {}),
@@ -1065,6 +1083,13 @@ export function stopBackgroundTask(
   return sendAgentCommand({ type: 'task-stop', identity, taskId });
 }
 
+export function backgroundForegroundTool(
+  identity: SessionIdentity,
+  toolCallId: string
+): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'tool-background', identity, toolCallId });
+}
+
 export function stopWorkflow(
   identity: SessionIdentity,
   runId: string
@@ -1111,7 +1136,8 @@ export function requestSnapshot(sessionId?: string): { ok: boolean; error?: stri
 
 function configuredAgentTypes(
   authenticatedAccountKeys: ReadonlySet<string>,
-  hasSubagentModels = false
+  hasSubagentModels = false,
+  plugins?: ResolvedPlugins
 ): AgentTypeSpawnConfig[] {
   const state = readSettingsState();
   const disabled = new Set(
@@ -1119,7 +1145,11 @@ function configuredAgentTypes(
       ? state.disabledBuiltinAgentTypes.filter((name): name is string => typeof name === 'string')
       : []
   );
-  const custom = Array.isArray(state?.agentTypes) ? state.agentTypes.filter(isAgentTypeEntry) : [];
+  const custom = withPluginAgentTypes(
+    Array.isArray(state?.agentTypes) ? state.agentTypes.filter(isAgentTypeEntry) : [],
+    state,
+    plugins
+  );
   // 与 registry 同口径（trim + 小写）：同名 custom 覆盖 builtin
   const customNames = new Set(custom.map((entry) => entry.name.trim().toLowerCase()));
   const builtins = BUILTIN_AGENT_TYPES.filter(
@@ -1237,7 +1267,7 @@ function isSubagentModelEntry(value: unknown): value is SubagentModelEntry {
 }
 
 function resolveAgentTypeResources(
-  definition: Pick<AgentTypeEntry, 'skillIds' | 'mcpServerIds'>
+  definition: Pick<RuntimeAgentType, 'skillIds' | 'mcpServerIds' | 'pluginSkillPaths'>
 ):
   | { ok: true; skillPaths: readonly string[]; mcpServers: readonly McpServerSpawnConfig[] }
   | { ok: false; error: string } {
@@ -1258,7 +1288,7 @@ function resolveAgentTypeResources(
   }
   return {
     ok: true,
-    skillPaths: skillPaths as string[],
+    skillPaths: [...(skillPaths as string[]), ...(definition.pluginSkillPaths ?? [])],
     mcpServers: mcpEntries.map((entry) => toMcpSpawnConfig(entry!)),
   };
 }

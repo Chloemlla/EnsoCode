@@ -50,6 +50,12 @@ import {
   type ModelThinkingLevelOverride,
 } from './llm';
 import { type AgentDispatchTask, parseAgentDispatchTask } from './mentions';
+import {
+  type PluginCommandSpawn,
+  type PluginHookSpawn,
+  parsePluginCommands,
+  parsePluginHooks,
+} from './plugins';
 import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot } from './workflow';
 
 export type { ChildSessionIdentity, SessionIdentity } from '../builtinAgents';
@@ -633,6 +639,8 @@ export interface McpServerSpawnConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  /** http/sse 请求头（Claude 插件 .mcp.json 用它传 key） */
+  headers?: Record<string, string>;
   /** 已授权的 OAuth 凭据（http/sse 远程 server） */
   oauth?: McpOAuthTokens;
   /** 连接 + listTools；缺省 10s */
@@ -930,6 +938,8 @@ export type AgentCommand =
       loadLocalSkills?: boolean;
       /** 同时加载项目内 .claude/.codex/.cursor 的 skills 与规则文件（.cursorrules、.cursor/rules） */
       loadHarnessAssets?: boolean;
+      /** 用户已信任的项目代码来源（.pi/extensions、项目包等）；有未在此列的来源时整个项目的代码都不加载 */
+      trustedProjectCode?: string[];
       /** 探后折叠工具 + context 折叠 */
       exploreFoldEnabled?: boolean;
       /** 文件编辑工具模式；缺省 apply_patch */
@@ -948,6 +958,10 @@ export type AgentCommand =
       memoryLanguage?: string;
       skillPaths?: string[];
       mcpServers?: McpServerSpawnConfig[];
+      /** 已启用 Claude 插件的命令（作为 `/plugin:command` 提示词模板） */
+      pluginCommands?: PluginCommandSpawn[];
+      /** 已启用 Claude 插件的 command hooks；远程会话不下发 */
+      pluginHooks?: PluginHookSpawn[];
       instruction?: { path: string; content: string };
       approvalMode?: ApprovalMode;
       /** 助手代审模型；仅 approvalMode=assistant 时有意义 */
@@ -1072,6 +1086,7 @@ export type AgentCommand =
       error?: string;
     }
   | { type: 'task-stop'; identity: SessionIdentity; taskId: string }
+  | { type: 'tool-background'; identity: SessionIdentity; toolCallId: string }
   | { type: 'workflow-stop'; identity: SessionIdentity; runId: string }
   | { type: 'subagent-stop'; identity: SessionIdentity; agentId: string }
   | {
@@ -1197,6 +1212,8 @@ export interface ProjectedMessage {
   /** Persisted user entry identity, absent on unconfirmed messages. */
   entryId?: string;
   rtk?: RtkToolStats;
+  /** 前台命令被移交为后台任务时的任务 id */
+  backgroundTaskId?: string;
   role: string;
   content: ProjectedPart[];
   /** toolResult 消息附带 */
@@ -1718,8 +1735,16 @@ function parseProjectedApplyPatchOutcome(value: unknown): ProjectedApplyPatchOut
   return value as unknown as ProjectedApplyPatchOutcome;
 }
 
+/** 后台任务 id 形如 task-<n>-<base36>，渲染层只拿它做展示 */
+export function isBackgroundTaskId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
+
 function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   if (value.rtk !== undefined && !parseRtkToolStats(value.rtk)) return false;
+  if (value.backgroundTaskId !== undefined && !isBackgroundTaskId(value.backgroundTaskId)) {
+    return false;
+  }
   const fileChanges =
     value.fileChanges === undefined ? undefined : parseProjectedFileChanges(value.fileChanges);
   if (fileChanges === null) return false;
@@ -2525,6 +2550,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'thinkingLevel',
           'loadLocalSkills',
           'loadHarnessAssets',
+          'trustedProjectCode',
           'exploreFoldEnabled',
           'editMode',
           'hashlineEditEnabled',
@@ -2535,6 +2561,8 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'memoryLanguage',
           'skillPaths',
           'mcpServers',
+          'pluginCommands',
+          'pluginHooks',
           'instruction',
           'approvalMode',
           'approvalReviewer',
@@ -2553,6 +2581,17 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         !parseSpawnModelConfig(value.model) ||
         (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
         (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
+        (value.trustedProjectCode !== undefined &&
+          !(
+            Array.isArray(value.trustedProjectCode) &&
+            value.trustedProjectCode.length <= 500 &&
+            value.trustedProjectCode.every(
+              (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
+            )
+          )) ||
+        (value.pluginCommands !== undefined &&
+          parsePluginCommands(value.pluginCommands) === null) ||
+        (value.pluginHooks !== undefined && parsePluginHooks(value.pluginHooks) === null) ||
         (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
         (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
         (value.windowsLocalShell !== undefined &&
@@ -2813,6 +2852,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'identity', 'taskId']) &&
         parseAnySessionIdentity(value.identity) &&
         isNonEmptyString(value.taskId)
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'tool-background':
+      return hasExactKeys(value, ['type', 'identity', 'toolCallId']) &&
+        parseAnySessionIdentity(value.identity) &&
+        isNonEmptyString(value.toolCallId) &&
+        value.toolCallId.length <= 512
         ? (value as unknown as AgentCommand)
         : null;
     case 'subagent-stop':

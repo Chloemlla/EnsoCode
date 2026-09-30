@@ -1233,6 +1233,13 @@ export const CAPABILITY_CATALOG = {
     reason: 'Enso never receives browsing or page-interaction tools.',
     suggestedAction: 'Ask the coding agent to use the built-in browser.',
   }),
+  'coding-tools.web': unavailable('coding-tools.web', {
+    description: 'Search the public web and fetch pages.',
+    risk: 'read',
+    targetContext: 'origin-project',
+    reason: 'Enso never receives the coding-session web tools.',
+    suggestedAction: 'Ask the coding agent to search or fetch the page.',
+  }),
   'coding-tools.isolated-sandbox': unavailable('coding-tools.isolated-sandbox', {
     description: 'Run JavaScript that calls coding-session tools, including edits.',
     risk: 'dangerous',
@@ -1246,6 +1253,13 @@ export const CAPABILITY_CATALOG = {
     targetContext: 'origin-project',
     reason: 'Enso never receives the coding-session memory tools.',
     suggestedAction: 'Ask the coding agent to search or capture the memory.',
+  }),
+  'coding-tools.plan': unavailable('coding-tools.plan', {
+    description: 'Research read-only and submit an implementation plan for user approval.',
+    risk: 'read',
+    targetContext: 'origin-project',
+    reason: 'Enso never receives the coding-session plan mode tools.',
+    suggestedAction: 'Turn on plan mode in the coding session composer.',
   }),
 } as const satisfies Record<ProductSurfaceId, CapabilitySpec<ProductSurfaceId, ProductSurfaceId>>;
 

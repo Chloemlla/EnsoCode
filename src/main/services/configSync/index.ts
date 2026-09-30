@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -157,6 +156,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   subagentModelsEnabled: { mode: 'portable' },
   subagentModels: { mode: 'portable' },
   skills: { mode: 'portable' },
+  plugins: { mode: 'excluded', reason: 'refers to Claude Code plugins installed on this device' },
   mcpServers: { mode: 'portable' },
   instructions: { mode: 'portable' },
   presets: { mode: 'portable' },
@@ -197,6 +197,13 @@ const tokens = new Map<string, TokenEntry>();
 function resultError(error: string): { ok: false; error: string } {
   return { ok: false, error };
 }
+
+/** 可直接展示给用户的导出失败原因 */
+class ExportError extends Error {}
+
+const MISSING_SYSTEM_PROMPT = 'A preset uses a system prompt that is missing or empty.';
+const WRITE_FAILED = 'Could not write the export file. Check that the folder is writable.';
+const SYMLINK_TARGET = 'The selected file is a symbolic link. Choose a different location.';
 
 function stateOf(settings: Record<string, unknown> | null): Record<string, unknown> {
   const store = settings?.['enso-settings'];
@@ -263,7 +270,10 @@ function portableState(state: Record<string, unknown>): Record<string, unknown> 
   return result;
 }
 
-function collectBundle(secretsIncluded: boolean): ConfigSyncBundle {
+function collectBundle(secretsIncluded: boolean): {
+  bundle: ConfigSyncBundle;
+  skippedInstructions: string[];
+} {
   const sourceState = stateOf(readSettings());
   const state = portableState(sourceState);
   const skills = [] as ConfigSyncBundle['resources']['skills'];
@@ -307,31 +317,60 @@ function collectBundle(secretsIncluded: boolean): ConfigSyncBundle {
       return { ...agent, skillIds: pruneSkillIds(agent.skillIds) };
     });
   }
-  const portableInstructions = Array.isArray(state.instructions) ? state.instructions : [];
   const rawInstructions = Array.isArray(sourceState.instructions) ? sourceState.instructions : [];
+  const keptInstructionIds = new Set<string>();
+  const skippedInstructions: string[] = [];
   for (const value of rawInstructions) {
-    if (!value || typeof value !== 'object') throw new Error('Instruction source is unavailable');
+    if (!value || typeof value !== 'object') continue;
     const instruction = value as Record<string, unknown>;
-    if (typeof instruction.id !== 'string') throw new Error('Instruction source is unavailable');
+    if (typeof instruction.id !== 'string') continue;
     const local = instruction.local === true;
-    if (local && !isValidId(instruction.id)) {
-      throw new Error('Instruction source is unavailable');
-    }
     const sourcePath = typeof instruction.sourcePath === 'string' ? instruction.sourcePath : '';
     const path = local
-      ? join(app.getPath('userData'), 'instructions', `${instruction.id}.md`)
+      ? isValidId(instruction.id)
+        ? join(app.getPath('userData'), 'instructions', `${instruction.id}.md`)
+        : ''
       : sourcePath;
-    if (!path || !existsSync(path) || !lstatSync(path).isFile()) {
-      throw new Error('Instruction source is unavailable');
+    let content: string;
+    try {
+      if (!path || !lstatSync(path).isFile()) throw new Error('Instruction source is unavailable');
+      content = readFileSync(path, 'utf8');
+    } catch {
+      // 源文件被删除/移走/不可读：跳过该条并报告，其余配置照常导出
+      skippedInstructions.push(
+        typeof instruction.name === 'string' && instruction.name ? instruction.name : instruction.id
+      );
+      continue;
     }
-    const content = readFileSync(path, 'utf8');
     const bytes = Buffer.byteLength(content, 'utf8');
-    const portable = portableInstructions.find(
+    const portable = (Array.isArray(state.instructions) ? state.instructions : []).find(
       (item) =>
         item && typeof item === 'object' && (item as Record<string, unknown>).id === instruction.id
     ) as Record<string, unknown> | undefined;
     if (portable) portable.bytes = bytes;
     instructions.push({ id: instruction.id, content });
+    keptInstructionIds.add(instruction.id);
+  }
+  if (Array.isArray(state.instructions)) {
+    state.instructions = state.instructions.filter(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        keptInstructionIds.has(String((item as { id?: unknown }).id))
+    );
+  }
+  if (Array.isArray(state.presets)) {
+    state.presets = state.presets.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      const preset = item as Record<string, unknown>;
+      if (
+        preset.instructionId === undefined ||
+        keptInstructionIds.has(String(preset.instructionId))
+      )
+        return preset;
+      const { instructionId: _dropped, ...rest } = preset;
+      return rest;
+    });
   }
   const collectedSystemPromptIds = new Set<string>();
   for (const value of Array.isArray(state.presets) ? state.presets : []) {
@@ -341,21 +380,24 @@ function collectBundle(secretsIncluded: boolean): ConfigSyncBundle {
       continue;
     }
     if (typeof systemPromptId !== 'string' || !isSystemPromptId(systemPromptId)) {
-      throw new Error('System prompt source is unavailable');
+      throw new ExportError(MISSING_SYSTEM_PROMPT);
     }
     const result = readStoredSystemPrompt(systemPromptId);
-    if (!result.ok) throw new Error('System prompt source is unavailable');
+    if (!result.ok) throw new ExportError(MISSING_SYSTEM_PROMPT);
     collectedSystemPromptIds.add(systemPromptId);
     systemPrompts.push({ id: systemPromptId, content: result.content });
   }
   return {
-    format: 'enso-config',
-    version: 1,
-    createdAt: new Date().toISOString(),
-    state,
-    resources: { skills, instructions, systemPrompts },
-    secretsIncluded,
-  } as unknown as ConfigSyncBundle;
+    bundle: {
+      format: 'enso-config',
+      version: 1,
+      createdAt: new Date().toISOString(),
+      state,
+      resources: { skills, instructions, systemPrompts },
+      secretsIncluded,
+    } as unknown as ConfigSyncBundle,
+    skippedInstructions,
+  };
 }
 
 function assertToken(token: string, senderId: SenderKey): TokenEntry | null {
@@ -380,7 +422,8 @@ export async function exportConfigToPath(
     ) {
       return resultError('Export password must be between 8 and 1024 characters.');
     }
-    let bundle = collectBundle(options.includeSecrets);
+    const collected = collectBundle(options.includeSecrets);
+    let bundle = collected.bundle;
     if (
       !options.includeSecrets &&
       (bundle.resources.skills.length > 0 ||
@@ -402,7 +445,7 @@ export async function exportConfigToPath(
         return null;
       }
     })();
-    if (existing?.isSymbolicLink()) return resultError('Unable to export configuration.');
+    if (existing?.isSymbolicLink()) return resultError(SYMLINK_TARGET);
     const tempPath = join(dirname(filePath), `.${basename(filePath)}.${randomUUID()}.tmp`);
     let fd: number | null = null;
     try {
@@ -411,13 +454,19 @@ export async function exportConfigToPath(
       closeSync(fd);
       fd = null;
       renameSync(tempPath, filePath);
+    } catch (error) {
+      console.error('[configSync] export write failed', error);
+      return resultError(WRITE_FAILED);
     } finally {
       if (fd !== null) closeSync(fd);
       rmSync(tempPath, { force: true });
     }
-    return { ok: true, filePath };
+    return collected.skippedInstructions.length
+      ? { ok: true, filePath, skippedInstructions: collected.skippedInstructions }
+      : { ok: true, filePath };
   } catch (error) {
     console.error('[configSync] export failed', error);
+    if (error instanceof ExportError) return resultError(error.message);
     return resultError('Unable to export configuration.');
   }
 }

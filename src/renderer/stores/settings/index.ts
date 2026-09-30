@@ -196,6 +196,7 @@ const initialState = {
   defaultReasoningEnabled: true,
   defaultThinkingLevel: 'medium' as import('@shared/types/agent').ThinkingLevel,
   skills: [] as import('@shared/types').SkillEntry[],
+  plugins: [] as import('@shared/types').PluginEntry[],
   mcpServers: [] as import('@shared/types').McpServerEntry[],
   instructions: [] as import('@shared/types').InstructionEntry[],
   presets: [] as import('@shared/types').Preset[],
@@ -510,6 +511,27 @@ export const useSettingsStore = create<SettingsState>()(
       },
 
       removeSkill: (id) => set((state) => ({ skills: state.skills.filter((s) => s.id !== id) })),
+
+      addPlugins: (plugins) => {
+        const known = new Set(get().plugins.map((plugin) => plugin.key));
+        const fresh = plugins.filter((plugin) => {
+          if (known.has(plugin.key)) return false;
+          known.add(plugin.key);
+          return true;
+        });
+        if (fresh.length > 0) set((state) => ({ plugins: [...state.plugins, ...fresh] }));
+        return fresh.length;
+      },
+
+      setPluginEnabled: (id, enabled) =>
+        set((state) => ({
+          plugins: state.plugins.map((plugin) =>
+            plugin.id === id ? { ...plugin, enabled } : plugin
+          ),
+        })),
+
+      removePlugin: (id) =>
+        set((state) => ({ plugins: state.plugins.filter((plugin) => plugin.id !== id) })),
 
       // 按启动命令或 URL 去重
       addMcpServers: (servers) => {
@@ -884,6 +906,19 @@ export const useSettingsStore = create<SettingsState>()(
               ...project,
               subagentAllowedModes: normalizeSubagentAllowedModes(modes),
             };
+          }),
+        }));
+      },
+
+      setProjectTrustedCode: (projectId, sources) => {
+        set((state) => ({
+          projects: state.projects.map((project) => {
+            if (project.id !== projectId) return project;
+            if (!sources) {
+              const { trustedProjectCode: _removed, ...rest } = project;
+              return rest;
+            }
+            return { ...project, trustedProjectCode: [...new Set(sources)].sort() };
           }),
         }));
       },

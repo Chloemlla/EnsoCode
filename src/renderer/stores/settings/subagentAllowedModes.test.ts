@@ -65,4 +65,15 @@ describe('subagent allowed modes settings', () => {
     settings.useSettingsStore.getState().setProjectSubagentAllowedModes('project-1', null);
     expect(settings.useSettingsStore.getState().projects[0]?.subagentAllowedModes).toBeUndefined();
   });
+
+  it('stores and revokes trusted project code sources', () => {
+    const store = settings.useSettingsStore.getState();
+    store.setProjectTrustedCode('project-1', ['b', 'a', 'a']);
+    expect(settings.useSettingsStore.getState().projects[0]?.trustedProjectCode).toEqual([
+      'a',
+      'b',
+    ]);
+    store.setProjectTrustedCode('project-1', null);
+    expect(settings.useSettingsStore.getState().projects[0]?.trustedProjectCode).toBeUndefined();
+  });
 });

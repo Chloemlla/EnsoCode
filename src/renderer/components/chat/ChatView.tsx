@@ -2,6 +2,7 @@ import { agentTypeDisplayName, ENSO_AGENT_TYPE_KEY } from '@shared/builtinAgents
 import { conversationDotTone } from '@shared/conversationDotTone';
 import { resolveChatModel, scopedDefaultModels } from '@shared/defaultModel';
 import { planPhase } from '@shared/planMode';
+import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import type { AgentTypeMentionCandidate } from '@shared/types/mentions';
 import { Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -38,6 +39,7 @@ import { ModelPicker } from './ModelPicker';
 import { PlanBar } from './PlanBar';
 import { PlanModeToggle } from './PlanModeToggle';
 import { PresetPicker } from './PresetPicker';
+import { ProjectCodeTrustBar } from './ProjectCodeTrustBar';
 import { RetryBar } from './RetryBar';
 import { StatsLine } from './StatsLine';
 import { dedupeSlashCommands } from './skillCompletion';
@@ -183,6 +185,14 @@ export function ChatView() {
     (localBranch?.id === chrome?.parentId ? localBranch?.branch : undefined);
   const skills = useSettingsStore((state) => state.skills);
   const loadLocalSkills = useSettingsStore((state) => state.loadLocalSkills);
+  const planAvailable = useSettingsStore((state) =>
+    isBuiltinToolEnabledForProject(
+      state.disabledBuiltinTools,
+      state.projects,
+      chrome?.projectId,
+      'plan'
+    )
+  );
   const [projectSkills, setProjectSkills] = useState<{ name: string; description: string }[]>([]);
 
   useEffect(() => {
@@ -233,12 +243,12 @@ export function ChatView() {
     return dedupeSlashCommands([
       goal,
       compact,
-      plan,
+      ...(planAvailable ? [plan] : []),
       ...fromSettings,
       ...fromProject,
       ...chromeCommands,
     ]);
-  }, [t, skills, projectSkills, chromeCommands]);
+  }, [t, skills, projectSkills, chromeCommands, planAvailable]);
 
   const timelineRef = useRef<MessageTimelineHandle>(null);
   const planning =
@@ -328,6 +338,9 @@ export function ChatView() {
 
       <div className="@container pt-1">
         <div className={CHAT_COL}>
+          {project && project.kind !== 'ssh' && !chrome.displayedParentId && (
+            <ProjectCodeTrustBar projectId={project.id} conversationId={chrome.id} />
+          )}
           {chrome.retry && (
             <RetryBar
               retry={chrome.retry}
@@ -455,12 +468,14 @@ export function ChatView() {
                       conversationId={chrome.id}
                       onBranchChange={handleBranchChange}
                     />
-                    <PlanModeToggle
-                      active={chrome.planState?.active ?? false}
-                      onToggle={(active) =>
-                        useSessionsStore.getState().setPlanMode(chrome.id, active)
-                      }
-                    />
+                    {(planAvailable || chrome.planState?.active) && (
+                      <PlanModeToggle
+                        active={chrome.planState?.active ?? false}
+                        onToggle={(active) =>
+                          useSessionsStore.getState().setPlanMode(chrome.id, active)
+                        }
+                      />
+                    )}
                     <ApprovalModePicker
                       mode={chrome.approvalMode ?? 'full'}
                       onSelect={(mode) =>

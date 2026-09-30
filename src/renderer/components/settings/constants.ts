@@ -8,6 +8,7 @@ export type SettingsCategory =
   | 'appearance'
   | 'providers'
   | 'skills'
+  | 'plugins'
   | 'mcp'
   | 'instructions'
   | 'presets'

@@ -531,6 +531,57 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ ...base, rolePrompt: 1 })).toBeNull();
   });
 
+  it('spawn-parent 携 trustedProjectCode:字符串数组通过,脏值拒绝', () => {
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
+    const trusted = { ...base, trustedProjectCode: ['.pi/extensions/a.ts', 'package:npm:x'] };
+    expect(parseAgentCommand(trusted)).toEqual(trusted);
+    expect(parseAgentCommand({ ...base, trustedProjectCode: 'x' })).toBeNull();
+    expect(parseAgentCommand({ ...base, trustedProjectCode: [1] })).toBeNull();
+    expect(parseAgentCommand({ ...base, trustedProjectCode: ['x'.repeat(2000)] })).toBeNull();
+  });
+
+  it('spawn-parent 携插件命令与 hooks:合法通过,脏值拒绝', () => {
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
+    const hook = {
+      plugin: 'demo',
+      root: '/p',
+      dataDir: '/d',
+      event: 'PreToolUse',
+      matcher: 'Bash',
+      command: 'echo hi',
+      timeoutSec: 5,
+    };
+    const command = {
+      name: 'demo:review',
+      description: 'Review',
+      argumentHint: '[focus]',
+      content: 'Review $ARGUMENTS',
+      filePath: '/p/commands/review.md',
+    };
+    const full = { ...base, pluginHooks: [hook], pluginCommands: [command] };
+    expect(parseAgentCommand(full)).toEqual(full);
+    expect(
+      parseAgentCommand({ ...base, pluginHooks: [{ ...hook, event: 'Notification' }] })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...base, pluginHooks: [{ ...hook, timeoutSec: 0 }] })).toBeNull();
+    expect(parseAgentCommand({ ...base, pluginHooks: [{ ...hook, extra: 1 }] })).toBeNull();
+    expect(
+      parseAgentCommand({ ...base, pluginCommands: [{ ...command, content: '' }] })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...base, pluginCommands: 'x' })).toBeNull();
+  });
+
+  it('tool-background 必须 exact identity + 合法 toolCallId', () => {
+    const command = { type: 'tool-background', identity: parent, toolCallId: 'call_1|fc_2' };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(
+      parseAgentCommand({ ...command, identity: { ...parent, generation: 'old' } })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...command, toolCallId: '' })).toBeNull();
+    expect(parseAgentCommand({ ...command, toolCallId: 'x'.repeat(513) })).toBeNull();
+    expect(parseAgentCommand({ ...command, extra: 1 })).toBeNull();
+  });
+
   it('workflow-stop 必须 exact identity + 合法 runId', () => {
     const command = { type: 'workflow-stop', identity: parent, runId: 'run-1' };
     expect(parseAgentCommand(command)).toEqual(command);
@@ -710,6 +761,13 @@ describe('parent/child commands', () => {
         message: { ...event.message, rtk: { ...event.message.rtk, inputTokens: -10 } },
       })
     ).toBeNull();
+    const moved = { ...event, message: { ...event.message, backgroundTaskId: 'task-1-abc' } };
+    expect(parseAgentWorkerEvent(moved)).toEqual(moved);
+    for (const backgroundTaskId of ['', 1, 'x'.repeat(129)]) {
+      expect(
+        parseAgentWorkerEvent({ ...event, message: { ...event.message, backgroundTaskId } })
+      ).toBeNull();
+    }
   });
 
   it('spawn-parent 携 remote:合法通过,坏 shape 拒绝', () => {

@@ -5,6 +5,7 @@ export const SETTINGS_CATEGORIES = [
   'appearance',
   'providers',
   'skills',
+  'plugins',
   'mcp',
   'instructions',
   'presets',

@@ -2,7 +2,7 @@ import { type DefaultModelRef, resolveChatReasoning } from '@shared/defaultModel
 import { projectDisplayName } from '@shared/projectName';
 import { BUILTIN_TOOLS, type Project, type ThinkingLevel } from '@shared/types';
 import type { AgentMode } from '@shared/types/agent';
-import { FolderOpen, Wrench } from 'lucide-react';
+import { FolderOpen, ShieldAlert, Wrench } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { CopyButton } from '@/components/chat/CopyButton';
 import { ScopedDefaultModelField } from '@/components/chat/ScopedDefaultModelField';
@@ -52,6 +52,7 @@ export function ProjectSettingsDialog({
   const setProjectSubagentAllowedModes = useSettingsStore(
     (state) => state.setProjectSubagentAllowedModes
   );
+  const setProjectTrustedCode = useSettingsStore((state) => state.setProjectTrustedCode);
   const globalDisabledBuiltinTools = useSettingsStore((state) => state.disabledBuiltinTools);
   const globalSubagentAllowedModes = useSettingsStore((state) => state.subagentAllowedModes);
   const [alias, setAlias] = useState('');
@@ -63,9 +64,11 @@ export function ProjectSettingsDialog({
   const [disabledBuiltinTools, setDisabledBuiltinTools] = useState<string[]>([]);
   const [followGlobalSubagentModes, setFollowGlobalSubagentModes] = useState(true);
   const [subagentAllowedModes, setSubagentAllowedModes] = useState<AgentMode[]>([]);
+  const [revokeTrust, setRevokeTrust] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    setRevokeTrust(false);
     setDefaultModel(project?.defaultModel ?? null);
     setGroupId(project?.groupId ?? '');
     setAlias(project?.alias ?? '');
@@ -138,6 +141,7 @@ export function ProjectSettingsDialog({
               project.id,
               followGlobalSubagentModes ? null : subagentAllowedModes
             );
+            if (revokeTrust) setProjectTrustedCode(project.id, null);
             onOpenChange(false);
           }}
         >
@@ -318,6 +322,34 @@ export function ProjectSettingsDialog({
                 </div>
               )}
             </div>
+            {project?.trustedProjectCode?.length ? (
+              <div className="flex items-start gap-3 rounded-lg border px-3 py-2.5">
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-sm">{t('Trusted project extensions')}</p>
+                  <p
+                    className="truncate font-mono text-muted-foreground text-xs"
+                    title={project.trustedProjectCode.join('\n')}
+                  >
+                    {project.trustedProjectCode.join(', ')}
+                  </p>
+                  {revokeTrust && (
+                    <p className="text-muted-foreground text-xs">
+                      {t('No longer loaded after saving, starting with the next session.')}
+                    </p>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={revokeTrust}
+                  onClick={() => setRevokeTrust(true)}
+                >
+                  {t('Revoke trust')}
+                </Button>
+              </div>
+            ) : null}
           </DialogPanel>
           <DialogFooter>
             <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>

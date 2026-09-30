@@ -118,6 +118,8 @@ export const IPC_CHANNELS = {
   ASSETS_INSTRUCTION_OCCUPANCY: 'assets:instruction-occupancy',
   ASSETS_MCP_OCCUPANCY: 'assets:mcp-occupancy',
   ASSETS_BUILTIN_TOOL_OCCUPANCY: 'assets:builtin-tool-occupancy',
+  /** Claude Code 已装插件及其组件摘要 */
+  PLUGINS_LIST_INSTALLED: 'plugins:list-installed',
 
   // MCP OAuth 授权与连接状态
   MCP_AUTHORIZE: 'mcp:authorize',
@@ -169,6 +171,8 @@ export const IPC_CHANNELS = {
   /** renderer → main：上报当前正在查看的会话，供系统通知抑制判断 */
   NOTIFICATION_ACTIVE_SESSION: 'notification:active-session',
   AGENT_TASK_STOP: 'agent:task-stop',
+  /** 把运行中的前台命令移交为后台任务 */
+  AGENT_TOOL_BACKGROUND: 'agent:tool-background',
   AGENT_SUBAGENT_STOP: 'agent:subagent-stop',
   AGENT_WORKFLOW_STOP: 'agent:workflow-stop',
   AGENT_REWIND: 'agent:rewind',
@@ -225,6 +229,7 @@ export const IPC_CHANNELS = {
   PROJECTS_GET_RECENT: 'projects:get-recent',
   /** 在系统文件管理器或指定 appId 的应用里打开项目根目录或会话 worktree（仅本地项目） */
   PROJECTS_REVEAL: 'projects:reveal',
+  PROJECTS_CODE_SOURCES: 'projects:code-sources',
   /** 列出本机已安装、可打开项目目录的编辑器 / 终端 */
   PROJECTS_OPEN_IN_APPS: 'projects:open-in-apps',
 

@@ -94,30 +94,3 @@ export function listProjectSkills(
   }
   return skills;
 }
-
-interface InstalledPlugins {
-  plugins?: Record<string, Array<{ installPath?: string }>>;
-}
-
-/** Claude Code 插件包内附带的技能：按 installed_plugins.json 记录的安装路径读取 */
-export function readPluginSkills(installedPluginsFile: string): DiscoveredSkill[] {
-  if (!fs.existsSync(installedPluginsFile)) return [];
-
-  let manifest: InstalledPlugins;
-  try {
-    manifest = JSON.parse(fs.readFileSync(installedPluginsFile, 'utf8')) as InstalledPlugins;
-  } catch {
-    return [];
-  }
-
-  const skills: DiscoveredSkill[] = [];
-  for (const [pluginKey, installs] of Object.entries(manifest.plugins ?? {})) {
-    // "name@marketplace" 只取插件名部分作为分组名
-    const pluginName = pluginKey.split('@')[0] || pluginKey;
-    for (const install of installs ?? []) {
-      if (!install.installPath) continue;
-      skills.push(...readSkillsRoot(path.join(install.installPath, 'skills'), pluginName));
-    }
-  }
-  return skills;
-}
