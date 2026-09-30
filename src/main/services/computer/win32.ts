@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { BackgroundUnavailableError, ComputerError } from '@shared/computer/errors';
+import { AxRegistry, axHandleEpoch, isAxStaleHandleError } from '@shared/computer/axRegistry';
+import type { AxTreeNode } from '@shared/computer/axTree';
+import { BackgroundUnavailableError, ComputerError, StaleRefError } from '@shared/computer/errors';
 import { captureSourceRect, scaleCaptureSize } from '@shared/computer/frame';
 import type { ComputerCapabilities, ComputerWindowInfo } from '@shared/computer/types';
 import {
@@ -11,6 +13,8 @@ import {
   screen,
   shell,
 } from 'electron';
+import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
+import { AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
 import type { CaptureBytes, DesktopBackend, PointerOptions } from './backend';
 import { loadWin32Native, type Win32Native } from './win32Native';
 import { findCapturerWindowSource, thumbnailCropForWindow } from './windowSource';
@@ -24,6 +28,7 @@ const primaryPhysical = () => toPhysical(screen.getPrimaryDisplay().bounds);
 
 export class WindowsDesktopBackend implements DesktopBackend {
   private native: Win32Native | null | undefined;
+  private readonly registry = new AxRegistry<string>(axHandleEpoch);
 
   private async nativeOrNull(): Promise<Win32Native | null> {
     if (this.native !== undefined) return this.native;
@@ -45,14 +50,14 @@ export class WindowsDesktopBackend implements DesktopBackend {
       platform: 'win32',
       capture: true,
       input: Boolean(native),
-      ax: false,
+      ax: Boolean(native),
       backgroundInput: false,
       clipboard: true,
       capturePermission: 'granted',
       inputPermission: native ? 'granted' : 'unsupported',
-      axPermission: 'unsupported',
+      axPermission: native ? 'granted' : 'unsupported',
       detail: native
-        ? 'Windows input uses SendInput and brings the target window to the front. No accessibility tree yet: work from screenshots and click(x, y). cmd in shortcuts means Ctrl.'
+        ? 'Windows input uses SendInput and brings the target window to the front. UI Automation tree is available via ax()/find(). cmd in shortcuts means Ctrl.'
         : 'Native input bridge unavailable.',
     };
   }
@@ -252,41 +257,132 @@ export class WindowsDesktopBackend implements DesktopBackend {
     await execFileAsync('cmd.exe', ['/c', 'start', '', launch.target], { windowsHide: true });
   }
 
-  async axSnapshot(): Promise<never[]> {
-    return [];
+  private async withAxErrors<T>(run: () => Promise<T>, ref?: string): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (ref && isAxStaleHandleError(error)) throw new StaleRefError(ref);
+      throw error;
+    }
   }
-  async axQuery(): Promise<never[]> {
-    return [];
+
+  async axSnapshot(target: string, opts?: { maxDepth?: number; all?: boolean }) {
+    const native = await this.requireNative();
+    const generation = this.registry.beginSnapshot(target);
+    const nodes = await this.withAxErrors(() =>
+      native.axSnapshot(target, opts?.maxDepth ?? (opts?.all ? 8 : AX_SNAPSHOT_DEFAULT_DEPTH))
+    );
+    const attach = (node: AxTreeNode): AxTreeNode => {
+      const ref = this.registry.register(target, generation, node.ref);
+      return { ...node, ref, children: node.children?.map(attach) };
+    };
+    return nodes.map(attach);
   }
-  async axElementAt() {
-    return null;
+
+  async axQuery(
+    target: string,
+    query: {
+      role?: string;
+      title?: string;
+      value?: string;
+      description?: string;
+      limit?: number;
+    }
+  ) {
+    const native = await this.requireNative();
+    const generation = this.registry.beginSnapshot(target);
+    try {
+      const nodes = await this.withAxErrors(() => native.axQuery(target, query));
+      return nodes.map((node) => ({
+        ...node,
+        ref: this.registry.register(target, generation, node.ref),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'AX_TIMEOUT') return [];
+      throw error;
+    }
   }
+
+  private registerDesktopNode(node: AxTreeNode | null): AxTreeNode | null {
+    if (!node) return null;
+    const generation = this.registry.beginSnapshot('desktop');
+    return { ...node, ref: this.registry.register('desktop', generation, node.ref) };
+  }
+
+  async axElementAt(screenX: number, screenY: number) {
+    const native = await this.requireNative();
+    return this.registerDesktopNode(
+      await this.withAxErrors(() => native.axElementAt(screenX, screenY))
+    );
+  }
+
   async axFocused() {
-    return null;
+    const native = await this.requireNative();
+    return this.registerDesktopNode(await this.withAxErrors(() => native.axFocused()));
   }
-  async axNode(): Promise<never> {
-    throw new ComputerError('unsupported', 'Accessibility is not available on Windows yet');
+
+  async axNode(ref: string) {
+    const handle = this.registry.resolve(ref);
+    const native = await this.requireNative();
+    return { ...(await this.withAxErrors(() => native.axNode(handle), ref)), ref };
   }
-  async axAttributes(): Promise<never> {
-    return this.axNode();
+
+  async axAttributes(ref: string) {
+    const native = await this.requireNative();
+    const handle = this.registry.resolve(ref);
+    return this.withAxErrors(() => native.axAttributes(handle), ref);
   }
-  async axChildren(): Promise<never> {
-    return this.axNode();
+
+  async axChildren(ref: string) {
+    const native = await this.requireNative();
+    const handle = this.registry.resolve(ref);
+    const children = await this.withAxErrors(() => native.axChildren(handle), ref);
+    return children.map((child) => ({
+      ...child,
+      ref: this.registry.adopt(ref, child.ref),
+    }));
   }
+
   async axParent() {
     return null;
   }
-  async axPerform(): Promise<never> {
-    return this.axNode();
+
+  async axPerform(ref: string, action: string) {
+    const native = await this.requireNative();
+    const handle = this.registry.resolve(ref);
+    await this.withAxErrors(() => native.axPerform(handle, action), ref);
   }
-  async axSetValue(): Promise<never> {
-    return this.axNode();
+
+  async axSetValue(ref: string, value: string) {
+    const native = await this.requireNative();
+    const handle = this.registry.resolve(ref);
+    await this.withAxErrors(() => native.axSetValue(handle, value), ref);
   }
-  async axFocus(): Promise<never> {
-    return this.axNode();
+
+  async axFocus(ref: string) {
+    const native = await this.requireNative();
+    const handle = this.registry.resolve(ref);
+    await this.withAxErrors(() => native.axFocus(handle), ref);
   }
-  async axClick(): Promise<never> {
-    return this.axNode();
+
+  async axClick(ref: string) {
+    try {
+      await this.axPerform(ref, 'press');
+    } catch (error) {
+      if (!isAxPressUnsupported(error)) throw error;
+      const node = await this.axNode(ref);
+      const bounds = node.bounds;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        throw new Error(axPressFallbackMessage(node.role, ref));
+      }
+      await this.click(
+        this.registry.targetOf(ref),
+        bounds.x + bounds.width / 2,
+        bounds.y + bounds.height / 2,
+        { delivery: 'foreground' }
+      );
+    }
   }
 
   async clipboardRead() {

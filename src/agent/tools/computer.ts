@@ -136,7 +136,7 @@ const DESCRIPTION =
   'This is not the browser tool. Child, coworker, and SSH sessions do not get computer.';
 
 const WINDOWS_GUIDELINES = [
-  'Windows: there is no accessibility tree yet (ax()/find() return nothing) — work from screenshots and click(x, y). "cmd"/"command" in shortcuts means Ctrl; use "win" for the Windows key. Apps running as administrator cannot receive input.',
+  'Windows: prefer ax()/find() [ref=eN] (UI Automation). "cmd"/"command" in shortcuts means Ctrl; use "win" for the Windows key. Pixel/keyboard input brings the window to the front; apps running as administrator cannot receive SendInput.',
 ];
 
 export function createComputerTool(invoker: ComputerInvoker): ToolDefinition {

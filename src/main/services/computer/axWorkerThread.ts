@@ -1,5 +1,4 @@
 import { parentPort } from 'node:worker_threads';
-import { performAxJob } from './axNative';
 import { unwrapAxWorkerMessage } from './axWorkerClient';
 
 interface Port {
@@ -16,7 +15,10 @@ port.on('message', async (message) => {
   const job = unwrapAxWorkerMessage(message, !parentPort);
   if (!job) return;
   try {
-    const result = await performAxJob(job);
+    const result =
+      process.platform === 'win32'
+        ? await (await import('./winUia')).performWinUiaJob(job)
+        : await (await import('./axNative')).performAxJob(job);
     port.postMessage({ id: job.id, ok: true, result });
   } catch (error) {
     port.postMessage({

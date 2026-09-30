@@ -1,5 +1,10 @@
 import { basename } from 'node:path';
+import type { AxTreeNode } from '@shared/computer/axTree';
 import type { ComputerWindowInfo } from '@shared/computer/types';
+import { AX_WORKER_TIMEOUT_MS } from './axWalkBudget';
+import type { AxWorkerRequest } from './axWorkerClient';
+import { createAxWorkerClient, spawnAxWorker } from './axWorkerClient';
+import axWorkerPath from './axWorkerThread?modulePath';
 import {
   absoluteMouseCoords,
   INPUT_SIZE,
@@ -38,6 +43,19 @@ export interface Win32Native {
   raise(windowId: string): Promise<void>;
   /** 一次 run 结束：让尚未发完的逐字输入立刻停下 */
   endInput(): void;
+  axSnapshot(target: string, maxDepth: number): Promise<AxTreeNode[]>;
+  axQuery(
+    target: string,
+    query: { role?: string; title?: string; value?: string; description?: string; limit?: number }
+  ): Promise<AxTreeNode[]>;
+  axElementAt(x: number, y: number): Promise<AxTreeNode | null>;
+  axFocused(): Promise<AxTreeNode | null>;
+  axNode(handle: string): Promise<AxTreeNode>;
+  axAttributes(handle: string): Promise<Array<[string, string]>>;
+  axChildren(handle: string): Promise<AxTreeNode[]>;
+  axPerform(handle: string, action: string): Promise<void>;
+  axSetValue(handle: string, value: string): Promise<void>;
+  axFocus(handle: string): Promise<void>;
 }
 
 let cached: Promise<Win32Native | null> | undefined;
@@ -248,6 +266,15 @@ async function load(): Promise<Win32Native | null> {
     }
   };
 
+  let axClient: ReturnType<typeof createAxWorkerClient> | undefined;
+  const axCall = async (request: AxWorkerRequest) => {
+    axClient ??= createAxWorkerClient({
+      timeoutMs: AX_WORKER_TIMEOUT_MS,
+      spawn: () => spawnAxWorker(axWorkerPath),
+    });
+    return axClient.call(request);
+  };
+
   return {
     virtualScreen,
     async windows() {
@@ -372,6 +399,48 @@ async function load(): Promise<Win32Native | null> {
     },
     endInput() {
       inputEpoch += 1;
+    },
+    async axSnapshot(target, maxDepth) {
+      return (await axCall({
+        op: 'snapshot',
+        pid: hwndOf(target),
+        maxDepth,
+      })) as AxTreeNode[];
+    },
+    async axQuery(target, query) {
+      return (await axCall({
+        op: 'query',
+        pid: hwndOf(target),
+        limit: query.limit ?? 20,
+        ...(query.role ? { role: query.role } : {}),
+        ...(query.title ? { title: query.title } : {}),
+        ...(query.value ? { value: query.value } : {}),
+        ...(query.description ? { description: query.description } : {}),
+      })) as AxTreeNode[];
+    },
+    async axElementAt(x, y) {
+      return (await axCall({ op: 'elementAt', x, y })) as AxTreeNode | null;
+    },
+    async axFocused() {
+      return (await axCall({ op: 'focused' })) as AxTreeNode | null;
+    },
+    async axNode(handle) {
+      return (await axCall({ op: 'node', handle })) as AxTreeNode;
+    },
+    async axAttributes(handle) {
+      return (await axCall({ op: 'attributes', handle })) as Array<[string, string]>;
+    },
+    async axChildren(handle) {
+      return (await axCall({ op: 'children', handle })) as AxTreeNode[];
+    },
+    async axPerform(handle, action) {
+      await axCall({ op: 'perform', handle, action });
+    },
+    async axSetValue(handle, value) {
+      await axCall({ op: 'setValue', handle, value });
+    },
+    async axFocus(handle) {
+      await axCall({ op: 'focus', handle });
     },
   };
 }

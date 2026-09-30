@@ -31,10 +31,10 @@ describe('createDesktopBackend', () => {
     expect(isComputerPlatformSupported('linux')).toBe(false);
   });
 
-  it('Windows 能截图，但还没有 AX', async () => {
+  it('Windows 能截图；本机有 native 桥时 AX 可用', async () => {
     const caps = await createDesktopBackend('win32').capabilities();
     expect(caps.platform).toBe('win32');
     expect(caps.capture).toBe(true);
-    expect(caps.ax).toBe(false);
+    expect(caps.ax).toBe(process.platform === 'win32');
   });
 });
