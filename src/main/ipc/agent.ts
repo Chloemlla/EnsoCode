@@ -1186,7 +1186,9 @@ export function registerAgentHandlers(): void {
       try {
         const keys = await readStoredOauthCredentialKeys();
         if (
-          !resolveModelSelection(parsed.selection.providerId, parsed.selection.modelId, keys).ok
+          !resolveModelSelection(parsed.selection.providerId, parsed.selection.modelId, keys, {
+            allowVirtual: true,
+          }).ok
         ) {
           return { accepted: false, error: 'Selected model is unavailable.' };
         }
@@ -1315,7 +1317,8 @@ export function registerAgentHandlers(): void {
       validated = resolveModelSelection(
         parsed.selection.providerId,
         parsed.selection.modelId,
-        keys
+        keys,
+        { allowVirtual: true }
       ).ok;
     } catch {}
     return sourceBindings!.registerModelSelection(event.sender.id, parsed, validated);

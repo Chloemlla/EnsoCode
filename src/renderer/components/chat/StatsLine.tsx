@@ -7,6 +7,7 @@ import {
 } from '@shared/statusLine';
 import type { ModelProvider, OauthAccountUsage, Project } from '@shared/types';
 import type { ApprovalMode, ProjectedMessage, ThinkingLevel } from '@shared/types/agent';
+import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import {
   Clock,
   Coins,
@@ -398,6 +399,21 @@ export function StatsLine({ conversationId }: StatsLineProps) {
   const conversation = useSessionsStore((state) => state.conversations[conversationId]);
   const messages = conversation?.messages ?? [];
   const providers = useSettingsStore((state) => state.providers);
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
+  // 虚拟模型按名称显示：以伪 provider 参与模型名查找
+  const labelProviders = useMemo(
+    () =>
+      virtualModels.length === 0
+        ? providers
+        : [
+            ...providers,
+            {
+              id: VIRTUAL_PROVIDER_ID,
+              models: virtualModels.map((entry) => ({ id: entry.id, label: entry.name })),
+            } as ModelProvider,
+          ],
+    [providers, virtualModels]
+  );
   const projects = useSettingsStore((state) => state.projects);
   const rawSegments = useSettingsStore((state) => state.statusLineSegments);
   // 渲染层第二道防线：见 sanitizeStatusLineSegments 注释；useMemo 保持引用稳定，
@@ -436,9 +452,9 @@ export function StatsLine({ conversationId }: StatsLineProps) {
   const values = useMemo(
     () =>
       conversation
-        ? buildSegmentValues(t, conversation, messages, providers, projects, now, usageData)
+        ? buildSegmentValues(t, conversation, messages, labelProviders, projects, now, usageData)
         : null,
-    [t, conversation, messages, providers, projects, now, usageData]
+    [t, conversation, messages, labelProviders, projects, now, usageData]
   );
 
   if (!conversation || !icons || !values) return null;

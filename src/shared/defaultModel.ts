@@ -1,5 +1,6 @@
 import type { ModelProvider } from './types';
 import type { ApprovalMode, ThinkingLevel } from './types/agent';
+import { findVirtualModel, isVirtualRef, type VirtualModelEntry } from './virtualModels';
 
 export interface DefaultModelRef {
   providerId: string;
@@ -69,6 +70,7 @@ export interface DefaultModelState {
   defaultModel: DefaultModelRef | null;
   providers: readonly ModelProvider[];
   credentials: ModelCredentialContext;
+  virtualModels?: readonly VirtualModelEntry[];
 }
 
 export type SanitizeDefaultModelResult =
@@ -116,13 +118,24 @@ function oauthCredentialBlock(credentials: ModelCredentialContext): OauthCredent
   }
 }
 
-/** 返回可用、确定失效或 OAuth 未知；不把不同原因压成 unavailable。 */
+/**
+ * 返回可用、确定失效或 OAuth 未知；不把不同原因压成 unavailable。
+ * 虚拟模型按主模型判定；不传 virtualModels 的调用方（不接受虚拟模型的场景）视为 provider 缺失。
+ */
 export function modelUsability(
   selection: DefaultModelRef | null,
   providers: readonly ModelProvider[],
-  credentials: ModelCredentialContext
+  credentials: ModelCredentialContext,
+  virtualModels?: readonly VirtualModelEntry[]
 ): ModelUsability {
   if (!selection) return 'missing-selection';
+  if (isVirtualRef(selection)) {
+    if (!virtualModels) return 'provider-missing';
+    const entry = findVirtualModel(virtualModels, selection);
+    if (!entry) return 'model-missing';
+    if (!entry.enabled) return 'model-disabled';
+    return modelUsability(entry.primary, providers, credentials);
+  }
   const provider = providers.find((entry) => entry.id === selection.providerId);
   if (!provider) return 'provider-missing';
   if (!provider.enabled) return 'provider-disabled';
@@ -141,9 +154,10 @@ export function modelUsability(
 export function isUsableModel(
   selection: DefaultModelRef | null,
   providers: readonly ModelProvider[],
-  credentials: ModelCredentialContext
+  credentials: ModelCredentialContext,
+  virtualModels?: readonly VirtualModelEntry[]
 ): selection is DefaultModelRef {
-  return modelUsability(selection, providers, credentials) === 'usable';
+  return modelUsability(selection, providers, credentials, virtualModels) === 'usable';
 }
 
 /** 新会话缺省审批档：优先上次档；assistant 仅在代审模型可用时保留，否则 full。 */
@@ -219,8 +233,14 @@ export function resolveChatModel(input: {
   lastModelId?: string;
   providers: readonly ModelProvider[];
   credentials: ModelCredentialContext;
+  virtualModels?: readonly VirtualModelEntry[];
 }): ChatModelResolution {
-  const defaultUsability = modelUsability(input.defaultModel, input.providers, input.credentials);
+  const defaultUsability = modelUsability(
+    input.defaultModel,
+    input.providers,
+    input.credentials,
+    input.virtualModels
+  );
   const invalidDefault =
     input.defaultModel !== null &&
     defaultUsability !== 'usable' &&
@@ -237,7 +257,12 @@ export function resolveChatModel(input: {
   ];
 
   for (const candidate of candidates) {
-    const usability = modelUsability(candidate.selection, input.providers, input.credentials);
+    const usability = modelUsability(
+      candidate.selection,
+      input.providers,
+      input.credentials,
+      input.virtualModels
+    );
     if (usability === 'usable' && candidate.selection) {
       return {
         ...candidate.selection,
@@ -274,7 +299,12 @@ export function sanitizeDefaultModel(state: DefaultModelState): SanitizeDefaultM
   if (!state.defaultModel) {
     return { status: 'unchanged', defaultModel: null, notice: null };
   }
-  const currentUsability = modelUsability(state.defaultModel, state.providers, state.credentials);
+  const currentUsability = modelUsability(
+    state.defaultModel,
+    state.providers,
+    state.credentials,
+    state.virtualModels
+  );
   if (currentUsability === 'usable') {
     return { status: 'unchanged', defaultModel: state.defaultModel, notice: null };
   }

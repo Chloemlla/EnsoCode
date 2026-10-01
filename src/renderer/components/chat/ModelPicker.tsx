@@ -9,7 +9,12 @@ import type {
   OauthProviderInfo,
 } from '@shared/types';
 import { THINKING_LEVELS, type ThinkingLevel } from '@shared/types/agent';
-import { BadgeCheck, Brain, Check, ChevronDown, KeyRound } from 'lucide-react';
+import {
+  findVirtualModel,
+  VIRTUAL_PROVIDER_ID,
+  type VirtualModelEntry,
+} from '@shared/virtualModels';
+import { BadgeCheck, Brain, Check, ChevronDown, KeyRound, Shuffle } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -147,6 +152,10 @@ function stopTypeaheadOnly(e: KeyboardEvent<HTMLInputElement>): void {
 
 interface ModelPickerProps {
   providers: ModelProvider[];
+  /** 传入时在顶部列出虚拟模型（仅会话主模型与默认模型的选择场景） */
+  virtualModels?: readonly VirtualModelEntry[];
+  /** 选中虚拟模型时附在触发器上的实际路由模型 */
+  routedModelLabel?: string;
   providerId: string;
   modelId: string;
   reasoningEnabled: boolean;
@@ -459,6 +468,8 @@ interface SearchHit {
  */
 export function ModelPicker({
   providers,
+  virtualModels,
+  routedModelLabel,
   providerId,
   modelId,
   reasoningEnabled,
@@ -498,18 +509,38 @@ export function ModelPicker({
     {}
   );
 
-  const currentProvider = useMemo(
-    () => providers.find((p) => p.id === providerId),
-    [providers, providerId]
+  const selectableVirtualModels = useMemo(
+    () =>
+      (virtualModels ?? []).filter(
+        (entry) =>
+          entry.enabled &&
+          providers.some(
+            (p) =>
+              p.id === entry.primary.providerId &&
+              p.models.some((m) => m.id === entry.primary.modelId && m.enabled !== false)
+          )
+      ),
+    [virtualModels, providers]
   );
-  const current = currentProvider?.models.find((m) => m.id === modelId);
+  const currentVirtual = findVirtualModel(virtualModels, { providerId, modelId });
+  // 虚拟模型的推理能力按主模型展示与钳位
+  const capabilityRef = currentVirtual?.primary ?? { providerId, modelId };
+  const currentProvider = useMemo(
+    () => providers.find((p) => p.id === capabilityRef.providerId),
+    [providers, capabilityRef.providerId]
+  );
+  const current = currentProvider?.models.find((m) => m.id === capabilityRef.modelId);
   const formTrigger = Boolean(triggerClassName);
-  const modelName = current?.label || current?.id || modelId;
+  const modelName = currentVirtual
+    ? routedModelLabel
+      ? `${currentVirtual.name} · ${routedModelLabel}`
+      : currentVirtual.name
+    : current?.label || current?.id || modelId;
   const hasSelection = Boolean(modelName);
   const triggerLabel =
     triggerLabelProp ??
     (hasSelection
-      ? formTrigger && currentProvider?.name
+      ? formTrigger && currentProvider?.name && !currentVirtual
         ? `${currentProvider.name} / ${modelName}`
         : modelName
       : emptyLabel || t('Select model'));
@@ -640,14 +671,40 @@ export function ModelPicker({
     }
     return hits.sort((a, b) => b.score - a.score);
   }, [searching, keyword, providers, entryInfoByProviderId]);
+  const virtualHits = useMemo(
+    () =>
+      searching
+        ? selectableVirtualModels.filter(
+            (entry) => fuzzyMatchScore(keyword.trim(), entry.name) !== null
+          )
+        : selectableVirtualModels,
+    [searching, keyword, selectableVirtualModels]
+  );
+  const virtualItems = virtualHits.map((entry) => (
+    <MenuItem
+      key={`virtual/${entry.id}`}
+      data-model-picker-virtual={entry.id}
+      onClick={() => handleSelectModel(VIRTUAL_PROVIDER_ID, entry.id)}
+    >
+      <Shuffle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        {currentVirtual?.id === entry.id && <Check className="h-3.5 w-3.5 text-primary" />}
+      </span>
+    </MenuItem>
+  ));
 
   const handleSelectModel = useCallback(
     (targetProviderId: string, targetModelId: string) => {
       onSelect(targetProviderId, targetModelId);
       // 同一次交互内钳位:目标模型已知的支持档集若不含当前档,自动降到最近支持档并回写
-      const meta = metaByProvider[targetProviderId]?.[targetModelId];
-      const provider = providers.find((entry) => entry.id === targetProviderId);
-      const row = provider?.models.find((entry) => entry.id === targetModelId);
+      const target = findVirtualModel(virtualModels, {
+        providerId: targetProviderId,
+        modelId: targetModelId,
+      })?.primary ?? { providerId: targetProviderId, modelId: targetModelId };
+      const meta = metaByProvider[target.providerId]?.[target.modelId];
+      const provider = providers.find((entry) => entry.id === target.providerId);
+      const row = provider?.models.find((entry) => entry.id === target.modelId);
       const capability = resolvePickerCapabilities(
         provider,
         row,
@@ -665,6 +722,7 @@ export function ModelPicker({
     [
       onSelect,
       providers,
+      virtualModels,
       modelCapabilityOverrides,
       metaByProvider,
       thinkingLevel,
@@ -674,7 +732,7 @@ export function ModelPicker({
   );
 
   const currentProviderMeta = useModelMeta(currentProvider);
-  const currentModelMeta = currentProviderMeta[modelId];
+  const currentModelMeta = currentProviderMeta[capabilityRef.modelId];
   const capability = useMemo(
     () =>
       resolvePickerCapabilities(
@@ -819,6 +877,7 @@ export function ModelPicker({
           <div className="max-h-72 overflow-y-auto">
             {searching ? (
               <>
+                {virtualItems}
                 {searchHits.map(({ provider, model, entryTag }) => (
                   <MenuItem
                     key={`${provider.id}/${model.id}`}
@@ -832,7 +891,7 @@ export function ModelPicker({
                     />
                   </MenuItem>
                 ))}
-                {searchHits.length === 0 && (
+                {searchHits.length === 0 && virtualItems.length === 0 && (
                   <p className="px-1 py-4 text-center text-xs text-muted-foreground">
                     {t('No models found')}
                   </p>
@@ -840,6 +899,12 @@ export function ModelPicker({
               </>
             ) : (
               <>
+                {virtualItems.length > 0 && (
+                  <MenuGroup>
+                    <MenuGroupLabel>{t('Virtual models')}</MenuGroupLabel>
+                    {virtualItems}
+                  </MenuGroup>
+                )}
                 {groups.map((group) => (
                   <MenuGroup key={group.vendorId}>
                     <MenuGroupLabel>
@@ -918,7 +983,7 @@ export function ModelPicker({
                     })}
                   </MenuGroup>
                 ))}
-                {groups.length === 0 && (
+                {groups.length === 0 && virtualItems.length === 0 && (
                   <p className="px-1 py-4 text-center text-xs text-muted-foreground">
                     {t('No models found')}
                   </p>

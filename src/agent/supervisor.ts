@@ -201,6 +201,7 @@ import { createEnsoAppTool, EnsoAppInvoker } from './tools/ensoApp';
 import { createEnsoCapabilitiesTool } from './tools/ensoCapabilities';
 import { createMemoryTools, MemoryInvoker } from './tools/memory';
 import { createWebTools } from './tools/web';
+import { registerVirtualModel, withAdaptiveThinking } from './virtualModels';
 import { createWorkflowTool, WORKFLOW_STOPPED_BY_USER } from './workflow';
 import { listWorkflowPresets, loadWorkflowPreset, workflowPresetRoots } from './workflowPresets';
 import { WorkspaceSwitchGate, workspaceBranchContextExtension } from './workspaceSwitch';
@@ -1251,7 +1252,7 @@ export class SessionSupervisor {
       case 'set-model': {
         const managed = this.must(command.identity);
         const runtime = await this.getRuntime();
-        const base = await resolveBaseModelOrRefresh(runtime, command.model);
+        const base = await resolveSessionModel(runtime, command.model);
         const next = applyReasoningToModel(
           { ...base, compat: base.compat ? { ...base.compat } : undefined },
           managed.session.model ? Boolean(managed.session.model.reasoning) : false,
@@ -1586,7 +1587,7 @@ export class SessionSupervisor {
     }
     const spawnStart = Date.now();
     const runtime = await this.getRuntime();
-    const baseModel = await resolveBaseModelOrRefresh(runtime, model);
+    const baseModel = await resolveSessionModel(runtime, model);
     const piModel = applyReasoningToModel(
       { ...baseModel, compat: baseModel.compat ? { ...baseModel.compat } : undefined },
       reasoningEnabled,
@@ -1886,7 +1887,7 @@ export class SessionSupervisor {
         extraTools = [],
       }) => {
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
-        const base = await resolveBaseModelOrRefresh(runtime, selectedModel);
+        const base = await resolveSessionModel(runtime, selectedModel);
         // 派发 thinking > 类型预设 > 模型条目预设 > 父会话
         const childReasoning = resolveChildReasoning(
           pickChildReasoningOverride(thinkingOverride, agentType, selectedModel),
@@ -2899,7 +2900,7 @@ export class SessionSupervisor {
       summary = `(WARNING: output hit the model limit — treat this round as incomplete)\n${summary}`;
     }
     const used = (last?.usage?.input ?? 0) + (last?.usage?.output ?? 0);
-    const window = positiveContextWindow(managed.session.model);
+    const window = positiveContextWindow(limitsModelOf(managed.session));
     if (window !== undefined && used > window * 0.85) {
       const pct = Math.round((used / window) * 100);
       summary += `\n\n(coworker context ${pct}% full — have it summarize, or dismiss it soon)`;
@@ -3206,6 +3207,9 @@ export class SessionSupervisor {
     if (!lastError.includes('adaptive thinking is not supported')) return false;
     managed.adaptiveDowngraded = true;
     runtimeAdaptiveBlocklist.add(managed.modelId);
+    // 虚拟模型：真正不支持的是这次路由到的成员
+    const failedModel = (managed.session.messages.at(-1) as { model?: unknown } | undefined)?.model;
+    if (typeof failedModel === 'string') runtimeAdaptiveBlocklist.add(failedModel);
     const compat = managed.session.model?.compat as { forceAdaptiveThinking?: boolean } | undefined;
     if (compat) compat.forceAdaptiveThinking = undefined;
     const lastUser = [...managed.messages].reverse().find((message) => message.role === 'user');
@@ -3696,7 +3700,7 @@ export class SessionSupervisor {
   }
 
   private emitSessionMeta(managed: ManagedSession): void {
-    const contextWindow = positiveContextWindow(managed.session.model);
+    const contextWindow = positiveContextWindow(limitsModelOf(managed.session));
     let occupancy: ReturnType<typeof collectContextOccupancy> | undefined;
     try {
       const baseline = occupancyFromManaged(managed, contextWindow, (message) =>
@@ -4199,16 +4203,39 @@ function liveCompletionText(partial: unknown): { text: string; thinking: string 
  * 已能选到，worker 这边仍是旧清单 → 未命中时对基础 provider 补一次联网刷新再重试。
  */
 export async function resolveBaseModelOrRefresh(runtime: ModelRuntime, model: SpawnModelConfig) {
+  let resolved: ReturnType<typeof resolveBaseModel>;
   try {
-    return resolveBaseModel(runtime, model);
+    resolved = resolveBaseModel(runtime, model);
   } catch (error) {
     if (!model.oauthAccountKey) throw error;
     // Cursor 无 force 只踢后台任务并立刻返回兜底清单（没有 claude-fable-5-1 这类新 id）
     await refreshWorkerProviderModels(runtime, providerIdOfAccountKey(model.oauthAccountKey), {
       force: true,
     });
-    return resolveBaseModel(runtime, model);
+    resolved = resolveBaseModel(runtime, model);
   }
+  // 虚拟模型路由后按目录副本发请求，adaptive 只能在 provider 出口补；直连会话已显式设置，不受影响
+  if (resolved.api === 'anthropic-messages') {
+    const provider = runtime.getProvider(resolved.provider);
+    if (provider) {
+      runtime.registerNativeProvider(withAdaptiveThinking(provider, supportsAdaptiveThinking));
+    }
+  }
+  return resolved;
+}
+
+/** 会话主模型：虚拟配置先逐成员解析并注册 pi 虚拟模型，其余同 resolveBaseModelOrRefresh。 */
+export async function resolveSessionModel(runtime: ModelRuntime, model: SpawnModelConfig) {
+  if (!model.virtual) return resolveBaseModelOrRefresh(runtime, model);
+  const registration = await registerVirtualModel(runtime, model, (member) =>
+    resolveBaseModelOrRefresh(runtime, member)
+  );
+  return registration.model;
+}
+
+/** 上下文上限按最近一次实际响应的模型；虚拟模型首个响应前用其声明的上限。 */
+function limitsModelOf(session: AgentSession) {
+  return session.routedModel?.model ?? session.model;
 }
 
 /**
@@ -4318,7 +4345,7 @@ function occupancyFromManaged(
     tools: typeof managed.session.getAllTools === 'function' ? managed.session.getAllTools() : [],
     contextMessages: sessionManager.buildSessionContext?.().messages ?? [],
     branch,
-    currentModelFamily: modelFamilyOf(managed.session.model?.id ?? managed.modelId),
+    currentModelFamily: modelFamilyOf(limitsModelOf(managed.session)?.id ?? managed.modelId),
     compactionModelFamily: compactionModelFamilyOf(branch),
     contextWindow,
     pendingTaskReminders: managed.pendingTaskReminders,

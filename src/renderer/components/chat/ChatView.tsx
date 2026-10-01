@@ -4,6 +4,7 @@ import { resolveChatModel, scopedDefaultModels } from '@shared/defaultModel';
 import { planPhase } from '@shared/planMode';
 import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import type { AgentTypeMentionCandidate } from '@shared/types/mentions';
+import { isVirtualRef, modelDisplayName } from '@shared/virtualModels';
 import { Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -49,6 +50,16 @@ import { WorkspaceBadge } from './WorkspaceBadge';
 import { WorktreeMissingDialog } from './WorktreeMissingDialog';
 import { WorktreePicker } from './WorktreePicker';
 
+/** 虚拟模型最近一次实际路由到的真实模型：取最后一条成功回复记录的 model */
+function lastReplyModel(messages: readonly { role: string; model?: string }[] | undefined) {
+  if (!messages) return undefined;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === 'assistant' && message.model) return message.model;
+  }
+  return undefined;
+}
+
 /** 空会话建议：填入输入框并聚焦，由用户确认后再发送 */
 const pickSuggestion = (prompt: string) => {
   if (insertComposerText(prompt)) requestFocusComposer();
@@ -57,6 +68,7 @@ const pickSuggestion = (prompt: string) => {
 export function ChatView() {
   const { t } = useI18n();
   const providers = useSettingsStore((state) => state.providers);
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const customAgentTypes = useSettingsStore((state) => state.agentTypes);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const projects = useSettingsStore((state) => state.projects);
@@ -113,6 +125,7 @@ export function ChatView() {
         lastModelId: chrome?.lastModelId,
         providers,
         credentials: oauthCredentialContext(oauthSnapshot),
+        virtualModels,
       }),
     [
       chrome?.lastModelId,
@@ -121,6 +134,7 @@ export function ChatView() {
       defaultModel,
       oauthSnapshot,
       providers,
+      virtualModels,
     ]
   );
   const parentModelResolution = useMemo(
@@ -132,6 +146,7 @@ export function ChatView() {
         lastModelId: chrome?.parentLastModelId,
         providers,
         credentials: oauthCredentialContext(oauthSnapshot),
+        virtualModels,
       }),
     [
       defaultModel,
@@ -140,6 +155,7 @@ export function ChatView() {
       chrome?.parentLastProviderId,
       parentDefaults,
       providers,
+      virtualModels,
     ]
   );
   const parentSelectedModel =
@@ -154,6 +170,17 @@ export function ChatView() {
       ? undefined
       : enabledProviders.find((entry) => entry.id === modelResolution.providerId);
   const effectiveModelId = modelResolution.source === 'none' ? '' : modelResolution.modelId;
+  const selectedProviderId =
+    modelResolution.source === 'none'
+      ? ''
+      : isVirtualRef(modelResolution)
+        ? modelResolution.providerId
+        : (provider?.id ?? '');
+  const routedModelLabel = useSessionsStore((state) =>
+    isVirtualRef(modelResolution) && chrome?.id
+      ? lastReplyModel(state.conversations[chrome.id]?.messages)
+      : undefined
+  );
   const modelBlockMessage =
     modelResolution.source !== 'none'
       ? null
@@ -485,7 +512,9 @@ export function ChatView() {
                     <ModelPicker
                       listenHotkey
                       providers={enabledProviders}
-                      providerId={provider?.id ?? ''}
+                      virtualModels={virtualModels}
+                      routedModelLabel={routedModelLabel}
+                      providerId={selectedProviderId}
                       modelId={effectiveModelId}
                       reasoningEnabled={chrome.reasoningEnabled ?? false}
                       thinkingLevel={chrome.thinkingLevel ?? 'medium'}
@@ -506,7 +535,9 @@ export function ChatView() {
                     {chrome.agentType
                       ? agentTypeDisplayName(chrome.agentType, customAgentTypes)
                       : 'coworker'}
-                    {chrome.lastModelId ? ` · ${chrome.lastModelId}` : ''}
+                    {chrome.lastModelId
+                      ? ` · ${modelDisplayName(virtualModels, chrome.lastModelId)}`
+                      : ''}
                   </span>
                 )}
               </>
@@ -517,7 +548,7 @@ export function ChatView() {
               if (
                 !payload.recipient &&
                 !chrome.displayedParentId &&
-                (!provider || !effectiveModelId)
+                (!selectedProviderId || !effectiveModelId)
               ) {
                 return false;
               }
@@ -534,7 +565,7 @@ export function ChatView() {
                   void useSessionsStore.getState().send(
                     text,
                     {
-                      providerId: provider?.id ?? '',
+                      providerId: selectedProviderId,
                       modelId: effectiveModelId,
                       cwd: project.path,
                     },

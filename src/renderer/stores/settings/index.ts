@@ -26,6 +26,7 @@ import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types';
 import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
 import { DEFAULT_SPEECH_MODEL_ID, SYSTEM_MICROPHONE } from '@shared/types/speech';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
+import { parseVirtualModels, type VirtualModelEntry } from '@shared/virtualModels';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
@@ -204,6 +205,7 @@ const initialState = {
   agentTypes: [] as import('@shared/types').AgentTypeEntry[],
   subagentModelsEnabled: false,
   subagentModels: [] as import('@shared/types').SubagentModelEntry[],
+  virtualModels: [] as VirtualModelEntry[],
   disabledBuiltinAgentTypes: [] as string[],
   disabledBuiltinTools: [...DEFAULT_DISABLED_BUILTIN_TOOLS] as string[],
   disabledWorkflowPresets: [] as string[],
@@ -451,6 +453,7 @@ export const useSettingsStore = create<SettingsState>()(
           defaultModel,
           providers: get().providers,
           credentials: oauthCredentialContext(snapshot),
+          virtualModels: get().virtualModels,
         });
         if (sanitized.status === 'unchanged') {
           const unchanged: DefaultModelRevalidation = {
@@ -653,6 +656,24 @@ export const useSettingsStore = create<SettingsState>()(
       removeSubagentModel: (id) =>
         set((state) => ({
           subagentModels: state.subagentModels.filter((entry) => entry.id !== id),
+        })),
+
+      addVirtualModel: (entry) => {
+        const created = { ...entry, id: crypto.randomUUID() };
+        set((state) => ({ virtualModels: [...state.virtualModels, created] }));
+        return created;
+      },
+
+      updateVirtualModel: (id, updates) =>
+        set((state) => ({
+          virtualModels: state.virtualModels.map((entry) =>
+            entry.id === id ? { ...entry, ...updates } : entry
+          ),
+        })),
+
+      removeVirtualModel: (id) =>
+        set((state) => ({
+          virtualModels: state.virtualModels.filter((entry) => entry.id !== id),
         })),
 
       addAgentType: (entry) => {
@@ -978,6 +999,10 @@ export const useSettingsStore = create<SettingsState>()(
         const terminalShell = parseTerminalShell(s.terminalShell);
         if (terminalShell !== s.terminalShell) {
           useSettingsStore.setState({ terminalShell });
+        }
+        const virtualModels = parseVirtualModels(s.virtualModels);
+        if (JSON.stringify(virtualModels) !== JSON.stringify(s.virtualModels)) {
+          useSettingsStore.setState({ virtualModels });
         }
         const smartCompactMode = parseSmartCompactMode(s.smartCompactMode) ?? 'auto';
         if (smartCompactMode !== s.smartCompactMode) {

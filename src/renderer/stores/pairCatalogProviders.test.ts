@@ -84,3 +84,30 @@ describe('toPairProviderEntries', () => {
     ).toEqual({ entries: [], settled: true });
   });
 });
+
+describe('虚拟模型下发手机', () => {
+  it('主模型可用的启用条目以伪 provider 置顶下发', () => {
+    const snapshot = {
+      revision: 1,
+      availability: { status: 'ready' as const, authenticatedAccountKeys: new Set<string>() },
+    };
+    const entry = (id: string, primaryModel: string, enabled = true) => ({
+      id,
+      name: id.toUpperCase(),
+      enabled,
+      primary: { providerId: 'api', modelId: primaryModel },
+      fallbacks: [],
+    });
+    const entries = toPairProviderEntries([provider('api')], snapshot, [
+      entry('a', 'enabled'),
+      entry('b', 'disabled'),
+      entry('c', 'enabled', false),
+    ]);
+    expect(entries[0]).toEqual({
+      id: 'enso-virtual',
+      name: 'Auto',
+      models: [{ id: 'a', label: 'A' }],
+    });
+    expect(entries).toHaveLength(2);
+  });
+});

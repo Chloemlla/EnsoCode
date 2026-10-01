@@ -214,6 +214,39 @@ describe('buildTimeline', () => {
       expect(users[1]).not.toHaveProperty('replyAt');
     });
 
+    it('首个回复失败被重试（虚拟模型换成员）时，回复头用随后成功那条的模型', () => {
+      const timeline = buildTimeline(
+        [
+          user('一轮'),
+          {
+            role: 'assistant',
+            content: [],
+            model: 'primary',
+            stopReason: 'error',
+            errorMessage: '503',
+            timestamp: 10,
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'ok' }],
+            model: 'backup',
+            timestamp: 20,
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'more' }],
+            model: 'later',
+            timestamp: 30,
+          },
+        ],
+        false
+      );
+      expect(timeline.find((item) => item.kind === 'user')).toMatchObject({
+        replyModel: 'backup',
+        replyAt: 10,
+      });
+    });
+
     it('user 消息保留发送时间戳 timestamp', () => {
       const timeline = buildTimeline(
         [{ role: 'user', content: [{ type: 'text', text: '你好' }], timestamp: 1726700000000 }],

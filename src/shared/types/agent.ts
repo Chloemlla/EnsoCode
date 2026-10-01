@@ -106,6 +106,28 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
    * 存在时 worker 直取该 key 对应的 provider 与模型，凭证由 pi runtime 从 auth.json 解析。
    */
   oauthAccountKey?: string;
+  /**
+   * 虚拟模型：settingsProviderId 为 `enso-virtual`、modelId 为条目 id，顶层其余字段沿用主模型
+   * 只作占位；worker 必须先看这里，按成员逐个解析后注册 pi 虚拟模型。
+   */
+  virtual?: VirtualSpawnConfig;
+}
+
+export interface VirtualSpawnClassifier {
+  source: 'judge' | 'pi-classifier';
+  timeoutMs: number;
+  /** judge：裁判聊天模型 */
+  model?: SpawnModelConfig;
+  /** pi-classifier：pi catalog 里的分类器 provider/model 与凭证 */
+  classifier?: { provider: string; modelId: string; apiKey?: string };
+}
+
+export interface VirtualSpawnConfig {
+  name: string;
+  primary: SpawnModelConfig;
+  fast?: SpawnModelConfig;
+  fallbacks: SpawnModelConfig[];
+  classifier?: VirtualSpawnClassifier;
 }
 
 /** 思考努力档位（reasoning 开启时有效），值域对齐 pi 的 ThinkingLevel。off 由 reasoningEnabled 表达 */
@@ -1948,7 +1970,51 @@ function parseAttachedImages(value: unknown): AttachedImage[] | null {
 const parseAnySessionIdentity = (value: unknown): SessionIdentity | ChildSessionIdentity | null =>
   parseChildSessionIdentity(value) ?? parseSessionIdentity(value);
 
+function parseVirtualSpawnClassifier(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['source', 'timeoutMs', 'model', 'classifier'])) {
+    return false;
+  }
+  if (typeof value.timeoutMs !== 'number' || !(value.timeoutMs > 0)) return false;
+  if (value.source === 'judge') {
+    return value.classifier === undefined && parsePhysicalSpawnModelConfig(value.model) !== null;
+  }
+  if (value.source !== 'pi-classifier' || value.model !== undefined) return false;
+  const classifier = value.classifier;
+  return (
+    isRecord(classifier) &&
+    hasOnlyKeys(classifier, ['provider', 'modelId', 'apiKey']) &&
+    isNonEmptyString(classifier.provider) &&
+    isNonEmptyString(classifier.modelId) &&
+    (classifier.apiKey === undefined || typeof classifier.apiKey === 'string')
+  );
+}
+
+function parseVirtualSpawnConfig(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['name', 'primary', 'fast', 'fallbacks', 'classifier'])
+  )
+    return false;
+  return (
+    isNonEmptyString(value.name) &&
+    parsePhysicalSpawnModelConfig(value.primary) !== null &&
+    (value.fast === undefined || parsePhysicalSpawnModelConfig(value.fast) !== null) &&
+    Array.isArray(value.fallbacks) &&
+    value.fallbacks.every((item) => parsePhysicalSpawnModelConfig(item) !== null) &&
+    (value.classifier === undefined || parseVirtualSpawnClassifier(value.classifier))
+  );
+}
+
 function parseSpawnModelConfig(value: unknown): SpawnModelConfig | null {
+  if (!isRecord(value)) return null;
+  if (value.virtual === undefined) return parsePhysicalSpawnModelConfig(value);
+  const { virtual, ...physical } = value;
+  return parseVirtualSpawnConfig(virtual) && parsePhysicalSpawnModelConfig(physical)
+    ? (value as unknown as SpawnModelConfig)
+    : null;
+}
+
+function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null {
   if (!isRecord(value)) return null;
   if (
     !hasOnlyKeys(value, [

@@ -21,6 +21,7 @@ function selectionLabel(selection: DefaultModelRef, providers: readonly ModelPro
 export function DefaultModelPicker() {
   const { t } = useI18n();
   const providers = useSettingsStore((state) => state.providers);
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const setDefaultModel = useSettingsStore((state) => state.setDefaultModel);
   const defaultModelFollowLast = useSettingsStore((state) => state.defaultModelFollowLast);
@@ -74,6 +75,7 @@ export function DefaultModelPicker() {
         <div className="w-full min-w-0">
           <ModelPicker
             providers={candidates}
+            virtualModels={virtualModels}
             providerId={selectedProvider?.id ?? defaultModel?.providerId ?? ''}
             modelId={selectedModel?.id ?? defaultModel?.modelId ?? ''}
             reasoningEnabled={defaultReasoningEnabled}

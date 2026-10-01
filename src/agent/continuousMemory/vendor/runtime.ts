@@ -1,5 +1,6 @@
 import { type Config, DEFAULTS, loadConfig } from "./config.js";
 import { debugLog } from "./debug-log.js";
+import { directModelFor } from "../../virtualModels";
 
 export type ResolveResult =
 	| { ok: true; model: unknown; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string>; baseUrl?: string }
@@ -124,7 +125,8 @@ export class Runtime {
 	}
 
 	async resolveModel(ctx: ResolveCtx): Promise<ResolveResult> {
-		let model = ctx.model;
+		// Enso: a virtual session model cannot be called directly; use its direct member.
+		let model = ctx.model ? directModelFor(ctx.model) : ctx.model;
 		if (this.config.model) {
 			const configured = ctx.modelRegistry.find(this.config.model.provider, this.config.model.id);
 			if (configured) {

@@ -18,6 +18,7 @@ import {
   expectedAgentTypeToolIds,
   readSettingsState,
   rememberParentToolProfile,
+  resolveModelSelection,
   resolvePresetSystemPrompt,
   toSessionMcpConfig,
 } from './agentHost';
@@ -136,5 +137,83 @@ describe('readSettingsState', () => {
     });
     settingsMock.value = { 'enso-settings': { version: 14, state: { disabledBuiltinTools: [] } } };
     expect(readSettingsState()).toEqual({ disabledBuiltinTools: [] });
+  });
+});
+
+describe('resolveModelSelection 虚拟模型', () => {
+  const provider = (id: string, models: string[], extra: Record<string, unknown> = {}) => ({
+    id,
+    name: id,
+    api: 'anthropic-messages',
+    apiKey: `key-${id}`,
+    baseUrl: `https://${id}.test`,
+    enabled: true,
+    models: models.map((model) => ({ id: model })),
+    ...extra,
+  });
+  const auto = {
+    id: 'auto',
+    name: 'Auto',
+    enabled: true,
+    primary: { providerId: 'p1', modelId: 'strong' },
+    fast: { providerId: 'p1', modelId: 'weak' },
+    fallbacks: [
+      { providerId: 'p2', modelId: 'other' },
+      { providerId: 'gone', modelId: 'x' },
+      { providerId: 'cur', modelId: 'composer' },
+    ],
+  };
+  const setSettings = (virtualModels: unknown[]) => {
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            provider('p1', ['strong', 'weak']),
+            provider('p2', ['other']),
+            provider('cur', ['composer'], { apiKey: '', baseUrl: '', oauthAccountKey: 'cursor' }),
+          ],
+          virtualModels,
+        },
+      },
+    };
+  };
+  const keys = new Set(['cursor']);
+
+  it('会话主模型下发虚拟配置：成员带各自凭证，跳过不可用与 Cursor 成员', () => {
+    setSettings([auto]);
+    const result = resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection.ref).toEqual({ providerId: 'enso-virtual', modelId: 'auto' });
+    const config = result.selection.config;
+    expect(config).toMatchObject({ settingsProviderId: 'enso-virtual', modelId: 'auto' });
+    expect(config.virtual?.primary).toMatchObject({ modelId: 'strong', apiKey: 'key-p1' });
+    expect(config.virtual?.fast).toMatchObject({ modelId: 'weak' });
+    expect(config.virtual?.fallbacks.map((item) => item.modelId)).toEqual(['other']);
+  });
+
+  it('不接受虚拟模型的场景落到快模型；快模型失效回落主模型', () => {
+    setSettings([auto]);
+    const direct = resolveModelSelection('enso-virtual', 'auto', keys);
+    expect(direct.ok && direct.selection.ref).toEqual({ providerId: 'p1', modelId: 'weak' });
+    setSettings([{ ...auto, fast: { providerId: 'gone', modelId: 'x' } }]);
+    const fallback = resolveModelSelection('enso-virtual', 'auto', keys);
+    expect(fallback.ok && fallback.selection.ref).toEqual({ providerId: 'p1', modelId: 'strong' });
+  });
+
+  it('条目缺失、停用或主模型不可用时拒绝', () => {
+    setSettings([]);
+    expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
+      false
+    );
+    setSettings([{ ...auto, enabled: false }]);
+    expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
+      false
+    );
+    setSettings([{ ...auto, primary: { providerId: 'cur', modelId: 'composer' } }]);
+    expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
+      false
+    );
   });
 });
