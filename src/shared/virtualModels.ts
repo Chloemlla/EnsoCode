@@ -75,8 +75,9 @@ function parseClassifier(value: unknown): VirtualClassifierConfig | undefined {
 function parseEntry(value: unknown): VirtualModelEntry | null {
   if (!isRecord(value)) return null;
   if (typeof value.id !== 'string' || !value.id.trim()) return null;
-  const name = typeof value.name === 'string' ? value.name.trim().slice(0, NAME_MAX) : '';
-  if (!name) return null;
+  // 名称清空只是编辑中间态：给默认名，不能因此丢掉整条（会话还引用着它）
+  const name =
+    (typeof value.name === 'string' ? value.name.trim().slice(0, NAME_MAX) : '') || 'Auto';
   const primary = parseMemberRef(value.primary);
   if (!primary) return null;
   const fast = parseMemberRef(value.fast) ?? undefined;
@@ -157,9 +158,7 @@ export function classifierProviderFor(
       ? provider.oauthAccountKey
       : undefined;
   }
-  if (provider.catalogId && CLASSIFIER_PROVIDER_IDS.has(provider.catalogId)) {
-    return provider.catalogId;
-  }
+  // 只认 baseUrl 域名：目录 id 相同但 baseUrl 改成中转站时，不能把 key 发到官方域名
   try {
     const host = new URL(provider.baseUrl).hostname.toLowerCase();
     for (const [domain, id] of Object.entries(CLASSIFIER_PROVIDER_HOSTS)) {

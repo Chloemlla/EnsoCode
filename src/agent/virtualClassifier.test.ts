@@ -1,6 +1,9 @@
 import type { Api, Message, Model } from '@earendil-works/pi-ai';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@shared/piAccounts', () => ({ ensureAccountProvider: vi.fn() }));
+
 import {
   createVirtualChooser,
   latestUserText,
@@ -16,6 +19,12 @@ const user = (text: string) =>
 const request = (state?: object, messages: Message[] = [user('fix the bug')]) =>
   ({ model: model('auto'), thinkingLevel: 'high', reason: 'user', messages, state }) as never;
 const runtime = {} as ModelRuntime;
+const reply = {
+  role: 'assistant',
+  content: [],
+  stopReason: 'stop',
+  timestamp: 0,
+} as unknown as Message;
 
 describe('virtualClassifier', () => {
   it('滞回：升档立即生效，降档要连续两轮 simple', () => {
@@ -38,7 +47,10 @@ describe('virtualClassifier', () => {
     expect(parseJudgeReply(' complex.')).toBe('complex');
     expect(parseJudgeReply('SIMPLE')).toBe('simple');
     expect(parseJudgeReply('maybe')).toBeUndefined();
-    expect(latestUserText([user('first'), user('  second  ')])).toBe('second');
+    // 扩展注入的上下文（hook、bash 输出）追加在用户输入之后，也是 user 角色
+    expect(latestUserText([user('old'), reply, user('  prompt  '), user('hook context')])).toBe(
+      'prompt'
+    );
     expect(latestUserText([user('x'.repeat(5000))])).toHaveLength(4000);
   });
 
@@ -88,5 +100,45 @@ describe('virtualClassifier', () => {
     expect(createVirtualChooser(runtime, { source: 'judge', timeoutMs: 1000 }, undefined)).toBe(
       undefined
     );
+  });
+});
+
+describe('pi 分类器', () => {
+  it('多账号克隆按克隆 provider 取凭证，complex 概率过半走主模型', async () => {
+    const seen: Array<{ provider: string; apiKey?: string }> = [];
+    const piRuntime = {
+      getModelsOfType: () => [{ id: 'jev', provider: 'openrouter', type: 'classifier' }],
+      classify: async (
+        model: { provider: string },
+        _context: unknown,
+        options: { apiKey?: string }
+      ) => {
+        seen.push({ provider: model.provider, apiKey: options.apiKey });
+        return {
+          stopReason: 'stop',
+          answers: {
+            complexity: {
+              type: 'choice',
+              choice: 'complex',
+              probabilities: { complex: 0.7 },
+              confidence: 0.7,
+            },
+          },
+        };
+      },
+    } as unknown as ModelRuntime;
+    const chooser = createVirtualChooser(
+      piRuntime,
+      {
+        source: 'pi-classifier',
+        timeoutMs: 1000,
+        classifier: { provider: 'openrouter#2', modelId: 'jev' },
+      },
+      undefined
+    )!;
+    await expect(chooser(request(), members)).resolves.toMatchObject({
+      preferred: members.primary,
+    });
+    expect(seen).toEqual([{ provider: 'openrouter#2', apiKey: undefined }]);
   });
 });

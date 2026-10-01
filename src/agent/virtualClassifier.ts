@@ -43,14 +43,18 @@ function textOf(message: Message | undefined): string {
     .join('\n');
 }
 
-/** 本轮用户输入：最后一条 user 消息的文本，截断 */
+/**
+ * 本轮用户输入：最后一条 assistant 之后的第一条 user 消息。
+ * hook 上下文、bash 输出等扩展消息也会转成 user 角色，但都追加在用户输入之后。
+ */
 export function latestUserText(messages: readonly Message[]): string {
+  let first: Message | undefined;
   for (let index = messages.length - 1; index >= 0; index--) {
-    if (messages[index]!.role === 'user') {
-      return textOf(messages[index]).trim().slice(0, INPUT_MAX_CHARS);
-    }
+    const message = messages[index]!;
+    if (message.role === 'assistant') break;
+    if (message.role === 'user') first = message;
   }
-  return '';
+  return textOf(first).trim().slice(0, INPUT_MAX_CHARS);
 }
 
 /** 滞回：升档立即生效，降档要连续 DOWNGRADE_STREAK 轮判为 simple，避免相邻轮来回换模型丢缓存。 */
@@ -94,13 +98,16 @@ function judgeClassify(runtime: ModelRuntime, judge: Model<Api>): Classify {
           },
         ],
       },
-      { maxTokens: 16, signal }
+      // 部分模型（如强制 adaptive 的 Claude）关不掉思考，输出上限要留出思考的量
+      { maxTokens: 1024, signal }
     );
     if (message.stopReason === 'error' || message.stopReason === 'aborted') {
       throw new Error(message.errorMessage ?? `judge ${message.stopReason}`);
     }
     const text = message.content.map((part) => (part.type === 'text' ? part.text : '')).join(' ');
-    return parseJudgeReply(text);
+    const tier = parseJudgeReply(text);
+    if (!tier) console.warn('[virtual-model] judge reply not understood:', text.slice(0, 80));
+    return tier;
   };
 }
 
@@ -110,10 +117,12 @@ function piClassify(
 ): Classify {
   if (config.provider.includes('#')) ensureAccountProvider(runtime, config.provider);
   return async (input, previous, signal) => {
-    const model = runtime
+    const found = runtime
       .getModelsOfType('classifier', config.provider)
-      .find((candidate) => candidate.id === config.modelId) as ClassifierModel<never> | undefined;
-    if (!model) throw new Error(`classifier not found: ${config.provider}/${config.modelId}`);
+      .find((candidate) => candidate.id === config.modelId);
+    if (!found) throw new Error(`classifier not found: ${config.provider}/${config.modelId}`);
+    // 多账号克隆 provider 列出的模型仍带基础 provider id，凭证必须按克隆账号解析
+    const model = { ...found, provider: config.provider } as ClassifierModel<never>;
     const result = await runtime.classify(
       model,
       {

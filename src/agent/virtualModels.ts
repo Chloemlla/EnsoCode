@@ -115,8 +115,30 @@ export function isNewTurn(messages: readonly Message[]): boolean {
     if (message.role === 'assistant') {
       return (message as { stopReason?: string }).stopReason !== 'toolUse';
     }
+    // 工具执行中被中止：pi 补一条 "Operation aborted" 错误结果，上一轮已结束
+    if (
+      message.role === 'toolResult' &&
+      (message as { isError?: boolean }).isError &&
+      contentText(message) === 'Operation aborted'
+    ) {
+      return true;
+    }
   }
   return true;
+}
+
+function contentText(message: Message): string {
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) =>
+      part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
+        ? (part as { text: string }).text
+        : ''
+    )
+    .join('')
+    .trim();
 }
 
 const acceptsImages = (model: Model<Api>): boolean => model.input.includes('image');

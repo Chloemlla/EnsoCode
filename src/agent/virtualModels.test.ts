@@ -117,6 +117,28 @@ describe('routeVirtualRequest', () => {
     expect(estimateRequestTokens([image])).toBe(1500);
   });
 
+  it('工具执行中被中止后的新输入算新一轮', () => {
+    const toolTurn = { ...(reply(backup) as object), stopReason: 'toolUse' } as unknown as Message;
+    const aborted = {
+      role: 'toolResult',
+      toolCallId: 't1',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'Operation aborted' }],
+      isError: true,
+      timestamp: 0,
+    } as unknown as Message;
+    const routed = routeVirtualRequest(
+      request('user', {
+        previous: { model: backup },
+        state: { failed: ['p1/strong'] },
+        messages: [user('go'), toolTurn, aborted, user('new task')],
+      }),
+      members
+    );
+    expect(routed.model).toBe(strong);
+    expect(routed.state).toEqual({ failed: [] });
+  });
+
   it('运行中插入的 steering 按续请求处理：不重置失败记录、不回主模型', () => {
     const toolTurn = {
       ...(reply(backup) as object),

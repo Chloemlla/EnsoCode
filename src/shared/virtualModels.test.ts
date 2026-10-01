@@ -40,7 +40,7 @@ const auto: VirtualModelEntry = {
 const autoRef = { providerId: VIRTUAL_PROVIDER_ID, modelId: 'auto' };
 
 describe('parseVirtualModels', () => {
-  it('丢弃非法条目、嵌套虚拟成员与重复 id，去重备用并钳制分类器超时', () => {
+  it('丢弃非法条目、嵌套虚拟成员与重复 id，空名给默认名，去重备用并钳制分类器超时', () => {
     const parsed = parseVirtualModels([
       {
         id: 'a',
@@ -83,6 +83,13 @@ describe('parseVirtualModels', () => {
           model: { providerId: 'p1', modelId: 'weak' },
           timeoutMs: 500,
         },
+      },
+      {
+        id: 'c',
+        name: 'Auto',
+        enabled: true,
+        primary: { providerId: 'p1', modelId: 'weak' },
+        fallbacks: [],
       },
       {
         id: 'd',
@@ -160,9 +167,10 @@ describe('classifierProviderFor', () => {
     expect(classifierProviderFor({ baseUrl: 'https://ai-gateway.vercel.sh/v1' })).toBe(
       'vercel-ai-gateway'
     );
-    expect(classifierProviderFor({ baseUrl: 'https://x.test', catalogId: 'opencode' })).toBe(
-      'opencode'
-    );
+    expect(
+      classifierProviderFor({ baseUrl: 'https://relay.test', catalogId: 'openrouter' })
+    ).toBeUndefined();
+    expect(classifierProviderFor({ baseUrl: 'https://opencode.ai/zen/v1' })).toBe('opencode');
     expect(classifierProviderFor({ baseUrl: 'https://evil-openrouter.ai.test' })).toBeUndefined();
     expect(classifierProviderFor({ baseUrl: 'not a url' })).toBeUndefined();
   });
