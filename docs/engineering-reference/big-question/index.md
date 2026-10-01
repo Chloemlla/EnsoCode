@@ -33,6 +33,7 @@
 | [pi-project-trust-default.md](pi-project-trust-default.md) | 无报错；打开带 `.pi/extensions` 或项目包的仓库，其代码即在 worker 里运行、缺包还会自动安装 |
 | [koffi-view-electron-sandbox.md](koffi-view-electron-sandbox.md) | Windows `ax()`/`getState` 报 AX_WORKER_EXITED；单测和 Node 探针全绿，只在 Electron 里崩 |
 | [macos-window-focus.md](macos-window-focus.md) | 系统设置已在前台，computer 仍报窗口无法置于前台；浮窗被误判为输入焦点 |
+| [macos-ax-identity.md](macos-ax-identity.md) | AX 树中有亮度滑块但 find 返回空，setValue 无可见效果、actions 为空 |
 
 ## 共同教训
 

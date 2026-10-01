@@ -21,3 +21,17 @@ export function takeOwnedRefs<T>(
   }
   return values;
 }
+
+/** koffi 每次拷贝同一 AX 元素都会得到新指针对象，去重必须用 CFEqual。 */
+export function splitUniqueRefs<T>(
+  values: T[],
+  equal: (a: T, b: T) => boolean
+): { unique: T[]; duplicates: T[] } {
+  const unique: T[] = [];
+  const duplicates: T[] = [];
+  for (const value of values) {
+    if (unique.some((kept) => equal(kept, value))) duplicates.push(value);
+    else unique.push(value);
+  }
+  return { unique, duplicates };
+}

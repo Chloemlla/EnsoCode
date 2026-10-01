@@ -1,6 +1,6 @@
 import { AX_STALE_HANDLE, parseAxHandle } from '@shared/computer/axRegistry';
 import { describe, expect, it } from 'vitest';
-import { AxHandleTable } from './axNative';
+import { AxHandleTable, axAttributePairs, axSetValueRejection } from './axNative';
 
 function table(epoch = 'e1') {
   const retained: string[] = [];
@@ -62,5 +62,40 @@ describe('AxHandleTable', () => {
     expect(() => handles.get('ax-other-1')).toThrow(AX_STALE_HANDLE);
     expect(() => handles.get('ax1')).toThrow(AX_STALE_HANDLE);
     expect(() => handles.scopeOf('ax-other-1')).toThrow(AX_STALE_HANDLE);
+  });
+});
+
+describe('axAttributePairs', () => {
+  it('树里可见的 description/value 也要出现在 attributes()', () => {
+    expect(
+      axAttributePairs({ ref: 'ax-a-1', role: 'AXSlider', description: '亮度', value: '0.5' })
+    ).toEqual([
+      ['role', 'AXSlider'],
+      ['value', '0.5'],
+      ['description', '亮度'],
+    ]);
+    expect(axAttributePairs({ ref: 'ax-a-1', role: 'AXButton', title: 'OK' })).toEqual([
+      ['role', 'AXButton'],
+      ['title', 'OK'],
+    ]);
+  });
+});
+
+describe('axSetValueRejection', () => {
+  it('AXValue 不可设置时拒绝写入并指向可用 action', () => {
+    const message = axSetValueRejection({
+      role: 'AXSlider',
+      settable: false,
+      actions: ['AXIncrement', 'AXDecrement'],
+    });
+    expect(message).toContain('AXSlider');
+    expect(message).toContain('AXIncrement');
+    expect(message).toContain('AXDecrement');
+  });
+
+  it('可设置时放行', () => {
+    expect(axSetValueRejection({ role: 'AXTextField', settable: true, actions: [] })).toBe(
+      undefined
+    );
   });
 });
