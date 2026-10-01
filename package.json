@@ -34,10 +34,10 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.0",
-    "@earendil-works/pi-agent-core": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-agent-core": "0.99.2",
+    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@earendil-works/pi-tui": "0.99.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -144,7 +144,7 @@
     ],
     "patchedDependencies": {
       "@rahularya01/pi-cursor@1.4.38": "patches/@rahularya01__pi-cursor@1.4.38.patch",
-      "@earendil-works/pi-coding-agent@0.87.1": "patches/@earendil-works__pi-coding-agent@0.87.1.patch"
+      "@earendil-works/pi-coding-agent@0.99.2": "patches/@earendil-works__pi-coding-agent@0.99.2.patch"
     }
   },
   "optionalDependencies": {

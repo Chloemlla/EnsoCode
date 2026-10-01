@@ -1,9 +1,10 @@
 const SSE_EOF = new Uint8Array([10, 10]);
 
 /**
- * openai-node 的 SSE 解码只在空行时吐事件；网关若在最后一条 `data:` 后直接关连接，
+ * openai-node 6 的 SSE 解码只在空行时吐事件；网关若在最后一条 `data:` 后直接关连接，
  * `response.completed` 会被丢掉，pi 就报 stream ended before a terminal response event。
  * 在 EOF 补 `\n\n`，空帧会被忽略，未闭合的末帧会被刷出。
+ * openai-node 7（pi-ai 0.99 起）已自行在 EOF 刷出末帧，本包装退化为无副作用的防御层。
  */
 export function withSseEofFlush(fetchFn: typeof fetch): typeof fetch {
   return async (input, init) => {
