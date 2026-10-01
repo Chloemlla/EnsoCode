@@ -77,39 +77,59 @@ export function pendingInputHasImage(messages: readonly Message[]): boolean {
   return false;
 }
 
-interface UsageLike {
-  totalTokens?: number;
-  input?: number;
-  output?: number;
-  cacheRead?: number;
+/** 单张图片按固定 token 估（base64 字节数与实际计费无关） */
+const IMAGE_TOKENS = 1500;
+
+function partChars(part: unknown): number {
+  if (typeof part === 'string') return part.length;
+  if (!part || typeof part !== 'object') return 0;
+  const record = part as Record<string, unknown>;
+  if (record.type === 'image') return IMAGE_TOKENS * 4;
+  if (typeof record.text === 'string') return record.text.length;
+  if (typeof record.thinking === 'string') return record.thinking.length;
+  return JSON.stringify(record.arguments ?? record.input ?? '').length;
 }
 
-/** 粗估请求体 token：最近一次响应的用量 + 之后新增内容按 4 字符 1 token。 */
+/**
+ * 粗估请求体 token：按 4 字符 1 token 数当前上下文（含压缩后的摘要），图片按固定值。
+ * 不用最近一次响应的 usage：压缩后保留的旧回复仍带着压缩前的大用量。
+ */
 export function estimateRequestTokens(messages: readonly Message[]): number {
-  let base = 0;
-  let tail = 0;
+  let chars = 0;
+  for (const message of messages) {
+    const content = (message as { content?: unknown }).content;
+    chars += Array.isArray(content)
+      ? content.reduce<number>((sum, part) => sum + partChars(part), 0)
+      : partChars(content);
+  }
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * pi 把最后一条 assistant 之后出现的 user 消息都算作 `user`，包括运行中插入的 steering。
+ * 只有上一条回复已收尾（不是等工具结果）时才是真正的新一轮。
+ */
+export function isNewTurn(messages: readonly Message[]): boolean {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!;
     if (message.role === 'assistant') {
-      const usage = (message as { usage?: UsageLike }).usage;
-      base =
-        usage?.totalTokens || (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.output ?? 0);
-      if (base > 0) break;
+      return (message as { stopReason?: string }).stopReason !== 'toolUse';
     }
-    tail += JSON.stringify((message as { content?: unknown }).content ?? '').length;
   }
-  return base + Math.ceil(tail / 4);
+  return true;
 }
 
 const acceptsImages = (model: Model<Api>): boolean => model.input.includes('image');
 const fitsContext = (model: Model<Api>, tokens: number): boolean =>
   !(model.contextWindow > 0) || tokens <= model.contextWindow * CONTEXT_HEADROOM;
 
+interface Needs {
+  image: boolean;
+  readonly tokens: number;
+}
+
 /** 候选里第一个满足图片与上下文需求的成员；都不满足时退回第一个（交给 pi 压缩/报错）。 */
-function pick(
-  candidates: readonly Model<Api>[],
-  needs: { image: boolean; tokens: number }
-): Model<Api> | undefined {
+function pick(candidates: readonly Model<Api>[], needs: Needs): Model<Api> | undefined {
   return (
     candidates.find(
       (model) => (!needs.image || acceptsImages(model)) && fitsContext(model, needs.tokens)
@@ -152,9 +172,14 @@ export function routeVirtualRequest(
   };
   const previousState = request.state ?? {};
   const ordered = chain(members);
-  const needs = {
+  let tokens: number | undefined;
+  const needs: Needs = {
     image: pendingInputHasImage(request.messages),
-    tokens: estimateRequestTokens(request.messages),
+    // 只在真要挑成员时才数整段上下文
+    get tokens() {
+      tokens ??= estimateRequestTokens(request.messages);
+      return tokens;
+    },
   };
 
   if (request.reason === 'direct') return finish(members.fast ?? members.primary);
@@ -169,7 +194,11 @@ export function routeVirtualRequest(
     return finish(next ?? findMember(members, request.failed.model) ?? members.primary, state);
   }
 
-  if (request.reason === 'continuation') {
+  // 运行中插入的 steering：按续请求处理，不重置失败记录、不重新分档
+  if (
+    request.reason === 'continuation' ||
+    (request.reason === 'user' && request.previous && !isNewTurn(request.messages))
+  ) {
     const previous = findMember(members, request.previous?.model);
     if (previous && (!needs.image || acceptsImages(previous))) return finish(previous);
     const failed = new Set(previousState.failed ?? []);
@@ -199,11 +228,12 @@ const ADAPTIVE_WRAPPED = Symbol('enso.adaptiveThinking');
  */
 export function withAdaptiveThinking(
   provider: Provider,
-  supportsAdaptive: (modelId: string) => boolean
+  supportsAdaptive: (modelId: string) => boolean,
+  applies: (model: Model<Api>) => boolean = () => true
 ): Provider {
   if ((provider as { [ADAPTIVE_WRAPPED]?: true })[ADAPTIVE_WRAPPED]) return provider;
   const patch = <T extends Model<Api>>(model: T): T => {
-    if (model.api !== 'anthropic-messages' || !model.reasoning) return model;
+    if (model.api !== 'anthropic-messages' || !model.reasoning || !applies(model)) return model;
     const compat = model.compat as { forceAdaptiveThinking?: boolean } | undefined;
     if (compat && 'forceAdaptiveThinking' in compat) return model;
     if (!supportsAdaptive(model.id)) return model;
@@ -216,6 +246,29 @@ export function withAdaptiveThinking(
       provider.streamSimple(patch(model), context, options),
   };
   return Object.assign(wrapped, { [ADAPTIVE_WRAPPED]: true as const });
+}
+
+/** 走虚拟路由的 anthropic 成员；包装只对它们生效，不改变同 provider 其他调用 */
+const adaptiveMembers = new Set<string>();
+
+/**
+ * 确保成员所在 provider 套了 adaptive 出口。provider 被重新注册（如 resolveBaseModel 累积模型）
+ * 会换掉包装，所以路由时也调用一次自愈。
+ */
+function ensureAdaptiveProvider(
+  runtime: ModelRuntime,
+  model: Model<Api>,
+  supportsAdaptive: ((modelId: string) => boolean) | undefined
+): void {
+  if (!supportsAdaptive || model.api !== 'anthropic-messages') return;
+  adaptiveMembers.add(memberKey(model));
+  const provider = runtime.getProvider(model.provider);
+  if (!provider || (provider as { [ADAPTIVE_WRAPPED]?: true })[ADAPTIVE_WRAPPED]) return;
+  runtime.registerNativeProvider(
+    withAdaptiveThinking(provider, supportsAdaptive, (candidate) =>
+      adaptiveMembers.has(memberKey(candidate))
+    )
+  );
 }
 
 export interface VirtualModelRegistration {
@@ -231,14 +284,24 @@ export async function registerVirtualModel(
   runtime: ModelRuntime,
   config: SpawnModelConfig,
   resolveMember: (member: SpawnModelConfig) => Promise<Model<Api>>,
-  choose?: VirtualChooser
+  choose?: VirtualChooser,
+  supportsAdaptive?: (modelId: string) => boolean
 ): Promise<VirtualModelRegistration> {
   const virtual = config.virtual;
   if (!virtual) throw new Error('not a virtual model config');
-  const primary = await resolveMember(virtual.primary);
+  // pi 路由时按目录重新取模型并校验凭证：只在 Enso 侧合成、不在目录里的模型不能做成员
+  const routable = async (member: SpawnModelConfig) => {
+    const model = await resolveMember(member);
+    if (!runtime.getPhysicalModel(model.provider, model.id)) {
+      throw new Error(`${model.id} cannot be routed by a virtual model`);
+    }
+    ensureAdaptiveProvider(runtime, model, supportsAdaptive);
+    return model;
+  };
+  const primary = await routable(virtual.primary);
   const optional = async (member: SpawnModelConfig) => {
     try {
-      return await resolveMember(member);
+      return await routable(member);
     } catch (error) {
       console.warn(`[virtual-model] member ${member.modelId} unavailable:`, error);
       return undefined;
@@ -271,13 +334,15 @@ export async function registerVirtualModel(
     route: async (request: ModelRouteRequest) => {
       const typed = request as ModelRouteRequest<VirtualRouterState>;
       const choice =
-        typed.reason === 'user' && choose
+        typed.reason === 'user' && choose && isNewTurn(typed.messages)
           ? await choose(typed, members).catch((error) => {
               console.warn('[virtual-model] classifier failed:', error);
               return undefined;
             })
           : undefined;
-      return routeVirtualRequest(typed, members, choice);
+      const route = routeVirtualRequest(typed, members, choice);
+      ensureAdaptiveProvider(runtime, route.model, supportsAdaptive);
+      return route;
     },
   });
   const model = runtime.getModel(VIRTUAL_PROVIDER_ID, config.modelId);

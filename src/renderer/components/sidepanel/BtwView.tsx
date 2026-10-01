@@ -6,6 +6,7 @@ import {
   snapshotMainConversation,
 } from '@shared/btw';
 import { resolveChatModel, scopedDefaultModels } from '@shared/defaultModel';
+import { isVirtualRef } from '@shared/virtualModels';
 import type { DockviewPanelApi } from 'dockview-react';
 import { MessageCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -44,6 +45,7 @@ export function BtwView({
   const { t } = useI18n();
   const sessionId = panelApi.id.startsWith('btw:') ? panelApi.id.slice(4) : panelApi.id;
   const providers = useSettingsStore((state) => state.providers);
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const projects = useSettingsStore((state) => state.projects);
   const projectGroups = useSettingsStore((state) => state.projectGroups);
@@ -81,8 +83,10 @@ export function BtwView({
         lastModelId: conversation?.lastModelId,
         providers,
         credentials: oauthCredentialContext(oauthSnapshot),
+        virtualModels,
       }),
     [
+      virtualModels,
       conversation?.lastModelId,
       conversation?.lastProviderId,
       conversationDefaults,
@@ -96,6 +100,12 @@ export function BtwView({
       ? undefined
       : enabledProviders.find((entry) => entry.id === modelResolution.providerId);
   const effectiveModelId = modelResolution.source === 'none' ? '' : modelResolution.modelId;
+  const selectedProviderId =
+    modelResolution.source === 'none'
+      ? ''
+      : isVirtualRef(modelResolution)
+        ? modelResolution.providerId
+        : (provider?.id ?? '');
   const lastAssistant = useMemo(
     () => lastAssistantText(conversation?.messages ?? []),
     [conversation?.messages]
@@ -267,7 +277,8 @@ export function BtwView({
             toolbar={
               <ModelPicker
                 providers={enabledProviders}
-                providerId={provider?.id ?? ''}
+                virtualModels={virtualModels}
+                providerId={selectedProviderId}
                 modelId={effectiveModelId}
                 reasoningEnabled={conversation?.reasoningEnabled ?? false}
                 thinkingLevel={conversation?.thinkingLevel ?? 'medium'}
@@ -282,12 +293,12 @@ export function BtwView({
               />
             }
             onSend={(payload) => {
-              if (!provider || !effectiveModelId || !project) return false;
+              if (!selectedProviderId || !effectiveModelId || !project) return false;
               timelineRef.current?.scrollToBottom();
               void useSessionsStore.getState().send(
                 payload.text,
                 {
-                  providerId: provider.id,
+                  providerId: selectedProviderId,
                   modelId: effectiveModelId,
                   cwd: project.path,
                 },

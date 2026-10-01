@@ -800,7 +800,9 @@ export function registerAgentHandlers(): void {
     },
     host: {
       registrySnapshot: agentTypeRegistrySnapshot,
-      resolveModel: resolveModelSelection,
+      // 派发继承父会话模型：父会话是虚拟模型时子会话同样按虚拟模型路由
+      resolveModel: (providerId, modelId, credentialKeys) =>
+        resolveModelSelection(providerId, modelId, credentialKeys, { allowVirtual: true }),
       resolveAgentType: (typeKey, parentModel, credentialKeys, parentConversationId) =>
         resolveAgentTypeSpawnConfig(
           typeKey,

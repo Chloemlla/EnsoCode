@@ -40,6 +40,7 @@ export function Onboarding() {
   useOverlayGuard();
   const setOnboarded = useSettingsStore((s) => s.setOnboarded);
   const providers = useSettingsStore((s) => s.providers);
+  const virtualModels = useSettingsStore((s) => s.virtualModels);
   const skills = useSettingsStore((s) => s.skills);
   const mcpServers = useSettingsStore((s) => s.mcpServers);
   const instructions = useSettingsStore((s) => s.instructions);
@@ -54,6 +55,7 @@ export function Onboarding() {
       defaultModel,
       providers,
       credentials: oauthCredentialContext(oauthSnapshot),
+      virtualModels,
     }).source !== 'none';
 
   const [stepIndex, setStepIndex] = React.useState(0);

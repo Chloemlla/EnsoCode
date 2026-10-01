@@ -51,11 +51,15 @@ import { WorktreeMissingDialog } from './WorktreeMissingDialog';
 import { WorktreePicker } from './WorktreePicker';
 
 /** 虚拟模型最近一次实际路由到的真实模型：取最后一条成功回复记录的 model */
-function lastReplyModel(messages: readonly { role: string; model?: string }[] | undefined) {
+function lastReplyModel(
+  messages: readonly { role: string; model?: string; stopReason?: string }[] | undefined
+) {
   if (!messages) return undefined;
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!;
-    if (message.role === 'assistant' && message.model) return message.model;
+    if (message.role !== 'assistant' || !message.model) continue;
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') continue;
+    return message.model;
   }
   return undefined;
 }

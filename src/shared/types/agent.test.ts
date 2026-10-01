@@ -741,6 +741,11 @@ describe('parent/child commands', () => {
     for (const candidate of bad) {
       expect(parseAgentCommand({ ...base, model: candidate })).toBeNull();
     }
+    // 辅助用途（代审、压缩摘要）只收真实模型
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', model: virtualModel })).toBeNull();
+    expect(
+      parseAgentCommand({ ...base, model, smartCompactSummaryModel: virtualModel })
+    ).toBeNull();
   });
 
   it('spawn-parent 携 smartCompactMode:合法通过,脏值拒绝', () => {

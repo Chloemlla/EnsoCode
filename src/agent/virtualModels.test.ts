@@ -109,10 +109,29 @@ describe('routeVirtualRequest', () => {
     );
   });
 
-  it('上下文超过主模型窗口时换窗口足够的成员', () => {
-    const messages = [user('a'), reply(strong, 190_000), user('b')];
+  it('上下文超过主模型窗口时换窗口足够的成员；图片按固定值估、不信旧 usage', () => {
+    const messages = [user('a'.repeat(800_000)), reply(strong, 999_999), user('b')];
     expect(routeVirtualRequest(request('user', { messages }), members).model).toBe(backup);
-    expect(estimateRequestTokens(messages)).toBeGreaterThan(190_000);
+    expect(estimateRequestTokens(messages)).toBeLessThan(210_000);
+    const image = user([{ type: 'image', data: 'x'.repeat(4_000_000), mimeType: 'image/png' }]);
+    expect(estimateRequestTokens([image])).toBe(1500);
+  });
+
+  it('运行中插入的 steering 按续请求处理：不重置失败记录、不回主模型', () => {
+    const toolTurn = {
+      ...(reply(backup) as object),
+      stopReason: 'toolUse',
+    } as unknown as Message;
+    const steering = routeVirtualRequest(
+      request('user', {
+        previous: { model: backup },
+        state: { failed: ['p1/strong'] },
+        messages: [user('go'), toolTurn, user('also check tests')],
+      }),
+      members
+    );
+    expect(steering.model).toBe(backup);
+    expect(steering.state).toBeUndefined();
   });
 
   it('首选成员（分类器）优先，状态合并写回；关推理时一律 off', () => {
@@ -219,5 +238,17 @@ describe('registerVirtualModel（真实 ModelRuntime）', () => {
     expect(direct.model.id).toBe('weak');
     expect(directModelFor(registered)).toMatchObject({ id: 'weak' });
     expect(directModelFor(strong)).toBe(strong);
+    // 只在 Enso 合成、不在目录里的模型不能做主模型
+    await expect(
+      registerVirtualModel(
+        runtime,
+        {
+          ...config('auto-2'),
+          settingsProviderId: 'enso-virtual',
+          virtual: { name: 'Bad', primary: config('strong'), fallbacks: [] },
+        },
+        async () => model('p1', 'synthetic-overlay')
+      )
+    ).rejects.toThrow('cannot be routed');
   });
 });

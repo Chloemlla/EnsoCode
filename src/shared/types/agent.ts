@@ -2005,7 +2005,8 @@ function parseVirtualSpawnConfig(value: unknown): boolean {
   );
 }
 
-function parseSpawnModelConfig(value: unknown): SpawnModelConfig | null {
+/** 只有会话主模型（spawn-parent / set-model / 子会话继承）接受虚拟配置；其余用途一律真实模型。 */
+function parseSessionModelConfig(value: unknown): SpawnModelConfig | null {
   if (!isRecord(value)) return null;
   if (value.virtual === undefined) return parsePhysicalSpawnModelConfig(value);
   const { virtual, ...physical } = value;
@@ -2013,6 +2014,9 @@ function parseSpawnModelConfig(value: unknown): SpawnModelConfig | null {
     ? (value as unknown as SpawnModelConfig)
     : null;
 }
+
+const parseSpawnModelConfig = (value: unknown): SpawnModelConfig | null =>
+  parsePhysicalSpawnModelConfig(value);
 
 function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null {
   if (!isRecord(value)) return null;
@@ -2552,7 +2556,7 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
     return null;
   }
   const typeKey = parseAgentTypeKey(value.typeKey);
-  const model = parseSpawnModelConfig(value.model);
+  const model = parseSessionModelConfig(value.model);
   const skillPaths = Array.isArray(value.skillPaths) ? value.skillPaths : null;
   const mcpServers = Array.isArray(value.mcpServers) ? value.mcpServers : null;
   const skillBindingIds = Array.isArray(value.skillBindingIds) ? value.skillBindingIds : null;
@@ -2705,7 +2709,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ]) ||
         !parseSessionIdentity(value.identity) ||
         typeof value.cwd !== 'string' ||
-        !parseSpawnModelConfig(value.model) ||
+        !parseSessionModelConfig(value.model) ||
         (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
         (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
         (value.trustedProjectCode !== undefined &&
@@ -2876,7 +2880,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
     case 'set-model':
       return hasExactKeys(value, ['type', 'identity', 'model']) &&
         parseAnySessionIdentity(value.identity) &&
-        parseSpawnModelConfig(value.model)
+        parseSessionModelConfig(value.model)
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-thinking':

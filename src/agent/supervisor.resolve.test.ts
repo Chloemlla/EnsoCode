@@ -48,6 +48,31 @@ const apiKeySpawn = {
 };
 
 describe('resolveBaseModel apiKey', () => {
+  it('同一端点与 key 的多个模型累积注册，后注册的不把先注册的挤出目录', () => {
+    const calls: string[][] = [];
+    const runtime = mockRuntime({ catalog: [] });
+    const register = runtime.registerProvider.bind(runtime);
+    (runtime as unknown as { registerProvider: typeof register }).registerProvider = (
+      providerId,
+      config
+    ) => {
+      calls.push((config.models ?? []).map((model) => model.id));
+      register(providerId, config);
+    };
+    resolveBaseModel(runtime, { ...apiKeySpawn, apiKey: 'sk-accumulate', modelId: 'strong' });
+    resolveBaseModel(runtime, { ...apiKeySpawn, apiKey: 'sk-accumulate', modelId: 'weak' });
+    expect(calls.at(-1)).toEqual(['strong', 'weak']);
+  });
+
+  it('虚拟配置不能直接按真实模型解析', () => {
+    expect(() =>
+      resolveBaseModel(mockRuntime({}), {
+        ...apiKeySpawn,
+        virtual: { name: 'Auto', primary: apiKeySpawn, fallbacks: [] },
+      })
+    ).toThrow('resolveSessionModel');
+  });
+
   it('catalog 命中官方 id 时用 catalog，不再无条件 {max:max}', () => {
     const runtime = mockRuntime({
       catalog: [
