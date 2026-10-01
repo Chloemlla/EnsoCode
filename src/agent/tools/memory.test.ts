@@ -54,12 +54,13 @@ describe('MemoryInvoker', () => {
 });
 
 describe('createMemoryTools', () => {
-  it('三个工具，schema 每个属性都声明 type，且 additionalProperties=false', () => {
+  it('四个工具，schema 每个属性都声明 type，且 additionalProperties=false', () => {
     const tools = createMemoryTools(new MemoryInvoker(identity, () => {}));
     expect(tools.map((t) => t.name)).toEqual([
       'memory_search',
       'memory_capture',
       'memory_crystallize',
+      'memory_delete',
     ]);
     for (const tool of tools) {
       const schema = tool.parameters as unknown as {
@@ -95,6 +96,8 @@ describe('createMemoryTools', () => {
     });
     // 描述必须说清什么时候不该用：结晶不是每次检索后的常规动作
     expect(tools[2].description).toMatch(/Do not use/);
+    expect((tools[3].parameters as unknown as { required: string[] }).required).toEqual(['id']);
+    expect(tools[3].description).toMatch(/permanent/i);
   });
 
   // pi 在 prepareArguments 之后才做 schema 校验：归一产物多出 schema 未声明的键就会被
@@ -150,6 +153,7 @@ describe('createMemoryTools', () => {
         { content: 'c', title: 't', sourceIds: '["a","b","c"]', force: 'true' },
         { content: 'c', title: 't', sourceIds: 'a, b, c' },
       ],
+      memory_delete: [{ id: 'm1' }, { id: ' m1 ' }, '{"id":"m1"}'],
     };
     for (const tool of tools) {
       const schema = tool.parameters as unknown as JsonSchema;
@@ -291,6 +295,22 @@ describe('createMemoryTools', () => {
       requestId: emit.mock.calls[0]?.[0]?.requestId as string,
       ok: true,
       result: { status: 'inserted' },
+    });
+    await pending;
+  });
+
+  it('delete 缺 id 不上桥；有 id 时以 op=delete 发上桥', async () => {
+    const emit = vi.fn();
+    const invoker = new MemoryInvoker(identity, emit);
+    const remove = createMemoryTools(invoker)[3];
+    await expect(exec(remove, { id: ' ' })).rejects.toThrow(/id/);
+    expect(emit).not.toHaveBeenCalled();
+    const pending = exec(remove, { id: ' m1 ' });
+    expect(emit.mock.calls[0]?.[0]).toMatchObject({ op: 'delete', params: { id: 'm1' } });
+    invoker.resolve({
+      requestId: emit.mock.calls[0]?.[0]?.requestId as string,
+      ok: true,
+      result: { status: 'deleted', id: 'm1' },
     });
     await pending;
   });

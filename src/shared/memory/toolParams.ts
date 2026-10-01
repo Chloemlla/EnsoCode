@@ -197,6 +197,26 @@ export function normalizeMemoryCrystallizeParams(raw: unknown): unknown {
 const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]) =>
   Object.keys(value).every((key) => allowed.includes(key));
 
+export function normalizeMemoryDeleteParams(raw: unknown): unknown {
+  const record = asRecord(raw);
+  if (!record) return raw;
+  return { id: optionalText(record.id) ?? record.id };
+}
+
+export function parseMemoryDeleteRequest(value: unknown): { id: string } | null {
+  const record = asRecord(value);
+  if (
+    !record ||
+    typeof value === 'string' ||
+    !hasOnlyKeys(record, ['id']) ||
+    typeof record.id !== 'string' ||
+    !record.id.trim()
+  ) {
+    return null;
+  }
+  return { id: record.id };
+}
+
 /** Main 侧收窄：桥上来的载荷必须已是归一后的完整形状，否则拒绝。 */
 export function parseMemorySearchRequest(value: unknown): MemorySearchRequest | null {
   const record = asRecord(value);

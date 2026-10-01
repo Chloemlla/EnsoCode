@@ -638,6 +638,7 @@ export async function invokeMemory(
     projectId,
     embedder: await memoryEmbedder(),
     onCreated: onMemoryCreated,
+    onDeleted: notifyMemoryChanged,
     complete: () => getMemoryCompletion(),
   });
 }

@@ -991,8 +991,8 @@ export const zhTranslations: Record<string, string> = {
   'Durable knowledge the agent can search and write across sessions. Stored locally in a SQLite database.':
     '可跨会话检索与写入的持久知识,本地存放在一个 SQLite 库里。',
   'Enable memory tools': '启用记忆工具',
-  'Gives the agent memory_search, memory_capture and memory_crystallize. The database is only created after you enable this.':
-    '给 agent 提供 memory_search、memory_capture 与 memory_crystallize。开启后才会创建数据库。',
+  'Gives the agent memory_search, memory_capture, memory_crystallize and memory_delete. The database is only created after you enable this.':
+    '给 agent 提供 memory_search、memory_capture、memory_crystallize 与 memory_delete。开启后才会创建数据库。',
   'Memory is off. The settings below take effect once you enable it.':
     '记忆已关闭。开启后下面的设置才会生效。',
   'Embedding model': '嵌入模型',
@@ -1663,6 +1663,7 @@ export const zhTranslations: Record<string, string> = {
   'Memory search': '搜索记忆',
   'Memory capture': '记录记忆',
   'Memory crystallize': '提炼记忆',
+  'Memory delete': '删除记忆',
   'Browser navigate': '浏览器 · 打开',
   'Browser snapshot': '浏览器 · 快照',
   'Browser click': '浏览器 · 点击',

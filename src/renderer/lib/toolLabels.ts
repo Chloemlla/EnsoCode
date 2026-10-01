@@ -20,6 +20,7 @@ export const TOOL_LABEL_KEYS: Partial<Record<string, string>> = {
   memory_search: 'Memory search',
   memory_capture: 'Memory capture',
   memory_crystallize: 'Memory crystallize',
+  memory_delete: 'Memory delete',
   browser_navigate: 'Browser navigate',
   browser_snapshot: 'Browser snapshot',
   browser_click: 'Browser click',
