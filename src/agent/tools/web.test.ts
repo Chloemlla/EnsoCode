@@ -1,4 +1,4 @@
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it, vi } from 'vitest';
 import { createWebTools } from './web';
 
@@ -18,7 +18,7 @@ const ctx = (model?: unknown, auth: unknown = { ok: true, apiKey: 'k' }) =>
   ({
     model,
     modelRegistry: { getApiKeyAndHeaders: vi.fn(async () => auth) },
-  }) as unknown as ExtensionContext;
+  }) as unknown as ExtensionToolContext;
 
 describe('createWebTools', () => {
   it('声明 web_search / web_fetch 且 schema 类型完整', () => {

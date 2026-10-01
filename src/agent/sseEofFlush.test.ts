@@ -94,17 +94,19 @@ describe('withSseEofFlush', () => {
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
 
-  it('openai-node 在最后一帧没有空行时丢掉 response.completed', async () => {
-    const conformant = await complete(sseFetch('\n\n'));
-    expect(conformant).toMatchObject({
-      stopReason: 'stop',
-      content: [{ type: 'text', text: SUMMARY }],
-    });
-
-    const dropped = await complete(sseFetch('\n'));
-    expect(dropped.stopReason).toBe('error');
-    expect(dropped.errorMessage).toMatch(/terminal response event/i);
-  });
+  // openai-node 6 的 SSE 解码只在空行时吐事件，末帧缺空行会丢 response.completed；
+  // openai-node 7（pi-ai 0.99 起）在 EOF 刷出未闭合末帧，上游缺陷已修。此处锁定上游
+  // 行为：若将来又回退成丢帧，下面的用例会先于真实网关暴露问题。
+  it.each(['\n\n', '\n', ''] as const)(
+    '不加 flush 时 openai-node 7 对末帧 %j 也能完成 Responses 流（上游已修复）',
+    async (trailing) => {
+      const message = await complete(sseFetch(trailing));
+      expect(message, message.errorMessage).toMatchObject({
+        stopReason: 'stop',
+        content: [{ type: 'text', text: SUMMARY }],
+      });
+    }
+  );
 
   it.each(['\n', ''] as const)(
     '补上 EOF 空行后，末帧只有 %j 的网关仍能完成 Responses 流',

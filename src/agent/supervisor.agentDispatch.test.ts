@@ -126,10 +126,12 @@ function session(options: Record<string, unknown>) {
       for (const listener of listeners) listener(event);
     },
     prompt: vi.fn(
-      async (_text?: string, _options?: { preflightResult?: (accepted: boolean) => void }) =>
-        undefined
+      async (
+        _text?: string,
+        _options?: { preflightResult?: (disposition: 'handled' | 'queued' | 'started') => void }
+      ) => undefined
     ),
-    steer: vi.fn(async () => undefined),
+    steer: vi.fn(async (): Promise<'queued' | 'handled'> => 'queued'),
     abort: vi.fn(async () => undefined),
     waitForIdle: vi.fn(async () => undefined),
     dispose: vi.fn(),
@@ -953,13 +955,13 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       return { events, supervisor, piSession, userMessage, settled };
     }
 
-    it.each([false, true, undefined])(
-      '仅 preflight 明确拒收才允许撤回（accepted=%s）',
-      async (accepted) => {
+    it.each(['started', 'queued', 'handled', undefined] as const)(
+      'prompt 抛错时，仅 preflightResult 从未回调才视为拒收并允许撤回（disposition=%s）',
+      async (disposition) => {
         const { events, supervisor, piSession, userMessage } = await spawned();
         piSession.prompt.mockImplementationOnce(async (_text, options) => {
-          if (accepted !== undefined) options?.preflightResult?.(accepted);
-          if (accepted) userMessage('hi');
+          if (disposition !== undefined) options?.preflightResult?.(disposition);
+          if (disposition === 'started' || disposition === 'queued') userMessage('hi');
           throw new Error('send failed');
         });
         supervisor.handleCommand({
@@ -970,7 +972,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         });
         await settle();
         expect(events.filter((event) => event.type === 'delivery-rejected')).toEqual(
-          accepted === false
+          disposition === undefined
             ? [expect.objectContaining({ identity: parent, deliveryId: 'd1' })]
             : []
         );
@@ -1036,6 +1038,28 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       supervisor.handleCommand({ type: 'tool-background', identity: parent, toolCallId: 'call-1' });
       await settle();
       expect(one).toHaveBeenCalledWith(parent.sessionId, 'call-1', 'user');
+      await supervisor.shutdown();
+    });
+
+    it('pi input hook 已处理的 steer 不占队列位', async () => {
+      const { supervisor, piSession, userMessage, settled } = await spawned();
+      piSession.steer.mockResolvedValueOnce('handled');
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'consumed',
+        deliveryId: 's1',
+      });
+      await settle();
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'queued',
+        deliveryId: 's2',
+      });
+      await settle();
+      userMessage('queued');
+      expect(settled()).toEqual(['s2']);
       await supervisor.shutdown();
     });
   });

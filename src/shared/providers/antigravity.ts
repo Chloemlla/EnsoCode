@@ -25,8 +25,8 @@ import {
   type PiEventStream,
   type PiLoginCallbacks,
   type PiModel,
-  type PiModelSpec,
   type PiOauthCredentials,
+  type PiModelSpec as PiProviderModelSpec,
   type PiRefreshModelsContext,
   type PiStopReason,
   type PiStreamOptions,
@@ -38,6 +38,8 @@ import {
 } from './piProviderTypes';
 
 export const ANTIGRAVITY_PROVIDER_ID = 'google-antigravity';
+
+type PiModelSpec = Extract<PiProviderModelSpec, { type?: 'chat' }>;
 
 /**
  * 自定义 api 标识。pi 的 provider composer 要求「注册 streamSimple 时必须给 api」

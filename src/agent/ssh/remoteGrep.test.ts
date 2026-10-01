@@ -1,9 +1,9 @@
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it } from 'vitest';
 import type { SshExecutor } from './executor';
 import { createRemoteGrepToolDefinition } from './remoteGrep';
 
-const ctx = undefined as unknown as ExtensionContext;
+const ctx = undefined as unknown as ExtensionToolContext;
 
 function fakeExecutor(handler: (command: string[] | string) => { stdout?: string; code?: number }) {
   const calls: (string[] | string)[] = [];

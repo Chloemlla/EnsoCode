@@ -14,6 +14,7 @@ import {
   DefaultResourceLoader,
   type InlineExtension,
   ModelRuntime,
+  type PromptOptions,
   type PromptTemplate,
   type ResourceDiagnostic,
   SessionManager,
@@ -240,6 +241,9 @@ interface SessionFactory {
     extraTools?: unknown[];
   }): Promise<ChildSessionResult>;
 }
+
+/** pi 未从包入口导出 `PromptDisposition`，从 `PromptOptions.preflightResult` 的参数推导。 */
+type PromptDisposition = Parameters<NonNullable<PromptOptions['preflightResult']>>[0];
 
 interface ManagedSession {
   identity: SessionIdentity;
@@ -3409,6 +3413,10 @@ export class SessionSupervisor {
   /**
    * pi 先投递新 prompt 自身的 user 消息，再投递滞留的 steer；每条 user 消息按此顺序领取回执。
    * 所有注入 user 消息的调用都必须经这两个入口，否则队列错位。
+   *
+   * pi 0.99 起 `preflightResult` 只在 prompt 被接受后回调 disposition（`handled` / `queued` /
+   * `started`），被拒绝时不回调而是直接抛错。因此「抛错且从未回调」即为 preflight 拒收，
+   * 此时消息尚未提交，允许渲染层撤回乐观气泡；回调之后再抛错则不能视为未送达。
    */
   private promptTracked(
     managed: ManagedSession,
@@ -3418,24 +3426,29 @@ export class SessionSupervisor {
   ): Promise<void> {
     const slot = { id: deliveryId ?? null };
     managed.promptDelivery = slot;
+    let dispatched = false;
     const trackedOptions = deliveryId
       ? {
           ...options,
-          preflightResult: (accepted: boolean) => {
-            if (!accepted && managed.promptDelivery === slot) {
-              this.options.emit({
-                type: 'delivery-rejected',
-                identity: managed.identity,
-                seq: ++managed.seq,
-                deliveryId,
-              });
-            }
-            options?.preflightResult?.(accepted);
+          preflightResult: (disposition: PromptDisposition) => {
+            dispatched = true;
+            options?.preflightResult?.(disposition);
           },
         }
       : options;
     return managed.session
       .prompt(withPendingPlanNote(managed, text), trackedOptions)
+      .catch((error: unknown) => {
+        if (deliveryId && !dispatched && managed.promptDelivery === slot) {
+          this.options.emit({
+            type: 'delivery-rejected',
+            identity: managed.identity,
+            seq: ++managed.seq,
+            deliveryId,
+          });
+        }
+        throw error;
+      })
       .finally(() => {
         if (managed.promptDelivery === slot) managed.promptDelivery = undefined;
       });
@@ -3452,6 +3465,14 @@ export class SessionSupervisor {
     managed.steerDeliveries.push(slot);
     return managed.session
       .steer(withPendingPlanNote(managed, text), images)
+      .then((disposition) => {
+        // Pi 可在 input hook 中消费输入，而不向队列添加 user 消息，因此不能保留对应投递标记。
+        //
+        // Pi can consume input in an input hook without adding a user message to the queue, so its delivery marker must be removed.
+        if (disposition === 'handled') {
+          managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+        }
+      })
       .catch((error: unknown) => {
         managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
         throw error;

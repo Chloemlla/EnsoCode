@@ -140,11 +140,11 @@ export function attachCursorBridgeToSession(
     }
   }) as AgentSession['prompt'];
 
-  session.steer = (async (text, images) => {
+  session.steer = (async (text, images, options) => {
     const prev = boundBridge;
     boundBridge = bridge;
     try {
-      await origSteer(text, images);
+      return await origSteer(text, images, options);
     } finally {
       boundBridge = prev;
     }
