@@ -202,6 +202,66 @@ describe('resolveModelSelection 虚拟模型', () => {
     expect(fallback.ok && fallback.selection.ref).toEqual({ providerId: 'p1', modelId: 'strong' });
   });
 
+  it('分类器：有快模型才下发；judge 带裁判配置，pi 分类器只带 provider 与 key', () => {
+    setSettings([
+      {
+        ...auto,
+        classifier: {
+          source: 'judge',
+          model: { providerId: 'p1', modelId: 'weak' },
+          timeoutMs: 3000,
+        },
+      },
+    ]);
+    const judge = resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true });
+    expect(judge.ok && judge.selection.config.virtual?.classifier).toMatchObject({
+      source: 'judge',
+      timeoutMs: 3000,
+      model: { modelId: 'weak', apiKey: 'key-p1' },
+    });
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            provider('p1', ['strong', 'weak']),
+            provider('or', ['x'], { baseUrl: 'https://openrouter.ai/api/v1' }),
+          ],
+          virtualModels: [
+            {
+              ...auto,
+              fallbacks: [],
+              classifier: {
+                source: 'pi-classifier',
+                model: { providerId: 'or', modelId: 'typesafe/jev-1.13' },
+                timeoutMs: 3000,
+              },
+            },
+          ],
+        },
+      },
+    };
+    const pi = resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true });
+    expect(pi.ok && pi.selection.config.virtual?.classifier).toEqual({
+      source: 'pi-classifier',
+      timeoutMs: 3000,
+      classifier: { provider: 'openrouter', modelId: 'typesafe/jev-1.13', apiKey: 'key-or' },
+    });
+    setSettings([
+      {
+        ...auto,
+        fast: undefined,
+        classifier: {
+          source: 'judge',
+          model: { providerId: 'p1', modelId: 'weak' },
+          timeoutMs: 3000,
+        },
+      },
+    ]);
+    const noFast = resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true });
+    expect(noFast.ok && noFast.selection.config.virtual?.classifier).toBeUndefined();
+  });
+
   it('条目缺失、停用或主模型不可用时拒绝', () => {
     setSettings([]);
     expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(

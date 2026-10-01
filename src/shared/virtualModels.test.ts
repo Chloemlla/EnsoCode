@@ -3,6 +3,7 @@ import { modelUsability, resolveChatModel, sanitizeDefaultModel } from './defaul
 import type { ModelProvider } from './types';
 import {
   canBeVirtualMember,
+  classifierProviderFor,
   directMemberRef,
   findVirtualModel,
   parseVirtualModels,
@@ -146,5 +147,23 @@ describe('虚拟模型可用性', () => {
         virtualModels: [],
       })
     ).toMatchObject({ status: 'sanitized', defaultModel: { providerId: 'p1', modelId: 'strong' } });
+  });
+});
+
+describe('classifierProviderFor', () => {
+  it('按订阅账号、目录 id 或域名识别分类器 provider', () => {
+    expect(classifierProviderFor({ oauthAccountKey: 'openrouter#2', baseUrl: '' })).toBe(
+      'openrouter#2'
+    );
+    expect(classifierProviderFor({ oauthAccountKey: 'anthropic', baseUrl: '' })).toBeUndefined();
+    expect(classifierProviderFor({ baseUrl: 'https://openrouter.ai/api/v1' })).toBe('openrouter');
+    expect(classifierProviderFor({ baseUrl: 'https://ai-gateway.vercel.sh/v1' })).toBe(
+      'vercel-ai-gateway'
+    );
+    expect(classifierProviderFor({ baseUrl: 'https://x.test', catalogId: 'opencode' })).toBe(
+      'opencode'
+    );
+    expect(classifierProviderFor({ baseUrl: 'https://evil-openrouter.ai.test' })).toBeUndefined();
+    expect(classifierProviderFor({ baseUrl: 'not a url' })).toBeUndefined();
   });
 });

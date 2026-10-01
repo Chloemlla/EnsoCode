@@ -136,3 +136,37 @@ export function modelDisplayName(
 ): string {
   return virtualModels?.find((entry) => entry.id === modelId)?.name ?? modelId;
 }
+
+/** pi 内置里提供分类器（System One 协议）的 provider，及其 API 域名 */
+const CLASSIFIER_PROVIDER_HOSTS: Readonly<Record<string, string>> = {
+  'openrouter.ai': 'openrouter',
+  'opencode.ai': 'opencode',
+  'ai-gateway.vercel.sh': 'vercel-ai-gateway',
+};
+const CLASSIFIER_PROVIDER_IDS = new Set(Object.values(CLASSIFIER_PROVIDER_HOSTS));
+
+/**
+ * 设置里的 provider 条目能否当 pi 分类器的凭证来源，能则返回 pi provider id。
+ * 订阅账号返回账号 key（多账号克隆同样按 key 取凭证）；API key 条目按 baseUrl 域名识别。
+ */
+export function classifierProviderFor(
+  provider: Pick<ModelProvider, 'oauthAccountKey' | 'baseUrl' | 'catalogId'>
+): string | undefined {
+  if (provider.oauthAccountKey) {
+    return CLASSIFIER_PROVIDER_IDS.has(providerIdOfAccountKey(provider.oauthAccountKey))
+      ? provider.oauthAccountKey
+      : undefined;
+  }
+  if (provider.catalogId && CLASSIFIER_PROVIDER_IDS.has(provider.catalogId)) {
+    return provider.catalogId;
+  }
+  try {
+    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    for (const [domain, id] of Object.entries(CLASSIFIER_PROVIDER_HOSTS)) {
+      if (host === domain || host.endsWith(`.${domain}`)) return id;
+    }
+  } catch {
+    // 非法 baseUrl：不是分类器来源
+  }
+  return undefined;
+}

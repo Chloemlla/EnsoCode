@@ -27,6 +27,7 @@ vi.mock('electron', () => ({
 }));
 
 vi.mock('../services/modelMeta', () => ({ queryModelMeta: mocks.queryModelMeta }));
+vi.mock('../services/classifierModels', () => ({ listClassifierModels: vi.fn(async () => []) }));
 vi.mock('../services/oauthProviders', () => ({
   cancelOauthLogin: mocks.cancelOauthLogin,
   getOauthAccountUsage: vi.fn(),

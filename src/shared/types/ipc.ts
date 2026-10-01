@@ -38,6 +38,7 @@ export const IPC_CHANNELS = {
   PROVIDERS_LIST_MODELS: 'providers:list-models',
   PROVIDERS_TEST: 'providers:test',
   PROVIDERS_MODEL_META: 'providers:model-meta',
+  PROVIDERS_CLASSIFIER_MODELS: 'providers:classifier-models',
 
   // Local token usage statistics
   USAGE_SUMMARY: 'usage:summary',

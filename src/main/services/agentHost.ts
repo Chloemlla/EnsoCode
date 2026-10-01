@@ -52,6 +52,7 @@ import type {
   SubagentModelOption,
   ThinkingLevel,
   TitleSummaryInput,
+  VirtualSpawnClassifier,
 } from '@shared/types/agent';
 import { parseAgentWorkerEvent } from '@shared/types/agent';
 import type { SubagentModelEntry } from '@shared/types/assets';
@@ -76,11 +77,13 @@ import type { AgentDispatchTask } from '@shared/types/mentions';
 import { parseDisabledWorkflowPresets } from '@shared/types/workflow';
 import {
   canBeVirtualMember,
+  classifierProviderFor,
   directMemberRef,
   findVirtualModel,
   isVirtualRef,
   parseVirtualModels,
   VIRTUAL_PROVIDER_ID,
+  type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
@@ -427,11 +430,22 @@ function resolveVirtualModelSelection(
   const fallbacks = entry.fallbacks
     .map(member)
     .filter((config): config is SpawnModelConfig => config !== undefined);
+  // 分类器只在有快模型可分档时下发；解析失败静默不分类（路由回到主模型）
+  const classifier =
+    fast && entry.classifier
+      ? resolveVirtualClassifier(entry.classifier, authenticatedAccountKeys)
+      : undefined;
   const config: SpawnModelConfig = {
     ...primary,
     modelId: entry.id,
     settingsProviderId: VIRTUAL_PROVIDER_ID,
-    virtual: { name: entry.name, primary, ...(fast ? { fast } : {}), fallbacks },
+    virtual: {
+      name: entry.name,
+      primary,
+      ...(fast ? { fast } : {}),
+      fallbacks,
+      ...(classifier ? { classifier } : {}),
+    },
   };
   return {
     ok: true,
@@ -439,6 +453,40 @@ function resolveVirtualModelSelection(
       ref: { providerId: VIRTUAL_PROVIDER_ID, modelId: entry.id },
       runtimeRef: { providerId: VIRTUAL_PROVIDER_ID, modelId: entry.id },
       config,
+    },
+  };
+}
+
+function resolveVirtualClassifier(
+  classifier: VirtualClassifierConfig,
+  authenticatedAccountKeys: ReadonlySet<string>
+): VirtualSpawnClassifier | undefined {
+  if (classifier.source === 'judge') {
+    const resolved = resolvePhysicalModelSelection(
+      classifier.model.providerId,
+      classifier.model.modelId,
+      authenticatedAccountKeys
+    );
+    return resolved.ok
+      ? { source: 'judge', timeoutMs: classifier.timeoutMs, model: resolved.selection.config }
+      : undefined;
+  }
+  const provider = providersFromSettings().find((item) => item.id === classifier.model.providerId);
+  if (!provider?.enabled) return undefined;
+  const piProvider = classifierProviderFor(provider);
+  if (!piProvider) return undefined;
+  if (provider.oauthAccountKey) {
+    if (!authenticatedAccountKeys.has(provider.oauthAccountKey)) return undefined;
+  } else if (!provider.apiKey) {
+    return undefined;
+  }
+  return {
+    source: 'pi-classifier',
+    timeoutMs: classifier.timeoutMs,
+    classifier: {
+      provider: piProvider,
+      modelId: classifier.model.modelId,
+      ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
     },
   };
 }

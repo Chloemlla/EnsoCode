@@ -202,6 +202,7 @@ import { createEnsoAppTool, EnsoAppInvoker } from './tools/ensoApp';
 import { createEnsoCapabilitiesTool } from './tools/ensoCapabilities';
 import { createMemoryTools, MemoryInvoker } from './tools/memory';
 import { createWebTools } from './tools/web';
+import { createVirtualChooser } from './virtualClassifier';
 import { registerVirtualModel } from './virtualModels';
 import { createWorkflowTool, WORKFLOW_STOPPED_BY_USER } from './workflow';
 import { listWorkflowPresets, loadWorkflowPreset, workflowPresetRoots } from './workflowPresets';
@@ -4223,11 +4224,20 @@ export async function resolveBaseModelOrRefresh(runtime: ModelRuntime, model: Sp
 /** 会话主模型：虚拟配置先逐成员解析并注册 pi 虚拟模型，其余同 resolveBaseModelOrRefresh。 */
 export async function resolveSessionModel(runtime: ModelRuntime, model: SpawnModelConfig) {
   if (!model.virtual) return resolveBaseModelOrRefresh(runtime, model);
+  const classifier = model.virtual.classifier;
+  const judge =
+    classifier?.source === 'judge' && classifier.model
+      ? await resolveBaseModelOrRefresh(runtime, classifier.model).catch((error) => {
+          console.warn('[virtual-model] judge model unavailable:', error);
+          return undefined;
+        })
+      : undefined;
+  const chooser = classifier ? createVirtualChooser(runtime, classifier, judge) : undefined;
   const registration = await registerVirtualModel(
     runtime,
     model,
     (member) => resolveBaseModelOrRefresh(runtime, member),
-    undefined,
+    chooser,
     supportsAdaptiveThinking
   );
   return registration.model;

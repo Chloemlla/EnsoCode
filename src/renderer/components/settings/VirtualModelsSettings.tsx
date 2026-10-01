@@ -1,12 +1,24 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
-import { canBeVirtualMember, type VirtualModelEntry } from '@shared/virtualModels';
+import {
+  canBeVirtualMember,
+  classifierProviderFor,
+  VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+  type VirtualModelEntry,
+} from '@shared/virtualModels';
 import { Plus, Trash2, X } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
@@ -17,6 +29,7 @@ import {
 import { useSettingsStore } from '@/stores/settings';
 
 const noop = () => undefined;
+const OFF = 'off';
 
 function MemberPicker({
   providers,
@@ -69,12 +82,159 @@ function Field({
   );
 }
 
-function VirtualModelCard({
+function ClassifierField({
   entry,
   providers,
+  classifierProviders,
+  update,
 }: {
   entry: VirtualModelEntry;
   providers: ModelProvider[];
+  classifierProviders: ModelProvider[];
+  update: (updates: Partial<Omit<VirtualModelEntry, 'id'>>) => void;
+}) {
+  const { t } = useI18n();
+  const classifier = entry.classifier;
+  const source = classifier?.source ?? OFF;
+  const piProviderId = classifier?.source === 'pi-classifier' ? classifier.model.providerId : '';
+  const [piModels, setPiModels] = useState<Array<{ id: string; name: string }>>([]);
+  useEffect(() => {
+    if (!piProviderId) {
+      setPiModels([]);
+      return;
+    }
+    let cancelled = false;
+    void window.electronAPI.providers.classifierModels(piProviderId).then((models) => {
+      if (!cancelled) setPiModels(models);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [piProviderId]);
+  if (!entry.fast) {
+    return (
+      <p className="pt-1.5 text-[11px] text-muted-foreground">{t('Set a fast model first')}</p>
+    );
+  }
+  const fast = entry.fast;
+  const setSource = (next: string) => {
+    if (next === OFF) return update({ classifier: undefined });
+    if (next === 'judge') {
+      return update({
+        classifier: {
+          source: 'judge',
+          model: fast,
+          timeoutMs: VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+        },
+      });
+    }
+    const provider = classifierProviders[0];
+    if (provider) {
+      update({
+        classifier: {
+          source: 'pi-classifier',
+          model: { providerId: provider.id, modelId: '' },
+          timeoutMs: VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+        },
+      });
+    }
+  };
+  const sourceItems = [
+    { value: OFF, label: t('Off') },
+    { value: 'judge', label: t('Fast model judges') },
+    ...(classifierProviders.length > 0
+      ? [{ value: 'pi-classifier', label: t('Classifier model') }]
+      : []),
+  ];
+  return (
+    <div className="space-y-1">
+      <Select
+        items={sourceItems}
+        value={source}
+        onValueChange={(value) => setSource(String(value))}
+      >
+        <SelectTrigger size="sm" className="w-48">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectPopup>
+          {sourceItems.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+      {classifier?.source === 'judge' && (
+        <MemberPicker
+          providers={providers}
+          value={classifier.model}
+          onSelect={(model) => update({ classifier: { ...classifier, model } })}
+        />
+      )}
+      {classifier?.source === 'pi-classifier' && (
+        <div className="flex gap-1">
+          <Select
+            items={classifierProviders.map((p) => ({ value: p.id, label: p.name }))}
+            value={classifier.model.providerId}
+            onValueChange={(value) =>
+              update({
+                classifier: { ...classifier, model: { providerId: String(value), modelId: '' } },
+              })
+            }
+          >
+            <SelectTrigger size="sm" className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {classifierProviders.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          <Select
+            items={piModels.map((m) => ({ value: m.id, label: m.name }))}
+            value={classifier.model.modelId || null}
+            onValueChange={(value) =>
+              update({
+                classifier: {
+                  ...classifier,
+                  model: { providerId: classifier.model.providerId, modelId: String(value) },
+                },
+              })
+            }
+          >
+            <SelectTrigger size="sm" className="min-w-0 flex-1">
+              <SelectValue placeholder={t('Select model')} />
+            </SelectTrigger>
+            <SelectPopup>
+              {piModels.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </div>
+      )}
+      <p className="text-[10px] text-muted-foreground">
+        {t(
+          'Classifies each new turn: simple turns use the fast model, complex ones the primary model. Adds a short delay before the reply.'
+        )}
+      </p>
+    </div>
+  );
+}
+
+function VirtualModelCard({
+  entry,
+  providers,
+  classifierProviders,
+}: {
+  entry: VirtualModelEntry;
+  providers: ModelProvider[];
+  classifierProviders: ModelProvider[];
 }) {
   const { t } = useI18n();
   const updateEntry = useSettingsStore((state) => state.updateVirtualModel);
@@ -208,6 +368,14 @@ function VirtualModelCard({
           {t('Add fallback')}
         </Button>
       </Field>
+      <Field label={t('Difficulty routing')}>
+        <ClassifierField
+          entry={entry}
+          providers={providers}
+          classifierProviders={classifierProviders}
+          update={update}
+        />
+      </Field>
     </div>
   );
 }
@@ -223,9 +391,14 @@ export function VirtualModelsSettings() {
   const addEntry = useSettingsStore((state) => state.addVirtualModel);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot).filter(canBeVirtualMember),
+  const usable = useMemo(
+    () => usableProvidersForOauthSnapshot(providers, snapshot),
     [providers, snapshot]
+  );
+  const candidates = useMemo(() => usable.filter(canBeVirtualMember), [usable]);
+  const classifierProviders = useMemo(
+    () => usable.filter((provider) => classifierProviderFor(provider) !== undefined),
+    [usable]
   );
   const seed = useMemo((): DefaultModelRef | null => {
     if (defaultModel) {
@@ -256,7 +429,12 @@ export function VirtualModelsSettings() {
       </div>
       <div className="space-y-2">
         {entries.map((entry) => (
-          <VirtualModelCard key={entry.id} entry={entry} providers={candidates} />
+          <VirtualModelCard
+            key={entry.id}
+            entry={entry}
+            providers={candidates}
+            classifierProviders={classifierProviders}
+          />
         ))}
         <Button
           type="button"

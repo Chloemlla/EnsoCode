@@ -108,8 +108,9 @@ interface VirtualClassifierConfig {
 ```
 
 - 只在 `reason === 'user'` 时分类一次，结果写入 state（`tier: 'simple' | 'complex'`，置信度），续请求沿用 previous，不额外调用。
-- 输入：本轮用户消息（截断 4KB）+ 上一轮结论 + 是否带图/是否处在计划模式。计划模式直接判 complex，不调用分类器。
-- `pi-classifier`：`classify(model, {questions: {complexity: {type: 'choice', criteria: {simple, complex}}}})`，complex 概率 ≥ 0.5 走 primary，否则 fast。要求用户配置了支持分类器的 provider（OpenRouter / TypeSafe 等），catalog 里 `type === 'classifier'` 的模型才出现在选项里。
+- 输入：本轮用户消息（截断 4KB）+ 上一轮结论。运行中插入的 steering 不算新一轮，不分类。
+- 实现偏差：未做「计划模式直接判 complex」。虚拟模型注册按条目共享、路由函数拿不到会话的计划状态；计划模式本身只读，误判为 simple 的代价有限。
+- `pi-classifier`：`classify(model, {questions: {complexity: {type: 'choice', criteria: {simple, complex}}}})`，complex 概率 ≥ 0.5 走 primary，否则 fast。凭证来源是设置里已有的 provider 条目：OpenRouter / OpenCode / Vercel AI Gateway（按 baseUrl 域名或目录 id 识别，或 OpenRouter 订阅账号）；分类器模型列表由 Main 经 `providers:classifier-models` 按条目 id 从 pi 目录取。TypeSafe 直连需单独 key，本期不做。
 - `judge`：用 `completeSimple` 让快聊天模型输出单个 token（`SIMPLE`/`COMPLEX`），`maxTokens` 8、无思考；适配用户现有的 anthropic/openai 兼容代理，不需要额外凭证。
 - 分档换模型会丢 prompt cache：同一会话相邻两轮档位不同才换，且 `simple→complex` 立即换、`complex→simple` 需要连续两轮 simple 才换（滞回），避免来回抖。
 - 成本与延迟：分类在首 token 前同步执行，上限 `timeoutMs`；分类用量单独记一条（不进主对话 usage 统计口径，日志可见）。

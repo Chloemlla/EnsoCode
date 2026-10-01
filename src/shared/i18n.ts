@@ -1579,6 +1579,12 @@ export const zhTranslations: Record<string, string> = {
   'Used in order when a model is rate limited or down': '限流或故障时按顺序切换',
   'Add fallback': '添加备用',
   'Not used': '不使用',
+  'Difficulty routing': '按难度分档',
+  'Set a fast model first': '先设置快模型',
+  'Fast model judges': '快模型判断',
+  'Classifier model': '分类器模型',
+  'Classifies each new turn: simple turns use the fast model, complex ones the primary model. Adds a short delay before the reply.':
+    '每轮新输入先分类：简单问题用快模型，复杂任务用主模型。回复前会多一点延迟。',
   'New virtual model': '新建虚拟模型',
   'A virtual model appears as one model in the picker and routes each request to a real model: fallbacks on rate limits or outages, image-capable or larger-context members when needed, and the fast model for summaries.':
     '虚拟模型在选择器里显示为一个模型，每次请求由路由挑选真实模型：限流或故障时切到备用，需要时换成支持图片或上下文更大的成员，摘要使用快模型。',

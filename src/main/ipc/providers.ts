@@ -6,6 +6,7 @@ import {
 import type { ModelMetaQuery, ProviderApiConfig } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { ipcMain } from 'electron';
+import { listClassifierModels } from '../services/classifierModels';
 import { queryModelMeta } from '../services/modelMeta';
 import {
   cancelOauthLogin,
@@ -95,6 +96,10 @@ export function registerProviderHandlers(): void {
     if (!parsed) return { ok: false, models: [], error: 'Invalid query' };
     return queryModelMeta(parsed);
   });
+
+  ipcMain.handle(IPC_CHANNELS.PROVIDERS_CLASSIFIER_MODELS, (_event, providerId: unknown) =>
+    listClassifierModels(providerId)
+  );
 
   ipcMain.handle(IPC_CHANNELS.OAUTH_PROVIDERS_LIST, () => listOauthProviders());
   ipcMain.handle(IPC_CHANNELS.OAUTH_CREDENTIAL_KEYS_LIST, async () => [

@@ -390,6 +390,9 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_LIST_MODELS, config),
     test: (config: ProviderApiConfig, modelId?: string): Promise<TestProviderResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_TEST, config, modelId),
+    /** 设置里某个 provider 条目可用的 pi 分类器模型（虚拟模型分档用）；不支持分类的返回空 */
+    classifierModels: (providerId: string): Promise<Array<{ id: string; name: string }>> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_CLASSIFIER_MODELS, providerId),
     modelMeta: (query: ModelMetaQuery): Promise<ModelMetaResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROVIDERS_MODEL_META, query),
     listOauth: (): Promise<OauthProviderInfo[]> =>

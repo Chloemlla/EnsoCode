@@ -386,6 +386,9 @@ export const IPC_PRODUCT_COVERAGE = {
   PROVIDERS_LIST_MODELS: surfaces('providers.fetch-models'),
   PROVIDERS_TEST: surfaces('providers.test-connection'),
   PROVIDERS_MODEL_META: surfaces('providers.model-meta'),
+  PROVIDERS_CLASSIFIER_MODELS: excluded(
+    'classifier models are listed only by the virtual model settings UI'
+  ),
   OAUTH_PROVIDERS_LIST: surfaces('providers.oauth.list'),
   OAUTH_LOGIN: surfaces('providers.oauth.login'),
   OAUTH_LOGIN_RESPOND: excluded(
