@@ -368,7 +368,13 @@ function SubagentToolIcon({ toolName }: { toolName: string }) {
   ) {
     return <FileText aria-hidden="true" className={className} />;
   }
-  if (name === 'bash' || name === 'exec' || name.includes('shell') || name.includes('terminal')) {
+  if (
+    name === 'bash' ||
+    name === 'exec' ||
+    name === 'codemode' ||
+    name.includes('shell') ||
+    name.includes('terminal')
+  ) {
     return <Terminal aria-hidden="true" className={className} />;
   }
   return <Wrench aria-hidden="true" className={className} />;

@@ -4,6 +4,8 @@ import type { SubagentOp } from '@/stores/sessions/timeline';
 /** 工具 id → 显示名 i18n key；只影响 UI，发给模型的工具名不变 */
 export const TOOL_LABEL_KEYS: Partial<Record<string, string>> = {
   exec: 'Isolated sandbox',
+  codemode: 'Isolated sandbox',
+  tool_search: 'Tool search',
   apply_patch: 'Apply patch',
   explore_mark: 'Explore mark',
   explore_fold: 'Explore fold',

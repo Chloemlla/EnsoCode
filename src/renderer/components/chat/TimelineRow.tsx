@@ -66,7 +66,8 @@ import { formatDuration, formatTokens } from '@/stores/sessions/stats';
 import {
   exploreStepsKey,
   isReadOnlyTool,
-  parseSandboxOutput,
+  isSandboxTool,
+  type SandboxView,
   shouldAutoExpandAppliedFileChanges,
   shouldShowToolOutputAfterFileChanges,
   summarizeSandboxCalls,
@@ -167,6 +168,7 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.agentMeta === b.agentMeta &&
         a.source === b.source &&
         a.nestedPending === b.nestedPending &&
+        JSON.stringify(a.sandbox) === JSON.stringify(b.sandbox) &&
         a.rtk === b.rtk &&
         a.plan?.title === b.plan?.title &&
         a.plan?.text === b.plan?.text &&
@@ -1599,7 +1601,7 @@ function SandboxOutput({
 }: {
   source?: string | null;
   output: string | null;
-  view: ReturnType<typeof parseSandboxOutput>;
+  view: SandboxView | null;
 }) {
   const value =
     view?.status === 'completed' ? formatSandboxValue(view.value) : (view?.error ?? output);
@@ -1653,7 +1655,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
   const hasDiff = Boolean(item.edits && item.edits.length > 0);
   const hasWrite = Boolean(item.writeContent);
   const hasFileChanges = Boolean(item.fileChanges && item.fileChanges.length > 0);
-  const sandbox = item.name === 'exec' ? parseSandboxOutput(item.output) : null;
+  const sandbox = item.sandbox ?? null;
   // 消息类工具展开显示发出的正文（投递回执已在 timeline 剥掉）；出错时只显示错误输出
   const sentMessage = item.state === 'error' ? null : item.sentMessage;
   const labelKey = TOOL_LABEL_KEYS[item.name];
@@ -1836,7 +1838,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
           )}
           {!hasDiff && !hasWrite && !hasFileChanges && hasBody && (
             <ToolContentScroller follow={item.state === 'running'}>
-              {item.name === 'exec' ? (
+              {isSandboxTool(item.name) ? (
                 <SandboxOutput source={item.source} output={item.output} view={sandbox} />
               ) : item.name === 'bash' ? (
                 <TerminalOutput command={item.summary} output={item.output ?? ''} />
@@ -2033,7 +2035,7 @@ function toolIcon(name: string): LucideIcon {
   if (name === 'bash' || name === 'powershell' || name === 'task_output') return TerminalSquare;
   if (name === 'edit' || name === 'apply_patch') return Pencil;
   if (name === 'write') return FilePlus;
-  if (name === 'exec') return BoxSelect;
+  if (isSandboxTool(name)) return BoxSelect;
   if (name === 'subagent') return Bot;
   if (name.includes('web') || name.includes('fetch')) return Globe;
   return Wrench;

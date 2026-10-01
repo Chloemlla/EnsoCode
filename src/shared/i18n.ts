@@ -1687,6 +1687,7 @@ export const zhTranslations: Record<string, string> = {
     '选择文件修改方式。默认为应用补丁。新建和冷恢复的会话使用此模式；已在内存中的会话保持原模式。',
   'Text replacement': '文本替换',
   'Apply patch': '应用补丁',
+  'Tool search': '工具检索',
   'Apply patch (default)': '应用补丁（默认）',
   'Truncated preview': '截断预览',
   'Diff unavailable because the original snapshot was truncated.':

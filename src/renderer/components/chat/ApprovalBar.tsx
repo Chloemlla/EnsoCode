@@ -1,3 +1,4 @@
+import { isNestedToolCallId } from '@shared/toolCallId';
 import type { ApprovalDecision, ApprovalKind, ApprovalRequestInfo } from '@shared/types/agent';
 import { FileEdit, FilePlus, Plug, ShieldAlert, TerminalSquare } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -73,7 +74,7 @@ export function ApprovalBar({ approvals, onRespond, allowSession = true }: Appro
         <span className="flex min-w-0 items-center gap-1 text-muted-foreground">
           <Icon className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate font-mono">
-            {(active.toolCallId?.split(':').length ?? 0) >= 3
+            {active.toolCallId && isNestedToolCallId(active.toolCallId)
               ? `${t('Isolated sandbox')} › ${toolLabel(active.tool, t)}`
               : toolLabel(active.tool, t)}
           </span>

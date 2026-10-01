@@ -1,6 +1,7 @@
 import { parseRtkToolStats } from '@shared/rtk';
 import {
   isBackgroundTaskId,
+  type ProjectedCodemodeCall,
   type ProjectedMessage,
   type ProjectedPart,
   type TodoItem,
@@ -208,6 +209,10 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
       if (applyPatchOutcome) projected.applyPatchOutcome = applyPatchOutcome;
     }
   }
+  if (value.role === 'toolResult' && value.toolName === 'codemode' && isRecord(value.details)) {
+    const calls = projectCodemodeCalls(value.details.calls);
+    if (calls) projected.codemodeCalls = calls;
+  }
   if (value.role === 'toolResult' && value.toolName === 'subagent' && isRecord(value.details)) {
     const details = value.details as { modelId?: unknown; outputTokens?: unknown; steps?: unknown };
     projected.subagentMeta = {
@@ -304,4 +309,26 @@ function structuredCloneSafe(value: unknown): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** pi codemode details.calls → 时间线摘要；args 是预览，取常见路径类字段做 summary */
+function projectCodemodeCalls(raw: unknown): ProjectedCodemodeCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw.flatMap((entry): ProjectedCodemodeCall[] => {
+    if (!isRecord(entry) || typeof entry.name !== 'string' || !entry.name) return [];
+    const args = isRecord(entry.args) ? entry.args : undefined;
+    const hint = args?.path ?? args?.command ?? args?.pattern ?? args?.query;
+    return [
+      {
+        name: entry.name,
+        ok: entry.status === 'ok',
+        ...(entry.status !== 'ok' && typeof entry.error === 'string' ? { error: entry.error } : {}),
+        ...(entry.status === 'cancelled' && typeof entry.error !== 'string'
+          ? { error: 'cancelled' }
+          : {}),
+        ...(typeof hint === 'string' && hint ? { summary: hint.slice(0, 80) } : {}),
+      },
+    ];
+  });
+  return calls.length > 0 ? calls : undefined;
 }
