@@ -1,5 +1,6 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ThinkingLevel } from '@shared/types';
+import { findVirtualModel } from '@shared/virtualModels';
 import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
@@ -33,6 +34,7 @@ export function ScopedDefaultModelField({
 }) {
   const { t } = useI18n();
   const providers = useSettingsStore((state) => state.providers);
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const snapshot = useOauthCredentialStore((state) => state.snapshot);
   const candidates = useMemo(
     () => usableProvidersForOauthSnapshot(providers, snapshot),
@@ -42,6 +44,7 @@ export function ScopedDefaultModelField({
     ? candidates.find((entry) => entry.id === value.providerId)
     : undefined;
   const selectedModel = selectedProvider?.models.find((entry) => entry.id === value?.modelId);
+  const selectedVirtual = findVirtualModel(virtualModels, value);
 
   return (
     <Field className="w-full items-stretch">
@@ -51,8 +54,9 @@ export function ScopedDefaultModelField({
         <div className="w-full min-w-0">
           <ModelPicker
             providers={candidates}
-            providerId={selectedProvider?.id ?? ''}
-            modelId={selectedModel?.id ?? ''}
+            virtualModels={virtualModels}
+            providerId={selectedVirtual ? (value?.providerId ?? '') : (selectedProvider?.id ?? '')}
+            modelId={selectedVirtual ? selectedVirtual.id : (selectedModel?.id ?? '')}
             reasoningEnabled={reasoningEnabled}
             thinkingLevel={thinkingLevel}
             emptyLabel={inheritLabel}
@@ -65,7 +69,7 @@ export function ScopedDefaultModelField({
           />
         </div>
       )}
-      {value && (!selectedProvider || !selectedModel) && (
+      {value && !selectedVirtual && (!selectedProvider || !selectedModel) && (
         <p className="text-muted-foreground text-xs">
           {t('Selected model is unavailable — falls back to the default model.')}
         </p>

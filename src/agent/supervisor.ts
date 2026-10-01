@@ -75,6 +75,7 @@ import { parseAgentSessionCustomEntry, STALE_SESSION_ERROR } from '@shared/types
 import { type EditMode, resolveEditMode } from '@shared/types/editMode';
 import { providerIdOfAccountKey } from '@shared/types/oauthProviders';
 import type { PluginCommandSpawn, PluginHookSpawn } from '@shared/types/plugins';
+import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import { version } from '../../package.json';
 import { AgentControlInvoker } from './agentControl';
@@ -201,6 +202,8 @@ import { createEnsoAppTool, EnsoAppInvoker } from './tools/ensoApp';
 import { createEnsoCapabilitiesTool } from './tools/ensoCapabilities';
 import { createMemoryTools, MemoryInvoker } from './tools/memory';
 import { createWebTools } from './tools/web';
+import { createVirtualChooser } from './virtualClassifier';
+import { registerVirtualModel } from './virtualModels';
 import { createWorkflowTool, WORKFLOW_STOPPED_BY_USER } from './workflow';
 import { listWorkflowPresets, loadWorkflowPreset, workflowPresetRoots } from './workflowPresets';
 import { WorkspaceSwitchGate, workspaceBranchContextExtension } from './workspaceSwitch';
@@ -266,7 +269,8 @@ interface ManagedSession {
   browser?: BrowserInvoker;
   memory?: MemoryInvoker;
   agentControl?: AgentControlInvoker;
-  adaptiveDowngraded: boolean;
+  /** 已因不支持 adaptive 降级过的模型（虚拟模型下每个成员各降一次） */
+  adaptiveDowngraded: Set<string>;
   computer?: ComputerInvoker;
   /** 最近一次 auto_retry_start 携带的原始错误（取消重试时的终态错误文案） */
   lastRetryError?: string;
@@ -1251,7 +1255,7 @@ export class SessionSupervisor {
       case 'set-model': {
         const managed = this.must(command.identity);
         const runtime = await this.getRuntime();
-        const base = await resolveBaseModelOrRefresh(runtime, command.model);
+        const base = await resolveSessionModel(runtime, command.model);
         const next = applyReasoningToModel(
           { ...base, compat: base.compat ? { ...base.compat } : undefined },
           managed.session.model ? Boolean(managed.session.model.reasoning) : false,
@@ -1586,7 +1590,7 @@ export class SessionSupervisor {
     }
     const spawnStart = Date.now();
     const runtime = await this.getRuntime();
-    const baseModel = await resolveBaseModelOrRefresh(runtime, model);
+    const baseModel = await resolveSessionModel(runtime, model);
     const piModel = applyReasoningToModel(
       { ...baseModel, compat: baseModel.compat ? { ...baseModel.compat } : undefined },
       reasoningEnabled,
@@ -1886,7 +1890,7 @@ export class SessionSupervisor {
         extraTools = [],
       }) => {
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
-        const base = await resolveBaseModelOrRefresh(runtime, selectedModel);
+        const base = await resolveSessionModel(runtime, selectedModel);
         // 派发 thinking > 类型预设 > 模型条目预设 > 父会话
         const childReasoning = resolveChildReasoning(
           pickChildReasoningOverride(thinkingOverride, agentType, selectedModel),
@@ -2378,7 +2382,7 @@ export class SessionSupervisor {
       promptedRequestIds: new Set(),
       ...(opts.ensoApp ? { ensoApp: opts.ensoApp } : {}),
       ...(opts.safeJournal ? { safeJournal: opts.safeJournal } : {}),
-      adaptiveDowngraded: false,
+      adaptiveDowngraded: new Set<string>(),
       silentTurnNudgeUsed: false,
       ...(opts.runawayGuard ? { runawayGuard: opts.runawayGuard } : {}),
       timings: [],
@@ -2899,7 +2903,7 @@ export class SessionSupervisor {
       summary = `(WARNING: output hit the model limit — treat this round as incomplete)\n${summary}`;
     }
     const used = (last?.usage?.input ?? 0) + (last?.usage?.output ?? 0);
-    const window = positiveContextWindow(managed.session.model);
+    const window = positiveContextWindow(limitsModelOf(managed.session));
     if (window !== undefined && used > window * 0.85) {
       const pct = Math.round((used / window) * 100);
       summary += `\n\n(coworker context ${pct}% full — have it summarize, or dismiss it soon)`;
@@ -3201,11 +3205,15 @@ export class SessionSupervisor {
   }
 
   private tryAdaptiveDowngrade(managed: ManagedSession): boolean {
-    if (managed.adaptiveDowngraded) return false;
     const lastError = managed.messages.at(-1)?.errorMessage ?? '';
     if (!lastError.includes('adaptive thinking is not supported')) return false;
-    managed.adaptiveDowngraded = true;
+    // 虚拟模型：真正不支持的是这次路由到的成员
+    const routed = (managed.session.messages.at(-1) as { model?: unknown } | undefined)?.model;
+    const failedModel = typeof routed === 'string' ? routed : managed.modelId;
+    if (managed.adaptiveDowngraded.has(failedModel)) return false;
+    managed.adaptiveDowngraded.add(failedModel);
     runtimeAdaptiveBlocklist.add(managed.modelId);
+    runtimeAdaptiveBlocklist.add(failedModel);
     const compat = managed.session.model?.compat as { forceAdaptiveThinking?: boolean } | undefined;
     if (compat) compat.forceAdaptiveThinking = undefined;
     const lastUser = [...managed.messages].reverse().find((message) => message.role === 'user');
@@ -3696,7 +3704,7 @@ export class SessionSupervisor {
   }
 
   private emitSessionMeta(managed: ManagedSession): void {
-    const contextWindow = positiveContextWindow(managed.session.model);
+    const contextWindow = positiveContextWindow(limitsModelOf(managed.session));
     let occupancy: ReturnType<typeof collectContextOccupancy> | undefined;
     try {
       const baseline = occupancyFromManaged(managed, contextWindow, (message) =>
@@ -4199,16 +4207,45 @@ function liveCompletionText(partial: unknown): { text: string; thinking: string 
  * 已能选到，worker 这边仍是旧清单 → 未命中时对基础 provider 补一次联网刷新再重试。
  */
 export async function resolveBaseModelOrRefresh(runtime: ModelRuntime, model: SpawnModelConfig) {
+  let resolved: ReturnType<typeof resolveBaseModel>;
   try {
-    return resolveBaseModel(runtime, model);
+    resolved = resolveBaseModel(runtime, model);
   } catch (error) {
     if (!model.oauthAccountKey) throw error;
     // Cursor 无 force 只踢后台任务并立刻返回兜底清单（没有 claude-fable-5-1 这类新 id）
     await refreshWorkerProviderModels(runtime, providerIdOfAccountKey(model.oauthAccountKey), {
       force: true,
     });
-    return resolveBaseModel(runtime, model);
+    resolved = resolveBaseModel(runtime, model);
   }
+  return resolved;
+}
+
+/** 会话主模型：虚拟配置先逐成员解析并注册 pi 虚拟模型，其余同 resolveBaseModelOrRefresh。 */
+export async function resolveSessionModel(runtime: ModelRuntime, model: SpawnModelConfig) {
+  if (!model.virtual) return resolveBaseModelOrRefresh(runtime, model);
+  const classifier = model.virtual.classifier;
+  const judge =
+    classifier?.source === 'judge' && classifier.model
+      ? await resolveBaseModelOrRefresh(runtime, classifier.model).catch((error) => {
+          console.warn('[virtual-model] judge model unavailable:', error);
+          return undefined;
+        })
+      : undefined;
+  const chooser = classifier ? createVirtualChooser(runtime, classifier, judge) : undefined;
+  const registration = await registerVirtualModel(
+    runtime,
+    model,
+    (member) => resolveBaseModelOrRefresh(runtime, member),
+    chooser,
+    supportsAdaptiveThinking
+  );
+  return registration.model;
+}
+
+/** 上下文上限按最近一次实际响应的模型；虚拟模型首个响应前用其声明的上限。 */
+function limitsModelOf(session: AgentSession) {
+  return session.routedModel?.model ?? session.model;
 }
 
 /**
@@ -4217,6 +4254,7 @@ export async function resolveBaseModelOrRefresh(runtime: ModelRuntime, model: Sp
  * apiKey 注册自定义 provider：行覆盖 > 精确 catalog id > 乐观默认。
  */
 export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig) {
+  if (model.virtual) throw new Error('virtual model config must go through resolveSessionModel');
   if (model.oauthAccountKey) {
     // worker 与 Main 是两个 ModelRuntime 实例，只共用 auth.json。合成 id（第 2+ 个账号）
     // 的克隆 provider 必须在本进程也注册一遍，否则 getModel 取不到
@@ -4247,27 +4285,31 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
     piBaseUrl,
     selectCatalogEntryForCompat(models, model.api, piBaseUrl, model.modelId)
   );
+  const definition: CustomModelDefinition = {
+    id: model.modelId,
+    name: model.modelId,
+    reasoning: resolved.reasoning,
+    ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    // applyExtension 原样展开定义，不填默认值；缺 contextWindow 时 pi 会把 max_tokens 钳成 NaN
+    contextWindow,
+    // 太小会把 high/max 的思考预算压扁（预算被限制在 maxTokens-1024 内）
+    maxTokens,
+    ...(compat ? { compat } : {}),
+  };
+  // registerProvider 整体替换 models：同一端点+key 的多个模型要累积，否则虚拟模型的同 provider
+  // 成员会互相挤出目录（pi 路由时按目录重新取模型）
+  const known = registeredCustomModels.get(providerId) ?? new Map<string, CustomModelDefinition>();
+  known.set(model.modelId, definition);
+  registeredCustomModels.set(providerId, known);
   runtime.registerProvider(providerId, {
     baseUrl: piBaseUrl,
     api: model.api,
     apiKey: model.apiKey,
     // 统一伪装为 enso-code 客户端（覆盖 pi 默认的 "pi (darwin ...)"）
     headers: { 'User-Agent': ENSO_USER_AGENT },
-    models: [
-      {
-        id: model.modelId,
-        name: model.modelId,
-        reasoning: resolved.reasoning,
-        ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
-        input: ['text', 'image'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // applyExtension 原样展开定义，不填默认值；缺 contextWindow 时 pi 会把 max_tokens 钳成 NaN
-        contextWindow,
-        // 太小会把 high/max 的思考预算压扁（预算被限制在 maxTokens-1024 内）
-        maxTokens,
-        ...(compat ? { compat } : {}),
-      },
-    ],
+    models: [...known.values()],
   });
   if (model.api === 'openai-responses') {
     const provider = runtime.getProvider(providerId);
@@ -4279,6 +4321,12 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
   if (!registered) throw new Error(`model not found after register: ${model.modelId}`);
   return registered;
 }
+
+/** 每个自定义 provider 键已注册过的模型定义（worker 进程内） */
+type CustomModelDefinition = NonNullable<
+  Parameters<ModelRuntime['registerProvider']>[1]['models']
+>[number];
+const registeredCustomModels = new Map<string, Map<string, CustomModelDefinition>>();
 
 /** 统一的客户端标识，格式对齐 pi-coding-agent 的 getPiUserAgent（<name>/<ver> (<platform>; <runtime>; <arch>)） */
 const ENSO_USER_AGENT = `enso-code/${version} (${process.platform}; node/${process.version}; ${process.arch})`;
@@ -4318,7 +4366,7 @@ function occupancyFromManaged(
     tools: typeof managed.session.getAllTools === 'function' ? managed.session.getAllTools() : [],
     contextMessages: sessionManager.buildSessionContext?.().messages ?? [],
     branch,
-    currentModelFamily: modelFamilyOf(managed.session.model?.id ?? managed.modelId),
+    currentModelFamily: modelFamilyOf(limitsModelOf(managed.session)?.id ?? managed.modelId),
     compactionModelFamily: compactionModelFamilyOf(branch),
     contextWindow,
     pendingTaskReminders: managed.pendingTaskReminders,
@@ -4327,12 +4375,13 @@ function occupancyFromManaged(
 }
 
 function compactionModelFamilyOf(
-  branch: ReadonlyArray<{ type: string; modelId?: string }>
+  branch: ReadonlyArray<{ type: string; modelId?: string; provider?: string }>
 ): string | undefined {
   let lastModel: string | undefined;
   for (const entry of branch) {
+    // 虚拟模型的选择记录是条目 id，无法对应模型族：视为未知
     if (entry.type === 'model_change' && typeof entry.modelId === 'string')
-      lastModel = entry.modelId;
+      lastModel = entry.provider === VIRTUAL_PROVIDER_ID ? undefined : entry.modelId;
     if (entry.type === 'compaction') return lastModel ? modelFamilyOf(lastModel) : undefined;
   }
   return undefined;

@@ -24,6 +24,7 @@ import type {
 import type { AgentMode, ApprovalMode, ThinkingLevel } from '@shared/types/agent';
 import type { SpeechModelId } from '@shared/types/speech';
 import type { ModelPricing, PricingTable } from '@shared/usage/pricing';
+import type { VirtualModelEntry } from '@shared/virtualModels';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import type { OauthCredentialSnapshot } from '@/stores/oauthCredentials';
 
@@ -275,6 +276,8 @@ export interface SettingsState {
   subagentModelsEnabled: boolean;
   /** 子代理可选模型列表（模型 + 选型描述） */
   subagentModels: SubagentModelEntry[];
+  /** 虚拟模型：按请求路由到真实成员模型 */
+  virtualModels: VirtualModelEntry[];
   /** 被关闭的内置子代理类型（name 集合） */
   disabledBuiltinAgentTypes: string[];
   /** 被关闭的内置工具（id 集合;默认全开） */
@@ -436,6 +439,9 @@ export interface SettingsState {
   addSubagentModel: (entry: Omit<SubagentModelEntry, 'id'>) => SubagentModelEntry;
   updateSubagentModel: (id: string, updates: Partial<Omit<SubagentModelEntry, 'id'>>) => void;
   removeSubagentModel: (id: string) => void;
+  addVirtualModel: (entry: Omit<VirtualModelEntry, 'id'>) => VirtualModelEntry;
+  updateVirtualModel: (id: string, updates: Partial<Omit<VirtualModelEntry, 'id'>>) => void;
+  removeVirtualModel: (id: string) => void;
 
   // Agent type actions
   addAgentType: (entry: Omit<AgentTypeEntry, 'id'>) => AgentTypeEntry;

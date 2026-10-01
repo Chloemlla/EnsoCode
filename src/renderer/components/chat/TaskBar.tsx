@@ -1,4 +1,5 @@
 import type { BackgroundTaskInfo, SubagentActivity, SubagentInfo } from '@shared/types/agent';
+import { modelDisplayName } from '@shared/virtualModels';
 import {
   Ban,
   Bot,
@@ -22,6 +23,7 @@ import { parseMcpToolName, unwrapMcpProxyCall } from '@/lib/mcpToolName';
 import { stripAnsi } from '@/lib/terminalText';
 import { cn } from '@/lib/utils';
 import { formatDuration } from '@/stores/sessions/stats';
+import { useSettingsStore } from '@/stores/settings';
 import { Markdown } from './Markdown';
 import { StepNode } from './StepNode';
 import { summarizeSubagentToolArgs } from './subagentToolSummary';
@@ -61,6 +63,7 @@ const trackRunning = (sessionId: string, ids: string[]): ReadonlySet<string> => 
  * 点「查看」在行下内嵌展开输出;done 5s 自动移除,failed 手动关闭。
  */
 export function TaskBar({ sessionId, tasks, subagents }: TaskBarProps) {
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const { t } = useI18n();
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => readDismissed(sessionId));
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
@@ -108,7 +111,7 @@ export function TaskBar({ sessionId, tasks, subagents }: TaskBarProps) {
           <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs">
             <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
               {openTask ? openTask.command : openAgent?.description}
-              {openAgent?.modelId ? ` · ${openAgent.modelId}` : ''}
+              {openAgent?.modelId ? ` · ${modelDisplayName(virtualModels, openAgent.modelId)}` : ''}
             </span>
             <button
               type="button"
@@ -159,7 +162,10 @@ export function TaskBar({ sessionId, tasks, subagents }: TaskBarProps) {
             <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
               {agent.description}
               {agent.modelId && (
-                <span className="text-muted-foreground/60"> · {agent.modelId}</span>
+                <span className="text-muted-foreground/60">
+                  {' '}
+                  · {modelDisplayName(virtualModels, agent.modelId)}
+                </span>
               )}
               {agent.status === 'running' && agent.currentActivity && (
                 <span className="text-muted-foreground/60"> · {agent.currentActivity}</span>

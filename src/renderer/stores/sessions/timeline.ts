@@ -838,6 +838,8 @@ function buildMessageTimeline(
   // 整轮计时只累计模型请求与非交互工具的真实执行耗时；用户回答、审批、排队等空档不计。
   let turnActiveMs = 0;
   let turnSteps = 0;
+  // 首个 step 失败后被重试（虚拟模型会换成员）时，回复头改用随后成功的那条的模型
+  let replyModelFailed = false;
   let turnUserTimestamp: number | undefined;
   let turnHadAskUser = false;
   let currentTurnUserItem: Extract<TimelineItem, { kind: 'user' }> | undefined;
@@ -862,6 +864,7 @@ function buildMessageTimeline(
       turnHadAskUser = false;
       turnActiveMs = 0;
       turnSteps = 0;
+      replyModelFailed = false;
       const text = partText(message);
       const images = message.content.filter((part) => part.type === 'image');
       // 后台任务完成的合成注入：不按用户气泡渲染，转为系统通知行
@@ -927,9 +930,12 @@ function buildMessageTimeline(
 
     // 本轮末 step（后面只剩 toolResult 或已到新一轮 user）且轮内有多个 step 时，正文读数附带活跃总耗时。
     turnSteps += 1;
-    if (turnSteps === 1 && currentTurnUserItem) {
-      if (message.model) currentTurnUserItem.replyModel = message.model;
-      if (message.timestamp !== undefined) currentTurnUserItem.replyAt = message.timestamp;
+    if (currentTurnUserItem && message.model && (turnSteps === 1 || replyModelFailed)) {
+      currentTurnUserItem.replyModel = message.model;
+      replyModelFailed = message.stopReason === 'error';
+    }
+    if (turnSteps === 1 && currentTurnUserItem && message.timestamp !== undefined) {
+      currentTurnUserItem.replyAt = message.timestamp;
     }
     const stepRunMs = completedStepRunMs(message);
     if (stepRunMs !== undefined) turnActiveMs += stepRunMs;

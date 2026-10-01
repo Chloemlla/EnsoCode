@@ -46,6 +46,7 @@ import type {
 } from '@shared/types/oauthProviders';
 import type { RecentProject } from '@shared/types/project';
 import type { ListModelsResult, TestProviderResult } from '@shared/types/providerApi';
+import { parseVirtualModels } from '@shared/virtualModels';
 import { isAbsolutePathLike } from '@shared/worktreeRoot';
 import type { AgentSessionIndex } from './agentSessionIndex';
 import { createSecretSet, type SecretSet } from './secretRedactor';
@@ -838,9 +839,12 @@ export function createCapabilityHandlers(
         return unavailable(`OAuth credentials unavailable: ${safeError(error)}`);
       }
       const selection = { providerId, modelId };
-      const usability = modelUsability(selection, providers, {
-        oauthCredentials: { status: 'ready', authenticatedAccountKeys },
-      });
+      const usability = modelUsability(
+        selection,
+        providers,
+        { oauthCredentials: { status: 'ready', authenticatedAccountKeys } },
+        parseVirtualModels(settingsState(services.readSettings()).virtualModels)
+      );
       if (usability !== 'usable') return unavailable(`Default model is not usable: ${usability}`);
       const stale = context.assertExecutionCurrent();
       if (stale) return stale;

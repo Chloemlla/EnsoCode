@@ -175,6 +175,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   projects: { mode: 'excluded', reason: 'device-local paths and authority records' },
   projectGroups: { mode: 'excluded', reason: 'device-local project grouping' },
   usageModelPricing: { mode: 'portable' },
+  virtualModels: { mode: 'excluded', reason: 'virtual model routing is not synced yet' },
 } as const satisfies Record<SettingsStateField, ConfigSyncFieldPolicy>;
 
 export const SYNC_FIELDS = SETTINGS_STATE_FIELDS.filter(

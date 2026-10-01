@@ -3,6 +3,7 @@ import type {
   ExtensionContext,
   SessionBeforeCompactEvent,
 } from '@earendil-works/pi-coding-agent';
+import { directModelFor } from '../virtualModels';
 import { type EvictedItem, selectKeptBoundary } from './budget';
 import { BUDGETS, type CompactMode, chunkMessages, type MessageChunk } from './chunk';
 import { extractCompactFacts } from './extract';
@@ -124,7 +125,10 @@ export function createEnsoCompactHandler(options: EnsoCompactOptions = {}) {
     if (branch.length < 3) return;
 
     const ref = options.summaryModel;
-    const model = ref ? ctx.modelRegistry.find(ref.provider, ref.id) : ctx.model;
+    // 虚拟模型不能直接 complete：未配置摘要模型时用其快模型
+    const model = ref
+      ? ctx.modelRegistry.find(ref.provider, ref.id)
+      : ctx.model && directModelFor(ctx.model);
     if (!model) return;
 
     const preparation = event.preparation as typeof event.preparation & {

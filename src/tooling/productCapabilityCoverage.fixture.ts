@@ -116,6 +116,7 @@ export const SETTINGS_DATA_COVERAGE = {
   agentTypes: surfaces('agent-types.list'),
   subagentModelsEnabled: surfaces('providers.subagent-models.toggle'),
   subagentModels: surfaces('providers.subagent-models'),
+  virtualModels: excluded('virtual model routing is configured in the settings UI only'),
   disabledBuiltinAgentTypes: surfaces('agent-types.toggle-builtin'),
   disabledBuiltinTools: surfaces('tools.toggle-builtin'),
   disabledWorkflowPresets: excluded('Built-in workflow preset toggles in the settings page.'),
@@ -279,6 +280,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   addSubagentModel: surfaces('providers.subagent-models.add'),
   updateSubagentModel: surfaces('providers.subagent-models.update'),
   removeSubagentModel: surfaces('providers.subagent-models.remove'),
+  addVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
+  updateVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
+  removeVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
   addAgentType: surfaces('agent-types.create'),
   updateAgentType: surfaces('agent-types.edit'),
   removeAgentType: surfaces('agent-types.delete'),
@@ -382,6 +386,9 @@ export const IPC_PRODUCT_COVERAGE = {
   PROVIDERS_LIST_MODELS: surfaces('providers.fetch-models'),
   PROVIDERS_TEST: surfaces('providers.test-connection'),
   PROVIDERS_MODEL_META: surfaces('providers.model-meta'),
+  PROVIDERS_CLASSIFIER_MODELS: excluded(
+    'classifier models are listed only by the virtual model settings UI'
+  ),
   OAUTH_PROVIDERS_LIST: surfaces('providers.oauth.list'),
   OAUTH_LOGIN: surfaces('providers.oauth.login'),
   OAUTH_LOGIN_RESPOND: excluded(

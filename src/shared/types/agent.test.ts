@@ -685,6 +685,69 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ ...base, smartCompactSummaryModel: 'anthropic/x' })).toBeNull();
   });
 
+  it('spawn-parent / set-model 携虚拟模型配置：成员与分类器严格收窄', () => {
+    const virtualModel = {
+      ...model,
+      settingsProviderId: 'enso-virtual',
+      modelId: 'auto-1',
+      virtual: {
+        name: 'Auto',
+        primary: model,
+        fast: { ...model, modelId: 'fast' },
+        fallbacks: [{ ...model, modelId: 'backup' }],
+        classifier: { source: 'judge', timeoutMs: 3000, model: { ...model, modelId: 'fast' } },
+      },
+    };
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo' };
+    expect(parseAgentCommand({ ...base, model: virtualModel })).toEqual({
+      ...base,
+      model: virtualModel,
+    });
+    expect(
+      parseAgentCommand({ type: 'set-model', identity: parent, model: virtualModel })
+    ).not.toBeNull();
+    const piClassifier = {
+      ...virtualModel,
+      virtual: {
+        ...virtualModel.virtual,
+        classifier: {
+          source: 'pi-classifier',
+          timeoutMs: 3000,
+          classifier: { provider: 'openrouter', modelId: 'typesafe/jev-1.13', apiKey: 'k' },
+        },
+      },
+    };
+    expect(parseAgentCommand({ ...base, model: piClassifier })).not.toBeNull();
+    const bad = [
+      { ...virtualModel, virtual: { ...virtualModel.virtual, primary: { modelId: 'x' } } },
+      { ...virtualModel, virtual: { ...virtualModel.virtual, fallbacks: [virtualModel] } },
+      { ...virtualModel, virtual: { ...virtualModel.virtual, extra: true } },
+      {
+        ...virtualModel,
+        virtual: { ...virtualModel.virtual, classifier: { source: 'judge', timeoutMs: 3000 } },
+      },
+      {
+        ...virtualModel,
+        virtual: {
+          ...virtualModel.virtual,
+          classifier: {
+            source: 'pi-classifier',
+            timeoutMs: 0,
+            classifier: { provider: 'x', modelId: 'y' },
+          },
+        },
+      },
+    ];
+    for (const candidate of bad) {
+      expect(parseAgentCommand({ ...base, model: candidate })).toBeNull();
+    }
+    // 辅助用途（代审、压缩摘要）只收真实模型
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', model: virtualModel })).toBeNull();
+    expect(
+      parseAgentCommand({ ...base, model, smartCompactSummaryModel: virtualModel })
+    ).toBeNull();
+  });
+
   it('spawn-parent 携 smartCompactMode:合法通过,脏值拒绝', () => {
     const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
     expect(parseAgentCommand({ ...base, smartCompactMode: 'balanced' })).toEqual({

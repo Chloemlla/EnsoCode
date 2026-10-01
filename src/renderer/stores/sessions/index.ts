@@ -3282,6 +3282,7 @@ export const useSessionsStore = create<SessionsState>()(
             lastModelId: conversation.lastModelId,
             providers: settings.providers,
             credentials: oauthCredentialContext(snapshot),
+            virtualModels: settings.virtualModels,
           });
           // 有明确历史模型的旧会话只允许按原组合恢复；真实 logout/失效时不静默改模 spawn。
           const hasRememberedModel = Boolean(
