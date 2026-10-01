@@ -1220,6 +1220,13 @@ export interface TodoItem {
 }
 
 /** 渲染层可见的消息投影：pi AgentMessage 的白名单克隆 */
+export interface ProjectedCodemodeCall {
+  name: string;
+  ok: boolean;
+  error?: string;
+  summary?: string;
+}
+
 export interface ProjectedMessage {
   /** Persisted user entry identity, absent on unconfirmed messages. */
   entryId?: string;
@@ -1256,6 +1263,8 @@ export interface ProjectedMessage {
   fileChanges?: ProjectedFileChange[];
   /** apply_patch 完整终态清单，不依赖普通 content 截断预算 */
   applyPatchOutcome?: ProjectedApplyPatchOutcome;
+  /** codemode toolResult 的嵌套调用摘要（details.calls） */
+  codemodeCalls?: ProjectedCodemodeCall[];
   /** compactionSummary 消息：压缩前的上下文 token 数 */
   tokensBefore?: number;
   /** 摘要来自 Enso compact hook，不是原生 summarizer */
@@ -1775,8 +1784,25 @@ export function isBackgroundTaskId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 128;
 }
 
+function isProjectedCodemodeCalls(value: unknown): value is ProjectedCodemodeCall[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (call) =>
+        isRecord(call) &&
+        isNonEmptyString(call.name) &&
+        typeof call.ok === 'boolean' &&
+        (call.error === undefined || typeof call.error === 'string') &&
+        (call.summary === undefined || typeof call.summary === 'string')
+    )
+  );
+}
+
 function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   if (value.rtk !== undefined && !parseRtkToolStats(value.rtk)) return false;
+  if (value.codemodeCalls !== undefined && !isProjectedCodemodeCalls(value.codemodeCalls)) {
+    return false;
+  }
   if (value.backgroundTaskId !== undefined && !isBackgroundTaskId(value.backgroundTaskId)) {
     return false;
   }

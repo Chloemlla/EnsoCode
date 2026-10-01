@@ -109,6 +109,7 @@ import {
   resolveChildReasoning,
 } from './childReasoning';
 import { createClaudeHooksExtension } from './claudeHooks';
+import { CodemodeHost, isDeferredMcp } from './codemode';
 import {
   collectContextOccupancy,
   estimateConversationTokens,
@@ -136,9 +137,7 @@ import { OperationGate } from './gate';
 import { createGoalTools } from './goal';
 import { readHarnessRuleFiles, resolveHarnessSkillRoots } from './harnessAssets';
 import { type ContextMessage, sanitizeContextMessages } from './imageContext';
-import { createIsolatedSandboxTool } from './isolatedSandbox';
 import { McpManager } from './mcp';
-import { createMcpProxyTool, isDeferredMcp } from './mcpProxy';
 import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { ParentNotifier } from './notify';
@@ -385,6 +384,8 @@ function createSessionResourceLoader(options: {
     resumed?: boolean;
   };
   exploreFold?: ReturnType<typeof createExploreFoldState>;
+  /** codemode / tool_search 与按需 MCP；排在最前，mcp_servers 段先于 persona 强制提示词写入 */
+  codemode?: InlineExtension;
   /** 仅父会话：互斥压缩策略。 */
   compactStrategy?: CompactStrategy;
   smartCompactSummaryModel?: SpawnModelConfig;
@@ -415,6 +416,7 @@ function createSessionResourceLoader(options: {
       : {}),
     // noExtensions 只挡磁盘上的项目/全局扩展；inline factory 不受影响，图片修剪对所有会话生效
     extensionFactories: [
+      ...(options.codemode ? [options.codemode] : []),
       ...(persona
         ? [
             {
@@ -1615,6 +1617,12 @@ export class SessionSupervisor {
     if (smartCompactSummaryModel) {
       await resolveBaseModelOrRefresh(runtime, smartCompactSummaryModel);
     }
+    const deferredMcp = mcpServers.filter(isDeferredMcp);
+    const directMcp = mcpServers.filter((server) => !isDeferredMcp(server));
+    const codemodeHost = new CodemodeHost({
+      codemode: toolEnabled('isolated_sandbox'),
+      deferredServers: deferredMcp,
+    });
     const resourceLoader = createSessionResourceLoader({
       branchContext: this.branchContextExtension(() => managedRef),
       silentTurnRecovery: silentTurnRecoveryExtension((kind) => {
@@ -1634,6 +1642,7 @@ export class SessionSupervisor {
       pluginCommands,
       pluginHooks: { hooks: pluginHooks, role: { kind: 'parent' }, resumed: Boolean(resumeFile) },
       exploreFold,
+      codemode: codemodeHost.extension,
       persona: systemPrompt,
       ...(compactStrategy !== 'standard'
         ? {
@@ -1644,8 +1653,6 @@ export class SessionSupervisor {
         : {}),
     });
     const toolsStart = Date.now();
-    const deferredMcp = mcpServers.filter(isDeferredMcp);
-    const directMcp = mcpServers.filter((server) => !isDeferredMcp(server));
     const [, mcpTools] = await Promise.all([
       resourceLoader.reload(),
       directMcp.length > 0 ? this.mcp.toolsFor(directMcp, 3000) : Promise.resolve([]),
@@ -1844,18 +1851,17 @@ export class SessionSupervisor {
         ...mutations,
       ];
     };
-    const wrapMcpTools = (toolGate: ApprovalGate): Def[] => [
-      ...mcpTools.map((tool) => withApproval(toolGate, 'mcp', tool)),
-      ...(deferredMcp.length > 0
-        ? [
-            createMcpProxyTool({
-              servers: deferredMcp,
-              resolve: (server) => this.mcp.resolve(server),
-              wrap: (tool) => withApproval(toolGate, 'mcp', tool),
-            }),
-          ]
-        : []),
-    ];
+    const wrapMcpTools = (toolGate: ApprovalGate): Def[] =>
+      mcpTools.map((tool) => withApproval(toolGate, 'mcp', tool));
+    /** 按需 MCP：首次 codemode / tool_search 调用时连接，工具经同一套审批与装饰后动态注册 */
+    const deferredMcpLoader =
+      (toolGate: ApprovalGate, finish: (tools: Def[]) => Def[]) =>
+      async (server: McpServerSpawnConfig): Promise<Def[] | null> => {
+        const resolved = await this.mcp.resolve(server);
+        return resolved.ok
+          ? finish(resolved.tools.map((tool) => withApproval(toolGate, 'mcp', tool)))
+          : null;
+      };
     const buildCoreTools = (): Def[] => [
       ...buildBaseTools(gate, checkpoints),
       ...wrapMcpTools(gate),
@@ -1941,18 +1947,21 @@ export class SessionSupervisor {
             : undefined;
         const childExploreFold =
           !isLockedEnso && exploreFoldEnabled ? createExploreFoldState() : undefined;
-        const childSandboxCatalog: { current: Def[] } = { current: [] };
+        const typed = Boolean(resolved || agentType);
+        const childCodemode = new CodemodeHost({
+          codemode: !isLockedEnso && toolEnabled('isolated_sandbox'),
+          deferredServers: isLockedEnso || typed ? [] : deferredMcp,
+        });
         const childTools = isLockedEnso
           ? [createEnsoCapabilitiesTool(), createEnsoAppTool(ensoApp!), createAskTool(askManager!)]
           : [
               ...(resolved?.tools === 'readonly' || agentType?.tools === 'readonly'
                 ? readOnlyTools()
                 : buildBaseTools(childGate, undefined, agentType?.writeScope)),
-              ...(resolved || agentType ? typeMcpTools : wrapMcpTools(childGate)),
+              ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
               ...(extraTools as Def[]),
               ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
             ];
-        childSandboxCatalog.current = childTools;
         const childRunaway = new RunawayGuard();
         const childReminders = new SystemReminderRegistry();
         const childBudget = new ToolOutputBudget({
@@ -1962,26 +1971,15 @@ export class SessionSupervisor {
             childIdentity?.sessionId ?? `${sessionId}-child`
           ),
         });
-        const rawSubTools = isLockedEnso
-          ? childTools
-          : [
-              ...childTools,
-              ...(toolEnabled('isolated_sandbox')
-                ? [
-                    createIsolatedSandboxTool({
-                      getTools: () => childSandboxCatalog.current,
-                      store: new Map(),
-                    }),
-                  ]
-                : []),
-            ];
-        const subTools = isLockedEnso
-          ? rawSubTools
-          : decorateSessionTools(rawSubTools, {
-              reminders: childReminders,
-              runaway: childRunaway,
-              budget: childBudget,
-            });
+        const rawSubTools = childTools;
+        const decorateChild = (tools: Def[]) =>
+          decorateSessionTools(tools, {
+            reminders: childReminders,
+            runaway: childRunaway,
+            budget: childBudget,
+          });
+        const subTools = isLockedEnso ? rawSubTools : decorateChild(rawSubTools);
+        childCodemode.bindDeferredTools(deferredMcpLoader(childGate, decorateChild));
         const selectedSkillPaths = resolved?.skillPaths ?? agentType?.skillPaths ?? [];
         const branchContext = this.branchContextExtension(() =>
           [...this.sessions.values()].find((managed) => managed.session === session)
@@ -2018,6 +2016,7 @@ export class SessionSupervisor {
                 resumed: Boolean(childResume),
               },
               ...(childExploreFold ? { exploreFold: childExploreFold } : {}),
+              codemode: childCodemode.extension,
             });
         await subLoader.reload();
         const safeJournal =
@@ -2051,17 +2050,19 @@ export class SessionSupervisor {
           resourceLoader: subLoader,
           sessionManager,
         });
+        const childExtraTools = childCodemode.activeToolNames();
         if (isCursorModel(subModel)) attachCursorBridgeToSession(session, subTools, cwd);
         return {
           session,
           modelId: selectedModel.modelId,
           ...(safeJournal ? { safeJournal } : {}),
           modelRef: settingsModelRef(selectedModel),
-          toolIds: subTools.map((tool) => tool.name),
+          toolIds: [...subTools.map((tool) => tool.name), ...childExtraTools],
           // Decorators clone tools; exclude MCP by identity before decoration.
-          proofToolIds: rawSubTools
-            .filter((tool) => !typeMcpTools.includes(tool))
-            .map((tool) => tool.name),
+          proofToolIds: [
+            ...rawSubTools.filter((tool) => !typeMcpTools.includes(tool)).map((tool) => tool.name),
+            ...childExtraTools,
+          ],
           ...(ensoApp ? { ensoApp } : {}),
           ...(isLockedEnso ? {} : { runawayGuard: childRunaway }),
         };
@@ -2136,8 +2137,6 @@ export class SessionSupervisor {
           });
         })
       : undefined;
-    const catalogRef: { current: Def[] } = { current: [] };
-    const sandboxStore = new Map<string, unknown>();
     const workflowRoots = workflowPresetRoots(remote ? undefined : cwd, {
       customDir: this.options.workflowDir,
     });
@@ -2224,7 +2223,7 @@ export class SessionSupervisor {
           })
         : []),
     ];
-    // Plan 工具门包在父会话工具最外层（exec 沙盒经 catalog 调用同样受限）；目录跨模式不变
+    // Plan 工具门包在父会话工具最外层（codemode 嵌套调用同样受限）；目录跨模式不变
     const planRef: { current?: PlanController } = {};
     const planHost = {
       state: () => planRef.current?.state() ?? EMPTY_PLAN_STATE,
@@ -2233,24 +2232,21 @@ export class SessionSupervisor {
     const readonlyAgentTypes = new Set(
       agentTypes.filter((type) => type.tools === 'readonly').map((type) => type.name)
     );
-    const catalogTools = toolEnabled('plan')
-      ? sessionTools.map((tool) => withPlanGate(tool, { host: planHost, readonlyAgentTypes }))
-      : sessionTools;
-    catalogRef.current = catalogTools;
+    const planGated = (tools: Def[]): Def[] =>
+      toolEnabled('plan')
+        ? tools.map((tool) => withPlanGate(tool, { host: planHost, readonlyAgentTypes }))
+        : tools;
     const customTools = decorateSessionTools(
       [
-        ...catalogTools,
+        ...planGated(sessionTools),
         ...(toolEnabled('plan') ? [createSubmitPlanTool(planHost, randomUUID)] : []),
-        ...(toolEnabled('isolated_sandbox')
-          ? [
-              createIsolatedSandboxTool({
-                getTools: () => catalogRef.current,
-                store: sandboxStore,
-              }),
-            ]
-          : []),
       ],
       { reminders, runaway, budget }
+    );
+    codemodeHost.bindDeferredTools(
+      deferredMcpLoader(gate, (tools) =>
+        decorateSessionTools(planGated(tools), { reminders, runaway, budget })
+      )
     );
 
     const { session } = await createAgentSession({
@@ -2266,6 +2262,7 @@ export class SessionSupervisor {
         ? SessionManager.open(resumeFile, this.options.sessionDir, cwd)
         : SessionManager.create(cwd, this.options.sessionDir),
     });
+    const codemodeTools = codemodeHost.activeToolNames();
     if (isCursorModel(piModel)) attachCursorBridgeToSession(session, customTools, cwd);
     else ensureAssistantUsage(session.messages as unknown[]);
     console.log(
@@ -2277,7 +2274,7 @@ export class SessionSupervisor {
       resumeFile,
       asks: askManager,
       factory,
-      toolIds: customTools.map((tool) => tool.name),
+      toolIds: [...customTools.map((tool) => tool.name), ...codemodeTools],
       checkpoints,
       runawayGuard: runaway,
     });
@@ -3021,6 +3018,8 @@ export class SessionSupervisor {
         return;
       }
       case 'tool_execution_start': {
+        // codemode 嵌套调用只进脚本，不上时间线
+        if (event.parentToolCallId) return;
         // 耗时只从真正开始执行算：同轮后发工具不能把前面 bash 的排队算进去
         if (!managed.toolStartAt.has(event.toolCallId)) {
           const startedAt = Date.now();
@@ -3039,6 +3038,7 @@ export class SessionSupervisor {
         return;
       }
       case 'tool_execution_update': {
+        if (event.parentToolCallId) return;
         // pi 已按 BASH_UPDATE_THROTTLE_MS 节流下发全量快照，这里只做投影，不再二次节流
         const parts: unknown = event.partialResult?.content;
         if (!Array.isArray(parts)) return;
@@ -3062,6 +3062,7 @@ export class SessionSupervisor {
         return;
       }
       case 'tool_execution_end': {
+        if (event.parentToolCallId) return;
         const start = managed.toolStartAt.get(event.toolCallId);
         managed.toolStartAt.delete(event.toolCallId);
         if (start !== undefined) {

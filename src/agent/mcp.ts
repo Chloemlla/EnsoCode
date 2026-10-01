@@ -167,6 +167,36 @@ export const mcpServerSlug = (name: string): string =>
 export const mcpToolName = (serverName: string, toolName: string): string =>
   `mcp__${mcpServerSlug(serverName)}__${toolName}`;
 
+type McpJson = NonNullable<Awaited<ReturnType<ToolDefinition['execute']>>['structuredContent']>;
+
+/** codemode 脚本拿到的 CallToolResult 形状（与 pi 内置 MCP 一致） */
+const mcpResultSchema = (structuredContent: unknown) => ({
+  type: 'object',
+  properties: {
+    content: { type: 'array', items: { type: 'object' } },
+    ...(structuredContent && typeof structuredContent === 'object' ? { structuredContent } : {}),
+    isError: { type: 'boolean' },
+  },
+  required: ['content'],
+});
+
+const ANNOTATION_HINTS = [
+  'readOnlyHint',
+  'destructiveHint',
+  'idempotentHint',
+  'openWorldHint',
+] as const;
+
+function toAnnotations(raw: unknown): ToolDefinition['annotations'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const annotations: NonNullable<ToolDefinition['annotations']> = {};
+  for (const hint of ANNOTATION_HINTS) {
+    const value = (raw as Record<string, unknown>)[hint];
+    if (typeof value === 'boolean') annotations[hint] = value;
+  }
+  return Object.keys(annotations).length > 0 ? annotations : undefined;
+}
+
 export type McpServerResolution =
   | { ok: true; tools: ToolDefinition[] }
   | { ok: false; error: string; unauthorized: boolean };
@@ -179,10 +209,12 @@ function mapToolResult(
     { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
   >;
   details: undefined;
+  structuredContent: McpJson;
+  isError?: true;
 } {
   const payload =
     result && typeof result === 'object'
-      ? (result as { content?: unknown; isError?: boolean })
+      ? (result as { content?: unknown; isError?: boolean; _meta?: unknown })
       : {};
   const content = (Array.isArray(payload.content) ? payload.content : []).map(
     (part: { type: string; text?: string; data?: string; mimeType?: string }) => {
@@ -193,13 +225,19 @@ function mapToolResult(
       return { type: 'text' as const, text: JSON.stringify(part) };
     }
   );
-  if (payload.isError) {
-    const text = content.map((part) => (part.type === 'text' ? part.text : '[image]')).join('\n');
-    throw new Error(text || `MCP tool ${name} failed`);
+  const { _meta: _ignored, ...structuredContent } = payload;
+  const hasText = content.some((part) => part.type === 'text' && part.text);
+  if (payload.isError && !hasText) {
+    content.push({ type: 'text' as const, text: `MCP tool ${name} returned an error` });
   }
   return {
     content: content.length > 0 ? content : [{ type: 'text' as const, text: '' }],
     details: undefined,
+    structuredContent: {
+      ...structuredContent,
+      content: payload.content ?? [],
+    } as unknown as McpJson,
+    ...(payload.isError ? { isError: true as const } : {}),
   };
 }
 
@@ -454,7 +492,13 @@ export class McpManager {
   private toToolDefinition(
     client: Client,
     server: McpServerSpawnConfig,
-    tool: { name: string; description?: string; inputSchema: unknown },
+    tool: {
+      name: string;
+      description?: string;
+      inputSchema: unknown;
+      outputSchema?: unknown;
+      annotations?: unknown;
+    },
     callTimeoutMs: number
   ): ToolDefinition {
     const name = mcpToolName(server.name, tool.name);
@@ -473,12 +517,16 @@ export class McpManager {
         callTimeoutMs,
         `callTool ${name}`
       );
+    const annotations = toAnnotations(tool.annotations);
     return {
       name,
       label: `${server.name}: ${tool.name}`,
       description: tool.description ?? `MCP tool ${tool.name} from ${server.name}`,
       // MCP inputSchema 是标准 JSON Schema，TypeBox 的 TSchema 结构同源，直接透传
       parameters: tool.inputSchema as ToolDefinition['parameters'],
+      outputSchema: mcpResultSchema(tool.outputSchema) as ToolDefinition['outputSchema'],
+      namespace: { name: `mcp__${mcpServerSlug(server.name)}`, description: server.name },
+      ...(annotations ? { annotations } : {}),
       execute: async (_toolCallId, params) => {
         try {
           return mapToolResult(await invoke(active, params), name);

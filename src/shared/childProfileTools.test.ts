@@ -12,7 +12,7 @@ describe('childProfileToolIds', () => {
       'apply_patch',
       'message_main_agent',
       'message_coworker',
-      'exec',
+      'codemode',
     ]);
     expect(childProfileToolIds('all')).not.toContain('edit');
     expect(childProfileToolIds('all')).not.toContain('write');

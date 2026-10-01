@@ -254,7 +254,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     }
   );
 
-  it('按需 MCP 不在 spawn 与预热时连接，经 mcp 代理按真实工具名审批', async () => {
+  it('按需 MCP 不在 spawn 与预热时连接，首次 codemode 调用才注册为 deferred 并按真实工具名审批', async () => {
     const events: AgentWorkerEvent[] = [];
     const direct = { id: 'd', name: 'direct', transport: 'stdio' as const, command: 'd' };
     const deferred = {
@@ -296,15 +296,33 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
       customTools: Array<ToolDefinition>;
     };
-    const proxy = options.customTools.find((tool) => tool.name === 'mcp');
-    expect(proxy?.description).toContain('- notes: read');
-    void proxy!.execute(
-      'call-1',
-      { action: 'call', tool: 'mcp__notes__read', arguments: {} },
-      undefined,
-      undefined,
-      {} as never
-    );
+    expect(options.customTools.some((tool) => tool.name === 'mcp')).toBe(false);
+
+    const factories = (mocks.loaderOptions.at(-1) as { extensionFactories: unknown[] })
+      .extensionFactories as Array<{ name?: string; factory?: (pi: unknown) => void }>;
+    expect(factories[0]?.name).toBe('enso-codemode');
+    const handlers = new Map<string, Array<(event: unknown) => unknown>>();
+    const registered: ToolDefinition[] = [];
+    factories[0]?.factory?.({
+      on: (event: string, handler: (event: unknown) => unknown) =>
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+      registerTool: (tool: ToolDefinition) => registered.push(tool),
+      appendEntry: () => {},
+      getAllTools: () => [],
+      getSettings: () => ({}),
+    });
+    const sections: Record<string, string> = {};
+    for (const handler of handlers.get('before_agent_start') ?? []) {
+      await handler({ systemPromptOptions: { sections } });
+    }
+    expect(sections.mcp_servers).toContain('- mcp__notes: read');
+    for (const handler of handlers.get('tool_call') ?? []) {
+      await handler({ toolName: 'codemode', toolCallId: 'c1', input: { code: 'return 1;' } });
+    }
+    expect(mocks.mcpResolve).toHaveBeenCalledWith(deferred);
+    const registeredRead = registered.find((tool) => tool.name === 'mcp__notes__read');
+    expect(registeredRead?.exposure).toBe('deferred');
+    void registeredRead!.execute('c1/1', {}, undefined, undefined, {} as never);
     await settleUntil(() => events.some((event) => event.type === 'approval-request'));
     const request = events.find((event) => event.type === 'approval-request');
     expect(request).toMatchObject({ request: { tool: 'mcp__notes__read', kind: 'mcp' } });
@@ -751,9 +769,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
       customTools: ToolDefinition[];
     };
-    expect(options.customTools.map((tool) => tool.name).sort()).toEqual(
-      [...ready.proof.toolIds, ...mcpTools.map((tool) => tool.name)].sort()
-    );
+    expect(
+      [
+        ...options.customTools.map((tool) => tool.name),
+        ...(spec.isolatedSandbox ? ['codemode'] : []),
+      ].sort()
+    ).toEqual([...ready.proof.toolIds, ...mcpTools.map((tool) => tool.name)].sort());
     expect([...ready.proof.toolIds].sort()).toEqual(
       [
         ...childProfileToolIds(spec.tools, {

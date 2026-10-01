@@ -449,6 +449,47 @@ describe('McpManager call retry', () => {
     expect(clientState.callTool).toHaveBeenCalledTimes(1);
   });
 
+  it('maps MCP results for codemode: namespace, annotations, structuredContent, isError', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [
+        {
+          name: 'search',
+          inputSchema: { type: 'object' },
+          annotations: { readOnlyHint: true, title: 'ignored' },
+        },
+      ],
+    }));
+    clientState.callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: { hits: 2 },
+        _meta: { trace: 'x' },
+      })
+      .mockResolvedValueOnce({ content: [], isError: true });
+    const { manager } = makeManager();
+    const [tool] = await manager.toolsFor([httpServer]);
+    expect(tool?.namespace?.name).toMatch(/^mcp__/);
+    expect(tool?.annotations).toEqual({ readOnlyHint: true });
+    expect(tool?.outputSchema).toMatchObject({ required: ['content'] });
+    const ok = await tool?.execute('tc-1', {}, undefined, undefined, {} as never);
+    expect(ok).toMatchObject({
+      content: [{ type: 'text', text: 'ok' }],
+      structuredContent: {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: { hits: 2 },
+      },
+    });
+    expect(ok?.structuredContent).not.toHaveProperty('_meta');
+    expect(ok).not.toHaveProperty('isError');
+    const failed = await tool?.execute('tc-2', {}, undefined, undefined, {} as never);
+    expect(failed).toMatchObject({ isError: true, structuredContent: { isError: true } });
+    expect(failed?.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('error'),
+    });
+  });
+
   it('retries a stale call only once', async () => {
     clientState.listTools = vi.fn(async () => ({
       tools: [{ name: 'search', inputSchema: { type: 'object' } }],
