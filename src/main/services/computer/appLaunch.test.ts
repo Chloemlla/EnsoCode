@@ -17,6 +17,19 @@ describe('resolveOpenArgs', () => {
     expect(resolveOpenArgs('Safari')).toEqual(['-a', 'Safari']);
   });
 
+  it('显示器使用系统设置面板，而不是只打开应用', () => {
+    expect(resolveOpenArgs('系统设置', { pane: '显示器' })).toEqual([
+      'x-apple.systempreferences:com.apple.Displays-Settings.extension',
+    ]);
+    expect(resolveSettingsPaneUrl('显示器')).toBe(resolveSettingsPaneUrl('displays'));
+  });
+
+  it('未知面板明确失败，不静默打开错误页面', () => {
+    expect(() => resolveOpenArgs('系统设置', { pane: 'unknown-pane' })).toThrow(
+      /unsupported.*pane/i
+    );
+  });
+
   it('系统设置 pane 走 appearance URL', () => {
     expect(resolveSettingsPaneUrl('外观')).toMatch(/Appearance-Settings/);
     expect(resolveSettingsPaneUrl('Appearance')).toMatch(/Appearance-Settings/);

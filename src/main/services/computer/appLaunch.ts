@@ -10,7 +10,12 @@ const GROUPS: Array<{ names: readonly string[]; bundle?: string; launch?: string
   { names: ['微信', 'wechat', 'weixin'], launch: 'WeChat' },
 ];
 
-export function resolveOpenArgs(name: string): string[] {
+export function resolveOpenArgs(name: string, opts?: { pane?: string }): string[] {
+  if (opts?.pane !== undefined) {
+    const url = resolveSettingsPaneUrl(opts.pane);
+    if (!url) throw new Error(`Unsupported System Settings pane: ${opts.pane}`);
+    return [url];
+  }
   const key = name.trim().toLocaleLowerCase();
   if (!key) return ['-a', name];
   for (const group of GROUPS) {
@@ -42,6 +47,7 @@ const SETTINGS_PANES: Record<string, string> = {
   电池: 'x-apple.systempreferences:com.apple.Battery-Settings.extension',
   battery: 'x-apple.systempreferences:com.apple.Battery-Settings.extension',
   显示: 'x-apple.systempreferences:com.apple.Displays-Settings.extension',
+  显示器: 'x-apple.systempreferences:com.apple.Displays-Settings.extension',
   displays: 'x-apple.systempreferences:com.apple.Displays-Settings.extension',
   通用: 'x-apple.systempreferences:com.apple.LocalSettings.extension',
   general: 'x-apple.systempreferences:com.apple.LocalSettings.extension',
