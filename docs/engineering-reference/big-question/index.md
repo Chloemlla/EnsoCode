@@ -32,6 +32,7 @@
 | [coworker-restart-adopt.md](coworker-restart-adopt.md) | 重启后 coworker 的 tab 还在，subagent list 却是空的，给原 agentId 发消息报 not-found |
 | [pi-project-trust-default.md](pi-project-trust-default.md) | 无报错；打开带 `.pi/extensions` 或项目包的仓库，其代码即在 worker 里运行、缺包还会自动安装 |
 | [koffi-view-electron-sandbox.md](koffi-view-electron-sandbox.md) | Windows `ax()`/`getState` 报 AX_WORKER_EXITED；单测和 Node 探针全绿，只在 Electron 里崩 |
+| [macos-window-focus.md](macos-window-focus.md) | 系统设置已在前台，computer 仍报窗口无法置于前台；浮窗被误判为输入焦点 |
 
 ## 共同教训
 
