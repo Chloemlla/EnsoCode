@@ -336,6 +336,7 @@ export const BUILTIN_TOOL_COVERAGE: Readonly<Record<string, CoverageDisposition>
   web: surfaces('coding-tools.web'),
   isolated_sandbox: surfaces('coding-tools.isolated-sandbox'),
   memory: surfaces('coding-tools.memory'),
+  computer: surfaces('coding-tools.computer'),
   plan: surfaces('coding-tools.plan'),
 };
 
@@ -702,6 +703,8 @@ export const IPC_PRODUCT_COVERAGE = {
   BTW_ABORT: excluded('Desktop side-panel aside chat abort; not an Enso capability.'),
   BTW_SPAWN: excluded('Desktop side-panel aside chat spawn; not an Enso capability.'),
   BTW_DISPOSE: excluded('Desktop side-panel aside chat dispose; not an Enso capability.'),
+  COMPUTER_CAPABILITIES: surfaces('coding-tools.computer'),
+  COMPUTER_OPEN_PERMISSIONS: surfaces('coding-tools.computer'),
 } satisfies Record<keyof typeof IPC_CHANNELS, CoverageDisposition>;
 
 export const AUTHORITATIVE_COVERAGE_SOURCES = {

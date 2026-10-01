@@ -95,6 +95,17 @@ describe('withPlanGate', () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it('computer 规划期间只允许 read_only', async () => {
+    const { run } = setup(planning);
+    const computer = tool('computer');
+    await run(computer, { code: 'return 1', read_only: true });
+    expect(computer.execute).toHaveBeenCalledTimes(1);
+    await expect(run(computer, { code: 'await win.click(1, 1)' })).rejects.toThrow(
+      /Plan mode is active/
+    );
+    expect(computer.execute).toHaveBeenCalledTimes(1);
+  });
+
   it('subagent 只允许派生只读类型，禁止向已有代理发消息', async () => {
     const { run } = setup(planning);
     const subagent = tool('subagent');

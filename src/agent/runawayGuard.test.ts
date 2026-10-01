@@ -45,6 +45,23 @@ describe('RunawayGuard', () => {
     expect(guard.observe('read', args, { text: '6' })).toContain('same arguments');
   });
 
+  it('computer 相同 code 但截图 hash 变了不算 runaway', () => {
+    const guard = new RunawayGuard();
+    const args = { code: 'await win.screenshot()' };
+    expect(guard.observe('computer', args, { text: 'hash a' })).toBeUndefined();
+    expect(guard.observe('computer', args, { text: 'hash b' })).toBeUndefined();
+    expect(guard.observe('computer', args, { text: 'hash c' })).toBeUndefined();
+  });
+
+  it('computer 三次相同结果文本才算无进展', () => {
+    const guard = new RunawayGuard();
+    const args = { code: 'await win.screenshot()' };
+    const snap = { text: 'w1 10×10 hash deadbeef' };
+    expect(guard.observe('computer', args, snap)).toBeUndefined();
+    expect(guard.observe('computer', args, snap)).toBeUndefined();
+    expect(guard.observe('computer', args, snap)).toContain('no observable progress');
+  });
+
   it('同一错误家族连续三次提醒', () => {
     const guard = new RunawayGuard();
     const args = { command: 'npm test' };

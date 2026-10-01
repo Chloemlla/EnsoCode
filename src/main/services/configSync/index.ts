@@ -21,6 +21,7 @@ import type {
   ConfigSyncSummary,
 } from '@shared/types';
 import { resolveEditMode } from '@shared/types';
+import { persistedSettingsState } from '@shared/types/builtinTools';
 import { app } from 'electron';
 import {
   commitSettingsTransaction,
@@ -206,10 +207,7 @@ const WRITE_FAILED = 'Could not write the export file. Check that the folder is 
 const SYMLINK_TARGET = 'The selected file is a symbolic link. Choose a different location.';
 
 function stateOf(settings: Record<string, unknown> | null): Record<string, unknown> {
-  const store = settings?.['enso-settings'];
-  if (!store || typeof store !== 'object') return {};
-  const state = (store as Record<string, unknown>).state;
-  return state && typeof state === 'object' ? (state as Record<string, unknown>) : {};
+  return persistedSettingsState(settings?.['enso-settings']) ?? {};
 }
 
 function referencedSystemPromptIds(value: unknown): Set<string> {

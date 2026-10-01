@@ -6,9 +6,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { McpToolCatalogStore } from './mcpToolCatalog';
 
 vi.mock('../../agent/index?modulePath', () => ({ default: '/tmp/agent.js' }));
+const settingsMock = vi.hoisted(() => ({
+  value: undefined as Record<string, unknown> | undefined,
+}));
+vi.mock('../ipc/settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ipc/settings')>()),
+  readSettings: () => settingsMock.value,
+}));
 
 import {
   expectedAgentTypeToolIds,
+  readSettingsState,
   rememberParentToolProfile,
   resolvePresetSystemPrompt,
   toSessionMcpConfig,
@@ -108,5 +116,25 @@ describe('agentHost preset system prompt authority', () => {
     expect(
       resolvePresetSystemPrompt({ systemPromptId: '11111111-1111-4111-8111-111111111111' })
     ).toEqual({ ok: false });
+  });
+});
+
+describe('readSettingsState', () => {
+  it('磁盘仍是迁移前版本时 computer 按默认关闭读出', () => {
+    settingsMock.value = {
+      'enso-settings': {
+        version: 13,
+        state: {
+          disabledBuiltinTools: ['memory'],
+          projects: [{ id: 'p', disabledBuiltinTools: [] }],
+        },
+      },
+    };
+    expect(readSettingsState()).toEqual({
+      disabledBuiltinTools: ['memory', 'computer'],
+      projects: [{ id: 'p', disabledBuiltinTools: ['computer'] }],
+    });
+    settingsMock.value = { 'enso-settings': { version: 14, state: { disabledBuiltinTools: [] } } };
+    expect(readSettingsState()).toEqual({ disabledBuiltinTools: [] });
   });
 });

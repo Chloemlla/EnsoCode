@@ -524,6 +524,22 @@ describe('CapabilityGateway OAuth/default/secret/receipt', () => {
     }
   );
 
+  it('Enso 不能打开 computer；改其它工具时旧落盘列表保持 computer 关闭', async () => {
+    const { gateway, state, patchSettings } = fixture();
+    const enable = await gateway.invoke(
+      request('tool-computer', 'tools.toggle-builtin', { id: 'computer', enabled: true })
+    );
+    expect(enable.modelResult).toMatchObject({ ok: false, code: 'invalid' });
+    expect(patchSettings).not.toHaveBeenCalled();
+
+    state.disabledBuiltinTools = ['memory'];
+    const other = await gateway.invoke(
+      request('tool-browser', 'tools.toggle-builtin', { id: 'browser', enabled: false })
+    );
+    expect(other.modelResult).toMatchObject({ ok: true });
+    expect(state.disabledBuiltinTools).toEqual(['memory', 'computer', 'browser']);
+  });
+
   it('子模型更新能力不能夹带 enabled 重新开启禁用条目', async () => {
     const { gateway, state, patchSettings } = fixture();
     const entry = {

@@ -56,6 +56,16 @@ const checks = {
     peer.close();
     return 'loaded';
   },
+  koffi: () => {
+    const koffi = appRequire('koffi');
+    const lib =
+      {
+        darwin: '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics',
+        win32: 'user32.dll',
+      }[process.platform] ?? 'libc.so.6';
+    koffi.load(lib).unload();
+    return `${koffi.version} loaded ${lib}`;
+  },
   'pi-tui native': async () => {
     const { getNativeClipboard } = await appImport('@earendil-works/pi-tui');
     // Linux 原生剪贴板依赖 X11 DISPLAY，CI 无头环境按设计返回 undefined

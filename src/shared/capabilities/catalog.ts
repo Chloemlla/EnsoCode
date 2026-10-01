@@ -1254,6 +1254,13 @@ export const CAPABILITY_CATALOG = {
     reason: 'Enso never receives the coding-session memory tools.',
     suggestedAction: 'Ask the coding agent to search or capture the memory.',
   }),
+  'coding-tools.computer': unavailable('coding-tools.computer', {
+    description: 'Operate the host desktop with screenshots, accessibility, and input.',
+    risk: 'dangerous',
+    targetContext: 'origin-project',
+    reason: 'Enso never receives host-desktop computer tools.',
+    suggestedAction: 'Ask the coding agent to use the computer tool.',
+  }),
   'coding-tools.plan': unavailable('coding-tools.plan', {
     description: 'Research read-only and submit an implementation plan for user approval.',
     risk: 'read',

@@ -63,6 +63,7 @@ import {
   type Preset,
   type SkillEntry,
 } from '@shared/types/assets';
+import { persistedSettingsState } from '@shared/types/builtinTools';
 import {
   MODEL_REASONING_OVERRIDES,
   MODEL_THINKING_LEVEL_OVERRIDES,
@@ -80,6 +81,7 @@ import agentWorkerPath from '../../agent/index?modulePath';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import type { ResolvedPlugins } from './claudePlugins';
+import { isComputerPlatformSupported } from './computer/support';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
@@ -594,6 +596,10 @@ export function spawnSession(
   for (const id of options?.extraDisabledTools ?? []) {
     if (!disabledTools.includes(id)) disabledTools.push(id);
   }
+  // 当前平台不能操作桌面时不下发 computer，避免模型反复调用必失败的工具
+  if (!isComputerPlatformSupported() && !disabledTools.includes('computer')) {
+    disabledTools.push('computer');
+  }
   const loadHarnessAssets = state?.loadHarnessAssets === true;
   const trustedProjectCode = projectTrustedCode(state?.projects, projectId);
   const windowsLocalShell = parseWindowsLocalShell(state?.windowsLocalShell);
@@ -793,6 +799,14 @@ export function sendMemoryResultToSession(
   outcome: { ok: true; result: unknown } | { ok: false; error: string }
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({ type: 'memory-result', identity, requestId, ...outcome });
+}
+
+export function sendComputerResultToSession(
+  identity: SessionIdentity | ChildSessionIdentity,
+  requestId: string,
+  outcome: { ok: true; result: unknown } | { ok: false; error: string }
+): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'computer-result', identity, requestId, ...outcome });
 }
 
 export function sendCapabilityResultToSession(
@@ -1398,8 +1412,7 @@ export function pushDisabledWorkflowPresets(): void {
 }
 
 export function readSettingsState(): Record<string, unknown> | undefined {
-  const settings = readSettings();
-  return (settings?.['enso-settings'] as { state?: Record<string, unknown> } | undefined)?.state;
+  return persistedSettingsState(readSettings()?.['enso-settings']);
 }
 
 function providersFromSettings(): ModelProvider[] {

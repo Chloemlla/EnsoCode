@@ -306,4 +306,23 @@ describe('config sync portable preference contract', () => {
       expect.objectContaining({ category: 'settings', updated: 2 })
     );
   });
+
+  it('导入不改变本机 computer 开关（需本机授权，键鼠不可撤回）', () => {
+    const incoming = bundle({ disabledBuiltinTools: ['browser'] });
+    expect(
+      planImport({ disabledBuiltinTools: ['memory', 'computer'] }, incoming, 'merge').state
+        .disabledBuiltinTools
+    ).toEqual(['browser', 'computer']);
+    expect(
+      planImport(
+        { disabledBuiltinTools: [] },
+        bundle({ disabledBuiltinTools: ['computer'] }),
+        'replace'
+      ).state.disabledBuiltinTools
+    ).toEqual([]);
+    expect(planImport({}, incoming, 'merge').state.disabledBuiltinTools).toEqual([
+      'browser',
+      'computer',
+    ]);
+  });
 });

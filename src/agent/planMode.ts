@@ -1,4 +1,5 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { normalizeComputerParams } from '@shared/computer/params';
 import {
   activePlanNote,
   foldPlanState,
@@ -209,6 +210,9 @@ export function withPlanGate(
       const record = (params ?? {}) as Record<string, unknown>;
       const name = definition.name;
       if (DENIED_TOOLS.has(name)) throw denied(`${name} is disabled while planning`);
+      if (name === 'computer' && normalizeComputerParams(params)?.readOnly !== true) {
+        throw denied('computer only runs with read_only: true while planning');
+      }
       if (name === 'subagent') {
         const operation = record.operation;
         if (operation === 'spawn') {
