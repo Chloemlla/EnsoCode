@@ -290,6 +290,8 @@ export class McpManager {
   >();
   /** 最近一次下发的凭据：按需 server 的会话配置在 spawn 时冻结，连接时以它为准 */
   private readonly latestOAuth = new Map<string, McpOAuthTokens | undefined>();
+  /** 最近一次 insufficient_scope 挑战：建连随后失败时据此报「需授权」而非普通错误 */
+  private readonly scopeChallenges = new Map<string, McpScopeChallenge>();
 
   constructor(private readonly options: McpManagerOptions = { emit: () => {} }) {}
 
@@ -352,9 +354,13 @@ export class McpManager {
     if (!pending) {
       pending = this.connect(server).catch((error) => {
         console.error(`[mcp] connect failed for "${server.name}":`, error);
-        const unauthorized = isUnauthorized(error);
+        const challenge = this.scopeChallenges.get(key);
+        const unauthorized = Boolean(challenge) || isUnauthorized(error);
         const message = errorMessage(error);
-        this.emitStatus(server, unauthorized ? 'unauthorized' : 'error', { error: message });
+        this.emitStatus(server, unauthorized ? 'unauthorized' : 'error', {
+          error: message,
+          ...(challenge ? { scopeChallenge: challenge } : {}),
+        });
         this.connections.delete(key);
         this.failedUntil.set(key, {
           until: Date.now() + MCP_FAIL_TTL_MS,
@@ -424,6 +430,7 @@ export class McpManager {
 
   /** worker 不能开浏览器：把挑战交给 Main，由用户重新授权时在已授予 scope 上追加 */
   private reportScopeChallenge(server: McpServerSpawnConfig, challenge: McpScopeChallenge): void {
+    this.scopeChallenges.set(connectionKey(server), challenge);
     this.emitStatus(server, 'unauthorized', {
       error: `MCP server requires additional scope${challenge.scope ? `: ${challenge.scope}` : ''}`,
       scopeChallenge: challenge,
@@ -473,6 +480,7 @@ export class McpManager {
       await client.close().catch(() => {});
       throw error;
     }
+    this.scopeChallenges.delete(connectionKey(server));
     this.emitStatus(server, 'ready', { toolCount: tools.length });
     return {
       client,

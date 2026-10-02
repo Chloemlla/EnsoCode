@@ -570,3 +570,33 @@ describe('McpManager insufficient_scope', () => {
     ]);
   });
 });
+
+describe('McpManager insufficient_scope · 连接失败', () => {
+  it('建连因 scope 不足失败时，最终状态保留挑战而不是被普通 error 覆盖', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response('', {
+          status: 403,
+          headers: { 'WWW-Authenticate': 'Bearer error="insufficient_scope", scope="files:write"' },
+        })
+    ) as never;
+    clientState.connect = vi.fn(async () => {
+      const options = transportState.http.at(-1)?.options as { fetch?: typeof fetch } | undefined;
+      await options?.fetch?.('https://mcp.notion.com/mcp');
+      throw new Error('HTTP 403: Invalid OAuth error response');
+    });
+    try {
+      const { manager, events } = makeManager();
+      const result = await manager.resolve({ ...httpServer, id: 'srv-scope' });
+      expect(result).toMatchObject({ ok: false, unauthorized: true });
+      expect(events.at(-1)).toMatchObject({
+        type: 'mcp-status',
+        state: 'unauthorized',
+        scopeChallenge: { scope: 'files:write' },
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
