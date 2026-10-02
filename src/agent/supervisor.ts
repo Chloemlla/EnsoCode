@@ -4248,6 +4248,28 @@ function limitsModelOf(session: AgentSession) {
   return session.routedModel?.model ?? session.model;
 }
 
+type CatalogModel = ReturnType<ModelRuntime['getModels']>[number];
+
+/**
+ * 按同厂模板克隆的订阅模型（pi 目录没有）补进所在 provider 的目录：会话直连拿模型对象就能流，
+ * 但虚拟模型路由按目录重新取成员，查不到会被当成不可路由而静默丢弃。
+ */
+function listCatalogClone(runtime: ModelRuntime, model: CatalogModel): CatalogModel {
+  const listed = runtime.getModel(model.provider, model.id);
+  if (listed) return listed;
+  const base = runtime.getProvider(model.provider);
+  if (!base) return model;
+  const withClone = <T extends { id: string }>(models: readonly T[]): T[] =>
+    models.some((entry) => entry.id === model.id) ? [...models] : [...models, model as never];
+  runtime.registerNativeProvider(
+    Object.assign(Object.create(Object.getPrototypeOf(base)), base, {
+      getModels: () => withClone(base.getModels()),
+      getAllModels: () => withClone(base.getAllModels?.() ?? base.getModels()),
+    })
+  );
+  return runtime.getModel(model.provider, model.id) ?? model;
+}
+
 /**
  * 解析 spawn 模型：oauth 直取 pi 内置 catalog（凭证由 runtime 从共享 auth.json 解析，
  * 不注册自定义 provider、不覆盖 UA、不读行覆盖——订阅端点保持 pi 原生标识）；
@@ -4271,7 +4293,7 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
     if (!oauthModel) {
       throw new Error(`oauth model not found: ${model.oauthAccountKey}/${model.modelId}`);
     }
-    return oauthModel;
+    return exact ?? listCatalogClone(runtime, oauthModel);
   }
   const providerId = providerKeyFor(model);
   const models = runtime.getModels();

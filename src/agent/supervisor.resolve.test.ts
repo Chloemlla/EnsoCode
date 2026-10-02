@@ -1,4 +1,7 @@
-import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it, vi } from 'vitest';
 import { resolveBaseModel, resolveBaseModelOrRefresh } from './supervisor';
 
@@ -326,6 +329,7 @@ describe('resolveBaseModel oauth', () => {
         return [grok46];
       }),
       getModel: vi.fn(() => undefined),
+      getProvider: vi.fn(() => undefined),
       registerProvider,
     } as unknown as ModelRuntime;
 
@@ -354,6 +358,7 @@ describe('resolveBaseModel oauth', () => {
     const xaiRuntime = {
       getModels: vi.fn(() => [grok46]),
       getModel: vi.fn(() => undefined),
+      getProvider: vi.fn(() => undefined),
       registerProvider: vi.fn(),
     } as unknown as ModelRuntime;
     expect(
@@ -382,6 +387,32 @@ describe('resolveBaseModel oauth', () => {
         oauthAccountKey: 'anthropic',
       })
     ).toThrow('oauth model not found: anthropic/claude-mystery');
+  });
+
+  it('xAI 克隆模型补进 provider 目录，虚拟模型路由能按目录取到', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'enso-xai-clone-'));
+    const runtime = await ModelRuntime.create({
+      authPath: path.join(dir, 'auth.json'),
+      modelsPath: null,
+      refreshOnCreate: false,
+    });
+    const spawn = {
+      api: 'openai-completions' as const,
+      baseUrl: '',
+      apiKey: '',
+      modelId: 'grok-4.7-build-fast',
+      settingsProviderId: 'settings-provider',
+      oauthAccountKey: 'xai',
+    };
+    const before = runtime.getModels('xai').length;
+    expect(runtime.getPhysicalModel('xai', spawn.modelId)).toBeUndefined();
+
+    const resolved = resolveBaseModel(runtime, spawn);
+    resolveBaseModel(runtime, spawn);
+
+    expect(runtime.getPhysicalModel('xai', spawn.modelId)).toEqual(resolved);
+    expect(resolved).toMatchObject({ id: spawn.modelId, provider: 'xai' });
+    expect(runtime.getModels('xai')).toHaveLength(before + 1);
   });
 });
 
