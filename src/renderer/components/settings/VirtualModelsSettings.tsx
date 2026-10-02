@@ -98,6 +98,7 @@ function ClassifierField({
   const source = classifier?.source ?? OFF;
   const piProviderId = classifier?.source === 'pi-classifier' ? classifier.model.providerId : '';
   const [piModels, setPiModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [noClassifierModels, setNoClassifierModels] = useState(false);
   useEffect(() => {
     if (!piProviderId) {
       setPiModels([]);
@@ -117,7 +118,22 @@ function ClassifierField({
     );
   }
   const fast = entry.fast;
+  // 分类器模型 id 为空的配置会被 parseVirtualModels 丢弃（跨窗口重读后跳回“关”），选来源/换 provider 时直接带上首个模型
+  const pickPiClassifier = async (providerId: string) => {
+    const models = await window.electronAPI.providers.classifierModels(providerId);
+    const first = models[0];
+    setNoClassifierModels(!first);
+    if (!first) return;
+    update({
+      classifier: {
+        source: 'pi-classifier',
+        model: { providerId, modelId: first.id },
+        timeoutMs: classifier?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+      },
+    });
+  };
   const setSource = (next: string) => {
+    setNoClassifierModels(false);
     if (next === OFF) return update({ classifier: undefined });
     if (next === 'judge') {
       return update({
@@ -129,15 +145,7 @@ function ClassifierField({
       });
     }
     const provider = classifierProviders[0];
-    if (provider) {
-      update({
-        classifier: {
-          source: 'pi-classifier',
-          model: { providerId: provider.id, modelId: '' },
-          timeoutMs: VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
-        },
-      });
-    }
+    if (provider) void pickPiClassifier(provider.id);
   };
   const sourceItems = [
     { value: OFF, label: t('Off') },
@@ -176,11 +184,7 @@ function ClassifierField({
           <Select
             items={classifierProviders.map((p) => ({ value: p.id, label: p.name }))}
             value={classifier.model.providerId}
-            onValueChange={(value) =>
-              update({
-                classifier: { ...classifier, model: { providerId: String(value), modelId: '' } },
-              })
-            }
+            onValueChange={(value) => void pickPiClassifier(String(value))}
           >
             <SelectTrigger size="sm" className="w-40">
               <SelectValue />
@@ -217,6 +221,9 @@ function ClassifierField({
             </SelectPopup>
           </Select>
         </div>
+      )}
+      {noClassifierModels && (
+        <p className="text-[10px] text-destructive">{t('No classifier models available')}</p>
       )}
       <p className="text-[10px] text-muted-foreground">
         {t(

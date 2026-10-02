@@ -1583,6 +1583,7 @@ export const zhTranslations: Record<string, string> = {
   'Set a fast model first': '先设置快模型',
   'Fast model judges': '快模型判断',
   'Classifier model': '分类器模型',
+  'No classifier models available': '该服务商暂无可用的分类器模型',
   'Classifies each new turn: simple turns use the fast model, complex ones the primary model. Adds a short delay before the reply.':
     '每轮新输入先分类：简单问题用快模型，复杂任务用主模型。回复前会多一点延迟。',
   'New virtual model': '新建虚拟模型',
