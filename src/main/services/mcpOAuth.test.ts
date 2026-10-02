@@ -77,15 +77,20 @@ describe('McpOAuthClientProvider', () => {
   });
 });
 
-function fakeCallbackServer(code: string | (() => Promise<string>)) {
+function fakeCallbackServer(code: string | (() => Promise<string>), iss?: string) {
   const close = vi.fn();
   const waitForCode = vi.fn(() => (typeof code === 'string' ? Promise.resolve(code) : code()));
+  const waitForResponse = vi.fn(async () => ({
+    code: await waitForCode(),
+    ...(iss ? { iss } : {}),
+  }));
   return {
     close,
     waitForCode,
     start: vi.fn(async () => ({
       redirectUri: 'http://127.0.0.1:5000/cb',
       waitForCode,
+      waitForResponse,
       close,
     })),
   };
@@ -100,6 +105,7 @@ function rejectingCallbackServer() {
     start: vi.fn(async () => ({
       redirectUri: 'http://127.0.0.1:5000/cb',
       waitForCode: () => promise,
+      waitForResponse: () => promise.then((code) => ({ code })),
       close,
     })),
   };
@@ -308,3 +314,153 @@ describe('authorizeMcpServer', () => {
     expect(auth).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('authorizeMcpServer · pi 1.0 OAuth 加固', () => {
+  const remote = (extra: Record<string, unknown> = {}) => ({
+    id: 's1',
+    name: 'notion',
+    transport: 'http' as const,
+    url: 'https://mcp.test/mcp',
+    ...extra,
+  });
+  const redirectThenAuthorize = () =>
+    vi.fn(async (provider: McpOAuthClientProvider, options: { authorizationCode?: string }) => {
+      if (!options.authorizationCode) {
+        await provider.redirectToAuthorization(new URL('https://auth.test/authorize'));
+        return 'REDIRECT' as const;
+      }
+      await provider.saveTokens({ access_token: 'fresh' } as never);
+      return 'AUTHORIZED' as const;
+    });
+
+  it('回调里的 iss 随 code 一起交给换 token 的流程（RFC 9207）', async () => {
+    const auth = redirectThenAuthorize();
+    const server = fakeCallbackServer('the-code', 'https://auth.test');
+    const result = await authorizeMcpServer('s1', {
+      store: newStore(),
+      resolveServer: () => remote(),
+      startCallbackServer: server.start as never,
+      auth: auth as never,
+      openExternal: vi.fn(),
+    });
+    expect(result).toEqual({ ok: true });
+    expect(auth.mock.calls[1][1]).toMatchObject({
+      authorizationCode: 'the-code',
+      iss: 'https://auth.test',
+    });
+  });
+
+  it('配置的 clientName 与授权服务器元数据地址用于注册与发现', async () => {
+    const auth = vi.fn(
+      async (provider: McpOAuthClientProvider, _options: { [key: string]: unknown }) => {
+        expect(provider.clientMetadata.client_name).toBe('Known Client');
+        return 'AUTHORIZED' as const;
+      }
+    );
+    await authorizeMcpServer('s1', {
+      store: newStore(),
+      resolveServer: () =>
+        remote({
+          oauthClientName: 'Known Client',
+          oauthMetadataUrl: 'https://auth.test/.well-known/oauth-authorization-server',
+        }),
+      startCallbackServer: fakeCallbackServer('c').start as never,
+      auth: auth as never,
+      openExternal: vi.fn(),
+    });
+    expect(auth).toHaveBeenCalledTimes(1);
+    expect(String(auth.mock.calls[0][1].authorizationServerMetadataUrl)).toBe(
+      'https://auth.test/.well-known/oauth-authorization-server'
+    );
+  });
+
+  it('服务器要求更多 scope 时，新授权保留已授予的 scope 并跳过刷新', async () => {
+    const store = newStore();
+    store.saveTokens('s1', { access_token: 'old', refresh_token: 'r', scope: 'read' });
+    const auth = redirectThenAuthorize();
+    await authorizeMcpServer('s1', {
+      store,
+      resolveServer: () => remote(),
+      scopeChallenge: () => ({
+        scope: 'write',
+        resourceMetadataUrl: 'https://mcp.test/.well-known/oauth-protected-resource',
+      }),
+      startCallbackServer: fakeCallbackServer('c').start as never,
+      auth: auth as never,
+      openExternal: vi.fn(),
+    });
+    const options = auth.mock.calls[0][1] as Record<string, unknown>;
+    expect(String(options.scope).split(' ').sort()).toEqual(['read', 'write']);
+    expect(options.skipRefresh).toBe(true);
+    expect(String(options.resourceMetadataUrl)).toBe(
+      'https://mcp.test/.well-known/oauth-protected-resource'
+    );
+  });
+
+  it('真实流程：iss 与授权服务器不符时拒绝换 token', async () => {
+    const as = await startFakeAuthorizationServer();
+    try {
+      const run = (iss: string) =>
+        authorizeMcpServer('s1', {
+          store: newStore(),
+          resolveServer: () => remote({ url: `${as.base}/mcp` }),
+          startCallbackServer: fakeCallbackServer('the-code', iss).start as never,
+          openExternal: vi.fn(),
+        });
+      const rejected = await run('https://evil.test');
+      expect(rejected.ok).toBe(false);
+      expect(as.tokenRequests).toBe(0);
+      const accepted = await run(as.base);
+      expect(accepted).toEqual({ ok: true });
+      expect(as.tokenRequests).toBe(1);
+    } finally {
+      await as.close();
+    }
+  });
+});
+
+/** loopback 上的最小授权服务器：PRM + AS 元数据（声明支持 iss）+ DCR + token */
+async function startFakeAuthorizationServer() {
+  const { createServer } = await import('node:http');
+  let tokenRequests = 0;
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', base);
+    const json = (body: unknown) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+      return json({ resource: `${base}/mcp`, authorization_servers: [base] });
+    }
+    if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+      return json({
+        issuer: base,
+        authorization_endpoint: `${base}/authorize`,
+        token_endpoint: `${base}/token`,
+        registration_endpoint: `${base}/register`,
+        response_types_supported: ['code'],
+        code_challenge_methods_supported: ['S256'],
+        authorization_response_iss_parameter_supported: true,
+      });
+    }
+    if (url.pathname === '/register') {
+      return json({ client_id: 'c1', redirect_uris: ['http://127.0.0.1:5000/cb'] });
+    }
+    if (url.pathname === '/token') {
+      tokenRequests += 1;
+      return json({ access_token: 'issued', token_type: 'Bearer' });
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+  return {
+    base,
+    get tokenRequests() {
+      return tokenRequests;
+    },
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}

@@ -144,6 +144,8 @@ const MCP_KEYS = [
   'args',
   'env',
   'url',
+  'oauthClientName',
+  'oauthMetadataUrl',
   'connectTimeoutSec',
   'callTimeoutSec',
   'loadMode',
@@ -540,6 +542,10 @@ function validateMcp(raw: unknown): RecordValue {
     throw new Error('Invalid URL MCP configuration');
   }
   if (typeof entry.url === 'string') validateHttpUrl(entry.url, 'MCP server');
+  stringField(entry, 'oauthClientName', 'MCP server', false);
+  if (stringField(entry, 'oauthMetadataUrl', 'MCP server', false) !== undefined) {
+    validateHttpUrl(entry.oauthMetadataUrl as string, 'MCP server');
+  }
   if (entry.args !== undefined) {
     if (!Array.isArray(entry.args) || entry.args.some((item) => typeof item !== 'string'))
       throw new Error('Invalid MCP args');

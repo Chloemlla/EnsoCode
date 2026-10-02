@@ -1691,9 +1691,16 @@ export type McpWorkerEvent =
       /** state=ready 时的工具数 */
       toolCount?: number;
       error?: string;
+      /** 服务器要求更多 scope（insufficient_scope）：重新授权时在已授予 scope 上追加 */
+      scopeChallenge?: McpScopeChallenge;
     }
   /** SDK 自动 refresh 后回传 Main 持久化 */
   | { type: 'mcp-tokens-refreshed'; serverId: string; tokens: McpOAuthTokens };
+
+export interface McpScopeChallenge {
+  scope?: string;
+  resourceMetadataUrl?: string;
+}
 
 export type McpStatusEvent = Extract<McpWorkerEvent, { type: 'mcp-status' }>;
 
@@ -1715,6 +1722,13 @@ const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[])
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
+
+const isMcpScopeChallenge = (value: unknown): value is McpScopeChallenge =>
+  isRecord(value) &&
+  hasOnlyKeys(value, ['scope', 'resourceMetadataUrl']) &&
+  (value.scope === undefined || (typeof value.scope === 'string' && value.scope.length <= 2048)) &&
+  (value.resourceMetadataUrl === undefined ||
+    (typeof value.resourceMetadataUrl === 'string' && URL.canParse(value.resourceMetadataUrl)));
 
 const isSequence = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 0;
@@ -3190,7 +3204,16 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   }
   if (value.type === 'mcp-status') {
     // 该事件会广播到全部窗口，字段白名单 + 逐项类型都要卡死
-    return hasOnlyKeys(value, ['type', 'serverId', 'serverName', 'state', 'toolCount', 'error']) &&
+    return hasOnlyKeys(value, [
+      'type',
+      'serverId',
+      'serverName',
+      'state',
+      'toolCount',
+      'error',
+      'scopeChallenge',
+    ]) &&
+      (value.scopeChallenge === undefined || isMcpScopeChallenge(value.scopeChallenge)) &&
       isNonEmptyString(value.serverName) &&
       (value.serverId === undefined || isNonEmptyString(value.serverId)) &&
       (value.toolCount === undefined || isSequence(value.toolCount)) &&

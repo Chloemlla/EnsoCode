@@ -533,3 +533,40 @@ describe('McpManager call retry', () => {
     expect(clientState.callTool).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('McpManager insufficient_scope', () => {
+  it('传输层收到 insufficient_scope 挑战时上报 unauthorized 与所需 scope，响应原样返回', async () => {
+    const { manager, events } = makeManager();
+    await manager.toolsFor([httpServer]);
+    const fetchFn = (transportState.http.at(-1)?.options as { fetch?: typeof fetch } | undefined)
+      ?.fetch;
+    expect(fetchFn).toBeTypeOf('function');
+    const challenged = new Response('', {
+      status: 403,
+      headers: {
+        'WWW-Authenticate':
+          'Bearer error="insufficient_scope", scope="files:write", resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource"',
+      },
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => challenged) as never;
+    try {
+      expect(await fetchFn?.('https://mcp.notion.com/mcp')).toBe(challenged);
+      globalThis.fetch = vi.fn(async () => new Response('', { status: 500 })) as never;
+      await fetchFn?.('https://mcp.notion.com/mcp');
+    } finally {
+      globalThis.fetch = original;
+    }
+    const scoped = events.filter((event) => event.type === 'mcp-status' && event.scopeChallenge);
+    expect(scoped).toEqual([
+      expect.objectContaining({
+        serverId: 'srv-1',
+        state: 'unauthorized',
+        scopeChallenge: {
+          scope: 'files:write',
+          resourceMetadataUrl: 'https://mcp.notion.com/.well-known/oauth-protected-resource',
+        },
+      }),
+    ]);
+  });
+});

@@ -1277,6 +1277,25 @@ describe('OAuth loopback 回调服务器', () => {
     await Promise.resolve();
     expect(outcome).toBe('回调服务器已关闭');
   });
+
+  it('waitForResponse 一并带回授权响应里的 iss', async () => {
+    const server = await startOauthCallbackServer({
+      preferredPort: 0,
+      callbackPath: '/oauth-callback',
+      expectedState: 'expected-state',
+      timeoutMs: 2_000,
+    });
+    try {
+      const result = server.waitForResponse();
+      await fetch(
+        `${server.redirectUri}?code=c1&state=expected-state&iss=${encodeURIComponent('https://as.test')}`
+      );
+      expect(await result).toEqual({ code: 'c1', iss: 'https://as.test' });
+      expect(await server.waitForCode()).toBe('c1');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('Antigravity 请求信封会话隔离', () => {

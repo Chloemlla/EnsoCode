@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import {
+  extractWWWAuthenticateParams,
   type OAuthClientProvider,
   UnauthorizedError,
 } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -21,6 +22,7 @@ import {
 import type {
   McpConnectionState,
   McpOAuthTokens,
+  McpScopeChallenge,
   McpServerSpawnConfig,
   McpWorkerEvent,
 } from '@shared/types/agent';
@@ -139,6 +141,23 @@ const RETRIABLE_CONNECTION_PATTERNS = [
 ];
 
 /** 死连接 / 过期 session：值得清缓存并重试一次。业务错误和 401 不走这条。 */
+/** 401/403 带 insufficient_scope 时回报挑战（所需 scope 与资源元数据），响应原样交回 SDK */
+function scopeChallengeFetch(onChallenge: (challenge: McpScopeChallenge) => void): typeof fetch {
+  return async (input, init) => {
+    const response = await fetch(input, init);
+    if (response.status === 401 || response.status === 403) {
+      const { error, scope, resourceMetadataUrl } = extractWWWAuthenticateParams(response);
+      if (error === 'insufficient_scope') {
+        onChallenge({
+          ...(scope ? { scope } : {}),
+          ...(resourceMetadataUrl ? { resourceMetadataUrl: resourceMetadataUrl.href } : {}),
+        });
+      }
+    }
+    return response;
+  };
+}
+
 export function isRetriableMcpConnectionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
@@ -403,10 +422,18 @@ export class McpManager {
     return pending;
   }
 
+  /** worker 不能开浏览器：把挑战交给 Main，由用户重新授权时在已授予 scope 上追加 */
+  private reportScopeChallenge(server: McpServerSpawnConfig, challenge: McpScopeChallenge): void {
+    this.emitStatus(server, 'unauthorized', {
+      error: `MCP server requires additional scope${challenge.scope ? `: ${challenge.scope}` : ''}`,
+      scopeChallenge: challenge,
+    });
+  }
+
   private emitStatus(
     server: McpServerSpawnConfig,
     state: McpConnectionState,
-    extra?: { toolCount?: number; error?: string }
+    extra?: { toolCount?: number; error?: string; scopeChallenge?: McpScopeChallenge }
   ): void {
     this.options.emit({
       type: 'mcp-status',
@@ -477,6 +504,7 @@ export class McpManager {
         if (!server.url) throw new Error('http server missing url');
         return new StreamableHTTPClientTransport(new URL(server.url), {
           authProvider: provider,
+          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }
@@ -484,6 +512,7 @@ export class McpManager {
         if (!server.url) throw new Error('sse server missing url');
         return new SSEClientTransport(new URL(server.url), {
           authProvider: provider,
+          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }

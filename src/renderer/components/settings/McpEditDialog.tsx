@@ -87,6 +87,8 @@ export function McpEditDialog({ server, onClose }: McpEditDialogProps) {
   const [mode, setMode] = React.useState<EditorMode>('form');
   const [name, setName] = React.useState('');
   const [description, setDescription] = React.useState('');
+  const [oauthClientName, setOauthClientName] = React.useState('');
+  const [oauthMetadataUrl, setOauthMetadataUrl] = React.useState('');
   const [transport, setTransport] = React.useState<McpTransport>('stdio');
   const [command, setCommand] = React.useState('');
   const [argsText, setArgsText] = React.useState('');
@@ -100,6 +102,8 @@ export function McpEditDialog({ server, onClose }: McpEditDialogProps) {
 
   const serverOptions = () => ({
     description: description.trim() || undefined,
+    oauthClientName: (transport !== 'stdio' && oauthClientName.trim()) || undefined,
+    oauthMetadataUrl: (transport !== 'stdio' && oauthMetadataUrl.trim()) || undefined,
     connectTimeoutSec: parseMcpTimeoutSec(connectTimeout, MAX_MCP_CONNECT_TIMEOUT_SEC),
     callTimeoutSec: parseMcpTimeoutSec(callTimeout, MAX_MCP_CALL_TIMEOUT_SEC),
   });
@@ -158,6 +162,8 @@ export function McpEditDialog({ server, onClose }: McpEditDialogProps) {
     setMode('form');
     setName(base?.name ?? '');
     setDescription(base?.description ?? '');
+    setOauthClientName(base?.oauthClientName ?? '');
+    setOauthMetadataUrl(base?.oauthMetadataUrl ?? '');
     setTransport(base?.transport ?? 'stdio');
     setCommand(base?.command ?? '');
     setArgsText((base?.args ?? []).join('\n'));
@@ -406,15 +412,38 @@ export function McpEditDialog({ server, onClose }: McpEditDialogProps) {
                   </Field>
                 </>
               ) : (
-                <Field>
-                  <FieldLabel>{t('URL')}</FieldLabel>
-                  <Input
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    placeholder="https://..."
-                    className="font-mono text-xs"
-                  />
-                </Field>
+                <>
+                  <Field>
+                    <FieldLabel>{t('URL')}</FieldLabel>
+                    <Input
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      placeholder="https://..."
+                      className="font-mono text-xs"
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel>{t('OAuth client name (optional)')}</FieldLabel>
+                    <Input
+                      value={oauthClientName}
+                      onChange={(e) => setOauthClientName(e.target.value)}
+                      placeholder={t('For servers that only accept known OAuth clients')}
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel>
+                      {t('OAuth authorization server metadata URL (optional)')}
+                    </FieldLabel>
+                    <Input
+                      value={oauthMetadataUrl}
+                      onChange={(e) => setOauthMetadataUrl(e.target.value)}
+                      placeholder={t(
+                        'Use when the server advertises a wrong authorization server or none'
+                      )}
+                      className="font-mono text-xs"
+                    />
+                  </Field>
+                </>
               )}
 
               <Field>
