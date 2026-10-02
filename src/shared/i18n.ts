@@ -641,6 +641,13 @@ export const zhTranslations: Record<string, string> = {
   URL: 'URL',
   'Connection timeout (seconds)': '连接超时（秒）',
   'Tool call timeout (seconds)': '工具调用超时（秒）',
+  'Description (optional)': '描述（可选）',
+  'One line telling the model what this server is for': '一句话告诉模型这个服务器的用途',
+  'OAuth client name (optional)': 'OAuth 客户端名称（可选）',
+  'For servers that only accept known OAuth clients': '用于只接受已知 OAuth 客户端的服务器',
+  'OAuth authorization server metadata URL (optional)': 'OAuth 授权服务器元数据地址（可选）',
+  'Use when the server advertises a wrong authorization server or none':
+    '服务器声明的授权服务器不对或没有声明时填写',
   'This MCP server already exists': '该 MCP 服务器已存在',
   'Import MCP servers': '导入 MCP 服务器',
   Form: '表单',

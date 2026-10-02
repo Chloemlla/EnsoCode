@@ -29,8 +29,6 @@ vi.mock('./mcp', () => ({
     refresh = mocks.mcpRefresh;
     closeAll = vi.fn(async () => undefined);
   },
-  mcpServerSlug: (name: string) => name,
-  mcpToolName: (server: string, tool: string) => `mcp__${server}__${tool}`,
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {

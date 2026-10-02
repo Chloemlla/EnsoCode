@@ -28,6 +28,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 1.0.0
         version: 1.0.0(patch_hash=d837be33055c4e87267a35c703958b8fb508c76da3b1d3d03839b16fa01320b8)(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.4.3)
+      '@earendil-works/pi-mcp':
+        specifier: 1.0.0
+        version: 1.0.0
       '@earendil-works/pi-tui':
         specifier: 1.0.0
         version: 1.0.0

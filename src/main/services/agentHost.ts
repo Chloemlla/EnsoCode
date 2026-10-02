@@ -1474,6 +1474,7 @@ function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
   return {
     ...(server.id ? { id: server.id } : {}),
     name: server.name,
+    ...(server.description?.trim() ? { description: server.description.trim() } : {}),
     transport: server.transport,
     ...(server.command ? { command: server.command } : {}),
     ...(server.args?.length ? { args: server.args } : {}),

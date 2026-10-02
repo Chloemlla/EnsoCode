@@ -4,12 +4,11 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { OccupancyTool } from '@shared/occupancy';
 import type { McpServerEntry } from '@shared/types';
+import { assignMcpToolNames } from '../../agent/mcpNames';
 import { getMcpToolCatalog } from './mcpToolCatalog';
 
 const PROBE_TIMEOUT_MS = 8_000;
 const CLOSE_TIMEOUT_MS = 1_000;
-
-const slug = (name: string): string => name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -68,8 +67,12 @@ export async function listMcpOccupancyTools(server: McpServerEntry): Promise<Occ
       tools.map((tool) => tool.name)
     );
   }
-  return tools.map((tool) => ({
-    name: `mcp__${slug(server.name)}__${tool.name}`,
+  const names = assignMcpToolNames(
+    server.name,
+    tools.map((tool) => tool.name)
+  );
+  return tools.map((tool, index) => ({
+    name: names[index],
     description: tool.description,
     parameters: tool.inputSchema,
   }));

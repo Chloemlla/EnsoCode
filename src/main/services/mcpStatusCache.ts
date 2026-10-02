@@ -12,6 +12,10 @@ export function recordMcpStatus(event: McpStatusEvent): void {
   statuses.set(event.serverId ?? event.serverName, event);
 }
 
+export function mcpStatusFor(serverId: string): McpStatusEvent | undefined {
+  return statuses.get(serverId);
+}
+
 export function mcpStatusSnapshot(): McpStatusEvent[] {
   return [...statuses.values()];
 }

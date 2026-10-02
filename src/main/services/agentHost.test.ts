@@ -54,6 +54,25 @@ describe('agentHost session MCP config', () => {
     }
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('description 去空白后下发，空白不下发', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'enso-session-mcp-'));
+    const catalog = new McpToolCatalogStore(path.join(dir, 'catalog.json'));
+    const entry = (description?: string): McpServerEntry => ({
+      id: 's1',
+      name: 'search',
+      transport: 'stdio',
+      command: 'search-mcp',
+      source: 'manual',
+      enabled: true,
+      ...(description !== undefined ? { description } : {}),
+    });
+    expect(toSessionMcpConfig(entry('  Team wiki  '), catalog)).toMatchObject({
+      description: 'Team wiki',
+    });
+    expect(toSessionMcpConfig(entry('   '), catalog)).not.toHaveProperty('description');
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('agentHost agent type tool filtering', () => {

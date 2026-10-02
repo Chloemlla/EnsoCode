@@ -2011,6 +2011,23 @@ describe('MCP 旁路事件收窄', () => {
     expect(parseAgentWorkerEvent({ ...status, html: '<script>' })).toBeNull();
   });
 
+  it('mcp-status 的 scopeChallenge 只收字符串 scope 与合法 URL', () => {
+    const challenged = {
+      ...status,
+      state: 'unauthorized',
+      scopeChallenge: {
+        scope: 'files:write',
+        resourceMetadataUrl: 'https://mcp.test/.well-known/x',
+      },
+    };
+    expect(parseAgentWorkerEvent(challenged)).toEqual(challenged);
+    expect(parseAgentWorkerEvent({ ...status, scopeChallenge: { scope: 1 } })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...status, scopeChallenge: { resourceMetadataUrl: 'not a url' } })
+    ).toBeNull();
+    expect(parseAgentWorkerEvent({ ...status, scopeChallenge: { scope: 'a', x: 1 } })).toBeNull();
+  });
+
   it('mcp-tokens-refreshed 裁剪白名单外的 token 字段，不丢整条事件', () => {
     const event = {
       type: 'mcp-tokens-refreshed',

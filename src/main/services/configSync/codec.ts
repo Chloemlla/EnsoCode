@@ -138,11 +138,14 @@ const SKILL_KEYS = ['id', 'name', 'description', 'path', 'source', 'enabled'];
 const MCP_KEYS = [
   'id',
   'name',
+  'description',
   'transport',
   'command',
   'args',
   'env',
   'url',
+  'oauthClientName',
+  'oauthMetadataUrl',
   'connectTimeoutSec',
   'callTimeoutSec',
   'loadMode',
@@ -527,6 +530,7 @@ function validateMcp(raw: unknown): RecordValue {
   if (!['stdio', 'http', 'sse'].includes(String(entry.transport)))
     throw new Error('Invalid MCP transport');
   if (entry.command !== undefined) stringField(entry, 'command', 'MCP server', false);
+  stringField(entry, 'description', 'MCP server', false);
   if (entry.url !== undefined) stringField(entry, 'url', 'MCP server', false);
   if (
     entry.transport === 'stdio' &&
@@ -538,6 +542,10 @@ function validateMcp(raw: unknown): RecordValue {
     throw new Error('Invalid URL MCP configuration');
   }
   if (typeof entry.url === 'string') validateHttpUrl(entry.url, 'MCP server');
+  stringField(entry, 'oauthClientName', 'MCP server', false);
+  if (stringField(entry, 'oauthMetadataUrl', 'MCP server', false) !== undefined) {
+    validateHttpUrl(entry.oauthMetadataUrl as string, 'MCP server');
+  }
   if (entry.args !== undefined) {
     if (!Array.isArray(entry.args) || entry.args.some((item) => typeof item !== 'string'))
       throw new Error('Invalid MCP args');

@@ -37,6 +37,7 @@
     "@earendil-works/pi-agent-core": "1.0.0",
     "@earendil-works/pi-ai": "1.0.0",
     "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-mcp": "1.0.0",
     "@earendil-works/pi-tui": "1.0.0",
     "@electron-toolkit/utils": "^4.0.0",
     "@huggingface/tokenizers": "0.2.0",

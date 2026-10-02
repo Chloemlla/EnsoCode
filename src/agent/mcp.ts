@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import {
+  extractWWWAuthenticateParams,
   type OAuthClientProvider,
   UnauthorizedError,
 } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -21,10 +22,12 @@ import {
 import type {
   McpConnectionState,
   McpOAuthTokens,
+  McpScopeChallenge,
   McpServerSpawnConfig,
   McpWorkerEvent,
 } from '@shared/types/agent';
 import { parseMcpOAuthTokens } from '@shared/types/agent';
+import { assignMcpToolNames, mcpNamespaceName } from './mcpNames';
 
 interface Connection {
   client: Client;
@@ -138,6 +141,23 @@ const RETRIABLE_CONNECTION_PATTERNS = [
 ];
 
 /** 死连接 / 过期 session：值得清缓存并重试一次。业务错误和 401 不走这条。 */
+/** 401/403 带 insufficient_scope 时回报挑战（所需 scope 与资源元数据），响应原样交回 SDK */
+function scopeChallengeFetch(onChallenge: (challenge: McpScopeChallenge) => void): typeof fetch {
+  return async (input, init) => {
+    const response = await fetch(input, init);
+    if (response.status === 401 || response.status === 403) {
+      const { error, scope, resourceMetadataUrl } = extractWWWAuthenticateParams(response);
+      if (error === 'insufficient_scope') {
+        onChallenge({
+          ...(scope ? { scope } : {}),
+          ...(resourceMetadataUrl ? { resourceMetadataUrl: resourceMetadataUrl.href } : {}),
+        });
+      }
+    }
+    return response;
+  };
+}
+
 export function isRetriableMcpConnectionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
@@ -160,12 +180,6 @@ export const oauthFingerprint = (tokens: McpOAuthTokens | undefined): string =>
   tokens?.access_token
     ? createHash('sha256').update(tokens.access_token).digest('hex').slice(0, 16)
     : '';
-
-export const mcpServerSlug = (name: string): string =>
-  name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
-
-export const mcpToolName = (serverName: string, toolName: string): string =>
-  `mcp__${mcpServerSlug(serverName)}__${toolName}`;
 
 type McpJson = NonNullable<Awaited<ReturnType<ToolDefinition['execute']>>['structuredContent']>;
 
@@ -276,6 +290,8 @@ export class McpManager {
   >();
   /** 最近一次下发的凭据：按需 server 的会话配置在 spawn 时冻结，连接时以它为准 */
   private readonly latestOAuth = new Map<string, McpOAuthTokens | undefined>();
+  /** 最近一次 insufficient_scope 挑战：建连随后失败时据此报「需授权」而非普通错误 */
+  private readonly scopeChallenges = new Map<string, McpScopeChallenge>();
 
   constructor(private readonly options: McpManagerOptions = { emit: () => {} }) {}
 
@@ -338,9 +354,13 @@ export class McpManager {
     if (!pending) {
       pending = this.connect(server).catch((error) => {
         console.error(`[mcp] connect failed for "${server.name}":`, error);
-        const unauthorized = isUnauthorized(error);
+        const challenge = this.scopeChallenges.get(key);
+        const unauthorized = Boolean(challenge) || isUnauthorized(error);
         const message = errorMessage(error);
-        this.emitStatus(server, unauthorized ? 'unauthorized' : 'error', { error: message });
+        this.emitStatus(server, unauthorized ? 'unauthorized' : 'error', {
+          error: message,
+          ...(challenge ? { scopeChallenge: challenge } : {}),
+        });
         this.connections.delete(key);
         this.failedUntil.set(key, {
           until: Date.now() + MCP_FAIL_TTL_MS,
@@ -408,10 +428,19 @@ export class McpManager {
     return pending;
   }
 
+  /** worker 不能开浏览器：把挑战交给 Main，由用户重新授权时在已授予 scope 上追加 */
+  private reportScopeChallenge(server: McpServerSpawnConfig, challenge: McpScopeChallenge): void {
+    this.scopeChallenges.set(connectionKey(server), challenge);
+    this.emitStatus(server, 'unauthorized', {
+      error: `MCP server requires additional scope${challenge.scope ? `: ${challenge.scope}` : ''}`,
+      scopeChallenge: challenge,
+    });
+  }
+
   private emitStatus(
     server: McpServerSpawnConfig,
     state: McpConnectionState,
-    extra?: { toolCount?: number; error?: string }
+    extra?: { toolCount?: number; error?: string; scopeChallenge?: McpScopeChallenge }
   ): void {
     this.options.emit({
       type: 'mcp-status',
@@ -451,11 +480,20 @@ export class McpManager {
       await client.close().catch(() => {});
       throw error;
     }
+    this.scopeChallenges.delete(connectionKey(server));
     this.emitStatus(server, 'ready', { toolCount: tools.length });
     return {
       client,
       provider,
-      tools: tools.map((tool) => this.toToolDefinition(client, server, tool, callTimeoutMs)),
+      tools: (() => {
+        const names = assignMcpToolNames(
+          server.name,
+          tools.map((tool) => tool.name)
+        );
+        return tools.map((tool, index) =>
+          this.toToolDefinition(client, server, tool, names[index], callTimeoutMs)
+        );
+      })(),
     };
   }
 
@@ -474,6 +512,7 @@ export class McpManager {
         if (!server.url) throw new Error('http server missing url');
         return new StreamableHTTPClientTransport(new URL(server.url), {
           authProvider: provider,
+          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }
@@ -481,6 +520,7 @@ export class McpManager {
         if (!server.url) throw new Error('sse server missing url');
         return new SSEClientTransport(new URL(server.url), {
           authProvider: provider,
+          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }
@@ -499,9 +539,9 @@ export class McpManager {
       outputSchema?: unknown;
       annotations?: unknown;
     },
+    name: string,
     callTimeoutMs: number
   ): ToolDefinition {
-    const name = mcpToolName(server.name, tool.name);
     let active = client;
     const invoke = (target: Client, params: unknown) =>
       withTimeout(
@@ -525,7 +565,10 @@ export class McpManager {
       // MCP inputSchema 是标准 JSON Schema，TypeBox 的 TSchema 结构同源，直接透传
       parameters: tool.inputSchema as ToolDefinition['parameters'],
       outputSchema: mcpResultSchema(tool.outputSchema) as ToolDefinition['outputSchema'],
-      namespace: { name: `mcp__${mcpServerSlug(server.name)}`, description: server.name },
+      namespace: {
+        name: mcpNamespaceName(server.name),
+        description: server.description || server.name,
+      },
       ...(annotations ? { annotations } : {}),
       execute: async (_toolCallId, params) => {
         try {

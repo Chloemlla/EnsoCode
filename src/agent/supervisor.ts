@@ -143,6 +143,7 @@ import { createGoalTools } from './goal';
 import { readHarnessRuleFiles, resolveHarnessSkillRoots } from './harnessAssets';
 import { type ContextMessage, sanitizeContextMessages } from './imageContext';
 import { McpManager } from './mcp';
+import { partitionMcpNamespaces } from './mcpNames';
 import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { ParentNotifier } from './notify';
@@ -1611,8 +1612,18 @@ export class SessionSupervisor {
     if (smartCompactSummaryModel) {
       await resolveBaseModelOrRefresh(runtime, smartCompactSummaryModel);
     }
-    const deferredMcp = mcpServers.filter(isDeferredMcp);
-    const directMcp = mcpServers.filter((server) => !isDeferredMcp(server));
+    const { kept: sessionMcp, conflicts: mcpConflicts } = partitionMcpNamespaces(mcpServers);
+    for (const { server, clash } of mcpConflicts) {
+      this.options.emit({
+        type: 'mcp-status',
+        ...(server.id ? { serverId: server.id } : {}),
+        serverName: server.name,
+        state: 'error',
+        error: `Server name conflicts with "${clash}" (tool names would collide)`,
+      });
+    }
+    const deferredMcp = sessionMcp.filter(isDeferredMcp);
+    const directMcp = sessionMcp.filter((server) => !isDeferredMcp(server));
     const codemodeHost = new CodemodeHost({
       codemode: toolEnabled('isolated_sandbox'),
       deferredServers: deferredMcp,

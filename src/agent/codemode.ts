@@ -7,7 +7,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { McpServerSpawnConfig } from '@shared/types/agent';
 import { looksLikeApplyPatchDocument } from './applyPatch/parser';
-import { mcpServerSlug } from './mcp';
+import { mcpNamespaceName } from './mcpNames';
 
 export const CODEMODE_TOOL_NAME = 'codemode';
 export const TOOL_SEARCH_TOOL_NAME = 'tool_search';
@@ -20,6 +20,8 @@ const DEFERRED_CONNECT_BUDGET_MS = 20_000;
 const SECTION_NAME = 'mcp_servers';
 const SECTION_LINE_MAX = 600;
 const SECTION_MAX = 6000;
+/** 同 pi：每个 server 摘要上限 250 字符 */
+const DESCRIPTION_MAX = 250;
 
 /** 脚本内不可调用：编排/交互/会话控制类工具 */
 export const CODEMODE_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
@@ -103,8 +105,6 @@ function oneLine(text: string, max: number): string {
 export const isDeferredMcp = (server: McpServerSpawnConfig): boolean =>
   server.loadMode === 'deferred';
 
-export const mcpNamespaceName = (serverName: string): string => `mcp__${mcpServerSlug(serverName)}`;
-
 /** 按需服务器清单（system prompt 段）：工具名来自 Main 缓存，可能过期 */
 export function renderMcpServersSection(
   servers: readonly McpServerSpawnConfig[],
@@ -119,9 +119,11 @@ export function renderMcpServersSection(
   let total = intro.length;
   for (const [index, server] of servers.entries()) {
     const names = (server.toolNames ?? []).map((name) => oneLine(name, 64)).filter(Boolean);
-    let line = `- ${mcpNamespaceName(server.name)}`;
+    const summary = oneLine(server.description?.split('\n', 1)[0] ?? '', DESCRIPTION_MAX);
+    let line = `- ${mcpNamespaceName(server.name)}${summary ? `: ${summary}` : ''}`;
+    const toolsLead = summary ? `${/[.。!?！？…]$/.test(summary) ? '' : '.'} Tools: ` : ': ';
     for (const [position, name] of names.entries()) {
-      const next = `${line}${position === 0 ? ': ' : ', '}${name}`;
+      const next = `${line}${position === 0 ? toolsLead : ', '}${name}`;
       if (next.length > SECTION_LINE_MAX) {
         line += `, … +${names.length - position} more`;
         break;
