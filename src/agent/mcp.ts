@@ -528,7 +528,10 @@ export class McpManager {
       // MCP inputSchema 是标准 JSON Schema，TypeBox 的 TSchema 结构同源，直接透传
       parameters: tool.inputSchema as ToolDefinition['parameters'],
       outputSchema: mcpResultSchema(tool.outputSchema) as ToolDefinition['outputSchema'],
-      namespace: { name: mcpNamespaceName(server.name), description: server.name },
+      namespace: {
+        name: mcpNamespaceName(server.name),
+        description: server.description || server.name,
+      },
       ...(annotations ? { annotations } : {}),
       execute: async (_toolCallId, params) => {
         try {

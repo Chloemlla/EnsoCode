@@ -111,6 +111,20 @@ describe('renderMcpServersSection', () => {
     expect(section).toContain('searchTools');
     expect(renderMcpServersSection([server('a')], 'tool_search')).toContain('tool_search');
   });
+
+  it('配置了 description 的 server 带一行摘要，超长截断', () => {
+    const withDescription = {
+      ...server('docs', ['search']),
+      description: 'Internal docs\nsecond line',
+    };
+    expect(renderMcpServersSection([withDescription], 'codemode')).toContain(
+      '- mcp__docs: Internal docs. Tools: search'
+    );
+    const long = { ...server('long'), description: 'x'.repeat(400) };
+    const line = renderMcpServersSection([long], 'codemode')?.split('\n').at(-1) ?? '';
+    expect(line.length).toBeLessThanOrEqual(270);
+    expect(line.endsWith('…')).toBe(true);
+  });
 });
 
 describe('CodemodeHost', () => {

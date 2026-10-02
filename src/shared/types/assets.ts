@@ -27,6 +27,8 @@ export type McpTransport = (typeof MCP_TRANSPORTS)[number];
 export interface McpServerEntry {
   id: string;
   name: string;
+  /** 一行用途说明：进系统提示词的按需服务器清单，也是工具搜索的 namespace 描述 */
+  description?: string;
   transport: McpTransport;
   /** stdio 用 */
   command?: string;

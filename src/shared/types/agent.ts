@@ -660,6 +660,7 @@ export interface McpServerSpawnConfig {
   /** 对应 McpServerEntry.id：状态回报与 token 归属的关联键 */
   id?: string;
   name: string;
+  description?: string;
   transport: 'stdio' | 'http' | 'sse';
   command?: string;
   args?: string[];

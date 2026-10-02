@@ -82,6 +82,24 @@ describe('config sync codec schema and crypto boundaries', () => {
     expect(() => validateBundle(invalid)).toThrow(/loadMode/);
   });
 
+  it('MCP description 随包往返，非字符串拒绝', () => {
+    const mcp = (description: unknown) => ({
+      id: 'mcp-1',
+      name: 'Search',
+      description,
+      transport: 'stdio',
+      command: 'search-mcp',
+      source: 'manual',
+      enabled: true,
+    });
+    const input = minimalBundle();
+    (input.state as unknown as Record<string, unknown>).mcpServers = [mcp('Team wiki')];
+    expect(validateBundle(input).state.mcpServers[0]).toMatchObject({ description: 'Team wiki' });
+    const invalid = minimalBundle();
+    (invalid.state as unknown as Record<string, unknown>).mcpServers = [mcp(42)];
+    expect(() => validateBundle(invalid)).toThrow(/description/);
+  });
+
   it('接受智能压缩设置并校验模型引用', () => {
     const input = minimalBundle();
     input.state.providers = [provider()];

@@ -303,6 +303,17 @@ describe('McpManager deferred servers', () => {
     expect(result.ok && result.tools[0].namespace?.name).toBe('mcp__my_docs');
   });
 
+  it('namespace 描述优先用配置的 description，缺省回退服务器名', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [{ name: 'search', inputSchema: { type: 'object' } }],
+    }));
+    const { manager } = makeManager();
+    const described = await manager.resolve({ ...httpServer, description: 'Team wiki' });
+    expect(described.ok && described.tools[0].namespace?.description).toBe('Team wiki');
+    const plain = await manager.resolve({ ...httpServer, id: 'srv-2' });
+    expect(plain.ok && plain.tools[0].namespace?.description).toBe('notion');
+  });
+
   it('resolve 失败带原因与是否需授权，TTL 内复用同一原因', async () => {
     clientState.connect = vi.fn(async () => {
       throw new UnauthorizedError('401');

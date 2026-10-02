@@ -641,6 +641,8 @@ export const zhTranslations: Record<string, string> = {
   URL: 'URL',
   'Connection timeout (seconds)': '连接超时（秒）',
   'Tool call timeout (seconds)': '工具调用超时（秒）',
+  'Description (optional)': '描述（可选）',
+  'One line telling the model what this server is for': '一句话告诉模型这个服务器的用途',
   'This MCP server already exists': '该 MCP 服务器已存在',
   'Import MCP servers': '导入 MCP 服务器',
   Form: '表单',

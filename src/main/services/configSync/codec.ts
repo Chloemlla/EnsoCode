@@ -138,6 +138,7 @@ const SKILL_KEYS = ['id', 'name', 'description', 'path', 'source', 'enabled'];
 const MCP_KEYS = [
   'id',
   'name',
+  'description',
   'transport',
   'command',
   'args',
@@ -527,6 +528,7 @@ function validateMcp(raw: unknown): RecordValue {
   if (!['stdio', 'http', 'sse'].includes(String(entry.transport)))
     throw new Error('Invalid MCP transport');
   if (entry.command !== undefined) stringField(entry, 'command', 'MCP server', false);
+  stringField(entry, 'description', 'MCP server', false);
   if (entry.url !== undefined) stringField(entry, 'url', 'MCP server', false);
   if (
     entry.transport === 'stdio' &&
