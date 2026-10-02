@@ -1,6 +1,10 @@
 import { workspaceBranchChangedNote } from '@shared/types/agent';
 import { describe, expect, it, vi } from 'vitest';
-import { consumeBranchContext, WorkspaceSwitchGate } from './workspaceSwitch';
+import {
+  consumeBranchContext,
+  WorkspaceSwitchGate,
+  workspaceBranchContextExtension,
+} from './workspaceSwitch';
 
 const session = (id: string, parentId?: string) => ({
   identity: { sessionId: id, generation: `${id}-generation` },
@@ -24,6 +28,38 @@ async function flush() {
 }
 
 describe('WorkspaceSwitchGate', () => {
+  it('branch context extension injects a hidden message instead of forcing the system prompt', async () => {
+    const current: { pendingBranch?: string; pendingBranchRequestId?: string } = {
+      pendingBranch: 'feature/new',
+      pendingBranchRequestId: 'req-1',
+    };
+    const consumed = vi.fn();
+    let handler: ((event: { prompt: string; systemPrompt: string }) => unknown) | undefined;
+    const extension = workspaceBranchContextExtension(() => current, consumed) as {
+      factory: (pi: unknown) => void;
+    };
+    extension.factory({
+      on: (_event: string, fn: typeof handler) => {
+        handler = fn;
+      },
+    });
+    const first = await handler?.({ prompt: 'real input', systemPrompt: 'base' });
+    expect(first).toEqual({
+      message: {
+        customType: 'enso-branch-context',
+        content: workspaceBranchChangedNote('feature/new'),
+        display: false,
+      },
+    });
+    expect(consumed).toHaveBeenCalledWith('req-1');
+    expect(await handler?.({ prompt: 'next', systemPrompt: 'base' })).toBeUndefined();
+
+    current.pendingBranch = 'feature/new';
+    const note = workspaceBranchChangedNote('feature/new');
+    expect(await handler?.({ prompt: `${note}\n\ninput`, systemPrompt: 'base' })).toBeUndefined();
+    expect(current.pendingBranch).toBeUndefined();
+  });
+
   it('consumes but does not duplicate the same branch background already attached to real input', () => {
     const current = { pendingBranch: 'feature/new' };
     const input = `${workspaceBranchChangedNote('feature/new')}\n\nreal user input`;

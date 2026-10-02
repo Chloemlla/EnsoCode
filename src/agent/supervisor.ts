@@ -171,7 +171,7 @@ import {
   type SshExecutor,
   sshPasswordEnv,
 } from './ssh/executor';
-import { rewriteRemoteWorkingDirectoryPrompt } from './ssh/posixPath';
+import { applyRemoteWorkingDirectory } from './ssh/posixPath';
 import { createRemoteGrepToolDefinition } from './ssh/remoteGrep';
 import { createRemoteOperations } from './ssh/remoteOperations';
 import {
@@ -394,7 +394,7 @@ function createSessionResourceLoader(options: {
   compactStrategy?: CompactStrategy;
   smartCompactSummaryModel?: SpawnModelConfig;
   smartCompactMode?: SmartCompactMode;
-  /** 仅普通 parent：替换 pi 默认提示词开头的角色段落。 */
+  /** 仅普通 parent：替换 pi 默认提示词开头的角色段落；会强制整段提示词，故排在扩展最后。 */
   persona?: string;
 }): DefaultResourceLoader {
   const harness = options.loadHarnessAssets && !options.remoteAgentsFiles;
@@ -421,19 +421,6 @@ function createSessionResourceLoader(options: {
     // noExtensions 只挡磁盘上的项目/全局扩展；inline factory 不受影响，图片修剪对所有会话生效
     extensionFactories: [
       ...(options.codemode ? [options.codemode] : []),
-      ...(persona
-        ? [
-            {
-              name: 'custom-persona',
-              hidden: true,
-              factory: (pi) => {
-                pi.on('before_agent_start', (event) => ({
-                  systemPrompt: replacePersonaParagraph(event.systemPrompt, persona),
-                }));
-              },
-            } satisfies InlineExtension,
-          ]
-        : []),
       options.branchContext,
       applyPatchResultExtension,
       {
@@ -468,13 +455,13 @@ function createSessionResourceLoader(options: {
               name: 'ssh-cwd-prompt',
               hidden: true,
               factory: (pi) => {
-                pi.on('before_agent_start', (event) => ({
-                  systemPrompt: rewriteRemoteWorkingDirectoryPrompt(
-                    event.systemPrompt,
+                pi.on('before_agent_start', (event) => {
+                  applyRemoteWorkingDirectory(
+                    event.systemPromptOptions,
                     options.cwd,
                     options.remoteSsh!.host
-                  ),
-                }));
+                  );
+                });
               },
             } satisfies InlineExtension,
           ]
@@ -510,6 +497,19 @@ function createSessionResourceLoader(options: {
           ]
         : []),
       options.silentTurnRecovery,
+      ...(persona
+        ? [
+            {
+              name: 'custom-persona',
+              hidden: true,
+              factory: (pi) => {
+                pi.on('before_agent_start', (event) => ({
+                  systemPrompt: replacePersonaParagraph(event.systemPrompt, persona),
+                }));
+              },
+            } satisfies InlineExtension,
+          ]
+        : []),
     ],
     agentsFilesOverride: options.remoteAgentsFiles
       ? () => ({

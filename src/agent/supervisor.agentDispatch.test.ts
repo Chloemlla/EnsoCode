@@ -1537,6 +1537,9 @@ describe('SessionSupervisor custom parent system prompt', () => {
     const parentLoader = mocks.loaderOptions.at(-1);
     expect(parentLoader?.systemPromptOverride).toBeUndefined();
     expect(applyCustomPersona(parentLoader, DEFAULT_PERSONA_PROMPT)).toBe('custom parent base');
+    // 强制提示词会冻结后续扩展对 systemPromptOptions 的修改，必须最后执行
+    const factories = parentLoader?.extensionFactories as Array<{ name?: string }>;
+    expect(factories.at(-1)?.name).toBe('custom-persona');
 
     supervisor.handleCommand({
       type: 'spawn-child',

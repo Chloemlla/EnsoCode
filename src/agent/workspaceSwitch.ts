@@ -128,12 +128,25 @@ export function workspaceBranchContextExtension(
         const session = getSession();
         if (session?.pendingBranch === undefined) return;
         const requestId = session.pendingBranchRequestId;
-        const systemPrompt = consumeBranchContext(session, event.systemPrompt, event.prompt);
+        const note = takeBranchContextNote(session, event.prompt);
         if (requestId !== undefined) onConsumed?.(requestId);
-        return { systemPrompt };
+        if (!note) return;
+        return { message: { customType: 'enso-branch-context', content: note, display: false } };
       });
     },
   };
+}
+
+function takeBranchContextNote(
+  session: { pendingBranch?: string; pendingBranchRequestId?: string },
+  input: string
+): string | undefined {
+  if (session.pendingBranch === undefined) return undefined;
+  const branch = session.pendingBranch;
+  session.pendingBranch = undefined;
+  session.pendingBranchRequestId = undefined;
+  const note = workspaceBranchChangedNote(branch);
+  return input.includes(note) ? undefined : note;
 }
 
 export function consumeBranchContext(
@@ -141,10 +154,6 @@ export function consumeBranchContext(
   text: string,
   input = ''
 ): string {
-  if (session.pendingBranch === undefined) return text;
-  const branch = session.pendingBranch;
-  session.pendingBranch = undefined;
-  session.pendingBranchRequestId = undefined;
-  const note = workspaceBranchChangedNote(branch);
-  return input.includes(note) ? text : `${note}\n\n${text}`;
+  const note = takeBranchContextNote(session, input);
+  return note ? `${note}\n\n${text}` : text;
 }
