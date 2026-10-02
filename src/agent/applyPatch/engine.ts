@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { withFileMutationQueue } from '@earendil-works/pi-coding-agent';
 import type { AppliedFileChange } from '@shared/types/fileChanges';
 import { APPLY_PATCH_NO_EDITS_HINT } from './guidance';
 import { createLocalApplyPatchIo, normalizePatchPath } from './localIo';
@@ -407,6 +409,26 @@ function peekApplyPatchInput(params: unknown): string | undefined {
   }
 }
 
+/** 与 pi edit/write 共用同文件队列；解析失败不取锁，交给 buildPlan 报错 */
+function mutationTargets(cwd: string, params: unknown, io?: PatchIo): string[] {
+  try {
+    const operations = normalizeOperations(
+      parseApplyPatch(requireApplyPatchInput(params)),
+      io?.normalizePath ?? normalizePatchPath
+    );
+    return [...new Set(operationPaths(operations).map((value) => path.resolve(cwd, value)))].sort();
+  } catch {
+    return [];
+  }
+}
+
+function withMutationQueues<T>(targets: readonly string[], task: () => Promise<T>): Promise<T> {
+  return targets.reduceRight<() => Promise<T>>(
+    (next, target) => () => withFileMutationQueue(target, next),
+    task
+  )();
+}
+
 export function executeApplyPatch(
   cwd: string,
   params: unknown,
@@ -414,9 +436,8 @@ export function executeApplyPatch(
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; details: ApplyPatchDetails }> {
   return enqueue(async () => {
     try {
-      return await runPlan(
-        await buildPlan(cwd, params, options.io, options.signal),
-        options.signal
+      return await withMutationQueues(mutationTargets(cwd, params, options.io), async () =>
+        runPlan(await buildPlan(cwd, params, options.io, options.signal), options.signal)
       );
     } catch (error) {
       return result(

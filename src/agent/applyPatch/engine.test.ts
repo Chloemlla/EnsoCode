@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { withFileMutationQueue } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createLocalApplyPatchIo,
@@ -38,6 +39,49 @@ async function expectFailed(
 }
 
 describe('apply_patch 引擎', () => {
+  async function holdFile(relative: string, whileHeld: () => Promise<void> = async () => {}) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding = withFileMutationQueue(path.join(cwd, relative), async () => {
+      await gate;
+      await whileHeld();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return {
+      release: async () => {
+        release();
+        await holding;
+      },
+    };
+  }
+
+  it('与 pi edit/write 共用同文件写入队列，持锁期间不读不写', async () => {
+    await writeFile(path.join(cwd, 'a.txt'), 'one\n');
+    const lock = await holdFile('a.txt', () => writeFile(path.join(cwd, 'a.txt'), 'one\nmid\n'));
+    const pending = executeApplyPatch(cwd, patch('*** Update File: a.txt', '@@', '-one', '+two'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await text('a.txt')).toBe('one\n');
+    await lock.release();
+    expect((await pending).details.status).toBe('success');
+    expect(await text('a.txt')).toBe('two\nmid\n');
+  });
+
+  it('move 目标同样等待写入队列', async () => {
+    await writeFile(path.join(cwd, 'src.txt'), 'one\n');
+    const lock = await holdFile('dst.txt');
+    const pending = executeApplyPatch(
+      cwd,
+      patch('*** Update File: src.txt', '*** Move to: dst.txt', '@@', '-one', '+two')
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await text('src.txt')).toBe('one\n');
+    await lock.release();
+    expect((await pending).details.status).toBe('success');
+    expect(await text('dst.txt')).toBe('two\n');
+  });
+
   it('空 envelope 在执行期拒绝且零写，失败详情带回调用 input', async () => {
     const input = '*** Begin Patch\n*** End Patch';
     const result = await executeApplyPatch(cwd, { input });

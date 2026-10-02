@@ -28,14 +28,11 @@ export function relativizePosixRemotePath(absolutePath: string, root: string): s
 }
 
 /** SDK 在 Windows 会把 cwd 写成盘符路径；远程会话改回 POSIX 并标明 SSH。 */
-export function rewriteRemoteWorkingDirectoryPrompt(
-  systemPrompt: string,
+export function applyRemoteWorkingDirectory(
+  options: { cwd: string; sections: Record<string, string> },
   remoteCwd: string,
   remoteHost: string
-): string {
-  const line = `Current working directory: ${toPosixRemotePath(remoteCwd)} (via SSH: ${remoteHost})`;
-  if (/^Current working directory:.*$/m.test(systemPrompt)) {
-    return systemPrompt.replace(/^Current working directory:.*$/m, line);
-  }
-  return `${systemPrompt.replace(/\n+$/, '')}\n\n${line}`;
+): void {
+  options.cwd = toPosixRemotePath(remoteCwd);
+  options.sections.ssh = `The working directory is on ${remoteHost} via SSH; all paths are POSIX paths on that host.`;
 }
