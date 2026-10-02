@@ -7,7 +7,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { McpServerSpawnConfig } from '@shared/types/agent';
 import { looksLikeApplyPatchDocument } from './applyPatch/parser';
-import { mcpServerSlug } from './mcp';
+import { mcpNamespaceName } from './mcpNames';
 
 export const CODEMODE_TOOL_NAME = 'codemode';
 export const TOOL_SEARCH_TOOL_NAME = 'tool_search';
@@ -102,8 +102,6 @@ function oneLine(text: string, max: number): string {
 
 export const isDeferredMcp = (server: McpServerSpawnConfig): boolean =>
   server.loadMode === 'deferred';
-
-export const mcpNamespaceName = (serverName: string): string => `mcp__${mcpServerSlug(serverName)}`;
 
 /** 按需服务器清单（system prompt 段）：工具名来自 Main 缓存，可能过期 */
 export function renderMcpServersSection(

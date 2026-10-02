@@ -25,6 +25,7 @@ import type {
   McpWorkerEvent,
 } from '@shared/types/agent';
 import { parseMcpOAuthTokens } from '@shared/types/agent';
+import { assignMcpToolNames, mcpNamespaceName } from './mcpNames';
 
 interface Connection {
   client: Client;
@@ -160,12 +161,6 @@ export const oauthFingerprint = (tokens: McpOAuthTokens | undefined): string =>
   tokens?.access_token
     ? createHash('sha256').update(tokens.access_token).digest('hex').slice(0, 16)
     : '';
-
-export const mcpServerSlug = (name: string): string =>
-  name.replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
-
-export const mcpToolName = (serverName: string, toolName: string): string =>
-  `mcp__${mcpServerSlug(serverName)}__${toolName}`;
 
 type McpJson = NonNullable<Awaited<ReturnType<ToolDefinition['execute']>>['structuredContent']>;
 
@@ -455,7 +450,15 @@ export class McpManager {
     return {
       client,
       provider,
-      tools: tools.map((tool) => this.toToolDefinition(client, server, tool, callTimeoutMs)),
+      tools: (() => {
+        const names = assignMcpToolNames(
+          server.name,
+          tools.map((tool) => tool.name)
+        );
+        return tools.map((tool, index) =>
+          this.toToolDefinition(client, server, tool, names[index], callTimeoutMs)
+        );
+      })(),
     };
   }
 
@@ -499,9 +502,9 @@ export class McpManager {
       outputSchema?: unknown;
       annotations?: unknown;
     },
+    name: string,
     callTimeoutMs: number
   ): ToolDefinition {
-    const name = mcpToolName(server.name, tool.name);
     let active = client;
     const invoke = (target: Client, params: unknown) =>
       withTimeout(
@@ -525,7 +528,7 @@ export class McpManager {
       // MCP inputSchema 是标准 JSON Schema，TypeBox 的 TSchema 结构同源，直接透传
       parameters: tool.inputSchema as ToolDefinition['parameters'],
       outputSchema: mcpResultSchema(tool.outputSchema) as ToolDefinition['outputSchema'],
-      namespace: { name: `mcp__${mcpServerSlug(server.name)}`, description: server.name },
+      namespace: { name: mcpNamespaceName(server.name), description: server.name },
       ...(annotations ? { annotations } : {}),
       execute: async (_toolCallId, params) => {
         try {

@@ -287,6 +287,22 @@ describe('McpManager deferred servers', () => {
     expect(result.ok && result.tools.map((tool) => tool.name)).toEqual(['mcp__notion__search']);
   });
 
+  it('工具名归一化后撞名时各自带哈希，调用仍落到原工具', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [
+        { name: 'read-file', inputSchema: { type: 'object' } },
+        { name: 'read_file', inputSchema: { type: 'object' } },
+      ],
+    }));
+    const { manager } = makeManager();
+    const result = await manager.resolve({ ...httpServer, name: 'my-docs' });
+    const names = result.ok ? result.tools.map((tool) => tool.name) : [];
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) expect(name).toMatch(/^mcp__my_docs__read_file_[0-9a-f]{8}$/);
+    expect(result.ok && result.tools[0].namespace?.name).toBe('mcp__my_docs');
+  });
+
   it('resolve 失败带原因与是否需授权，TTL 内复用同一原因', async () => {
     clientState.connect = vi.fn(async () => {
       throw new UnauthorizedError('401');

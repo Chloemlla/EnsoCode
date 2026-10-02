@@ -107,7 +107,7 @@ describe('renderMcpServersSection', () => {
   it('列出按需 server 与缓存工具名，无 server 时不出段', () => {
     expect(renderMcpServersSection([], 'codemode')).toBeUndefined();
     const section = renderMcpServersSection([server('my docs', ['search', 'get'])], 'codemode');
-    expect(section).toContain('- mcp__my-docs: search, get');
+    expect(section).toContain('- mcp__my_docs: search, get');
     expect(section).toContain('searchTools');
     expect(renderMcpServersSection([server('a')], 'tool_search')).toContain('tool_search');
   });
