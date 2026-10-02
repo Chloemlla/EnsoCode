@@ -133,7 +133,11 @@ import { resolveCustomModelCompat, selectCatalogEntryForCompat } from './customM
 import { createNormalizedEditTool } from './editTool';
 import { ENSO_SYSTEM_PROMPT } from './ensoPrompt';
 import { EnsoSafeJournal } from './ensoSafeJournal';
-import { createExploreFoldState, createExploreFoldTools } from './exploreFold';
+import {
+  createExploreFoldState,
+  createExploreFoldTools,
+  exploreFoldExtension,
+} from './exploreFold';
 import { OperationGate } from './gate';
 import { createGoalTools } from './goal';
 import { readHarnessRuleFiles, resolveHarnessSkillRoots } from './harnessAssets';
@@ -434,21 +438,7 @@ function createSessionResourceLoader(options: {
           }));
         },
       } satisfies InlineExtension,
-      ...(options.exploreFold
-        ? [
-            {
-              name: 'explore-fold',
-              hidden: true,
-              factory: (pi) => {
-                pi.on('context', (event) => ({
-                  messages: options.exploreFold!.apply(
-                    event.messages as never
-                  ) as typeof event.messages,
-                }));
-              },
-            } satisfies InlineExtension,
-          ]
-        : []),
+      ...(options.exploreFold ? [exploreFoldExtension(options.exploreFold)] : []),
       ...(options.remoteSsh
         ? [
             {
