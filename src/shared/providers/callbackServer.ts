@@ -32,6 +32,8 @@ export interface OauthCallbackServer {
   redirectUri: string;
   /** 等浏览器带 code 回来；用户拒绝、超时、取消或主动关闭会 reject */
   waitForCode: () => Promise<string>;
+  /** 同 waitForCode，另带授权响应里的 iss（RFC 9207，供调用方核对授权服务器） */
+  waitForResponse: () => Promise<{ code: string; iss?: string }>;
   close: () => void;
 }
 
@@ -81,7 +83,15 @@ export async function startOauthCallbackServer(
   const port = typeof address === 'object' && address ? address.port : options.preferredPort;
   const redirectUri = `http://${LOOPBACK_HOST}:${port}${options.callbackPath}`;
 
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  // 两个出口各自同步落定（不经 then 派生），调用方只等其一，另一个预挂空 catch 防无人接管的 rejection
+  const response = Promise.withResolvers<{ code: string; iss?: string }>();
+  const codeOnly = Promise.withResolvers<string>();
+  response.promise.catch(() => {});
+  codeOnly.promise.catch(() => {});
+  const reject = (error: Error) => {
+    response.reject(error);
+    codeOnly.reject(error);
+  };
   let settled = false;
   const settle = (action: () => void) => {
     if (settled) return;
@@ -114,7 +124,11 @@ export async function startOauthCallbackServer(
     res.end(isSuccess ? SUCCESS_HTML : FAILURE_HTML);
 
     if (isSuccess) {
-      settle(() => resolve(code));
+      const iss = url.searchParams.get('iss');
+      settle(() => {
+        response.resolve({ code, ...(iss ? { iss } : {}) });
+        codeOnly.resolve(code);
+      });
       return;
     }
     if (error === 'access_denied' && isValidState) {
@@ -124,7 +138,8 @@ export async function startOauthCallbackServer(
 
   return {
     redirectUri,
-    waitForCode: () => promise,
+    waitForCode: () => codeOnly.promise,
+    waitForResponse: () => response.promise,
     close: () => {
       settle(() => reject(new Error('回调服务器已关闭')));
       clearTimeout(timer);

@@ -3,9 +3,11 @@ import { AGENT_CREATE_IMPORTANCE, CRYSTAL_MIN_SOURCES, EVOLVES_RELATIONS } from 
 import {
   normalizeMemoryCaptureParams,
   normalizeMemoryCrystallizeParams,
+  normalizeMemoryDeleteParams,
   normalizeMemorySearchParams,
   parseMemoryCaptureRequest,
   parseMemoryCrystallizeRequest,
+  parseMemoryDeleteRequest,
   parseMemorySearchRequest,
 } from './toolParams';
 
@@ -365,5 +367,20 @@ describe('crystallize params', () => {
       expect(parseMemoryCrystallizeRequest(bad), JSON.stringify(bad)).toBeNull();
     }
     expect(CRYSTAL_MIN_SOURCES).toBe(3);
+  });
+});
+
+describe('delete params', () => {
+  it('normalize：id 去空白；JSON 字串可解析；只产出 schema 内的键', () => {
+    expect(normalizeMemoryDeleteParams({ id: ' m1 ', junk: 1 })).toEqual({ id: 'm1' });
+    expect(normalizeMemoryDeleteParams('{"id":"m1"}')).toEqual({ id: 'm1' });
+    expect(normalizeMemoryDeleteParams('nope')).toBe('nope');
+  });
+
+  it('parse：id 非空字串，多余键拒绝', () => {
+    expect(parseMemoryDeleteRequest({ id: 'm1' })).toEqual({ id: 'm1' });
+    for (const bad of [{}, { id: ' ' }, { id: 1 }, { id: 'm1', force: true }, '{"id":"m1"}']) {
+      expect(parseMemoryDeleteRequest(bad), JSON.stringify(bad)).toBeNull();
+    }
   });
 });

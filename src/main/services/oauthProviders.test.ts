@@ -436,10 +436,10 @@ describe('IPC 入参收窄', () => {
     expect(events[0]).toMatchObject({ type: 'error' });
   });
 
-  it('登录时传只有 api_key 支持的 provider 被拒（openai 无 oauth 登录）', async () => {
+  it('登录时传只有 api_key 支持的 provider 被拒（groq 无 oauth 登录）', async () => {
     const { sender, events } = fakeSender();
-    await completeOauthLogin('openai', sender);
-    expect(events).toEqual([{ type: 'error', message: 'unknown oauth provider: openai' }]);
+    await completeOauthLogin('groq', sender);
+    expect(events).toEqual([{ type: 'error', message: 'unknown oauth provider: groq' }]);
   });
 
   it('被拒后登录锁已释放，下一次仍能进入流程', async () => {
@@ -1034,6 +1034,82 @@ describe('登录成功凭证失效通知', () => {
       expect(sourceSend).not.toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
     } finally {
       electronMocks.windows.splice(0);
+      vi.doUnmock('@earendil-works/pi-coding-agent');
+      vi.resetModules();
+    }
+  });
+});
+
+describe('OAuth 登录的安装级 deviceId', () => {
+  it('向 pi login 提供稳定 UUID 的 getDeviceId，并持久化到 pi 全局 settings.json', async () => {
+    vi.resetModules();
+    const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
+      '@earendil-works/pi-coding-agent'
+    );
+    let getDeviceId: (() => string) | undefined;
+    interface FakeProvider {
+      id: string;
+      name: string;
+      auth: { oauth?: { name?: string } };
+      getModels: () => string[];
+    }
+    const providers: FakeProvider[] = [
+      {
+        id: 'device-oauth',
+        name: 'Device OAuth',
+        auth: { oauth: { name: 'Device OAuth' } },
+        getModels: () => [],
+      },
+    ];
+    const runtime = {
+      registerProvider: (id: string, config: { oauth?: { name?: string } }) => {
+        providers.push({
+          id,
+          name: config.oauth?.name ?? id,
+          auth: { oauth: config.oauth },
+          getModels: () => [],
+        });
+      },
+      registerNativeProvider: (provider: FakeProvider) => providers.push(provider),
+      unregisterProvider: (id: string) => {
+        const index = providers.findIndex((provider) => provider.id === id);
+        if (index !== -1) providers.splice(index, 1);
+      },
+      getProvider: (id: string) => providers.find((provider) => provider.id === id),
+      getProviders: () => providers,
+      listCredentials: async () => [],
+      refresh: async () => ({ aborted: false, errors: new Map() }),
+      getAuth: async () => ({ auth: { apiKey: 'opaque-device-token' } }),
+      login: async (
+        _providerId: string,
+        _method: string,
+        _interaction: unknown,
+        options?: { getDeviceId?: () => string }
+      ) => {
+        getDeviceId = options?.getDeviceId;
+      },
+    };
+    vi.doMock('@earendil-works/pi-coding-agent', () => ({
+      ModelRuntime: { create: async () => runtime },
+      SettingsManager: actual.SettingsManager,
+    }));
+    try {
+      const { sender, events } = fakeSender();
+      await completeOauthLogin('device-oauth', sender);
+      expect(events.at(-1)).toMatchObject({ type: 'done', providerId: 'device-oauth' });
+
+      const first = getDeviceId?.();
+      expect(first).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
+      expect(getDeviceId?.()).toBe(first);
+      // pi 的 SettingsManager.save() 是异步排队写盘
+      const settingsFile = path.join(userData, 'agent', 'pi-agent', 'settings.json');
+      await vi.waitFor(() => {
+        const saved = JSON.parse(readFileSync(settingsFile, 'utf8')) as { deviceId?: string };
+        expect(saved.deviceId).toBe(first);
+      });
+    } finally {
       vi.doUnmock('@earendil-works/pi-coding-agent');
       vi.resetModules();
     }

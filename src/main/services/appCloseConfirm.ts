@@ -8,6 +8,10 @@ const CLOSE_RESPONSE_TIMEOUT_MS = 30_000;
 
 export interface AppCloseConfirmHost {
   isDestroyed(): boolean;
+  isMinimized(): boolean;
+  restore(): void;
+  show(): void;
+  focus(): void;
   on(event: 'close', listener: (event: Electron.Event) => void): void;
   once(event: 'closed', listener: () => void): void;
   removeListener(event: 'closed', listener: () => void): void;
@@ -76,6 +80,9 @@ export function attachAppCloseConfirm(
     flowInProgress = true;
     try {
       if (win.isDestroyed() || contentsOf().isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
       const action = await askRenderer();
       if (action === 'cancel') return;
       flowInProgress = false;

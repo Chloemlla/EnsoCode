@@ -82,6 +82,48 @@ describe('config sync codec schema and crypto boundaries', () => {
     expect(() => validateBundle(invalid)).toThrow(/loadMode/);
   });
 
+  it('MCP description 随包往返，非字符串拒绝', () => {
+    const mcp = (description: unknown) => ({
+      id: 'mcp-1',
+      name: 'Search',
+      description,
+      transport: 'stdio',
+      command: 'search-mcp',
+      source: 'manual',
+      enabled: true,
+    });
+    const input = minimalBundle();
+    (input.state as unknown as Record<string, unknown>).mcpServers = [mcp('Team wiki')];
+    expect(validateBundle(input).state.mcpServers[0]).toMatchObject({ description: 'Team wiki' });
+    const invalid = minimalBundle();
+    (invalid.state as unknown as Record<string, unknown>).mcpServers = [mcp(42)];
+    expect(() => validateBundle(invalid)).toThrow(/description/);
+  });
+
+  it('MCP OAuth 客户端名与元数据地址随包往返，坏 URL 拒绝', () => {
+    const mcp = (oauthMetadataUrl: string) => ({
+      id: 'mcp-1',
+      name: 'Remote',
+      transport: 'http',
+      url: 'https://mcp.test/mcp',
+      oauthClientName: 'Known',
+      oauthMetadataUrl,
+      source: 'manual',
+      enabled: true,
+    });
+    const input = minimalBundle();
+    (input.state as unknown as Record<string, unknown>).mcpServers = [
+      mcp('https://auth.test/.well-known/oauth-authorization-server'),
+    ];
+    expect(validateBundle(input).state.mcpServers[0]).toMatchObject({
+      oauthClientName: 'Known',
+      oauthMetadataUrl: 'https://auth.test/.well-known/oauth-authorization-server',
+    });
+    const invalid = minimalBundle();
+    (invalid.state as unknown as Record<string, unknown>).mcpServers = [mcp('javascript:alert(1)')];
+    expect(() => validateBundle(invalid)).toThrow();
+  });
+
   it('接受智能压缩设置并校验模型引用', () => {
     const input = minimalBundle();
     input.state.providers = [provider()];

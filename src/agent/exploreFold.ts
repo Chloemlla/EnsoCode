@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import type { InlineExtension, ToolDefinition } from '@earendil-works/pi-coding-agent';
 
 export interface LlmMessage {
   role: string;
@@ -52,6 +52,11 @@ function toolCallsOf(message: LlmMessage): Array<{ id: string; name: string }> {
  * 模型据此知道探索已完成，fold 结果正文即报告；工具调用与结果始终成对。
  */
 export function foldExploreContext(messages: LlmMessage[]): LlmMessage[] {
+  const drop = foldedIndices(messages);
+  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
+}
+
+function foldedIndices(messages: LlmMessage[]): Set<number> {
   const failed = new Set<string>();
   const done = new Set<string>();
   for (const message of messages) {
@@ -82,7 +87,70 @@ export function foldExploreContext(messages: LlmMessage[]): LlmMessage[] {
       i = from - 1;
     }
   }
-  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
+  return drop;
+}
+
+interface ProjectedEntry {
+  sourceEntry: { id: string; type: string };
+  messages: LlmMessage[];
+}
+
+/** 投影里整条落在折叠区间内的 message 条目 id，供写成持久 context_edit */
+export function exploreFoldContextEdits(entries: readonly ProjectedEntry[]): string[] {
+  const owners = entries.flatMap((entry) => entry.messages.map(() => entry));
+  const drop = foldedIndices(entries.flatMap((entry) => entry.messages));
+  if (drop.size === 0) return [];
+  const kept = new Set(owners.filter((_, i) => !drop.has(i)));
+  return [...new Set(owners.filter((_, i) => drop.has(i)))]
+    .filter((entry) => entry.sourceEntry.type === 'message' && !kept.has(entry))
+    .map((entry) => entry.sourceEntry.id);
+}
+
+function foldedThisTurn(message: LlmMessage, toolResults: readonly LlmMessage[]): boolean {
+  return toolCallsOf(message).some(
+    (c) =>
+      c.name === 'explore_fold' &&
+      toolResults.some((r) => r.toolCallId === c.id && r.isError !== true)
+  );
+}
+
+/**
+ * fold 成功的轮次结束时把折叠区间写成 context_edit，pi 的投影、压缩与用量估算都看到折叠后的上下文；
+ * context 钩子兜底没有持久编辑的旧会话。
+ */
+export function exploreFoldExtension(state: ExploreFoldState): InlineExtension {
+  return {
+    name: 'explore-fold',
+    hidden: true,
+    factory: (pi) => {
+      pi.on('context', (event) => ({
+        messages: state.apply(event.messages as never) as typeof event.messages,
+      }));
+      pi.on('turn_end', (event) => {
+        if (
+          !foldedThisTurn(
+            event.message as unknown as LlmMessage,
+            event.toolResults as unknown as LlmMessage[]
+          )
+        )
+          return;
+        const targets = exploreFoldContextEdits(
+          event.context.contextEntries as unknown as ProjectedEntry[]
+        );
+        if (targets.length === 0) return;
+        return {
+          entries: [
+            ...event.entries,
+            ...targets.map((targetId) => ({
+              type: 'context_edit' as const,
+              targetId,
+              replacement: null,
+            })),
+          ],
+        };
+      });
+    },
+  };
 }
 
 export function createExploreFoldTools(state: ExploreFoldState): ToolDefinition[] {

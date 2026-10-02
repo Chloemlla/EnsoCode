@@ -19,8 +19,12 @@ describe('speech model registry', () => {
       'x-asr-streaming',
       'hanbao',
       'gemini-live',
+      'wetype',
     ]);
-    expect(SPEECH_MODEL_IDS.filter((id) => SPEECH_MODELS[id].remote)).toEqual(['gemini-live']);
+    expect(SPEECH_MODEL_IDS.filter((id) => SPEECH_MODELS[id].remote)).toEqual([
+      'gemini-live',
+      'wetype',
+    ]);
     for (const id of SPEECH_MODEL_IDS.filter((id) => !SPEECH_MODELS[id].remote)) {
       const spec = SPEECH_MODELS[id];
       expect(spec.id).toBe(id);

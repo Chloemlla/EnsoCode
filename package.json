@@ -34,10 +34,11 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.0",
-    "@earendil-works/pi-agent-core": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-mcp": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@electron-toolkit/utils": "^4.0.0",
     "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -48,6 +49,7 @@
     "electron-updater": "^6.8.9",
     "koffi": "^3.3.1",
     "level": "^10.0.0",
+    "libopus-wasm": "^0.4.1",
     "linkedom": "^0.18.13",
     "node-datachannel": "^0.33.2",
     "node-pty": "^1.1.0",
@@ -144,7 +146,7 @@
     ],
     "patchedDependencies": {
       "@rahularya01/pi-cursor@1.4.38": "patches/@rahularya01__pi-cursor@1.4.38.patch",
-      "@earendil-works/pi-coding-agent@0.87.1": "patches/@earendil-works__pi-coding-agent@0.87.1.patch"
+      "@earendil-works/pi-coding-agent@1.0.0": "patches/@earendil-works__pi-coding-agent@1.0.0.patch"
     }
   },
   "optionalDependencies": {

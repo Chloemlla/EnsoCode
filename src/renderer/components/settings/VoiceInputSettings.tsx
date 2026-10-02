@@ -50,6 +50,10 @@ const MODEL_TEXT: Record<SpeechModelId, { name: string; description: string }> =
     description:
       'Google cloud recognition, most accurate with mixed Chinese-English and code terms. Needs a Gemini API key.',
   },
+  wetype: {
+    name: 'WeType',
+    description: 'WeChat Keyboard cloud recognition. Chinese and English, no setup needed.',
+  },
 };
 
 function DownloadActions({
@@ -109,6 +113,7 @@ export function VoiceModelList() {
       } (${current.fileIndex + 1}/${current.fileCount})`;
     }
     if (error?.modelId === model.id) return `${t('Download failed')}: ${error.message}`;
+    if (model.id === 'wetype') return t('Audio is uploaded to Tencent WeChat Keyboard servers.');
     if (model.remote) {
       return model.state === 'ready'
         ? t(
@@ -200,7 +205,7 @@ export function VoiceModelList() {
           {t('Download the selected model to start using voice input.')}
         </p>
       ) : null}
-      {selectedModel?.remote ? (
+      {selectedModel?.id === 'gemini-live' ? (
         <>
           <GeminiKeySetting />
           <VoiceVocabularySetting />

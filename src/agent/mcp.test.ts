@@ -287,6 +287,33 @@ describe('McpManager deferred servers', () => {
     expect(result.ok && result.tools.map((tool) => tool.name)).toEqual(['mcp__notion__search']);
   });
 
+  it('工具名归一化后撞名时各自带哈希，调用仍落到原工具', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [
+        { name: 'read-file', inputSchema: { type: 'object' } },
+        { name: 'read_file', inputSchema: { type: 'object' } },
+      ],
+    }));
+    const { manager } = makeManager();
+    const result = await manager.resolve({ ...httpServer, name: 'my-docs' });
+    const names = result.ok ? result.tools.map((tool) => tool.name) : [];
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) expect(name).toMatch(/^mcp__my_docs__read_file_[0-9a-f]{8}$/);
+    expect(result.ok && result.tools[0].namespace?.name).toBe('mcp__my_docs');
+  });
+
+  it('namespace 描述优先用配置的 description，缺省回退服务器名', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [{ name: 'search', inputSchema: { type: 'object' } }],
+    }));
+    const { manager } = makeManager();
+    const described = await manager.resolve({ ...httpServer, description: 'Team wiki' });
+    expect(described.ok && described.tools[0].namespace?.description).toBe('Team wiki');
+    const plain = await manager.resolve({ ...httpServer, id: 'srv-2' });
+    expect(plain.ok && plain.tools[0].namespace?.description).toBe('notion');
+  });
+
   it('resolve 失败带原因与是否需授权，TTL 内复用同一原因', async () => {
     clientState.connect = vi.fn(async () => {
       throw new UnauthorizedError('401');
@@ -449,6 +476,47 @@ describe('McpManager call retry', () => {
     expect(clientState.callTool).toHaveBeenCalledTimes(1);
   });
 
+  it('maps MCP results for codemode: namespace, annotations, structuredContent, isError', async () => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [
+        {
+          name: 'search',
+          inputSchema: { type: 'object' },
+          annotations: { readOnlyHint: true, title: 'ignored' },
+        },
+      ],
+    }));
+    clientState.callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: { hits: 2 },
+        _meta: { trace: 'x' },
+      })
+      .mockResolvedValueOnce({ content: [], isError: true });
+    const { manager } = makeManager();
+    const [tool] = await manager.toolsFor([httpServer]);
+    expect(tool?.namespace?.name).toMatch(/^mcp__/);
+    expect(tool?.annotations).toEqual({ readOnlyHint: true });
+    expect(tool?.outputSchema).toMatchObject({ required: ['content'] });
+    const ok = await tool?.execute('tc-1', {}, undefined, undefined, {} as never);
+    expect(ok).toMatchObject({
+      content: [{ type: 'text', text: 'ok' }],
+      structuredContent: {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: { hits: 2 },
+      },
+    });
+    expect(ok?.structuredContent).not.toHaveProperty('_meta');
+    expect(ok).not.toHaveProperty('isError');
+    const failed = await tool?.execute('tc-2', {}, undefined, undefined, {} as never);
+    expect(failed).toMatchObject({ isError: true, structuredContent: { isError: true } });
+    expect(failed?.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('error'),
+    });
+  });
+
   it('retries a stale call only once', async () => {
     clientState.listTools = vi.fn(async () => ({
       tools: [{ name: 'search', inputSchema: { type: 'object' } }],
@@ -463,5 +531,72 @@ describe('McpManager call retry', () => {
     );
     expect(clientState.instances).toBe(2);
     expect(clientState.callTool).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('McpManager insufficient_scope', () => {
+  it('传输层收到 insufficient_scope 挑战时上报 unauthorized 与所需 scope，响应原样返回', async () => {
+    const { manager, events } = makeManager();
+    await manager.toolsFor([httpServer]);
+    const fetchFn = (transportState.http.at(-1)?.options as { fetch?: typeof fetch } | undefined)
+      ?.fetch;
+    expect(fetchFn).toBeTypeOf('function');
+    const challenged = new Response('', {
+      status: 403,
+      headers: {
+        'WWW-Authenticate':
+          'Bearer error="insufficient_scope", scope="files:write", resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource"',
+      },
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => challenged) as never;
+    try {
+      expect(await fetchFn?.('https://mcp.notion.com/mcp')).toBe(challenged);
+      globalThis.fetch = vi.fn(async () => new Response('', { status: 500 })) as never;
+      await fetchFn?.('https://mcp.notion.com/mcp');
+    } finally {
+      globalThis.fetch = original;
+    }
+    const scoped = events.filter((event) => event.type === 'mcp-status' && event.scopeChallenge);
+    expect(scoped).toEqual([
+      expect.objectContaining({
+        serverId: 'srv-1',
+        state: 'unauthorized',
+        scopeChallenge: {
+          scope: 'files:write',
+          resourceMetadataUrl: 'https://mcp.notion.com/.well-known/oauth-protected-resource',
+        },
+      }),
+    ]);
+  });
+});
+
+describe('McpManager insufficient_scope · 连接失败', () => {
+  it('建连因 scope 不足失败时，最终状态保留挑战而不是被普通 error 覆盖', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response('', {
+          status: 403,
+          headers: { 'WWW-Authenticate': 'Bearer error="insufficient_scope", scope="files:write"' },
+        })
+    ) as never;
+    clientState.connect = vi.fn(async () => {
+      const options = transportState.http.at(-1)?.options as { fetch?: typeof fetch } | undefined;
+      await options?.fetch?.('https://mcp.notion.com/mcp');
+      throw new Error('HTTP 403: Invalid OAuth error response');
+    });
+    try {
+      const { manager, events } = makeManager();
+      const result = await manager.resolve({ ...httpServer, id: 'srv-scope' });
+      expect(result).toMatchObject({ ok: false, unauthorized: true });
+      expect(events.at(-1)).toMatchObject({
+        type: 'mcp-status',
+        state: 'unauthorized',
+        scopeChallenge: { scope: 'files:write' },
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

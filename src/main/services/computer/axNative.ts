@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { AX_STALE_HANDLE, formatAxHandle, parseAxHandle } from '@shared/computer/axRegistry';
 import type { AxTreeNode } from '@shared/computer/axTree';
-import { isLikelyCfPointer, takeOwnedRefs } from './axCfArray';
+import { isLikelyCfPointer, splitUniqueRefs, takeOwnedRefs } from './axCfArray';
 import { type AxJobBridge, dispatchAxJob } from './axJob';
 import { collectAxRoots } from './axRoots';
 import {
@@ -22,6 +22,28 @@ import type { AxWorkerRequest } from './axWorkerClient';
 export interface AxHandleScope {
   scope: string;
   generation: number;
+}
+
+export function axAttributePairs(node: AxTreeNode): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [['role', node.role]];
+  for (const key of ['title', 'value', 'description'] as const) {
+    const value = node[key];
+    if (value) pairs.push([key, value]);
+  }
+  return pairs;
+}
+
+export function axSetValueRejection(input: {
+  role: string;
+  settable: boolean;
+  actions: string[];
+}): string | undefined {
+  if (input.settable) return undefined;
+  const hint =
+    input.actions.length > 0
+      ? `; available actions: ${input.actions.map((action) => `el.perform(${JSON.stringify(action)})`).join(', ')}`
+      : '';
+  return `AX setValue unsupported: AXValue is not settable on ${input.role}${hint}`;
 }
 
 /**
@@ -123,6 +145,7 @@ async function load(): Promise<AxJobBridge> {
     'uint32',
   ]);
   const CFGetTypeID = cf.func('CFGetTypeID', 'ulong', ['void *']);
+  const CFEqual = cf.func('CFEqual', 'bool', ['void *', 'void *']);
   const CFStringGetTypeID = cf.func('CFStringGetTypeID', 'ulong', []);
   const kCFBooleanTrue = koffi.decode(cf.symbol('kCFBooleanTrue'), 'void *');
   const AXUIElementCreateApplication = ax.func('AXUIElementCreateApplication', 'void *', ['int']);
@@ -150,6 +173,15 @@ async function load(): Promise<AxJobBridge> {
     'void *',
     'void *',
   ]);
+  const AXUIElementIsAttributeSettable = ax.func('AXUIElementIsAttributeSettable', 'int', [
+    'void *',
+    'void *',
+    koffi.out(koffi.pointer('bool')),
+  ]);
+  const AXUIElementCopyActionNames = ax.func('AXUIElementCopyActionNames', 'int', [
+    'void *',
+    axRefOut,
+  ]);
   const AXValueGetValue = ax.func('AXValueGetValue', 'bool', ['void *', 'uint32', 'void *']);
   const kCFStringEncodingUTF8 = 0x08000100;
   const withCfString = <R>(value: string, fn: (ref: unknown) => R): R => {
@@ -164,6 +196,7 @@ async function load(): Promise<AxJobBridge> {
   const releaseAll = (refs: unknown[]) => {
     for (const ref of refs) CFRelease(ref);
   };
+  const sameElement = (a: unknown, b: unknown) => Boolean(CFEqual(a, b));
   const readString = (ref: unknown): string => {
     if (!ref) return '';
     if (CFGetTypeID(ref) !== CFStringGetTypeID()) return '';
@@ -210,6 +243,27 @@ async function load(): Promise<AxJobBridge> {
   });
   const axActionName = (action: string) =>
     action.startsWith('AX') ? action : `AX${action[0].toUpperCase()}${action.slice(1)}`;
+  const readActionNames = (element: unknown): string[] => {
+    const out = [null];
+    if (Number(AXUIElementCopyActionNames(element, out)) !== 0 || !out[0]) return [];
+    const array = out[0];
+    try {
+      if (CFGetTypeID(array) !== CFArrayGetTypeID()) return [];
+      const names: string[] = [];
+      for (let i = 0; i < Number(CFArrayGetCount(array)); i++) {
+        const name = readString(CFArrayGetValueAtIndex(array, i));
+        if (name) names.push(name);
+      }
+      return names;
+    } finally {
+      CFRelease(array);
+    }
+  };
+  const isSettable = (element: unknown, name: string): boolean =>
+    withCfString(name, (attr) => {
+      const out = [false];
+      return Number(AXUIElementIsAttributeSettable(element, attr, out)) === 0 && Boolean(out[0]);
+    });
   const readAxString = (element: unknown, name: string): string => {
     if (!isLikelyCfPointer(element)) return '';
     const { value } = copyAttr(element, name);
@@ -230,7 +284,6 @@ async function load(): Promise<AxJobBridge> {
       owned.push(...rows);
       const visible = copyArrayAttr(element, 'AXVisibleChildren').values;
       owned.push(...visible);
-      const seen = new Set<unknown>();
       const children: unknown[] = [];
       for (const name of axChildTraversalAttributes({
         role,
@@ -243,18 +296,15 @@ async function load(): Promise<AxJobBridge> {
           values = copyArrayAttr(element, name).values;
           owned.push(...values);
         }
-        for (const child of values) {
-          if (seen.has(child)) continue;
-          seen.add(child);
-          children.push(child);
-        }
+        children.push(...values);
       }
-      const kept = new Set(children);
+      const { unique } = splitUniqueRefs(children, sameElement);
+      const kept = new Set(unique);
       for (const ref of owned) {
         if (kept.has(ref)) kept.delete(ref);
         else CFRelease(ref);
       }
-      return children;
+      return unique;
     } catch (error) {
       releaseAll(owned);
       throw error;
@@ -457,9 +507,10 @@ async function load(): Promise<AxJobBridge> {
           return values;
         };
         try {
-          const queue = [...copyArray('AXWindows'), ...copyArray('AXChildren')].filter(
-            (element) => readAxString(element, 'AXRole') !== 'AXMenuBar'
-          );
+          const queue = splitUniqueRefs(
+            [...copyArray('AXWindows'), ...copyArray('AXChildren')],
+            sameElement
+          ).unique.filter((element) => readAxString(element, 'AXRole') !== 'AXMenuBar');
           const found: AxTreeNode[] = [];
           const limit = query.limit ?? 20;
           const startedAt = Date.now();
@@ -511,14 +562,12 @@ async function load(): Promise<AxJobBridge> {
       });
     },
     async node(handle) {
-      return describe(handles.get(handle), handle);
+      const element = handles.get(handle);
+      const actions = readActionNames(element);
+      return { ...describe(element, handle), ...(actions.length > 0 ? { actions } : {}) };
     },
     async attributes(handle) {
-      const node = describe(handles.get(handle), handle);
-      return [
-        ['role', node.role],
-        ...(node.title ? [['title', node.title] as [string, string]] : []),
-      ];
+      return axAttributePairs(describeLite(handles.get(handle), handle));
     },
     async children(handle) {
       const element = handles.get(handle);
@@ -539,6 +588,12 @@ async function load(): Promise<AxJobBridge> {
     },
     async setValue(handle, value) {
       const element = handles.get(handle);
+      const rejection = axSetValueRejection({
+        role: readAxString(element, 'AXRole') || 'unknown',
+        settable: isSettable(element, 'AXValue'),
+        actions: readActionNames(element),
+      });
+      if (rejection) throw new Error(rejection);
       const status = withCfString('AXValue', (attr) =>
         withCfString(value, (cfValue) =>
           Number(AXUIElementSetAttributeValue(element, attr, cfValue))

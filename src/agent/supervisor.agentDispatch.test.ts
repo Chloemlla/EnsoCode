@@ -29,8 +29,6 @@ vi.mock('./mcp', () => ({
     refresh = mocks.mcpRefresh;
     closeAll = vi.fn(async () => undefined);
   },
-  mcpServerSlug: (name: string) => name,
-  mcpToolName: (server: string, tool: string) => `mcp__${server}__${tool}`,
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
@@ -126,10 +124,12 @@ function session(options: Record<string, unknown>) {
       for (const listener of listeners) listener(event);
     },
     prompt: vi.fn(
-      async (_text?: string, _options?: { preflightResult?: (accepted: boolean) => void }) =>
-        undefined
+      async (
+        _text?: string,
+        _options?: { preflightResult?: (disposition: 'handled' | 'queued' | 'started') => void }
+      ) => undefined
     ),
-    steer: vi.fn(async () => undefined),
+    steer: vi.fn(async (): Promise<'queued' | 'handled'> => 'queued'),
     abort: vi.fn(async () => undefined),
     waitForIdle: vi.fn(async () => undefined),
     dispose: vi.fn(),
@@ -252,7 +252,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     }
   );
 
-  it('按需 MCP 不在 spawn 与预热时连接，经 mcp 代理按真实工具名审批', async () => {
+  it('按需 MCP 不在 spawn 与预热时连接，首次 codemode 调用才注册为 deferred 并按真实工具名审批', async () => {
     const events: AgentWorkerEvent[] = [];
     const direct = { id: 'd', name: 'direct', transport: 'stdio' as const, command: 'd' };
     const deferred = {
@@ -294,15 +294,33 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
       customTools: Array<ToolDefinition>;
     };
-    const proxy = options.customTools.find((tool) => tool.name === 'mcp');
-    expect(proxy?.description).toContain('- notes: read');
-    void proxy!.execute(
-      'call-1',
-      { action: 'call', tool: 'mcp__notes__read', arguments: {} },
-      undefined,
-      undefined,
-      {} as never
-    );
+    expect(options.customTools.some((tool) => tool.name === 'mcp')).toBe(false);
+
+    const factories = (mocks.loaderOptions.at(-1) as { extensionFactories: unknown[] })
+      .extensionFactories as Array<{ name?: string; factory?: (pi: unknown) => void }>;
+    expect(factories[0]?.name).toBe('enso-codemode');
+    const handlers = new Map<string, Array<(event: unknown) => unknown>>();
+    const registered: ToolDefinition[] = [];
+    factories[0]?.factory?.({
+      on: (event: string, handler: (event: unknown) => unknown) =>
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+      registerTool: (tool: ToolDefinition) => registered.push(tool),
+      appendEntry: () => {},
+      getAllTools: () => [],
+      getSettings: () => ({}),
+    });
+    const sections: Record<string, string> = {};
+    for (const handler of handlers.get('before_agent_start') ?? []) {
+      await handler({ systemPromptOptions: { sections } });
+    }
+    expect(sections.mcp_servers).toContain('- mcp__notes: read');
+    for (const handler of handlers.get('tool_call') ?? []) {
+      await handler({ toolName: 'codemode', toolCallId: 'c1', input: { code: 'return 1;' } });
+    }
+    expect(mocks.mcpResolve).toHaveBeenCalledWith(deferred);
+    const registeredRead = registered.find((tool) => tool.name === 'mcp__notes__read');
+    expect(registeredRead?.exposure).toBe('deferred');
+    void registeredRead!.execute('c1/1', {}, undefined, undefined, {} as never);
     await settleUntil(() => events.some((event) => event.type === 'approval-request'));
     const request = events.find((event) => event.type === 'approval-request');
     expect(request).toMatchObject({ request: { tool: 'mcp__notes__read', kind: 'mcp' } });
@@ -749,9 +767,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
       customTools: ToolDefinition[];
     };
-    expect(options.customTools.map((tool) => tool.name).sort()).toEqual(
-      [...ready.proof.toolIds, ...mcpTools.map((tool) => tool.name)].sort()
-    );
+    expect(
+      [
+        ...options.customTools.map((tool) => tool.name),
+        ...(spec.isolatedSandbox ? ['codemode'] : []),
+      ].sort()
+    ).toEqual([...ready.proof.toolIds, ...mcpTools.map((tool) => tool.name)].sort());
     expect([...ready.proof.toolIds].sort()).toEqual(
       [
         ...childProfileToolIds(spec.tools, {
@@ -953,13 +974,13 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       return { events, supervisor, piSession, userMessage, settled };
     }
 
-    it.each([false, true, undefined])(
-      '仅 preflight 明确拒收才允许撤回（accepted=%s）',
-      async (accepted) => {
+    it.each(['started', 'queued', 'handled', undefined] as const)(
+      'prompt 抛错时，仅 preflightResult 从未回调才视为拒收并允许撤回（disposition=%s）',
+      async (disposition) => {
         const { events, supervisor, piSession, userMessage } = await spawned();
         piSession.prompt.mockImplementationOnce(async (_text, options) => {
-          if (accepted !== undefined) options?.preflightResult?.(accepted);
-          if (accepted) userMessage('hi');
+          if (disposition !== undefined) options?.preflightResult?.(disposition);
+          if (disposition === 'started' || disposition === 'queued') userMessage('hi');
           throw new Error('send failed');
         });
         supervisor.handleCommand({
@@ -970,7 +991,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         });
         await settle();
         expect(events.filter((event) => event.type === 'delivery-rejected')).toEqual(
-          accepted === false
+          disposition === undefined
             ? [expect.objectContaining({ identity: parent, deliveryId: 'd1' })]
             : []
         );
@@ -1036,6 +1057,28 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       supervisor.handleCommand({ type: 'tool-background', identity: parent, toolCallId: 'call-1' });
       await settle();
       expect(one).toHaveBeenCalledWith(parent.sessionId, 'call-1', 'user');
+      await supervisor.shutdown();
+    });
+
+    it('pi input hook 已处理的 steer 不占队列位', async () => {
+      const { supervisor, piSession, userMessage, settled } = await spawned();
+      piSession.steer.mockResolvedValueOnce('handled');
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'consumed',
+        deliveryId: 's1',
+      });
+      await settle();
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'queued',
+        deliveryId: 's2',
+      });
+      await settle();
+      userMessage('queued');
+      expect(settled()).toEqual(['s2']);
       await supervisor.shutdown();
     });
   });
@@ -1492,6 +1535,9 @@ describe('SessionSupervisor custom parent system prompt', () => {
     const parentLoader = mocks.loaderOptions.at(-1);
     expect(parentLoader?.systemPromptOverride).toBeUndefined();
     expect(applyCustomPersona(parentLoader, DEFAULT_PERSONA_PROMPT)).toBe('custom parent base');
+    // 强制提示词会冻结后续扩展对 systemPromptOptions 的修改，必须最后执行
+    const factories = parentLoader?.extensionFactories as Array<{ name?: string }>;
+    expect(factories.at(-1)?.name).toBe('custom-persona');
 
     supervisor.handleCommand({
       type: 'spawn-child',

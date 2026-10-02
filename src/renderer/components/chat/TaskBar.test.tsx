@@ -8,6 +8,10 @@ vi.mock('@/i18n', () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }));
 vi.mock('./Markdown', () => ({ Markdown: ({ text }: { text: string }) => text }));
+vi.mock('@/stores/settings', () => ({
+  useSettingsStore: (select: (state: { virtualModels: never[] }) => unknown) =>
+    select({ virtualModels: [] }),
+}));
 
 const renderActivity = (activity: SubagentActivity): string =>
   renderToStaticMarkup(createElement(AgentActivityView, { activity }));

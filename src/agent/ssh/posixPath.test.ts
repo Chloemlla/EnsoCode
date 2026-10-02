@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rewriteRemoteWorkingDirectoryPrompt, toPosixRemotePath } from './posixPath';
+import { applyRemoteWorkingDirectory, toPosixRemotePath } from './posixPath';
 
 describe('toPosixRemotePath', () => {
   it('把 Windows 盘符根路径还原成 POSIX', () => {
@@ -9,20 +9,13 @@ describe('toPosixRemotePath', () => {
   });
 });
 
-describe('rewriteRemoteWorkingDirectoryPrompt', () => {
-  it('替换 SDK 写进提示词的本地盘符 cwd', () => {
-    const prompt = 'Guidelines:\n- Be concise\n\nCurrent working directory: D:/root/semble\n';
-    expect(rewriteRemoteWorkingDirectoryPrompt(prompt, 'D:/root/semble', 'user@box')).toContain(
-      'Current working directory: /root/semble (via SSH: user@box)'
-    );
-    expect(rewriteRemoteWorkingDirectoryPrompt(prompt, '/root/semble', 'user@box')).not.toContain(
-      'D:/root/semble'
-    );
-  });
-
-  it('没有 cwd 行时追加远程工作目录', () => {
-    expect(
-      rewriteRemoteWorkingDirectoryPrompt('You are a coding assistant.', '/opt/app', 'h')
-    ).toBe('You are a coding assistant.\n\nCurrent working directory: /opt/app (via SSH: h)');
+describe('applyRemoteWorkingDirectory', () => {
+  it('把结构化 cwd 改成远端 POSIX 路径并加 ssh 段，保留其他段', () => {
+    const options = { cwd: 'D:\\root\\semble', sections: { mcp_servers: 'x' } };
+    applyRemoteWorkingDirectory(options, 'D:/root/semble', 'user@box');
+    expect(options.cwd).toBe('/root/semble');
+    expect(options.sections.mcp_servers).toBe('x');
+    expect(options.sections).toHaveProperty('ssh');
+    expect((options.sections as Record<string, string>).ssh).toContain('user@box');
   });
 });

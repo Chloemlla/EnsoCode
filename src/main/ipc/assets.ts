@@ -1,5 +1,7 @@
+import path from 'node:path';
 import type { InstructionEntry, McpServerEntry, SkillEntry } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
+import { projectTrustedCode } from '@shared/types/project';
 import { ipcMain } from 'electron';
 import { snapshotBuiltinOccupancyTools } from '../../agent/builtinOccupancy';
 import {
@@ -12,7 +14,7 @@ import {
   saveCustomWorkflowPreset,
   workflowPresetRoots,
 } from '../../agent/workflowPresets';
-import { customWorkflowPresetDir, readSettingsState } from '../services/agentHost';
+import { agentDataDir, customWorkflowPresetDir, readSettingsState } from '../services/agentHost';
 import {
   instructionReader,
   occupancyForBuiltinTools,
@@ -95,9 +97,23 @@ export function registerAssetHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.ASSETS_LIST_PROJECT_SKILLS, (_event, cwd: unknown) => {
     if (typeof cwd !== 'string' || !cwd) return [];
-    // 与 spawn 同一来源读开关：菜单预览与实际注入的 skill 集合保持一致
-    return listProjectSkills(cwd, undefined, {
-      includeHarness: readSettingsState()?.loadHarnessAssets === true,
+    // 与 spawn 同一来源读开关、agentDir 与项目信任：菜单预览与实际注入的 skill 集合保持一致
+    const state = readSettingsState();
+    const projects: unknown[] = Array.isArray(state?.projects) ? state.projects : [];
+    const project = projects.find(
+      (entry): entry is { id: string } =>
+        Boolean(entry) &&
+        typeof entry === 'object' &&
+        (entry as { path?: unknown }).path === cwd &&
+        typeof (entry as { id?: unknown }).id === 'string'
+    );
+    return listProjectSkills(cwd, {
+      agentDir: path.join(agentDataDir(), 'pi-agent'),
+      trustedProjectCode: projectTrustedCode(projects, project?.id),
+      includeHarness: state?.loadHarnessAssets === true,
+    }).catch((error: unknown) => {
+      console.error('[assets] list project skills failed:', error);
+      return [];
     });
   });
 

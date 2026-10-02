@@ -118,7 +118,8 @@ function buildPayload(): PairCatalogPayload {
   // OAuth 未就绪的空列表不结算，main 会扣下这一帧，避免手机显示没有模型服务。
   const providerPlan = pairProviderSyncPlan(
     settings.providers,
-    useOauthCredentialStore.getState().snapshot
+    useOauthCredentialStore.getState().snapshot,
+    settings.virtualModels
   );
 
   return {

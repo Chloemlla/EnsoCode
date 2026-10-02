@@ -419,6 +419,17 @@ describe('runComputerGuest', () => {
     expect(result.returnValue).toBe('深色');
   });
 
+  it('find 返回数组，await ref 后可操作元素', async () => {
+    const { result } = await run(`
+      const win = await desktop.window('w1');
+      const hits = await win.find({ description: '深色' });
+      assert(Array.isArray(hits) && hits.length === 1, 'Expected one match');
+      const el = await win.ref(hits[0].ref);
+      return [el.description, typeof el.click, typeof el.setValue];
+    `);
+    expect(result.returnValue).toEqual(['深色', 'function', 'function']);
+  });
+
   it('find description 也能命中 title=浅色', async () => {
     const { result } = await run(`
       const win = await desktop.window('w1');
@@ -499,6 +510,28 @@ describe('runComputerGuest 生命周期', () => {
       timeoutMs: 1_000,
     });
     expect(after.returnValue).toEqual([7, 'function']);
+  });
+
+  it('普通声明局限于单次调用，只有显式全局可跨可写调用保留', async () => {
+    const session = createComputerGuestSession();
+    await runComputerGuest({
+      ...base(session),
+      code: 'var localWindow = await desktop.window("w1"); globalThis.savedWindow = localWindow;',
+      timeoutMs: 1_000,
+    });
+    const next = await runComputerGuest({
+      ...base(session),
+      code: 'return [typeof localWindow, savedWindow.id];',
+      timeoutMs: 1_000,
+    });
+    expect(next.returnValue).toEqual(['undefined', 'w1']);
+    const inspection = await runComputerGuest({
+      ...base(session),
+      readOnly: true,
+      code: 'return typeof globalThis.savedWindow;',
+      timeoutMs: 1_000,
+    });
+    expect(inspection.returnValue).toBe('undefined');
   });
 
   it('只读可读元素属性，但不能读剪贴板', async () => {

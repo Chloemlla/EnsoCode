@@ -55,6 +55,7 @@ function runPreset(
     lastModelId: conversation.lastModelId,
     providers: settings.providers,
     credentials: oauthCredentialContext(useOauthCredentialStore.getState().snapshot),
+    virtualModels: settings.virtualModels,
   });
   if (resolution.source === 'none') {
     addToast({

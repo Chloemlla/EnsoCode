@@ -685,6 +685,69 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ ...base, smartCompactSummaryModel: 'anthropic/x' })).toBeNull();
   });
 
+  it('spawn-parent / set-model 携虚拟模型配置：成员与分类器严格收窄', () => {
+    const virtualModel = {
+      ...model,
+      settingsProviderId: 'enso-virtual',
+      modelId: 'auto-1',
+      virtual: {
+        name: 'Auto',
+        primary: model,
+        fast: { ...model, modelId: 'fast' },
+        fallbacks: [{ ...model, modelId: 'backup' }],
+        classifier: { source: 'judge', timeoutMs: 3000, model: { ...model, modelId: 'fast' } },
+      },
+    };
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo' };
+    expect(parseAgentCommand({ ...base, model: virtualModel })).toEqual({
+      ...base,
+      model: virtualModel,
+    });
+    expect(
+      parseAgentCommand({ type: 'set-model', identity: parent, model: virtualModel })
+    ).not.toBeNull();
+    const piClassifier = {
+      ...virtualModel,
+      virtual: {
+        ...virtualModel.virtual,
+        classifier: {
+          source: 'pi-classifier',
+          timeoutMs: 3000,
+          classifier: { provider: 'openrouter', modelId: 'typesafe/jev-1.13', apiKey: 'k' },
+        },
+      },
+    };
+    expect(parseAgentCommand({ ...base, model: piClassifier })).not.toBeNull();
+    const bad = [
+      { ...virtualModel, virtual: { ...virtualModel.virtual, primary: { modelId: 'x' } } },
+      { ...virtualModel, virtual: { ...virtualModel.virtual, fallbacks: [virtualModel] } },
+      { ...virtualModel, virtual: { ...virtualModel.virtual, extra: true } },
+      {
+        ...virtualModel,
+        virtual: { ...virtualModel.virtual, classifier: { source: 'judge', timeoutMs: 3000 } },
+      },
+      {
+        ...virtualModel,
+        virtual: {
+          ...virtualModel.virtual,
+          classifier: {
+            source: 'pi-classifier',
+            timeoutMs: 0,
+            classifier: { provider: 'x', modelId: 'y' },
+          },
+        },
+      },
+    ];
+    for (const candidate of bad) {
+      expect(parseAgentCommand({ ...base, model: candidate })).toBeNull();
+    }
+    // 辅助用途（代审、压缩摘要）只收真实模型
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', model: virtualModel })).toBeNull();
+    expect(
+      parseAgentCommand({ ...base, model, smartCompactSummaryModel: virtualModel })
+    ).toBeNull();
+  });
+
   it('spawn-parent 携 smartCompactMode:合法通过,脏值拒绝', () => {
     const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
     expect(parseAgentCommand({ ...base, smartCompactMode: 'balanced' })).toEqual({
@@ -1817,11 +1880,12 @@ describe('memory-invoke / memory-result', () => {
     result: { results: [] },
   };
 
-  it('memory-invoke 只接受 search/capture，identity 可为 parent 或 child', () => {
+  it('memory-invoke 只接受闭集 op，identity 可为 parent 或 child', () => {
     expect(parseAgentWorkerEvent(invoke)).toEqual(invoke);
     expect(parseAgentWorkerEvent({ ...invoke, identity: child })).not.toBeNull();
     expect(parseAgentWorkerEvent({ ...invoke, op: 'capture' })).not.toBeNull();
-    expect(parseAgentWorkerEvent({ ...invoke, op: 'delete' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...invoke, op: 'delete' })).not.toBeNull();
+    expect(parseAgentWorkerEvent({ ...invoke, op: 'purge' })).toBeNull();
     expect(parseAgentWorkerEvent({ ...invoke, requestId: '' })).toBeNull();
     const { params: _p, ...noParams } = invoke;
     expect(parseAgentWorkerEvent(noParams)).toBeNull();
@@ -1945,6 +2009,23 @@ describe('MCP 旁路事件收窄', () => {
     expect(parseAgentWorkerEvent({ ...status, error: 42 })).toBeNull();
     // 该事件广播到所有窗口：多余字段一律拒绝
     expect(parseAgentWorkerEvent({ ...status, html: '<script>' })).toBeNull();
+  });
+
+  it('mcp-status 的 scopeChallenge 只收字符串 scope 与合法 URL', () => {
+    const challenged = {
+      ...status,
+      state: 'unauthorized',
+      scopeChallenge: {
+        scope: 'files:write',
+        resourceMetadataUrl: 'https://mcp.test/.well-known/x',
+      },
+    };
+    expect(parseAgentWorkerEvent(challenged)).toEqual(challenged);
+    expect(parseAgentWorkerEvent({ ...status, scopeChallenge: { scope: 1 } })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...status, scopeChallenge: { resourceMetadataUrl: 'not a url' } })
+    ).toBeNull();
+    expect(parseAgentWorkerEvent({ ...status, scopeChallenge: { scope: 'a', x: 1 } })).toBeNull();
   });
 
   it('mcp-tokens-refreshed 裁剪白名单外的 token 字段，不丢整条事件', () => {

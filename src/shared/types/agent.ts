@@ -106,6 +106,28 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
    * 存在时 worker 直取该 key 对应的 provider 与模型，凭证由 pi runtime 从 auth.json 解析。
    */
   oauthAccountKey?: string;
+  /**
+   * 虚拟模型：settingsProviderId 为 `enso-virtual`、modelId 为条目 id，顶层其余字段沿用主模型
+   * 只作占位；worker 必须先看这里，按成员逐个解析后注册 pi 虚拟模型。
+   */
+  virtual?: VirtualSpawnConfig;
+}
+
+export interface VirtualSpawnClassifier {
+  source: 'judge' | 'pi-classifier';
+  timeoutMs: number;
+  /** judge：裁判聊天模型 */
+  model?: SpawnModelConfig;
+  /** pi-classifier：pi catalog 里的分类器 provider/model 与凭证 */
+  classifier?: { provider: string; modelId: string; apiKey?: string };
+}
+
+export interface VirtualSpawnConfig {
+  name: string;
+  primary: SpawnModelConfig;
+  fast?: SpawnModelConfig;
+  fallbacks: SpawnModelConfig[];
+  classifier?: VirtualSpawnClassifier;
 }
 
 /** 思考努力档位（reasoning 开启时有效），值域对齐 pi 的 ThinkingLevel。off 由 reasoningEnabled 表达 */
@@ -142,7 +164,7 @@ export const BROWSER_OPS = [
 export type BrowserOp = (typeof BROWSER_OPS)[number];
 
 /** 记忆库活在 Main（better-sqlite3），worker 只发 memory-invoke 事件；op 闭集在这里冻结 */
-export const MEMORY_OPS = ['search', 'capture', 'crystallize'] as const;
+export const MEMORY_OPS = ['search', 'capture', 'crystallize', 'delete'] as const;
 export type MemoryOp = (typeof MEMORY_OPS)[number];
 
 /** 桌面 computer 活在 Main，worker 只发 computer-invoke；guest JS 一次 run。 */
@@ -638,6 +660,7 @@ export interface McpServerSpawnConfig {
   /** 对应 McpServerEntry.id：状态回报与 token 归属的关联键 */
   id?: string;
   name: string;
+  description?: string;
   transport: 'stdio' | 'http' | 'sse';
   command?: string;
   args?: string[];
@@ -1220,6 +1243,13 @@ export interface TodoItem {
 }
 
 /** 渲染层可见的消息投影：pi AgentMessage 的白名单克隆 */
+export interface ProjectedCodemodeCall {
+  name: string;
+  ok: boolean;
+  error?: string;
+  summary?: string;
+}
+
 export interface ProjectedMessage {
   /** Persisted user entry identity, absent on unconfirmed messages. */
   entryId?: string;
@@ -1256,6 +1286,8 @@ export interface ProjectedMessage {
   fileChanges?: ProjectedFileChange[];
   /** apply_patch 完整终态清单，不依赖普通 content 截断预算 */
   applyPatchOutcome?: ProjectedApplyPatchOutcome;
+  /** codemode toolResult 的嵌套调用摘要（details.calls） */
+  codemodeCalls?: ProjectedCodemodeCall[];
   /** compactionSummary 消息：压缩前的上下文 token 数 */
   tokensBefore?: number;
   /** 摘要来自 Enso compact hook，不是原生 summarizer */
@@ -1659,9 +1691,16 @@ export type McpWorkerEvent =
       /** state=ready 时的工具数 */
       toolCount?: number;
       error?: string;
+      /** 服务器要求更多 scope（insufficient_scope）：重新授权时在已授予 scope 上追加 */
+      scopeChallenge?: McpScopeChallenge;
     }
   /** SDK 自动 refresh 后回传 Main 持久化 */
   | { type: 'mcp-tokens-refreshed'; serverId: string; tokens: McpOAuthTokens };
+
+export interface McpScopeChallenge {
+  scope?: string;
+  resourceMetadataUrl?: string;
+}
 
 export type McpStatusEvent = Extract<McpWorkerEvent, { type: 'mcp-status' }>;
 
@@ -1683,6 +1722,13 @@ const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[])
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
+
+const isMcpScopeChallenge = (value: unknown): value is McpScopeChallenge =>
+  isRecord(value) &&
+  hasOnlyKeys(value, ['scope', 'resourceMetadataUrl']) &&
+  (value.scope === undefined || (typeof value.scope === 'string' && value.scope.length <= 2048)) &&
+  (value.resourceMetadataUrl === undefined ||
+    (typeof value.resourceMetadataUrl === 'string' && URL.canParse(value.resourceMetadataUrl)));
 
 const isSequence = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 0;
@@ -1775,8 +1821,25 @@ export function isBackgroundTaskId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 128;
 }
 
+function isProjectedCodemodeCalls(value: unknown): value is ProjectedCodemodeCall[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (call) =>
+        isRecord(call) &&
+        isNonEmptyString(call.name) &&
+        typeof call.ok === 'boolean' &&
+        (call.error === undefined || typeof call.error === 'string') &&
+        (call.summary === undefined || typeof call.summary === 'string')
+    )
+  );
+}
+
 function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   if (value.rtk !== undefined && !parseRtkToolStats(value.rtk)) return false;
+  if (value.codemodeCalls !== undefined && !isProjectedCodemodeCalls(value.codemodeCalls)) {
+    return false;
+  }
   if (value.backgroundTaskId !== undefined && !isBackgroundTaskId(value.backgroundTaskId)) {
     return false;
   }
@@ -1922,7 +1985,55 @@ function parseAttachedImages(value: unknown): AttachedImage[] | null {
 const parseAnySessionIdentity = (value: unknown): SessionIdentity | ChildSessionIdentity | null =>
   parseChildSessionIdentity(value) ?? parseSessionIdentity(value);
 
-function parseSpawnModelConfig(value: unknown): SpawnModelConfig | null {
+function parseVirtualSpawnClassifier(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['source', 'timeoutMs', 'model', 'classifier'])) {
+    return false;
+  }
+  if (typeof value.timeoutMs !== 'number' || !(value.timeoutMs > 0)) return false;
+  if (value.source === 'judge') {
+    return value.classifier === undefined && parsePhysicalSpawnModelConfig(value.model) !== null;
+  }
+  if (value.source !== 'pi-classifier' || value.model !== undefined) return false;
+  const classifier = value.classifier;
+  return (
+    isRecord(classifier) &&
+    hasOnlyKeys(classifier, ['provider', 'modelId', 'apiKey']) &&
+    isNonEmptyString(classifier.provider) &&
+    isNonEmptyString(classifier.modelId) &&
+    (classifier.apiKey === undefined || typeof classifier.apiKey === 'string')
+  );
+}
+
+function parseVirtualSpawnConfig(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['name', 'primary', 'fast', 'fallbacks', 'classifier'])
+  )
+    return false;
+  return (
+    isNonEmptyString(value.name) &&
+    parsePhysicalSpawnModelConfig(value.primary) !== null &&
+    (value.fast === undefined || parsePhysicalSpawnModelConfig(value.fast) !== null) &&
+    Array.isArray(value.fallbacks) &&
+    value.fallbacks.every((item) => parsePhysicalSpawnModelConfig(item) !== null) &&
+    (value.classifier === undefined || parseVirtualSpawnClassifier(value.classifier))
+  );
+}
+
+/** 只有会话主模型（spawn-parent / set-model / 子会话继承）接受虚拟配置；其余用途一律真实模型。 */
+function parseSessionModelConfig(value: unknown): SpawnModelConfig | null {
+  if (!isRecord(value)) return null;
+  if (value.virtual === undefined) return parsePhysicalSpawnModelConfig(value);
+  const { virtual, ...physical } = value;
+  return parseVirtualSpawnConfig(virtual) && parsePhysicalSpawnModelConfig(physical)
+    ? (value as unknown as SpawnModelConfig)
+    : null;
+}
+
+const parseSpawnModelConfig = (value: unknown): SpawnModelConfig | null =>
+  parsePhysicalSpawnModelConfig(value);
+
+function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null {
   if (!isRecord(value)) return null;
   if (
     !hasOnlyKeys(value, [
@@ -2460,7 +2571,7 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
     return null;
   }
   const typeKey = parseAgentTypeKey(value.typeKey);
-  const model = parseSpawnModelConfig(value.model);
+  const model = parseSessionModelConfig(value.model);
   const skillPaths = Array.isArray(value.skillPaths) ? value.skillPaths : null;
   const mcpServers = Array.isArray(value.mcpServers) ? value.mcpServers : null;
   const skillBindingIds = Array.isArray(value.skillBindingIds) ? value.skillBindingIds : null;
@@ -2613,7 +2724,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ]) ||
         !parseSessionIdentity(value.identity) ||
         typeof value.cwd !== 'string' ||
-        !parseSpawnModelConfig(value.model) ||
+        !parseSessionModelConfig(value.model) ||
         (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
         (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
         (value.trustedProjectCode !== undefined &&
@@ -2784,7 +2895,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
     case 'set-model':
       return hasExactKeys(value, ['type', 'identity', 'model']) &&
         parseAnySessionIdentity(value.identity) &&
-        parseSpawnModelConfig(value.model)
+        parseSessionModelConfig(value.model)
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-thinking':
@@ -3093,7 +3204,16 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   }
   if (value.type === 'mcp-status') {
     // 该事件会广播到全部窗口，字段白名单 + 逐项类型都要卡死
-    return hasOnlyKeys(value, ['type', 'serverId', 'serverName', 'state', 'toolCount', 'error']) &&
+    return hasOnlyKeys(value, [
+      'type',
+      'serverId',
+      'serverName',
+      'state',
+      'toolCount',
+      'error',
+      'scopeChallenge',
+    ]) &&
+      (value.scopeChallenge === undefined || isMcpScopeChallenge(value.scopeChallenge)) &&
       isNonEmptyString(value.serverName) &&
       (value.serverId === undefined || isNonEmptyString(value.serverId)) &&
       (value.toolCount === undefined || isSequence(value.toolCount)) &&

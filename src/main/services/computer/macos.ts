@@ -14,7 +14,7 @@ import type {
   ComputerWindowInfo,
 } from '@shared/computer/types';
 import { clipboard, desktopCapturer, type NativeImage, screen, systemPreferences } from 'electron';
-import { resolveOpenArgs, resolveSettingsPaneUrl } from './appLaunch';
+import { resolveOpenArgs } from './appLaunch';
 import { withAxErrors } from './axErrors';
 import { axPressFallbackMessage, isAxPressUnsupported } from './axJob';
 import { AX_SNAPSHOT_DEFAULT_DEPTH } from './axWalkBudget';
@@ -448,8 +448,7 @@ export class MacosDesktopBackend implements DesktopBackend {
   }
 
   async launchApp(name: string, opts?: { pane?: string }): Promise<void> {
-    const paneUrl = opts?.pane ? resolveSettingsPaneUrl(opts.pane) : undefined;
-    await execFileAsync('/usr/bin/open', paneUrl ? [paneUrl] : resolveOpenArgs(name), {
+    await execFileAsync('/usr/bin/open', resolveOpenArgs(name, opts), {
       timeout: 15_000,
     });
   }

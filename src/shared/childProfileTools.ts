@@ -30,7 +30,7 @@ export function childProfileToolIds(
   }
   ids.push('message_main_agent', 'message_coworker');
   if (options.exploreFold) ids.push('explore_mark', 'explore_fold');
-  if (options.isolatedSandbox !== false) ids.push('exec');
+  if (options.isolatedSandbox !== false) ids.push('codemode');
   return ids;
 }
 

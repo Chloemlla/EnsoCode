@@ -1,7 +1,10 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { ModelRuntime as ModelRuntimeType } from '@earendil-works/pi-coding-agent';
+import type {
+  ModelRuntime as ModelRuntimeType,
+  SettingsManager as SettingsManagerType,
+} from '@earendil-works/pi-coding-agent';
 import { isSameChildSessionIdentity } from '@shared/builtinAgents';
 import type {
   OauthFlowEvent,
@@ -51,7 +54,24 @@ type AuthPrompt = Parameters<AuthInteraction['prompt']>[0];
  * 静态引入会把它挂到 Main 的启动路径上，而这里的功能只在用户打开订阅设置时才需要。
  * ESM 模块注册表自带缓存，重复 `import()` 同一字面量不会重新解析，不必再包一层 memo。
  */
-const authPath = (): string => path.join(app.getPath('userData'), 'agent', 'pi-agent', 'auth.json');
+const agentDir = (): string => path.join(app.getPath('userData'), 'agent', 'pi-agent');
+const authPath = (): string => path.join(agentDir(), 'auth.json');
+
+/**
+ * 安装级稳定设备 ID。pi 0.99 起 OpenAI「ChatGPT 订阅」登录把它作为 agent host ID，
+ * 缺失时登录直接失败。复用 pi 全局 `settings.json`（agentDir）里的 `deviceId`，
+ * 首次使用时创建，之后每次返回同一值；只在需要它的登录流程里惰性创建 SettingsManager。
+ *
+ * Installation-level stable device ID. Since pi 0.99, OpenAI "ChatGPT subscription" login uses it as
+ * the agent host ID and fails without it. Reuses `deviceId` in pi's global `settings.json` (agentDir),
+ * created on first use and stable afterwards; the SettingsManager is created lazily only by login flows
+ * that need it.
+ */
+let deviceIdSettings: SettingsManagerType | undefined;
+function deviceIdFrom(SettingsManager: typeof SettingsManagerType): string {
+  deviceIdSettings ??= SettingsManager.create(agentDir(), agentDir());
+  return deviceIdSettings.getOrCreateDeviceId();
+}
 
 // 与 agent worker 共用同一 auth.json（pi CredentialStore 文件锁保证跨进程互斥），
 // 登录/退出在 Main 完成后，worker 侧请求时经 getAuth 直接读到新凭证
@@ -62,8 +82,7 @@ const onlineCatalogRefreshes = new Map<string, Promise<boolean>>();
 /** 订阅设置与模型元数据查询共用同一份 Main 侧 runtime（catalog + auth.json） */
 export function getRuntime(): Promise<ModelRuntimeType> {
   runtimePromise ??= (async () => {
-    const agentDir = path.join(app.getPath('userData'), 'agent', 'pi-agent');
-    process.env.PI_CODING_AGENT_DIR ??= agentDir;
+    process.env.PI_CODING_AGENT_DIR ??= agentDir();
     const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
     const runtime = await ModelRuntime.create({
       authPath: authPath(),
@@ -510,7 +529,9 @@ async function runOauthLogin(
     }
     ensureAccountProvider(runtime, accountKey);
 
-    await runtime.login(accountKey, 'oauth', {
+    // 不在此处解构 SettingsManager：只有需要 deviceId 的登录流程（OpenAI ChatGPT）才会访问它
+    const pi = await import('@earendil-works/pi-coding-agent');
+    const interaction: AuthInteraction = {
       signal: login.abort.signal,
       notify: (event) => {
         switch (event.type) {
@@ -565,6 +586,9 @@ async function runOauthLogin(
         });
         return promise;
       },
+    };
+    await runtime.login(accountKey, 'oauth', interaction, {
+      getDeviceId: () => deviceIdFrom(pi.SettingsManager),
     });
 
     const accountIdentity = await probeIdentity(runtime, accountKey);

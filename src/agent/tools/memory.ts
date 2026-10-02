@@ -9,6 +9,7 @@ import {
   MEMORY_SEARCH_SPACES,
   normalizeMemoryCaptureParams,
   normalizeMemoryCrystallizeParams,
+  normalizeMemoryDeleteParams,
   normalizeMemorySearchParams,
 } from '@shared/memory/toolParams';
 import type { MemoryOp, SessionIdentity } from '@shared/types/agent';
@@ -339,6 +340,24 @@ export function createMemoryTools(
       'crystallize',
       normalizeMemoryCrystallizeParams,
       'content'
+    ),
+    define(
+      'memory_delete',
+      'Memory delete',
+      'Permanently delete one memory by id; this cannot be undone. Use it only when the user asks ' +
+        'to forget or remove a memory, or confirms that a memory is wrong or obsolete. Get the id ' +
+        'from memory_search first. Do not use it to replace an outdated memory with a newer ' +
+        'version: capture the new one with evolvesRelation=replaces instead. Only memories in the ' +
+        'global space or the current project can be deleted.',
+      schema(
+        {
+          id: { type: 'string', description: 'Id of the memory to delete (from memory_search)' },
+        },
+        ['id']
+      ),
+      'delete',
+      normalizeMemoryDeleteParams,
+      'id'
     ),
   ];
 }

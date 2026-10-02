@@ -17,6 +17,7 @@ import {
   getSpeechStatus,
   onSpeechAvailabilityChange,
   openSpeechSession,
+  prewarmSpeech,
   setSpeechCorrector,
   setSpeechProgressSink,
   speechAvailable,
@@ -314,7 +315,41 @@ describe('speech status', () => {
       ['sense-voice', false, 'missing'],
       ['hanbao', true, 'missing'],
       ['gemini-live', true, 'missing'],
+      ['wetype', true, 'ready'],
     ]);
+  });
+
+  it('offers the WeType cloud model without credentials or downloads', async () => {
+    syncSpeechFromSettings({ voiceInputEnabled: true, voiceModel: 'wetype' });
+    expect(getSpeechStatus().state).toBe('ready');
+    expect(speechAvailable()).toBe(true);
+    await expect(startSpeechDownload('wetype')).resolves.toBe(false);
+    await expect(deleteSpeechModel('wetype')).resolves.toBe(false);
+  });
+
+  it('prewarms only a ready cloud engine', async () => {
+    let prewarmed = 0;
+    __setSpeechTestHooks({
+      root,
+      platform: 'darwin',
+      arch: 'arm64',
+      createEngine: async (spec) => {
+        loads.push(spec.id);
+        return { ...fakeEngine(spec.id), prewarm: () => prewarmed++ };
+      },
+    });
+    installModel('x-asr-streaming');
+    syncSpeechFromSettings({ voiceInputEnabled: true, voiceModel: 'x-asr-streaming' });
+    prewarmSpeech();
+    syncSpeechFromSettings({ voiceInputEnabled: false, voiceModel: 'wetype' });
+    prewarmSpeech();
+    await Promise.resolve();
+    expect(loads).toEqual([]);
+    syncSpeechFromSettings({ voiceInputEnabled: true, voiceModel: 'wetype' });
+    prewarmSpeech();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(loads).toEqual(['wetype']);
+    expect(prewarmed).toBe(1);
   });
 
   describe('Gemini cloud model', () => {

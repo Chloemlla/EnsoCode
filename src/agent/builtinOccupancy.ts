@@ -4,7 +4,7 @@ import { BUILTIN_AGENT_TYPES } from '@shared/types';
 import type { AgentTypeSpawnConfig, SubagentModelOption } from '@shared/types/agent';
 import { AskManager, createAskTool } from './ask';
 import { createTaskTools } from './backgroundTasks';
-import { createIsolatedSandboxTool } from './isolatedSandbox';
+import { codemodeToolSnapshot } from './codemode';
 import { createSubmitPlanTool } from './planMode';
 import { createUnifiedSubagentTool } from './subagent';
 import { createTodoTool } from './todo';
@@ -67,7 +67,7 @@ export function snapshotBuiltinOccupancyTools(input?: {
       stop: () => false,
       knownIds: () => [],
     } as never).map(fields),
-    isolated_sandbox: [fields(createIsolatedSandboxTool({ getTools: () => [] }))],
+    isolated_sandbox: [fields(codemodeToolSnapshot())],
     computer: [fields(createComputerTool(new ComputerInvoker(noopIdentity, () => {})))],
   };
 }

@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it } from 'vitest';
 import { sshProbeDirectory } from '../../main/services/sshProbe';
 import { createCheckpoint, listCheckpointRefs, restoreCheckpoint } from '../checkpoint/core';
@@ -16,7 +16,7 @@ import { createRemoteOperations } from './remoteOperations';
 
 const host = process.env.SSH_E2E_HOST;
 const cwd = process.env.SSH_E2E_PATH ?? '/root/enso-ssh-e2e';
-const ctx = undefined as unknown as ExtensionContext;
+const ctx = undefined as unknown as ExtensionToolContext;
 
 describe.skipIf(!host)('ssh 真机 e2e', { timeout: 60_000 }, () => {
   const controlDir = join(tmpdir(), 'enso-ssh-e2e-cm');

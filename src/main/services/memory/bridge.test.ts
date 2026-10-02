@@ -293,12 +293,41 @@ describe('executeMemoryOp', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM crystallized_from').get()).toEqual({ n: 3 });
   });
 
+  it('delete：只能删本会话可见 space 的记忆，彻底移除并通知', async () => {
+    const add = async (content: string, spaceId: string) => {
+      const r = await createMemory(db, { content, spaceId });
+      if (r.status !== 'inserted') throw new Error();
+      return r.memory.id;
+    };
+    const own = await add('旧结论：用 MySQL', projectSpaceId(PROJECT));
+    const foreign = await add('别的项目的记忆', projectSpaceId('other'));
+    const deleted: string[] = [];
+    const ctx = { projectId: PROJECT, onDeleted: (id: string) => deleted.push(id) };
+
+    expect(await executeMemoryOp(db, 'delete', { id: own }, ctx)).toEqual({
+      status: 'deleted',
+      id: own,
+    });
+    expect(getMemory(db, own)).toBeNull();
+    expect(deleted).toEqual([own]);
+
+    // 不可见与不存在同样拒绝，不泄露其它项目
+    for (const id of [foreign, own]) {
+      await expect(executeMemoryOp(db, 'delete', { id }, ctx)).rejects.toMatchObject({
+        code: 'not_found',
+      });
+    }
+    expect(getMemory(db, foreign)).not.toBeNull();
+    await expect(executeMemoryOp(db, 'delete', { id: ' ' }, ctx)).rejects.toThrow(/invalid/i);
+    expect(deleted).toEqual([own]);
+  });
+
   it('search 非法载荷 → 抛错；未知 op → 抛错', async () => {
     await expect(
       executeMemoryOp(db, 'search', { query: 'q' }, { projectId: PROJECT })
     ).rejects.toThrow(/invalid/i);
-    await expect(
-      executeMemoryOp(db, 'delete' as never, {}, { projectId: PROJECT })
-    ).rejects.toThrow(/op/i);
+    await expect(executeMemoryOp(db, 'purge' as never, {}, { projectId: PROJECT })).rejects.toThrow(
+      /op/i
+    );
   });
 });

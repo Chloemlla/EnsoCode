@@ -1,24 +1,25 @@
 import { randomBytes } from 'node:crypto';
 import {
-  type AuthResult,
+  authorizeMcp,
+  type OAuthClientInformationMixed,
+  type OAuthClientMetadata,
   type OAuthClientProvider,
-  auth as sdkAuth,
-} from '@modelcontextprotocol/sdk/client/auth.js';
-import type {
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js';
+  type OAuthFlowOptions,
+  type OAuthFlowResult,
+  type OAuthTokens,
+  stepUpScope,
+} from '@earendil-works/pi-mcp/oauth';
 import {
   type OauthCallbackServer,
   type OauthCallbackServerOptions,
   startOauthCallbackServer,
 } from '@shared/providers/callbackServer';
-import type { McpOAuthTokens } from '@shared/types/agent';
+import type { McpOAuthTokens, McpScopeChallenge } from '@shared/types/agent';
 import { MCP_TRANSPORTS, type McpServerEntry } from '@shared/types/assets';
 import { shell } from 'electron';
 import { readSettings } from '../ipc/settings';
 import { getMcpOAuthStore, type McpOAuthStore } from './mcpOAuthStore';
+import { mcpStatusFor } from './mcpStatusCache';
 
 /** 授权整体超时：含用户在浏览器里操作的时间 */
 const AUTHORIZE_TIMEOUT_MS = 300_000;
@@ -33,6 +34,8 @@ export interface McpOAuthProviderOptions {
   state: string;
   store: McpOAuthStore;
   openExternal: (url: string) => void | Promise<void>;
+  /** 动态注册用的 client_name；缺省 Enso Code */
+  clientName?: string;
 }
 
 /** MCP SDK 的 OAuthClientProvider 实现：持久化部分落 store，PKCE verifier 只活在本次流程内存 */
@@ -47,7 +50,7 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: 'Enso Code',
+      client_name: this.options.clientName || 'Enso Code',
       redirect_uris: [this.options.redirectUrl],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
@@ -97,6 +100,13 @@ export class McpOAuthClientProvider implements OAuthClientProvider {
     if (!this.verifier) throw new Error('缺少 PKCE code verifier');
     return this.verifier;
   }
+
+  /** 流程遇 invalid_client / invalid_grant 时清掉对应凭据后重试 */
+  invalidateCredentials(kind: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): void {
+    if (kind === 'tokens') this.options.store.clearTokens(this.options.serverId);
+    else if (kind === 'all' || kind === 'client') this.options.store.clear(this.options.serverId);
+    else if (kind === 'verifier') this.verifier = undefined;
+  }
 }
 
 /** 只保留下发 worker 需要的字段，避免把服务端多余内容一起落盘 */
@@ -114,12 +124,18 @@ export interface AuthorizeDeps {
   store: McpOAuthStore;
   resolveServer: (
     serverId: string
-  ) => McpServerEntry | Pick<McpServerEntry, 'id' | 'name' | 'transport' | 'url'> | undefined;
+  ) =>
+    | McpServerEntry
+    | Pick<
+        McpServerEntry,
+        'id' | 'name' | 'transport' | 'url' | 'oauthClientName' | 'oauthMetadataUrl'
+      >
+    | undefined;
   startCallbackServer: (options: OauthCallbackServerOptions) => Promise<OauthCallbackServer>;
-  auth: (
-    provider: OAuthClientProvider,
-    options: { serverUrl: string | URL; authorizationCode?: string }
-  ) => Promise<AuthResult>;
+  /** pi 的 MCP OAuth 流程：RFC 9207 iss 校验、指定授权服务器元数据、step-up scope */
+  auth: (provider: OAuthClientProvider, options: OAuthFlowOptions) => Promise<OAuthFlowResult>;
+  /** worker 上报的 insufficient_scope 挑战；有则本次授权在已授予 scope 上追加 */
+  scopeChallenge?: (serverId: string) => McpScopeChallenge | undefined;
   openExternal: (url: string) => void | Promise<void>;
   /** 授权成功后的回调：重新向 worker 下发 warm-mcp */
   onAuthorized?: (serverId: string) => void;
@@ -131,7 +147,8 @@ function defaultDeps(): AuthorizeDeps {
     store: getMcpOAuthStore(),
     resolveServer: resolveServerFromSettings,
     startCallbackServer: startOauthCallbackServer,
-    auth: sdkAuth,
+    auth: authorizeMcp,
+    scopeChallenge: (serverId) => mcpStatusFor(serverId)?.scopeChallenge,
     openExternal: (url) => shell.openExternal(url),
   };
 }
@@ -191,12 +208,13 @@ async function runAuthorize(
   }
 
   // close() 会 reject 内部 promise：预挂 handler，否则不走 REDIRECT 分支时会出现无人接管的 rejection
-  const codePromise = callback.waitForCode();
-  codePromise.catch(() => {});
+  const responsePromise = callback.waitForResponse();
+  responsePromise.catch(() => {});
 
   // 重新授权前清掉失效 token（否则 SDK 先走 refresh，invalid_grant 直接抛错）；
   // 用户中途取消时再放回去，避免把原本可用的凭据弄没
   const previousTokens = deps.store.tokens(serverId);
+  const challenge = deps.scopeChallenge?.(serverId);
   let authorized = false;
   try {
     deps.store.clearTokens(serverId);
@@ -207,12 +225,33 @@ async function runAuthorize(
       state,
       store: deps.store,
       openExternal: deps.openExternal,
+      ...(server.oauthClientName?.trim() ? { clientName: server.oauthClientName.trim() } : {}),
     });
-    // 首轮：SDK 完成 discovery/DCR，需要交互时经 redirectToAuthorization 打开浏览器
-    let result = await deps.auth(provider, { serverUrl });
+    const flow: OAuthFlowOptions = {
+      serverUrl,
+      ...(server.oauthMetadataUrl?.trim()
+        ? { authorizationServerMetadataUrl: new URL(server.oauthMetadataUrl.trim()) }
+        : {}),
+      ...(challenge
+        ? {
+            // 挑战可能只列缺的 scope：叠加已授予的，否则新 token 会丢掉原有权限；刷新拿不到新 scope
+            scope: stepUpScope(previousTokens?.scope, challenge.scope),
+            skipRefresh: true,
+            ...(challenge.resourceMetadataUrl
+              ? { resourceMetadataUrl: new URL(challenge.resourceMetadataUrl) }
+              : {}),
+          }
+        : {}),
+    };
+    // 首轮：完成 discovery/DCR，需要交互时经 redirectToAuthorization 打开浏览器
+    let result = await deps.auth(provider, flow);
     if (result === 'REDIRECT') {
-      const code = await codePromise;
-      result = await deps.auth(provider, { serverUrl, authorizationCode: code });
+      const { code, iss } = await responsePromise;
+      result = await deps.auth(provider, {
+        ...flow,
+        authorizationCode: code,
+        ...(iss ? { iss } : {}),
+      });
     }
     if (result !== 'AUTHORIZED') return { ok: false, error: '授权未完成。' };
     authorized = true;

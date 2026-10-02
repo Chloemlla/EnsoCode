@@ -52,6 +52,7 @@ import type {
   SubagentModelOption,
   ThinkingLevel,
   TitleSummaryInput,
+  VirtualSpawnClassifier,
 } from '@shared/types/agent';
 import { parseAgentWorkerEvent } from '@shared/types/agent';
 import type { SubagentModelEntry } from '@shared/types/assets';
@@ -74,6 +75,17 @@ import {
 } from '@shared/types/llm';
 import type { AgentDispatchTask } from '@shared/types/mentions';
 import { parseDisabledWorkflowPresets } from '@shared/types/workflow';
+import {
+  canBeVirtualMember,
+  classifierProviderFor,
+  directMemberRef,
+  findVirtualModel,
+  isVirtualRef,
+  parseVirtualModels,
+  VIRTUAL_PROVIDER_ID,
+  type VirtualClassifierConfig,
+  type VirtualModelEntry,
+} from '@shared/virtualModels';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { app, type UtilityProcess, utilityProcess } from 'electron';
 import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
@@ -364,7 +376,122 @@ export function agentTypeRegistrySnapshot(): AgentTypeRegistrySnapshot {
   });
 }
 
+/**
+ * 解析模型引用并组装下发配置。虚拟模型只在 `allowVirtual` 的场景（会话主模型）下发为虚拟配置；
+ * 其他场景（标题、代审、子代理固定模型…）落到虚拟引用时取其快模型（无则主模型）。
+ */
 export function resolveModelSelection(
+  providerId: string,
+  modelId: string,
+  authenticatedAccountKeys: ReadonlySet<string>,
+  options?: { allowVirtual?: boolean }
+): ModelSelectionResult {
+  if (isVirtualRef({ providerId })) {
+    const entry = findVirtualModel(virtualModelsFromSettings(), { providerId, modelId });
+    if (!entry) return { ok: false, error: 'Model is unavailable: model-missing' };
+    if (!entry.enabled) return { ok: false, error: 'Model is unavailable: model-disabled' };
+    if (!options?.allowVirtual) {
+      const direct = directMemberRef(entry);
+      const resolved = resolvePhysicalModelSelection(
+        direct.providerId,
+        direct.modelId,
+        authenticatedAccountKeys
+      );
+      return resolved.ok || direct === entry.primary
+        ? resolved
+        : resolvePhysicalModelSelection(
+            entry.primary.providerId,
+            entry.primary.modelId,
+            authenticatedAccountKeys
+          );
+    }
+    return resolveVirtualModelSelection(entry, authenticatedAccountKeys);
+  }
+  return resolvePhysicalModelSelection(providerId, modelId, authenticatedAccountKeys);
+}
+
+function resolveVirtualModelSelection(
+  entry: VirtualModelEntry,
+  authenticatedAccountKeys: ReadonlySet<string>
+): ModelSelectionResult {
+  const member = (ref: DefaultModelRef): SpawnModelConfig | undefined => {
+    const provider = providersFromSettings().find((item) => item.id === ref.providerId);
+    if (!provider || !canBeVirtualMember(provider)) return undefined;
+    const resolved = resolvePhysicalModelSelection(
+      ref.providerId,
+      ref.modelId,
+      authenticatedAccountKeys
+    );
+    return resolved.ok ? resolved.selection.config : undefined;
+  };
+  const primary = member(entry.primary);
+  if (!primary) return { ok: false, error: 'Model is unavailable: virtual primary model' };
+  const fast = entry.fast ? member(entry.fast) : undefined;
+  const fallbacks = entry.fallbacks
+    .map(member)
+    .filter((config): config is SpawnModelConfig => config !== undefined);
+  // 分类器只在有快模型可分档时下发；解析失败静默不分类（路由回到主模型）
+  const classifier =
+    fast && entry.classifier
+      ? resolveVirtualClassifier(entry.classifier, authenticatedAccountKeys)
+      : undefined;
+  const config: SpawnModelConfig = {
+    ...primary,
+    modelId: entry.id,
+    settingsProviderId: VIRTUAL_PROVIDER_ID,
+    virtual: {
+      name: entry.name,
+      primary,
+      ...(fast ? { fast } : {}),
+      fallbacks,
+      ...(classifier ? { classifier } : {}),
+    },
+  };
+  return {
+    ok: true,
+    selection: {
+      ref: { providerId: VIRTUAL_PROVIDER_ID, modelId: entry.id },
+      runtimeRef: { providerId: VIRTUAL_PROVIDER_ID, modelId: entry.id },
+      config,
+    },
+  };
+}
+
+function resolveVirtualClassifier(
+  classifier: VirtualClassifierConfig,
+  authenticatedAccountKeys: ReadonlySet<string>
+): VirtualSpawnClassifier | undefined {
+  if (classifier.source === 'judge') {
+    const resolved = resolvePhysicalModelSelection(
+      classifier.model.providerId,
+      classifier.model.modelId,
+      authenticatedAccountKeys
+    );
+    return resolved.ok
+      ? { source: 'judge', timeoutMs: classifier.timeoutMs, model: resolved.selection.config }
+      : undefined;
+  }
+  const provider = providersFromSettings().find((item) => item.id === classifier.model.providerId);
+  if (!provider?.enabled) return undefined;
+  const piProvider = classifierProviderFor(provider);
+  if (!piProvider) return undefined;
+  if (provider.oauthAccountKey) {
+    if (!authenticatedAccountKeys.has(provider.oauthAccountKey)) return undefined;
+  } else if (!provider.apiKey) {
+    return undefined;
+  }
+  return {
+    source: 'pi-classifier',
+    timeoutMs: classifier.timeoutMs,
+    classifier: {
+      provider: piProvider,
+      modelId: classifier.model.modelId,
+      ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
+    },
+  };
+}
+
+function resolvePhysicalModelSelection(
   providerId: string,
   modelId: string,
   authenticatedAccountKeys: ReadonlySet<string>
@@ -553,7 +680,8 @@ export function spawnSession(
   const resolved = resolveModelSelection(
     request.providerId,
     request.modelId,
-    authenticatedAccountKeys
+    authenticatedAccountKeys,
+    { allowVirtual: true }
   );
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const reviewer = resolveApprovalReviewer(authenticatedAccountKeys);
@@ -695,7 +823,9 @@ export function setSessionModel(
   modelId: string,
   authenticatedAccountKeys: ReadonlySet<string>
 ): { ok: boolean; error?: string } {
-  const resolved = resolveModelSelection(providerId, modelId, authenticatedAccountKeys);
+  const resolved = resolveModelSelection(providerId, modelId, authenticatedAccountKeys, {
+    allowVirtual: true,
+  });
   if (!resolved.ok) return { ok: false, error: resolved.error };
   return sendAgentCommand({ type: 'set-model', identity, model: resolved.selection.config });
 }
@@ -1344,6 +1474,7 @@ function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
   return {
     ...(server.id ? { id: server.id } : {}),
     name: server.name,
+    ...(server.description?.trim() ? { description: server.description.trim() } : {}),
     transport: server.transport,
     ...(server.command ? { command: server.command } : {}),
     ...(server.args?.length ? { args: server.args } : {}),
@@ -1413,6 +1544,10 @@ export function pushDisabledWorkflowPresets(): void {
 
 export function readSettingsState(): Record<string, unknown> | undefined {
   return persistedSettingsState(readSettings()?.['enso-settings']);
+}
+
+function virtualModelsFromSettings(): VirtualModelEntry[] {
+  return parseVirtualModels(readSettingsState()?.virtualModels);
 }
 
 function providersFromSettings(): ModelProvider[] {

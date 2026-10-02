@@ -1,8 +1,10 @@
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
 import type { RtkToolStats } from '@shared/rtk';
+import { nestedToolCallParent } from '@shared/toolCallId';
 import type {
   AgentSessionCustomEntry,
   ApprovalRequestInfo,
+  ProjectedCodemodeCall,
   ProjectedMessage,
   TodoItem,
   TurnPerf,
@@ -77,8 +79,10 @@ export type TimelineItem =
       agentMeta: { modelId?: string; outputTokens?: number; steps?: number } | null;
       /** exec / 隔离沙箱的 JS 源码；其它工具缺省 */
       source?: string | null;
-      /** 嵌套审批未决数（exec 脚本内 write 等） */
+      /** 嵌套审批未决数（codemode 脚本内 write 等） */
       nestedPending?: number;
+      /** exec / codemode 沙箱卡片：结果、嵌套调用摘要；其它工具缺省 */
+      sandbox?: SandboxView | null;
       /** RTK 对本次工具调用的真实处理结果；无元数据时缺省 */
       rtk?: RtkToolStats;
       /** 运行中的 bash/powershell 调用 id（转后台用）；其它缺省 */
@@ -337,6 +341,27 @@ export function summarizeSandboxCalls(calls: SandboxCallView[]): string {
   const counts = new Map<string, number>();
   for (const call of calls) counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   return [...counts].map(([name, count]) => `${name} ×${count}`).join(' ');
+}
+
+/** exec（历史）与 codemode 共用沙箱卡片 */
+export const isSandboxTool = (name: string): boolean => name === 'exec' || name === 'codemode';
+
+const CODEMODE_HEADER = /^Script (?:completed|failed)\nWall time [^\n]*\nOutput:\n/;
+
+export function stripCodemodeHeader(output: string | null): string | null {
+  if (output === null) return null;
+  return output.replace(CODEMODE_HEADER, '') || null;
+}
+
+export function codemodeView(
+  body: string | null,
+  isError: boolean,
+  calls: readonly SandboxCallView[] | null
+): SandboxView {
+  const text = body ?? '';
+  return isError
+    ? { status: 'failed', error: text, calls: [...(calls ?? [])] }
+    : { status: 'completed', value: text, calls: [...(calls ?? [])] };
 }
 
 export function parseSandboxOutput(output: string | null): SandboxView | null {
@@ -729,7 +754,7 @@ function reviewingToolCallIds(
   for (const request of pendingApprovals ?? []) {
     if (request.phase === 'reviewing' && request.toolCallId) {
       ids.add(request.toolCallId);
-      const parent = request.toolCallId.split(':')[0];
+      const parent = nestedToolCallParent(request.toolCallId);
       if (parent) ids.add(parent);
     }
   }
@@ -740,9 +765,9 @@ function nestedPendingCount(
   toolCallId: string,
   pendingApprovals: readonly ApprovalRequestInfo[] | undefined
 ): number {
-  const prefix = `${toolCallId}:`;
-  return (pendingApprovals ?? []).filter((request) => request.toolCallId?.startsWith(prefix))
-    .length;
+  return (pendingApprovals ?? []).filter(
+    (request) => request.toolCallId && nestedToolCallParent(request.toolCallId) === toolCallId
+  ).length;
 }
 
 function buildMessageTimeline(
@@ -766,6 +791,7 @@ function buildMessageTimeline(
       editDiff: { oldText: string; newText: string } | null;
       fileChanges: ProjectedFileChange[] | null;
       applyPatchOutcome: ProjectedApplyPatchOutcome | null;
+      codemodeCalls: ProjectedCodemodeCall[] | null;
       rtk?: RtkToolStats;
       backgroundTaskId?: string;
     }
@@ -781,6 +807,7 @@ function buildMessageTimeline(
         editDiff: message.editDiff ?? null,
         fileChanges: message.fileChanges ?? null,
         applyPatchOutcome: message.applyPatchOutcome ?? null,
+        codemodeCalls: message.codemodeCalls ?? null,
         rtk: message.rtk,
         backgroundTaskId: message.backgroundTaskId,
       });
@@ -811,6 +838,8 @@ function buildMessageTimeline(
   // 整轮计时只累计模型请求与非交互工具的真实执行耗时；用户回答、审批、排队等空档不计。
   let turnActiveMs = 0;
   let turnSteps = 0;
+  // 首个 step 失败后被重试（虚拟模型会换成员）时，回复头改用随后成功的那条的模型
+  let replyModelFailed = false;
   let turnUserTimestamp: number | undefined;
   let turnHadAskUser = false;
   let currentTurnUserItem: Extract<TimelineItem, { kind: 'user' }> | undefined;
@@ -835,6 +864,7 @@ function buildMessageTimeline(
       turnHadAskUser = false;
       turnActiveMs = 0;
       turnSteps = 0;
+      replyModelFailed = false;
       const text = partText(message);
       const images = message.content.filter((part) => part.type === 'image');
       // 后台任务完成的合成注入：不按用户气泡渲染，转为系统通知行
@@ -900,9 +930,12 @@ function buildMessageTimeline(
 
     // 本轮末 step（后面只剩 toolResult 或已到新一轮 user）且轮内有多个 step 时，正文读数附带活跃总耗时。
     turnSteps += 1;
-    if (turnSteps === 1 && currentTurnUserItem) {
-      if (message.model) currentTurnUserItem.replyModel = message.model;
-      if (message.timestamp !== undefined) currentTurnUserItem.replyAt = message.timestamp;
+    if (currentTurnUserItem && message.model && (turnSteps === 1 || replyModelFailed)) {
+      currentTurnUserItem.replyModel = message.model;
+      replyModelFailed = message.stopReason === 'error';
+    }
+    if (turnSteps === 1 && currentTurnUserItem && message.timestamp !== undefined) {
+      currentTurnUserItem.replyAt = message.timestamp;
     }
     const stepRunMs = completedStepRunMs(message);
     if (stepRunMs !== undefined) turnActiveMs += stepRunMs;
@@ -1015,13 +1048,20 @@ function buildMessageTimeline(
           const result = results.get(part.id);
           // 未完成时退而用执行中的输出快照（空串不算，否则行会变“可展开但空”）
           const partial = toolOutputs?.[part.id];
-          const execSource = part.name === 'exec' ? execSourceFromArgs(part.arguments) : null;
-          const output = result
+          const sandboxTool = isSandboxTool(part.name);
+          const execSource = sandboxTool ? execSourceFromArgs(part.arguments) : null;
+          const rawOutput = result
             ? result.applyPatchOutcome
               ? formatApplyPatchOutcome(result.applyPatchOutcome)
               : result.output
             : (partial ?? null) || null;
-          const sandboxView = part.name === 'exec' ? parseSandboxOutput(output) : null;
+          const output = part.name === 'codemode' ? stripCodemodeHeader(rawOutput) : rawOutput;
+          const sandboxView =
+            part.name === 'exec'
+              ? parseSandboxOutput(output)
+              : part.name === 'codemode' && result
+                ? codemodeView(output, result.isError, result.codemodeCalls)
+                : null;
           const call = unwrapMcpProxyCall(part.name, part.arguments);
           if (part.name === 'subagent') {
             recordSubagent(spawnedAgents, subagentRuns, part.arguments, result?.output);
@@ -1069,6 +1109,7 @@ function buildMessageTimeline(
             source: execSource,
             output: sent ? stripDeliveryReceipt(output) : asked ? asked.output : output,
             nestedPending: nestedPendingCount(part.id, pendingApprovals) || undefined,
+            ...(sandboxTool ? { sandbox: sandboxView } : {}),
             state: result
               ? result.isError || sandboxView?.status === 'failed'
                 ? 'error'

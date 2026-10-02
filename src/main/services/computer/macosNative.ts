@@ -15,6 +15,7 @@ import {
   pickEnglishLayoutIndex,
   splitMacChord,
 } from './macKey';
+import { withMacWindowFocus } from './macWindowFocus';
 import {
   SKY_CLICK_UNAVAILABLE,
   type SkyClickEventStep,
@@ -90,6 +91,8 @@ async function load(): Promise<MacosNative | null> {
     '/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices'
   );
   const carbon = koffi.load('/System/Library/Frameworks/Carbon.framework/Carbon');
+  const GetFrontProcess = carbon.func('GetFrontProcess', 'int32', ['void *']);
+  const GetProcessPID = carbon.func('GetProcessPID', 'int32', ['void *', 'void *']);
 
   const CGPoint = koffi.struct('CGPoint', { x: 'double', y: 'double' });
   const CGEventCreateMouseEvent = cg.func('CGEventCreateMouseEvent', 'void *', [
@@ -300,7 +303,7 @@ async function load(): Promise<MacosNative | null> {
           app: readString(dictGet(dict, 'kCGWindowOwnerName')),
           title: readString(dictGet(dict, 'kCGWindowName')),
           pid: Math.round(readNumber(dictGet(dict, 'kCGWindowOwnerPID'))),
-          focused: windows.length === 0,
+          focused: false,
           x:
             bounds && CFGetTypeID(bounds) === CFDictionaryGetTypeID()
               ? readNumber(dictGet(bounds, 'X'))
@@ -319,7 +322,7 @@ async function load(): Promise<MacosNative | null> {
               : 0,
         });
       }
-      return windows;
+      return withMacWindowFocus(windows, focusedWindow());
     } finally {
       CFRelease(array);
     }
@@ -536,6 +539,32 @@ async function load(): Promise<MacosNative | null> {
       return Number(AXUIElementGetWindow(element, buf)) === 0 ? buf.readUInt32LE(0) : undefined;
     } catch {
       return undefined;
+    }
+  };
+  const focusedWindow = (): { pid: number; windowId: string } | undefined => {
+    const psn = Buffer.alloc(8);
+    const pidBuffer = Buffer.alloc(4);
+    if (Number(GetFrontProcess(psn)) !== 0 || Number(GetProcessPID(psn, pidBuffer)) !== 0) return;
+    const pid = pidBuffer.readInt32LE();
+    if (pid <= 0) return;
+    const app = AXUIElementCreateApplication(pid);
+    if (!app) return;
+    try {
+      AXUIElementSetMessagingTimeout(app, RAISE_MESSAGING_TIMEOUT_SEC);
+      const out = [null];
+      const status = withCfString('AXFocusedWindow', (attr) =>
+        Number(AXUIElementCopyAttributeValue(app, attr, out))
+      );
+      if (status !== 0 || !out[0]) return;
+      try {
+        const windowId = axWindowId(out[0]);
+        // 焦点不可读时拒绝输入，不能用浮层 z-order 或同进程其他窗口猜测。
+        return windowId ? { pid, windowId: String(windowId) } : undefined;
+      } finally {
+        CFRelease(out[0]);
+      }
+    } finally {
+      CFRelease(app);
     }
   };
   const axTitle = (element: unknown): string => {

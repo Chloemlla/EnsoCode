@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DefaultPackageManager, loadSkills } from '@earendil-works/pi-coding-agent';
 import { parse as parseYaml } from 'yaml';
 import { resolveHarnessSkillRoots } from '../../../agent/harnessAssets';
+import { createProjectSettingsManager } from '../../../agent/projectCode';
 
 const HOME = os.homedir();
 
@@ -61,36 +63,26 @@ export function readSkillsRoot(root: string, groupName: string): DiscoveredSkill
   return skills;
 }
 
-/** spawn 前斜杠菜单用：覆盖 pi 运行时会自动发现的全部根（项目 + 用户全局，
- * 见 pi docs/skills.md），否则未 spawn 的新会话看不到 /skill；项目同名优先。
- * includeHarness 对应设置里的「加载项目内其它工具目录」，在 pi 根之后追加项目内 .claude/.codex/.cursor 的 skills */
-export function listProjectSkills(
+/** spawn 前斜杠菜单用：与 worker 的 DefaultResourceLoader 同一套 pi 发现规则（agentDir、settings、
+ * 项目信任一致），未安装的包跳过不装。includeHarness 对应「加载项目内其它工具目录」，追加在 pi 根之后 */
+export async function listProjectSkills(
   cwd: string,
-  home: string = HOME,
-  options: { includeHarness?: boolean } = {}
-): { name: string; description: string }[] {
-  const seen = new Set<string>();
-  const skills: { name: string; description: string }[] = [];
-  const roots = [
-    path.join(cwd, '.agents', 'skills'),
-    path.join(cwd, '.pi', 'skills'),
+  options: { agentDir: string; trustedProjectCode?: readonly string[]; includeHarness?: boolean }
+): Promise<{ name: string; description: string }[]> {
+  const { agentDir } = options;
+  const { settingsManager } = createProjectSettingsManager(
+    cwd,
+    agentDir,
+    options.trustedProjectCode ?? []
+  );
+  const resolved = await new DefaultPackageManager({ cwd, agentDir, settingsManager }).resolve(
+    async () => 'skip'
+  );
+  const skillPaths = [
+    ...resolved.skills.filter((entry) => entry.enabled).map((entry) => entry.path),
     ...(options.includeHarness ? resolveHarnessSkillRoots(cwd) : []),
-    path.join(home, '.agents', 'skills'),
-    path.join(home, '.pi', 'agent', 'skills'),
   ];
-  for (const root of roots) {
-    let found: DiscoveredSkill[];
-    try {
-      found = readSkillsRoot(root, '');
-    } catch {
-      continue;
-    }
-    for (const skill of found) {
-      const key = skill.name.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      skills.push({ name: skill.name, description: skill.description });
-    }
-  }
-  return skills;
+  return loadSkills({ cwd, agentDir, skillPaths, includeDefaults: false }).skills.map(
+    ({ name, description }) => ({ name, description })
+  );
 }

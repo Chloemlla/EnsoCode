@@ -641,6 +641,13 @@ export const zhTranslations: Record<string, string> = {
   URL: 'URL',
   'Connection timeout (seconds)': '连接超时（秒）',
   'Tool call timeout (seconds)': '工具调用超时（秒）',
+  'Description (optional)': '描述（可选）',
+  'One line telling the model what this server is for': '一句话告诉模型这个服务器的用途',
+  'OAuth client name (optional)': 'OAuth 客户端名称（可选）',
+  'For servers that only accept known OAuth clients': '用于只接受已知 OAuth 客户端的服务器',
+  'OAuth authorization server metadata URL (optional)': 'OAuth 授权服务器元数据地址（可选）',
+  'Use when the server advertises a wrong authorization server or none':
+    '服务器声明的授权服务器不对或没有声明时填写',
   'This MCP server already exists': '该 MCP 服务器已存在',
   'Import MCP servers': '导入 MCP 服务器',
   Form: '表单',
@@ -991,8 +998,8 @@ export const zhTranslations: Record<string, string> = {
   'Durable knowledge the agent can search and write across sessions. Stored locally in a SQLite database.':
     '可跨会话检索与写入的持久知识,本地存放在一个 SQLite 库里。',
   'Enable memory tools': '启用记忆工具',
-  'Gives the agent memory_search, memory_capture and memory_crystallize. The database is only created after you enable this.':
-    '给 agent 提供 memory_search、memory_capture 与 memory_crystallize。开启后才会创建数据库。',
+  'Gives the agent memory_search, memory_capture, memory_crystallize and memory_delete. The database is only created after you enable this.':
+    '给 agent 提供 memory_search、memory_capture、memory_crystallize 与 memory_delete。开启后才会创建数据库。',
   'Memory is off. The settings below take effect once you enable it.':
     '记忆已关闭。开启后下面的设置才会生效。',
   'Embedding model': '嵌入模型',
@@ -1029,6 +1036,10 @@ export const zhTranslations: Record<string, string> = {
   'Audio is uploaded to Google. On the free tier Google may use it to improve its products.':
     '音频会上传到 Google；免费层级下 Google 可能用它改进产品。',
   'Enter a Gemini API key below first.': '需先在下方填写 Gemini API Key。',
+  WeType: '微信输入法',
+  'WeChat Keyboard cloud recognition. Chinese and English, no setup needed.':
+    '微信输入法云端识别，支持中文和英文，无需配置。',
+  'Audio is uploaded to Tencent WeChat Keyboard servers.': '音频会上传到腾讯微信输入法服务器。',
   'Gemini API key': 'Gemini API Key',
   'Create one for free in Google AI Studio.': '可在 Google AI Studio 免费创建。',
   Cloud: '云端',
@@ -1565,6 +1576,26 @@ export const zhTranslations: Record<string, string> = {
   'Input {{input}} tok · Output {{output}} tok': '输入 {{input}} · 输出 {{output}} tok',
   '{{speed}} tok/s': '{{speed}} tok/s',
   'Search models': '搜索模型',
+  'Virtual models': '虚拟模型',
+  'Enable virtual model': '启用虚拟模型',
+  'Primary model': '主模型',
+  'Default for each new turn': '每轮默认使用',
+  'Fast model': '快模型',
+  'Summaries and simple turns': '摘要与简单问题',
+  'Fallback models': '备用模型',
+  'Used in order when a model is rate limited or down': '限流或故障时按顺序切换',
+  'Add fallback': '添加备用',
+  'Not used': '不使用',
+  'Difficulty routing': '按难度分档',
+  'Set a fast model first': '先设置快模型',
+  'Fast model judges': '快模型判断',
+  'Classifier model': '分类器模型',
+  'No classifier models available': '该服务商暂无可用的分类器模型',
+  'Classifies each new turn: simple turns use the fast model, complex ones the primary model. Adds a short delay before the reply.':
+    '每轮新输入先分类：简单问题用快模型，复杂任务用主模型。回复前会多一点延迟。',
+  'New virtual model': '新建虚拟模型',
+  'A virtual model appears as one model in the picker and routes each request to a real model: fallbacks on rate limits or outages, image-capable or larger-context members when needed, and the fast model for summaries.':
+    '虚拟模型在选择器里显示为一个模型，每次请求由路由挑选真实模型：限流或故障时切到备用，需要时换成支持图片或上下文更大的成员，摘要使用快模型。',
   'No models found': '没有匹配的模型',
   'Import session': '导入会话',
   'More actions': '更多操作',
@@ -1659,6 +1690,7 @@ export const zhTranslations: Record<string, string> = {
   'Memory search': '搜索记忆',
   'Memory capture': '记录记忆',
   'Memory crystallize': '提炼记忆',
+  'Memory delete': '删除记忆',
   'Browser navigate': '浏览器 · 打开',
   'Browser snapshot': '浏览器 · 快照',
   'Browser click': '浏览器 · 点击',
@@ -1682,6 +1714,7 @@ export const zhTranslations: Record<string, string> = {
     '选择文件修改方式。默认为应用补丁。新建和冷恢复的会话使用此模式；已在内存中的会话保持原模式。',
   'Text replacement': '文本替换',
   'Apply patch': '应用补丁',
+  'Tool search': '工具检索',
   'Apply patch (default)': '应用补丁（默认）',
   'Truncated preview': '截断预览',
   'Diff unavailable because the original snapshot was truncated.':

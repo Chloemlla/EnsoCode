@@ -31,6 +31,8 @@ files:
     to: node_modules/@bufbuild/protobuf
   - from: node_modules/quickjs-wasi
     to: node_modules/quickjs-wasi
+  - from: node_modules/libopus-wasm
+    to: node_modules/libopus-wasm
   # node-datachannel 平台包是 optional 兄弟目录，收集器只打 JS；不显式拷贝则
   # require('@node-datachannel/<platform>') 在安装包里找不到（Windows 直连会降级中继）
   - from: node_modules/.pnpm/node-datachannel@0.33.2/node_modules/@node-datachannel

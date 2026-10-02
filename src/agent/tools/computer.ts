@@ -127,6 +127,8 @@ function prepareComputerArguments(raw: unknown): unknown {
 const DESCRIPTION =
   'Control the host desktop with persistent JavaScript. Globals: desktop, wait, assert. ' +
   'All desktop/win/el methods are async — await them. ' +
+  'win.find() returns an array; win.ref() returns a Promise of an element. ' +
+  'Each call has local var/let/const; use globalThis for state across writable calls. read_only calls use an isolated VM. ' +
   'Discover with desktop.app() or desktop.window(); prefer win.getState() then [ref=eN]. ' +
   'Coordinates belong to the latest screenshot of that same target. ' +
   'Pixel/keyboard input takes over the foreground: the target window is brought to the front first, and input is refused if it cannot be. AX el.setValue/perform/focus work without taking over. ' +
@@ -149,11 +151,12 @@ export function createComputerTool(invoker: ComputerInvoker): ToolDefinition {
     promptGuidelines: [
       'Every desktop/win/el call returns a Promise; await it. Do not probe with Object.keys.',
       'Keep a whole UI task in one computer() call with several awaited steps; do not round-trip the main model for each click.',
-      'Prefer await win.getState() after actions; then win.ref("eN"). Empty AXRow labels mean use pixels.',
+      'Prefer await win.getState() after actions; then const el = await win.ref("eN"); await el.click(). Empty AXRow labels mean use pixels.',
+      'Each code runs in an async function: var/let/const do not survive calls. Explicit globalThis state survives writable calls only; read_only uses a fresh isolated VM and cannot read or modify that state. Reacquire windows in inspection calls.',
       'win.ax()/getState() return the full tree with fresh refs; pass { diff: true } only to see what changed (unchanged rows then carry no new refs).',
       'click(x,y) is in the last full window/desktop screenshot of that target. The 96px crop is a receipt, not a new clickSpace.',
       'await desktop.windows() / focused(); desktop.app("系统设置", { pane: "外观" }) opens that Settings pane.',
-      'After Appearance opens, await win.find({ description: "深色" }) then el.click(); do not full-tree ax() on Settings content.',
+      'find() returns Element[]: const hits = await win.find({ description: "深色" }); assert(hits.length === 1, "Expected one match"); await hits[0].click(). Do not full-tree ax() on Settings content after Appearance opens.',
       'desktop.app("访达") launches if needed; desktop.window("微信") matches localized names; do not use osascript.',
       'Screenshot the same target before click(x,y). New ax() invalidates older refs (StaleRef).',
       'Input actions wait for UI to settle; extra wait() only for slow loads. timeout is a wall-clock budget for the whole call (default 60s, max 120s).',
@@ -173,7 +176,7 @@ export function createComputerTool(invoker: ComputerInvoker): ToolDefinition {
         code: {
           type: 'string',
           description:
-            'JavaScript executed in the persistent computer session; top-level await allowed; desktop, wait, assert in scope',
+            'Async function body with desktop, wait, assert in scope. Local declarations are per-call; explicit globalThis state persists between writable calls, not read_only calls.',
         },
         read_only: {
           type: 'boolean',

@@ -214,6 +214,39 @@ describe('buildTimeline', () => {
       expect(users[1]).not.toHaveProperty('replyAt');
     });
 
+    it('首个回复失败被重试（虚拟模型换成员）时，回复头用随后成功那条的模型', () => {
+      const timeline = buildTimeline(
+        [
+          user('一轮'),
+          {
+            role: 'assistant',
+            content: [],
+            model: 'primary',
+            stopReason: 'error',
+            errorMessage: '503',
+            timestamp: 10,
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'ok' }],
+            model: 'backup',
+            timestamp: 20,
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'more' }],
+            model: 'later',
+            timestamp: 30,
+          },
+        ],
+        false
+      );
+      expect(timeline.find((item) => item.kind === 'user')).toMatchObject({
+        replyModel: 'backup',
+        replyAt: 10,
+      });
+    });
+
     it('user 消息保留发送时间戳 timestamp', () => {
       const timeline = buildTimeline(
         [{ role: 'user', content: [{ type: 'text', text: '你好' }], timestamp: 1726700000000 }],
@@ -887,6 +920,88 @@ describe('buildTimeline', () => {
         { name: 'ls', ok: true },
       ],
     });
+  });
+
+  it('codemode 卡片：剥掉 pi 结果头，嵌套调用摘要来自 codemodeCalls，失败标 error', () => {
+    const code = 'const a = await tools.read({ path: "a.ts" });\nreturn a.length;';
+    const timeline = buildTimeline(
+      [
+        user('用 codemode'),
+        {
+          role: 'assistant',
+          content: [
+            { type: 'toolCall', id: 'c1', name: 'codemode', arguments: { code } },
+            { type: 'toolCall', id: 'c2', name: 'codemode', arguments: { code: 'throw 1' } },
+          ],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'c1',
+          toolName: 'codemode',
+          isError: false,
+          codemodeCalls: [{ name: 'read', ok: true, summary: 'a.ts' }],
+          content: [{ type: 'text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n42' }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'c2',
+          toolName: 'codemode',
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: 'Script failed\nWall time 0.0 seconds\nOutput:\nScript error: 1',
+            },
+          ],
+        },
+      ],
+      false
+    );
+    expect(timeline[1]).toMatchObject({
+      kind: 'tool',
+      name: 'codemode',
+      source: code,
+      output: '42',
+      state: 'ok',
+      sandbox: { status: 'completed', value: '42', calls: [{ name: 'read', ok: true }] },
+    });
+    expect(timeline[2]).toMatchObject({
+      state: 'error',
+      sandbox: { status: 'failed', error: 'Script error: 1', calls: [] },
+    });
+  });
+
+  it('codemode 运行中按 <parent>/<n> 统计嵌套待审批', () => {
+    const timeline = buildTimeline(
+      [
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'c1', name: 'codemode', arguments: { code: 'x' } }],
+        },
+      ],
+      true,
+      [],
+      undefined,
+      {
+        pendingApprovals: [
+          {
+            requestId: 'apr-1',
+            tool: 'apply_patch',
+            kind: 'file-edit',
+            summary: 'a.ts',
+            toolCallId: 'c1/1',
+          },
+          {
+            requestId: 'apr-2',
+            tool: 'bash',
+            kind: 'command',
+            summary: 'ls',
+            toolCallId: 'c10/1',
+          },
+        ],
+      }
+    );
+    expect(timeline[0]).toMatchObject({ kind: 'tool', state: 'running', nestedPending: 1 });
   });
 
   it('exec 调用按工具名首次出现顺序计数', () => {

@@ -15,6 +15,7 @@ import {
   getSpeechStatus,
   onSpeechAvailabilityChange,
   openSpeechSession,
+  prewarmSpeech,
   setSpeechProgressSink,
   startSpeechDownload,
 } from '../services/speech/service';
@@ -132,6 +133,8 @@ export function registerSpeechHandlers(): void {
   // macOS 必须由主进程发起授权；拒绝过则只能去系统设置里打开
   ipcMain.handle(IPC_CHANNELS.SPEECH_MIC_ACCESS, async (event) => {
     if (!isMainWebContents(event.sender.id)) return false;
+    // 开录第一步就是问授权：顺带让云端模型提前建连
+    prewarmSpeech();
     if (process.platform !== 'darwin') return true;
     if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true;
     return systemPreferences.askForMediaAccess('microphone');

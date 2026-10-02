@@ -12,6 +12,8 @@ export interface SpeechEngine {
   transcribe(samples: Float32Array): Promise<string>;
   /** 流式识别（仅流式模型） */
   openStream(): SpeechEngineStream;
+  /** 云端引擎：开录前预先建连 */
+  prewarm?(): void;
   dispose(): void;
 }
 

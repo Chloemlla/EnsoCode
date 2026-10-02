@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listProjectSkills, readSkillsRoot } from './skills';
 
 let tmp: string;
@@ -97,53 +97,85 @@ describe('readSkillsRoot', () => {
 });
 
 describe('listProjectSkills', () => {
-  it('spawn 前菜单覆盖 pi 运行时的全部自动发现根:项目 + 用户全局', () => {
-    // pi 会自动发现 ~/.pi/agent/skills 与 ~/.agents/skills(docs/skills.md),
-    // spawn 前的斜杠菜单漏掉全局根会导致"新会话没有 /skill"
+  // 与 worker 同一套 pi 发现规则：agentDir 是 Enso 自己的 pi-agent 目录，HOME 决定 ~/.agents/skills
+  const setup = () => {
     const cwd = path.join(tmp, 'proj');
     const home = path.join(tmp, 'home');
+    const agentDir = path.join(tmp, 'pi-agent');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    vi.stubEnv('HOME', home);
+    return { cwd, home, agentDir };
+  };
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  const names = async (cwd: string, options: Parameters<typeof listProjectSkills>[1]) =>
+    (await listProjectSkills(cwd, options)).map((skill) => skill.name).sort();
+
+  it('覆盖 worker 实际加载的根：项目 .agents/.pi、~/.agents 与 Enso 的 agentDir，不含 ~/.pi/agent', async () => {
+    const { cwd, home, agentDir } = setup();
     writeSkill(path.join(cwd, '.agents', 'skills'), 'proj-a', 'name: proj-a\ndescription: p');
+    writeSkill(path.join(cwd, '.pi', 'skills'), 'proj-b', 'name: proj-b\ndescription: p');
     writeSkill(path.join(home, '.agents', 'skills'), 'global-a', 'name: global-a\ndescription: g');
-    writeSkill(
-      path.join(home, '.pi', 'agent', 'skills'),
-      'global-b',
-      'name: global-b\ndescription: g2'
-    );
-    const names = listProjectSkills(cwd, home).map((skill) => skill.name);
-    expect(names).toContain('proj-a');
-    expect(names).toContain('global-a');
-    expect(names).toContain('global-b');
+    writeSkill(path.join(agentDir, 'skills'), 'enso-a', 'name: enso-a\ndescription: e');
+    writeSkill(path.join(home, '.pi', 'agent', 'skills'), 'ghost', 'name: ghost\ndescription: x');
+    expect(await names(cwd, { agentDir })).toEqual(['enso-a', 'global-a', 'proj-a', 'proj-b']);
   });
 
-  it('同名 skill 项目优先,全局根不重复上报', () => {
-    const cwd = path.join(tmp, 'proj');
-    const home = path.join(tmp, 'home');
+  it('缺 description 的 skill 与 worker 一样不列出', async () => {
+    const { cwd, agentDir } = setup();
+    writeSkill(path.join(cwd, '.agents', 'skills'), 'no-desc', 'name: no-desc');
+    expect(await names(cwd, { agentDir })).toEqual([]);
+  });
+
+  it('列出 pi settings 里 skills 条目指向的目录', async () => {
+    const { cwd, agentDir } = setup();
+    const extra = path.join(tmp, 'extra-skills');
+    writeSkill(extra, 'from-settings', 'name: from-settings\ndescription: s');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ skills: [extra] }));
+    expect(await names(cwd, { agentDir })).toEqual(['from-settings']);
+  });
+
+  it('同名 skill 项目优先,全局根不重复上报', async () => {
+    const { cwd, home, agentDir } = setup();
     writeSkill(path.join(cwd, '.agents', 'skills'), 'dup', 'name: dup\ndescription: project');
     writeSkill(path.join(home, '.agents', 'skills'), 'dup', 'name: dup\ndescription: global');
-    const skills = listProjectSkills(cwd, home);
-    expect(skills.filter((skill) => skill.name === 'dup')).toEqual([
+    expect(await listProjectSkills(cwd, { agentDir })).toEqual([
       { name: 'dup', description: 'project' },
     ]);
   });
 });
 
 describe('listProjectSkills · harness 根', () => {
-  it('includeHarness 时追加项目内 .claude/.codex/.cursor 的 skills；缺省不含', () => {
+  const setup = () => {
     const cwd = path.join(tmp, 'proj');
     const home = path.join(tmp, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    vi.stubEnv('HOME', home);
+    return { cwd, agentDir: path.join(tmp, 'pi-agent') };
+  };
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('includeHarness 时追加项目内 .claude/.codex/.cursor 的 skills；缺省不含', async () => {
+    const { cwd, agentDir } = setup();
     writeSkill(path.join(cwd, '.claude', 'skills'), 'cc-only', 'name: cc-only\ndescription: c');
     writeSkill(path.join(cwd, '.cursor', 'skills'), 'cur-only', 'name: cur-only\ndescription: u');
-    expect(listProjectSkills(cwd, home).map((s) => s.name)).toEqual([]);
-    const names = listProjectSkills(cwd, home, { includeHarness: true }).map((s) => s.name);
+    expect(await listProjectSkills(cwd, { agentDir })).toEqual([]);
+    const names = (await listProjectSkills(cwd, { agentDir, includeHarness: true }))
+      .map((s) => s.name)
+      .sort();
     expect(names).toEqual(['cc-only', 'cur-only']);
   });
 
-  it('harness 根里的同名 skill 不覆盖 .agents/skills 的', () => {
-    const cwd = path.join(tmp, 'proj');
-    const home = path.join(tmp, 'home');
+  it('harness 根里的同名 skill 不覆盖 .agents/skills 的', async () => {
+    const { cwd, agentDir } = setup();
     writeSkill(path.join(cwd, '.agents', 'skills'), 'dup', 'name: dup\ndescription: agents');
     writeSkill(path.join(cwd, '.claude', 'skills'), 'dup', 'name: dup\ndescription: claude');
-    expect(listProjectSkills(cwd, home, { includeHarness: true })).toEqual([
+    expect(await listProjectSkills(cwd, { agentDir, includeHarness: true })).toEqual([
       { name: 'dup', description: 'agents' },
     ]);
   });

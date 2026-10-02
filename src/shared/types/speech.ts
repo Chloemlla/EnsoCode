@@ -9,6 +9,7 @@ export const SPEECH_MODEL_IDS = [
   'sense-voice',
   'hanbao',
   'gemini-live',
+  'wetype',
 ] as const;
 export type SpeechModelId = (typeof SPEECH_MODEL_IDS)[number];
 export const DEFAULT_SPEECH_MODEL_ID: SpeechModelId = 'qwen3-asr';

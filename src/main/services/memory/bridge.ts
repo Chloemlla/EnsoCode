@@ -3,10 +3,12 @@ import {
   type MemorySearchSpace,
   parseMemoryCaptureRequest,
   parseMemoryCrystallizeRequest,
+  parseMemoryDeleteRequest,
   parseMemorySearchRequest,
 } from '@shared/memory/toolParams';
 import type { MemoryOp } from '@shared/types/agent';
 import type Database from 'better-sqlite3';
+import { deleteMemoryPermanently } from '../memoryAdmin';
 import { createCrystal } from './crystal';
 import type { Complete } from './distill';
 import { searchMemories } from './search';
@@ -27,6 +29,8 @@ export interface MemoryBridgeContext {
   now?: Date;
   /** 真正新插一行后的 best-effort hook（KG 抽取排队） */
   onCreated?: (memory: Memory) => void;
+  /** 删除成功后的通知（刷新记忆视图） */
+  onDeleted?: (id: string) => void;
   /** deep 检索的 instruct LLM；不可用时检索退回本地意图 */
   complete?: (() => Complete | null | Promise<Complete | null>) | null;
 }
@@ -215,6 +219,31 @@ export async function executeMemoryOp(
         sourceUnitCount: memory.sourceUnitCount,
       },
     };
+  }
+  if (op === 'delete') {
+    const request = parseMemoryDeleteRequest(params);
+    if (!request) {
+      throw new MemoryValidationError(
+        'invalid_request',
+        'invalid memory_delete params: id is required'
+      );
+    }
+    // 只能删本会话可见 space 的记忆；不可见与不存在同样拒绝，不泄露其它项目
+    const memory = getMemory(db, request.id);
+    const visible = new Set(resolveSpaceIds('all', ctx.projectId));
+    if (
+      !memory ||
+      memory.lifecycleState === 'deleted' ||
+      !visible.has(memory.spaceId) ||
+      !deleteMemoryPermanently(db, request.id)
+    ) {
+      throw new MemoryValidationError(
+        'not_found',
+        `memory not found or not visible in this session: ${request.id}`
+      );
+    }
+    ctx.onDeleted?.(request.id);
+    return { status: 'deleted', id: request.id };
   }
   throw new MemoryValidationError('unknown_op', `unknown memory op: ${String(op)}`);
 }

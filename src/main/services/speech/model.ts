@@ -178,6 +178,16 @@ export const SPEECH_MODELS: Record<SpeechModelId, SpeechModelSpec> = {
     sources: null,
     remote: true,
   },
+  /** 微信输入法云端识别，无需凭证（服务端现场签发 UIN） */
+  wetype: {
+    id: 'wetype',
+    streaming: true,
+    approxBytes: 0,
+    memoryBytes: 0,
+    files: [],
+    sources: null,
+    remote: true,
+  },
 };
 
 /** hanbao 预编译（源码私有）挂在 EnsoCode v0.2.1 Release；升级时换 URL、哈希和目录版本 */
@@ -314,6 +324,7 @@ export function recognizerConfig(spec: SpeechModelSpec, dir: string): Recognizer
     case 'hanbao':
       throw new Error('hanbao runs its own engine process');
     case 'gemini-live':
+    case 'wetype':
       throw new Error('cloud speech model has no local recognizer');
   }
 }
