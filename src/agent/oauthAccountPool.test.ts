@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  VIRTUAL_MODEL_STATE_ENTRY,
 } from '@earendil-works/pi-coding-agent';
 import type { OauthPoolFailure } from '@shared/oauthAccountPool';
 import type { AgentCommand, SpawnModelConfig } from '@shared/types/agent';
@@ -32,9 +34,11 @@ import {
   releaseOauthPoolSession,
   resolveOauthPoolModel,
 } from './oauthAccountPool';
+import { buildSessionDisplayMessages } from './sessionAdapter';
 import { SessionSupervisor } from './supervisor';
 
 const keys = ['openai-codex', 'openai-codex#2'];
+vi.mock('node:crypto', { spy: true });
 const config: SpawnModelConfig = {
   api: 'openai-responses',
   apiKey: '',
@@ -54,6 +58,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.mocked(crypto.randomUUID).mockReset();
 });
 
 interface Request {
@@ -65,7 +70,16 @@ interface Request {
   reasoning?: string;
   signal?: AbortSignal;
 }
-type Reply = 'tool' | 'ok' | 'quota' | 'auth' | 'rate' | 'stream-quota' | 'wait-abort';
+type Reply =
+  | 'tool'
+  | 'ok'
+  | 'quota'
+  | 'auth'
+  | 'rate'
+  | 'stream-quota'
+  | 'wait-abort'
+  | 'quota-then-network'
+  | 'stream-revoked';
 
 async function fixture(
   replies: Reply[],
@@ -176,13 +190,18 @@ async function fixture(
         else await options?.fetch?.('https://fixture.invalid/error');
         message.stopReason = 'error';
         message.errorMessage = 'You have hit your ChatGPT usage limit.';
-      } else if (reply === 'stream-quota') {
+      } else if (reply === 'quota-then-network') {
+        await options?.fetch?.('https://fixture.invalid/error');
+        await options?.fetch?.('https://fixture.invalid/recovered');
+        message.stopReason = 'error';
+        message.errorMessage = 'connection dropped';
+      } else if (reply === 'stream-quota' || reply === 'stream-revoked') {
         await options?.onProviderStreamEvent?.(
           {
             type: 'response.failed',
             response: {
               error: {
-                code: 'usage_limit_reached',
+                type: reply === 'stream-revoked' ? 'token_revoked' : 'usage_limit_reached',
                 resets_at: Math.floor(Date.now() / 1000) + 3600,
               },
             },
@@ -265,7 +284,7 @@ async function fixture(
         ? SessionManager.open(resumeFile)
         : SessionManager.create(cwd, path.join(root, 'sessions')),
       settingsManager: SettingsManager.inMemory({
-        retry: { enabled: false },
+        retry: { enabled: false, baseDelayMs: 1, maxRetries: 1 },
         compaction: { enabled: false },
       }),
       noTools: 'builtin',
@@ -327,6 +346,56 @@ async function manualRetry(session: AgentSession): Promise<void> {
 }
 
 describe('真实 SDK 的假 provider 顺序接替', () => {
+  it('hard failures never trigger SDK transient retries because of digits in an opaque id', async () => {
+    vi.mocked(crypto.randomUUID).mockReturnValue('00000429-0503-4000-8000-000000000000');
+    const f = await fixture(['quota', 'ok']);
+    const session = await f.create();
+    session.settingsManager.setRetryEnabled(true);
+    let transientRetries = 0;
+    session.subscribe((event) => {
+      if (event.type === 'auto_retry_start') transientRetries++;
+    });
+    await session.prompt('task');
+    expect(f.requests.map((request) => request.key)).toEqual(keys);
+    expect(transientRetries).toBe(0);
+  });
+  it('a successful retry response clears earlier quota evidence before a later transport error', async () => {
+    const f = await fixture(['quota-then-network', 'ok']);
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.endsWith('/recovered')
+        ? Response.json({ ok: true })
+        : Response.json({ error: { code: 'usage_limit_reached' } }, { status: 429 })
+    );
+    const session = await f.create();
+    await session.prompt('task');
+    expect(f.requests.map((request) => request.key)).toEqual([keys[0]]);
+    expect(f.failures).toEqual([]);
+    expect((session.messages.at(-1) as AssistantMessage).errorMessage).toBe('connection dropped');
+  });
+  it('stream auth errors using type rather than code rotate the revoked account', async () => {
+    const f = await fixture(['stream-revoked', 'ok']);
+    const session = await f.create();
+    await session.prompt('task');
+    expect(f.requests.map((request) => request.key)).toEqual(keys);
+  });
+  it('does not append redundant router-state entries for successful tool followups', async () => {
+    const f = await fixture(['tool', 'ok']);
+    const session = await f.create();
+    await session.prompt('task');
+    const entries = session.sessionManager
+      .getBranch()
+      .filter((entry) => entry.type === 'custom' && entry.customType === VIRTUAL_MODEL_STATE_ENTRY);
+    expect(entries).toHaveLength(1);
+  });
+  it('preserves the terminal recovery explanation in the display after reopening the session', async () => {
+    const f = await fixture(['quota', 'quota']);
+    const session = await f.create();
+    await session.prompt('task');
+    const reopened = await f.create(f.model, session.sessionManager.getSessionFile());
+    expect(buildSessionDisplayMessages(reopened).at(-1)).toMatchObject({
+      errorMessage: OAUTH_POOL_EXHAUSTED,
+    });
+  });
   it('安装 selector 后普通账号鉴权直接返回 SDK 的原 promise，不添加异步跳数', async () => {
     const runtime = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(),

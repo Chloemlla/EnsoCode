@@ -23,6 +23,7 @@ import {
 } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
 import type { SpawnModelConfig } from '@shared/types/agent';
+import { OAUTH_POOL_TERMINAL_ERROR_ENTRY } from './sessionAdapter';
 
 /**
  * Main 权威选号接口；排除集合属于当前活动，不受额度冷却窗口到期影响。取消后调用方必须拒绝延迟结果。
@@ -117,7 +118,10 @@ function withReceipt(failure: OauthPoolFailure, selectionReceipt?: string): Oaut
 }
 
 function recordFailure(failure: OauthPoolFailure): string {
-  const id = randomUUID();
+  // SDK retry heuristics scan error text for numeric HTTP codes, including opaque ids.
+  const id = randomUUID().replace(/[0-9a-f]/g, (hex) =>
+    String.fromCharCode(97 + Number.parseInt(hex, 16))
+  );
   if (failures.size >= 256) failures.delete(failures.keys().next().value ?? '');
   failures.set(id, failure);
   return `ChatGPT account ${failure.reason}. [enso-pool-failure:${id}]`;
@@ -145,7 +149,7 @@ export function resetOauthPoolActivity(session: AgentSession): void {
 export function failureForMessage(message: {
   errorMessage?: string;
 }): OauthPoolFailure | undefined {
-  const id = /\[enso-pool-failure:([a-f0-9-]+)\]/.exec(message.errorMessage ?? '')?.[1];
+  const id = /\[enso-pool-failure:([a-p0-9-]+)\]/.exec(message.errorMessage ?? '')?.[1];
   return id ? failures.get(id) : undefined;
 }
 
@@ -220,6 +224,7 @@ export function withCodexPoolEvidence(provider: Provider): Provider {
       const captured: { evidence: OauthPoolFailure | null } = { evidence: null };
       const originalFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
       const controlledFetch: typeof fetch = async (...args) => {
+        captured.evidence = null;
         const response = await originalFetch(...args);
         if (!response.ok) {
           let body: unknown;
@@ -247,21 +252,7 @@ export function withCodexPoolEvidence(provider: Provider): Provider {
             const body = event.type === 'response.failed' ? response : event;
             if (event.type === 'error' || event.type === 'response.failed') {
               const nested = body?.error ?? body;
-              const code =
-                nested && typeof nested === 'object'
-                  ? (nested as Record<string, unknown>).code
-                  : undefined;
-              const status =
-                code === 'usage_limit_reached'
-                  ? 429
-                  : code === 'invalid_token' || code === 'token_expired'
-                    ? 401
-                    : 0;
-              captured.evidence = classifyCodexPoolFailure(
-                status,
-                { error: nested },
-                model.provider
-              );
+              captured.evidence = classifyCodexPoolFailure(400, { error: nested }, model.provider);
             }
           }
           await options.onProviderStreamEvent?.(data, eventModel);
@@ -351,7 +342,8 @@ export function resolveOauthPoolModel(runtime: ModelRuntime, config: SpawnModelC
       //
       // The public router state stores per-activity failures, so cooldown expiry cannot loop the same task through failed accounts.
       let failed = request.failed ? failureForMessage(request.failed.message) : undefined;
-      const attempted = attemptedAccounts(request.state);
+      const previous = attemptedAccounts(request.state);
+      const attempted = [...previous];
       if (failed && !attempted.includes(failed.accountKey)) attempted.push(failed.accountKey);
       for (let budget = 0; budget < 100; budget++) {
         const selected = await select(
@@ -389,7 +381,15 @@ export function resolveOauthPoolModel(runtime: ModelRuntime, config: SpawnModelC
             request.signal?.throwIfAborted();
             const scope = routing.getStore();
             if (scope) scope.selection = { accountKey: key, selectionReceipt };
-            return { model, thinkingLevel: request.thinkingLevel, state: { attempted } };
+            const unchanged =
+              request.state !== undefined &&
+              attempted.length === previous.length &&
+              attempted.every((key, index) => key === previous[index]);
+            return {
+              model,
+              thinkingLevel: request.thinkingLevel,
+              state: unchanged ? request.state : { attempted },
+            };
           }
         } catch (error) {
           request.signal?.throwIfAborted();
@@ -514,10 +514,19 @@ export function oauthPoolRecoveryExtension(
             continue: true,
           };
         } catch (error) {
-          if (!ctx.signal?.aborted)
-            message.errorMessage =
-              error instanceof Error ? error.message : 'No available ChatGPT OAuth accounts.';
-          return;
+          if (ctx.signal?.aborted) return;
+          message.errorMessage =
+            error instanceof Error ? error.message : 'No available ChatGPT OAuth accounts.';
+          return {
+            entries: [
+              ...event.entries,
+              {
+                type: 'custom' as const,
+                customType: OAUTH_POOL_TERMINAL_ERROR_ENTRY,
+                data: { targetId: latest.sourceEntry.id, error: message.errorMessage },
+              },
+            ],
+          };
         }
       });
     },

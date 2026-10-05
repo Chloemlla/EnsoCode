@@ -8,6 +8,8 @@ import {
 } from './silentTurn';
 import { transcriptMessages } from './transcript';
 
+export const OAUTH_POOL_TERMINAL_ERROR_ENTRY = 'enso.oauth-pool-terminal-error';
+
 /**
  * 空回复恢复：`turn_end` 用 context_edit 从模型上下文拿掉空 assistant 并 continue，
  * 恢复轮的请求经 context hook 临时追加 nudge。轮次类型看最近的 user/toolResult，跳过 system entry。
@@ -158,11 +160,29 @@ export function buildSessionDisplayMessages(
   if (!projection) return transcriptMessages(manager, contextMessages);
 
   const editedTargets = new Set<string>();
+  const terminalErrors = new Map<string, string>();
   for (const entry of manager.getBranch()) {
     if (entry.type === 'context_edit') editedTargets.add(entry.targetId);
+    if (
+      entry.type === 'custom' &&
+      entry.customType === OAUTH_POOL_TERMINAL_ERROR_ENTRY &&
+      entry.data &&
+      typeof entry.data === 'object'
+    ) {
+      const data = entry.data as Record<string, unknown>;
+      if (typeof data.targetId === 'string' && typeof data.error === 'string')
+        terminalErrors.set(data.targetId, data.error);
+    }
   }
 
   const displayContext = projection.entries.flatMap((entry) => {
+    const error = terminalErrors.get(entry.sourceEntry.id);
+    if (
+      error &&
+      entry.sourceEntry.type === 'message' &&
+      entry.sourceEntry.message.role === 'assistant'
+    )
+      return [{ ...entry.sourceEntry.message, errorMessage: error }];
     if (entry.sourceEntry.type === 'message' && editedTargets.has(entry.sourceEntry.id)) {
       return [entry.sourceEntry.message];
     }
