@@ -22,6 +22,12 @@ import { type CompactStrategy, parseCompactStrategy } from '../compactStrategy';
 import type { DefaultModelRef } from '../defaultModel';
 import { parseMaxActiveCoworkers } from '../maxActiveCoworkers';
 import {
+  isCodexAccountKey,
+  type OauthPoolFailure,
+  parseOauthAccountPool,
+  parseOauthPoolFailure,
+} from '../oauthAccountPool';
+import {
   PLAN_FEEDBACK_MAX,
   PLAN_RESPOND_ACTIONS,
   type PlanRespondAction,
@@ -112,6 +118,12 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
    * 只作占位；worker 必须先看这里，按成员逐个解析后注册 pi 虚拟模型。
    */
   virtual?: VirtualSpawnConfig;
+  /**
+   * Main 校验后下发的顺序池配置；仅用于路由身份，实时成员和游标仍以 Main 为权威。
+   *
+   * Validated sequential pool configuration; identifies the route, while Main remains authoritative for live membership and cursors.
+   */
+  oauthAccountPool?: { accountKeys: string[] };
 }
 
 /** pi catalog 里的分类器 provider/model 与凭证 */
@@ -893,6 +905,17 @@ export interface SafeChildRef {
 }
 
 export type AgentSessionCustomEntry =
+  | {
+      kind: 'oauth-account-selected';
+      accountKey: string;
+      previousAccountKey?: string;
+      /** 真实请求的池路由身份；旧历史缺省时不能用于额度展示。
+       *
+       * Pool route identity of the actual request; legacy entries without it cannot display usage. */
+      settingsProviderId?: string;
+      modelId?: string;
+      at: number;
+    }
   | { kind: 'agent-dispatch'; child: SafeChildRef; at: number }
   | {
       kind: 'agent-completed';
@@ -985,6 +1008,13 @@ export type DispatchMainEvent =
 
 /** Main → worker。所有 session 控制均携 exact generation。 */
 export type AgentCommand =
+  | {
+      type: 'oauth-pool-result';
+      requestId: string;
+      accountKey?: string;
+      selectionReceipt?: string;
+      error?: string;
+    }
   | { type: 'lock-workspace'; requestId: string; conversationIds: string[] }
   | { type: 'unlock-workspace'; requestId: string; conversationIds: string[]; branch?: string }
   | {
@@ -1488,6 +1518,7 @@ export type RendererAgentEvent =
       | ChildLifecycleEvent
       | McpWorkerEvent
       | WorkspaceLockEvent
+      | { type: 'oauth-pool-select' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -1512,6 +1543,14 @@ export type WorkspaceLockEvent =
   | { type: 'workspace-unlock-result'; requestId: string; ok: boolean; error?: string };
 
 export type AgentWorkerEvent =
+  | {
+      type: 'oauth-pool-select';
+      requestId: string;
+      settingsProviderId: string;
+      modelId: string;
+      failed?: OauthPoolFailure;
+      excludedAccountKeys?: string[];
+    }
   | WorkspaceLockEvent
   | ParentLifecycleEvent
   | ChildLifecycleEvent
@@ -2123,6 +2162,7 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
       'modelId',
       'settingsProviderId',
       'oauthAccountKey',
+      'oauthAccountPool',
       'reasoning',
       'thinkingLevel',
       'contextWindow',
@@ -2133,7 +2173,11 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
     typeof value.apiKey !== 'string' ||
     !isNonEmptyString(value.modelId) ||
     !isNonEmptyString(value.settingsProviderId) ||
-    (value.oauthAccountKey !== undefined && !isNonEmptyString(value.oauthAccountKey))
+    (value.oauthAccountKey !== undefined && !isNonEmptyString(value.oauthAccountKey)) ||
+    (value.oauthAccountPool !== undefined &&
+      (!parseOauthAccountPool(value.oauthAccountPool) ||
+        !isCodexAccountKey(value.oauthAccountKey) ||
+        value.apiKey !== ''))
   ) {
     return null;
   }
@@ -2475,6 +2519,24 @@ function parseSafeChildRef(value: unknown): SafeChildRef | null {
 
 export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustomEntry | null {
   if (!isRecord(value)) return null;
+  if (value.kind === 'oauth-account-selected') {
+    return hasOnlyKeys(value, [
+      'kind',
+      'accountKey',
+      'previousAccountKey',
+      'settingsProviderId',
+      'modelId',
+      'at',
+    ]) &&
+      isCodexAccountKey(value.accountKey) &&
+      (value.previousAccountKey === undefined || isCodexAccountKey(value.previousAccountKey)) &&
+      ((value.settingsProviderId === undefined && value.modelId === undefined) ||
+        (isNonEmptyString(value.settingsProviderId) && isNonEmptyString(value.modelId))) &&
+      typeof value.at === 'number' &&
+      Number.isFinite(value.at)
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  }
   if (value.kind === 'capability-receipt') {
     if (!hasExactKeys(value, ['kind', 'receipt'])) return null;
     const receipt = parseCapabilityReceipt(value.receipt);
@@ -2764,6 +2826,18 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
 /** 收窄 Main → worker 命令。旧 global/builtin session shape 一律拒绝。 */
 export function parseAgentCommand(value: unknown): AgentCommand | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  if (value.type === 'oauth-pool-result') {
+    return hasOnlyKeys(value, ['type', 'requestId', 'accountKey', 'selectionReceipt', 'error']) &&
+      isNonEmptyString(value.requestId) &&
+      ((isCodexAccountKey(value.accountKey) &&
+        value.error === undefined &&
+        (value.selectionReceipt === undefined || isUuid(value.selectionReceipt))) ||
+        (value.accountKey === undefined &&
+          value.selectionReceipt === undefined &&
+          isNonEmptyString(value.error)))
+      ? (value as unknown as AgentCommand)
+      : null;
+  }
   switch (value.type) {
     case 'lock-workspace':
     case 'unlock-workspace':
@@ -3295,6 +3369,26 @@ const isOptionalTimestamp = (value: unknown): boolean =>
 
 export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  if (value.type === 'oauth-pool-select') {
+    return hasOnlyKeys(value, [
+      'type',
+      'requestId',
+      'settingsProviderId',
+      'modelId',
+      'failed',
+      'excludedAccountKeys',
+    ]) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.settingsProviderId) &&
+      isNonEmptyString(value.modelId) &&
+      (value.excludedAccountKeys === undefined ||
+        (Array.isArray(value.excludedAccountKeys) &&
+          value.excludedAccountKeys.length <= 100 &&
+          value.excludedAccountKeys.every(isCodexAccountKey))) &&
+      (value.failed === undefined || parseOauthPoolFailure(value.failed) !== null)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
   if (
     value.type === 'parent-ready' ||
     value.type === 'model-changed' ||

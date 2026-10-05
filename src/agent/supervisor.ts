@@ -34,6 +34,7 @@ import {
   positiveContextWindow,
   resolveCustomModelCapabilities,
 } from '@shared/modelCatalog';
+import { isOauthAccountPool } from '@shared/oauthAccountPool';
 import { resolveOauthCatalogModel } from '@shared/oauthCatalog';
 import { ensureAccountProvider } from '@shared/piAccounts';
 import {
@@ -150,6 +151,14 @@ import { partitionMcpNamespaces } from './mcpNames';
 import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { ParentNotifier } from './notify';
+import {
+  installOauthPoolSelector,
+  type OauthPoolSelector,
+  oauthPoolRecoveryExtension,
+  releaseOauthPoolSession,
+  resetOauthPoolActivity,
+  resolveOauthPoolModel,
+} from './oauthAccountPool';
 import { withOpenAIResponsesRouting } from './openaiResponsesRouting';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
 import { createProjectSettingsManager } from './projectCode';
@@ -163,6 +172,7 @@ import { withRtkOptimization } from './rtk';
 import { RunawayGuard } from './runawayGuard';
 import {
   buildSessionDisplayMessages,
+  continueSessionActivity,
   editLatestAssistantForRetry,
   silentTurnRecoveryExtension,
 } from './sessionAdapter';
@@ -293,8 +303,6 @@ interface ManagedSession {
   lastRetryError?: string;
   /** 已见终态 agent_end、待 agent_settled 收口；failTurn 等提前收口时清掉，settled 不再重复收 */
   settlePending?: boolean;
-  /** 手动重试的裸 agent.continue 在跑：pi 不走 _runAgentPrompt，不会自动重试，willRetry 不可信 */
-  manualRetryRun?: boolean;
   /** 当前用户轮已做过一次空回复自动续跑 */
   silentTurnNudgeUsed: boolean;
   /** 本次空回复恢复的类型；post-tool 第二次仍空则失败 */
@@ -384,6 +392,7 @@ function sessionAgentsFilesOverride(
 function createSessionResourceLoader(options: {
   branchContext: InlineExtension;
   silentTurnRecovery: InlineExtension;
+  oauthPoolRecovery?: InlineExtension;
   cwd: string;
   agentDir: string;
   noSkills: boolean;
@@ -441,6 +450,7 @@ function createSessionResourceLoader(options: {
     // noExtensions 只挡磁盘上的项目/全局扩展；inline factory 不受影响，图片修剪对所有会话生效
     extensionFactories: [
       ...(options.codemode ? [options.codemode] : []),
+      ...(options.oauthPoolRecovery ? [options.oauthPoolRecovery] : []),
       options.branchContext,
       applyPatchResultExtension,
       {
@@ -566,7 +576,8 @@ function createEnsoResourceLoader(
   cwd: string,
   agentDir: string,
   branchContext: InlineExtension,
-  silentTurnRecovery: InlineExtension
+  silentTurnRecovery: InlineExtension,
+  oauthPoolRecovery?: InlineExtension
 ): DefaultResourceLoader {
   return new DefaultResourceLoader({
     cwd,
@@ -578,7 +589,12 @@ function createEnsoResourceLoader(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [branchContext, applyPatchResultExtension, silentTurnRecovery],
+    extensionFactories: [
+      branchContext,
+      applyPatchResultExtension,
+      silentTurnRecovery,
+      ...(oauthPoolRecovery ? [oauthPoolRecovery] : []),
+    ],
     systemPrompt: ENSO_SYSTEM_PROMPT,
     skillsOverride: () => ({ skills: [], diagnostics: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
@@ -686,6 +702,71 @@ export class SessionSupervisor {
   /** Bot 写成员在同一工作区的文件占用 / 全局命令独占（全部会话同进程共享） */
   private readonly workspaceClaims = new WorkspaceClaims();
   private runtimePromise: Promise<ModelRuntime> | null = null;
+  private readonly oauthPoolPending = new Map<
+    string,
+    (command: Extract<AgentCommand, { type: 'oauth-pool-result' }>) => void
+  >();
+  private oauthPoolRecovery(): InlineExtension {
+    return oauthPoolRecoveryExtension(
+      this.selectOauthPool,
+      (sessionId, accountKey, previousAccountKey, scope) => {
+        const managed = [...this.sessions.values()].find(
+          (item) => item.session.sessionId === sessionId
+        );
+        if (!managed) return;
+        const entry: AgentSessionCustomEntry = {
+          kind: 'oauth-account-selected',
+          accountKey,
+          ...scope,
+          ...(previousAccountKey ? { previousAccountKey } : {}),
+          at: Date.now(),
+        };
+        managed.session.sessionManager.appendCustomEntry('enso-agent-session', entry);
+        managed.customEntries.push(entry);
+        this.options.emit({
+          type: 'session-custom-entry',
+          identity: managed.identity,
+          seq: ++managed.seq,
+          entry,
+        });
+      }
+    );
+  }
+  private readonly selectOauthPool: OauthPoolSelector = (
+    settingsProviderId,
+    modelId,
+    failed,
+    signal,
+    excludedAccountKeys
+  ) =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error('ChatGPT pool selection cancelled.'));
+        return;
+      }
+      const requestId = randomUUID();
+      const finish = (error?: string, key?: string, selectionReceipt?: string) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        this.oauthPoolPending.delete(requestId);
+        if (error || !key) reject(new Error(error ?? 'ChatGPT pool selection failed.'));
+        else resolve({ accountKey: key, ...(selectionReceipt ? { selectionReceipt } : {}) });
+      };
+      const abort = () => finish('ChatGPT pool selection cancelled.');
+      const timer = setTimeout(() => finish('ChatGPT pool coordinator timed out.'), 30_000);
+      signal?.addEventListener('abort', abort, { once: true });
+      this.oauthPoolPending.set(requestId, (command) =>
+        finish(command.error, command.accountKey, command.selectionReceipt)
+      );
+      this.options.emit({
+        type: 'oauth-pool-select',
+        requestId,
+        settingsProviderId,
+        modelId,
+        ...(failed ? { failed } : {}),
+        ...(excludedAccountKeys ? { excludedAccountKeys: [...excludedAccountKeys] } : {}),
+      });
+    });
   /** 不可回收的会话（桌面正在查看 / 手机订阅），由 Main 全量下发 */
   private pinned: ReadonlySet<string> = new Set();
   private readonly evictionTimer: ReturnType<typeof setInterval>;
@@ -850,6 +931,7 @@ export class SessionSupervisor {
       } catch {}
       child.unsubscribe();
       try {
+        releaseOauthPoolSession(child.session.sessionId);
         child.session.dispose();
       } catch {}
       this.sessions.delete(id);
@@ -873,6 +955,7 @@ export class SessionSupervisor {
     await emitSessionShutdown(managed.session);
     managed.unsubscribe();
     try {
+      releaseOauthPoolSession(managed.session.sessionId);
       managed.session.dispose();
     } catch {}
     this.sessions.delete(parentId);
@@ -885,6 +968,10 @@ export class SessionSupervisor {
   }
 
   handleCommand(command: AgentCommand): void {
+    if (command.type === 'oauth-pool-result') {
+      this.oauthPoolPending.get(command.requestId)?.(command);
+      return;
+    }
     if (command.type === 'lock-workspace' || command.type === 'unlock-workspace') {
       const ok =
         command.type === 'lock-workspace'
@@ -1263,23 +1350,16 @@ export class SessionSupervisor {
         return;
       case 'retry': {
         const managed = this.must(command.identity);
-        if (managed.session.isStreaming || managed.status === 'running') return;
+        if (!managed.session.isIdle || managed.status === 'running') return;
         const agent = managed.session.agent;
         editLatestAssistantForRetry(managed.session);
         if (agent.state.messages.at(-1)?.role === 'assistant') return;
         ensureAssistantUsage(agent.state.messages as unknown[]);
         managed.currentTurnId = randomUUID();
-        // 裸 agent.continue 绕过 pi 的 _runAgentPrompt，不会发 agent_settled，需自行补发收口
-        managed.manualRetryRun = true;
-        void agent
-          .continue()
-          .finally(() => {
-            managed.manualRetryRun = false;
-          })
-          .then(
-            () => this.onSessionEvent(managed, { type: 'agent_settled' }),
-            (error) => this.failTurn(managed, toErrorMessage(error))
-          );
+        resetOauthPoolActivity(managed.session);
+        void continueSessionActivity(managed.session).catch((error) =>
+          this.failTurn(managed, toErrorMessage(error))
+        );
         return;
       }
       case 'agent-control-result': {
@@ -1701,6 +1781,7 @@ export class SessionSupervisor {
     });
     const resourceLoader = createSessionResourceLoader({
       branchContext: this.branchContextExtension(() => managedRef),
+      oauthPoolRecovery: this.oauthPoolRecovery(),
       silentTurnRecovery: silentTurnRecoveryExtension((kind) => {
         if (!managedRef) return;
         managedRef.silentTurnNudgeUsed = true;
@@ -2087,10 +2168,17 @@ export class SessionSupervisor {
           managed.silentTurnKind = kind;
         });
         const subLoader = isLockedEnso
-          ? createEnsoResourceLoader(cwd, this.options.agentDir, branchContext, silentTurnRecovery)
+          ? createEnsoResourceLoader(
+              cwd,
+              this.options.agentDir,
+              branchContext,
+              silentTurnRecovery,
+              this.oauthPoolRecovery()
+            )
           : createSessionResourceLoader({
               branchContext,
               silentTurnRecovery,
+              oauthPoolRecovery: this.oauthPoolRecovery(),
               cwd,
               agentDir: this.options.agentDir,
               noSkills: resolved || agentType ? true : loadLocalSkills === false,
@@ -2866,6 +2954,7 @@ export class SessionSupervisor {
       } catch {}
       managed.unsubscribe();
       try {
+        releaseOauthPoolSession(managed.session.sessionId);
         managed.session.dispose();
       } catch {}
       this.sessions.delete(coworkerId);
@@ -3253,7 +3342,7 @@ export class SessionSupervisor {
         this.reconcileMessages(managed, this.transcript(managed));
         // pi 将自动重试瞬态错误（随后 auto_retry_start）：非终态，不 settle、
         // 不发 turn-completed、状态保持 running，否则输入框解锁后又自己跑起来
-        if (event.willRetry && !managed.manualRetryRun) {
+        if (event.willRetry) {
           // pi 的 _prepareRetry 稍后会把这条瞬态错误 assistant 消息从自身状态删掉重发；
           // 提前对齐投影，重试期间时间线不闪现错误（错误文本已在 RetryBar 上）
           const last = managed.messages.at(-1);
@@ -3967,7 +4056,9 @@ export class SessionSupervisor {
         modelsPath: null,
         refreshOnCreate: false,
       });
-      return initializeWorkerRuntime(runtime);
+      await initializeWorkerRuntime(runtime);
+      installOauthPoolSelector(runtime, this.selectOauthPool);
+      return runtime;
     })();
     return this.runtimePromise;
   }
@@ -4495,6 +4586,9 @@ function listCatalogClone(runtime: ModelRuntime, model: CatalogModel): CatalogMo
  */
 export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig) {
   if (model.virtual) throw new Error('virtual model config must go through resolveSessionModel');
+  if (model.oauthAccountPool !== undefined && !isOauthAccountPool(model))
+    throw new Error('Invalid ChatGPT OAuth pool configuration.');
+  if (isOauthAccountPool(model)) return resolveOauthPoolModel(runtime, model);
   if (model.oauthAccountKey) {
     // worker 与 Main 是两个 ModelRuntime 实例，只共用 auth.json。合成 id（第 2+ 个账号）
     // 的克隆 provider 必须在本进程也注册一遍，否则 getModel 取不到

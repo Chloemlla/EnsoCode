@@ -1033,6 +1033,7 @@ export function registerAgentHandlers(): void {
     if (
       workerEvent.type === 'session-reloaded' ||
       workerEvent.type === 'workspace-lock-result' ||
+      workerEvent.type === 'oauth-pool-select' ||
       workerEvent.type === 'workspace-unlock-result'
     )
       return;

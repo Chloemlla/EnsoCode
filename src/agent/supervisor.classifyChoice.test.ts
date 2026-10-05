@@ -29,6 +29,8 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
     getModelsOfType: (_type: string, provider: string) =>
       mocks.classifiers.filter((model) => model.provider === provider),
     getProvider: () => undefined,
+    resolveModel: vi.fn(),
+    getAuth: vi.fn(),
     refresh: vi.fn(async () => ({ aborted: false, errors: new Map() })),
     classify: mocks.classify,
   };

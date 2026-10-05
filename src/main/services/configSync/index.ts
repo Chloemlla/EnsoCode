@@ -268,6 +268,11 @@ function portableState(state: Record<string, unknown>): Record<string, unknown> 
           : [];
         entry.omittedFields = [...new Set([...omitted, 'oauthAccountKey'])];
       }
+      if (entry.oauthAccountPool !== undefined) {
+        delete entry.oauthAccountPool;
+        const omitted = Array.isArray(entry.omittedFields) ? entry.omittedFields : [];
+        entry.omittedFields = [...new Set([...omitted, 'oauthAccountPool'])];
+      }
     }
   }
   return result;
