@@ -43,6 +43,7 @@ export function installElectronApiShim(): void {
         stopSubagent: async () => ({ ok: false as const, error: 'not supported on phone' }),
       },
       providers: {
+        listOauth: async () => [],
         getOauthUsage: async () => null,
       },
     },
