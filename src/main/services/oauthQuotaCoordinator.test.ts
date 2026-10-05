@@ -39,6 +39,18 @@ afterEach(() => {
 });
 
 describe('Main 额度权威协调器', () => {
+  it('retains exhaustion evidence when credentials are temporarily unreadable', async () => {
+    const quota = create();
+    answers.set(keys[0], usage(keys[0], 100));
+    await quota.getUsage(keys[0]);
+    identities.delete(keys[0]);
+    expect((await quota.getUsage(keys[0])).error).toBeDefined();
+    identities.set(keys[0], identityA);
+    query.mockClear();
+    answers.set(keys[0], { key: keys[0], windows: [], error: 'offline' });
+    expect((await create().select('p', [keys[0]], [keys[0]])).accountKey).toBeUndefined();
+    expect(query).not.toHaveBeenCalled();
+  });
   it.each([2, 3])('前%d个已耗尽直接选下一个，之后不重复探测或试发模型请求', async (count) => {
     for (const key of keys.slice(0, count)) answers.set(key, usage(key, 100));
     const quota = create();

@@ -283,7 +283,8 @@ export class OauthQuotaCoordinator {
       return undefined;
     }
     if (!validIdentity(identity)) {
-      this.invalidate(key);
+      // A transient credential read is not authoritative deletion. Logout/reconcileKeys
+      // invalidate explicitly; a confirmed identity change is handled below.
       return undefined;
     }
     const previous =
