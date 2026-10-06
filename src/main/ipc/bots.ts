@@ -8,6 +8,7 @@ import { normalizeBotMaxRunningTurns } from '@shared/bots/concurrency';
 import { BOT_NOTES_MAX_CHARS } from '@shared/bots/notes';
 import { isSkipReply } from '@shared/bots/router';
 import { assignTeamNames } from '@shared/bots/team';
+import { threadTitleFrom } from '@shared/bots/threads';
 import type { SessionIdentity } from '@shared/builtinAgents';
 import { BUILTIN_AGENT_TYPES, IPC_CHANNELS } from '@shared/types';
 import type { AttachedImage } from '@shared/types/agent';
@@ -149,6 +150,9 @@ import {
   parsePersonaSuggestRequest,
   parseSendInput,
   parseSessionHistoryInput,
+  parseThreadChatInput,
+  parseThreadSelectInput,
+  parseThreadUpdateInput,
   parseTimelineInput,
 } from './botsInput';
 import { parseTeamCreateInput, parseTeamPreviewInput } from './botsTeamInput';
@@ -898,6 +902,14 @@ function keepGroupImages(
   return { ok: true, ids };
 }
 
+/** 话题还没有标题时取首条人类消息 */
+function nameThread(chats: BotChatStore, chat: BotChat, text: string): void {
+  if (!chat.parentId || chats.get(chat.id)?.threadTitle) return;
+  const threadTitle = threadTitleFrom(text);
+  if (threadTitle && chats.update(chat.id, (draft) => ({ ...draft, threadTitle })))
+    emitBotEvent({ kind: 'chat', chatId: chat.id });
+}
+
 /** 桌面 BOT_SEND 与手机 bot-send 共用 */
 export async function sendBotMessage(
   { chats, host, composerRefs }: BotServices,
@@ -930,7 +942,9 @@ export async function sendBotMessage(
       return { ok: true, duplicate: true };
     const images = keepGroupImages(chats, chat.id, input.images);
     if (!images.ok) return images;
-    return groupSender(chat, input.text, options, refs, images.ids);
+    const sent = await groupSender(chat, input.text, options, refs, images.ids);
+    if (sent.ok) nameThread(chats, chat, input.text);
+    return sent;
   }
   const text = await composerRefs.expandDirect(chat, input);
   return host.deliver(chat.id, chat.members[0], text, options);
@@ -1675,6 +1689,79 @@ export function registerBotHandlers(): void {
 
   handle(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, 'write', (_sender, request, services) =>
     newBotSession(services, request)
+  );
+
+  handle(
+    IPC_CHANNELS.BOT_THREAD_CREATE,
+    'write',
+    (_sender, request, { chats }): BotChatWriteResult => {
+      const chatId = parseThreadChatInput(request);
+      const root = chatId ? chats.get(chatId) : undefined;
+      if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined)
+        return INVALID;
+      // 当前话题还没人说话：直接用它，不堆空话题
+      const active = chats.activeThread(root.id);
+      if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };
+      const thread = chats.createThread(root.id);
+      if (!thread) return INVALID;
+      chats.update(root.id, (draft) => ({ ...draft, activeThreadId: thread.id }));
+      emitBotEvent({ kind: 'chat', chatId: thread.id });
+      emitBotEvent({ kind: 'chat', chatId: root.id });
+      return { ok: true, chat: thread };
+    }
+  );
+
+  handle(
+    IPC_CHANNELS.BOT_THREAD_SELECT,
+    'write',
+    (_sender, request, { chats }): BotActionResult => {
+      const input = parseThreadSelectInput(request);
+      const root = input ? chats.get(input.chatId) : undefined;
+      if (!input || !root || !chats.threadsOf(root.id).some((chat) => chat.id === input.threadId))
+        return INVALID;
+      chats.update(root.id, (draft) => {
+        if (input.threadId === root.id) delete draft.activeThreadId;
+        else draft.activeThreadId = input.threadId;
+        return draft;
+      });
+      emitBotEvent({ kind: 'chat', chatId: root.id });
+      return { ok: true };
+    }
+  );
+
+  handle(
+    IPC_CHANNELS.BOT_THREAD_UPDATE,
+    'write',
+    (_sender, request, { chats }): BotChatWriteResult => {
+      const input = parseThreadUpdateInput(request);
+      const current = input ? chats.get(input.chatId) : undefined;
+      if (!input || current?.kind !== 'group') return INVALID;
+      const chat = chats.update(current.id, (draft) => ({ ...draft, threadTitle: input.title }));
+      if (!chat) return INVALID;
+      emitBotEvent({ kind: 'chat', chatId: chat.id });
+      return { ok: true, chat };
+    }
+  );
+
+  handle(
+    IPC_CHANNELS.BOT_THREAD_DELETE,
+    'write',
+    async (_sender, request, { chats, groups, host }): Promise<BotActionResult> => {
+      const chatId = parseThreadChatInput(request);
+      const thread = chatId ? chats.get(chatId) : undefined;
+      const root = thread?.parentId ? chats.get(thread.parentId) : undefined;
+      if (!thread || !root) return INVALID;
+      const stopped = await groups.stop(thread.id);
+      if (!stopped.ok) return stopped;
+      if (!host.discardChat(thread.id)) return INVALID;
+      if (root.activeThreadId === thread.id)
+        chats.update(root.id, (draft) => {
+          delete draft.activeThreadId;
+          return draft;
+        });
+      emitBotEvent({ kind: 'chat', chatId: root.id });
+      return { ok: true };
+    }
   );
 
   handle(IPC_CHANNELS.BOT_CHAT_CLONE, 'write', (_sender, request, services): BotChatWriteResult => {

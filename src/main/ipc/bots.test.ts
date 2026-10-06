@@ -1563,6 +1563,77 @@ describe('群话题', () => {
     });
   });
 
+  it('话题 IPC：新建并切换、空话题复用、首条消息定标题、改名、切换校验、删除回到根群', async () => {
+    const { alice, bob, chatId, services } = await team();
+    for (const bad of [undefined, { chatId: 'x' }, { chatId, extra: 1 }])
+      expect(await call(IPC_CHANNELS.BOT_THREAD_CREATE, bad)).toEqual({
+        ok: false,
+        error: 'invalid',
+      });
+    const created = await call(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId });
+    const thread = created.chat as { id: string; parentId: string };
+    expect(thread.parentId).toBe(chatId);
+    expect(services.chats.get(chatId)?.activeThreadId).toBe(thread.id);
+    expect(await call(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId: thread.id })).toMatchObject({
+      ok: false,
+    });
+    // 当前话题还是空的：不重复建
+    expect(await call(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId })).toMatchObject({
+      ok: true,
+      chat: { id: thread.id },
+    });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(
+      await call(IPC_CHANNELS.BOT_SEND, {
+        chatId: thread.id,
+        text: '  发布清单\n细节',
+        deliveryId: 't1',
+      })
+    ).toMatchObject({ ok: true });
+    warn.mockRestore();
+    expect(services.chats.get(thread.id)?.threadTitle).toBe('发布清单');
+    expect(services.chats.readEntries(chatId)).toEqual([]);
+
+    expect(
+      await call(IPC_CHANNELS.BOT_THREAD_UPDATE, { chatId: thread.id, title: '  上线  ' })
+    ).toMatchObject({ ok: true, chat: { threadTitle: '上线' } });
+    expect(
+      await call(IPC_CHANNELS.BOT_THREAD_UPDATE, { chatId: thread.id, title: ' ' })
+    ).toMatchObject({ ok: false });
+
+    const second = (await call(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId })).chat as { id: string };
+    expect(second.id).not.toBe(thread.id);
+    expect(await call(IPC_CHANNELS.BOT_THREAD_SELECT, { chatId, threadId: thread.id })).toEqual({
+      ok: true,
+    });
+    expect(services.chats.get(chatId)?.activeThreadId).toBe(thread.id);
+    expect(await call(IPC_CHANNELS.BOT_THREAD_SELECT, { chatId, threadId: chatId })).toEqual({
+      ok: true,
+    });
+    expect(services.chats.get(chatId)).not.toHaveProperty('activeThreadId');
+    const other = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'group',
+      title: 'other',
+      members: [alice, bob],
+      bossBotId: alice,
+      workspace: { kind: 'chat-home' },
+    });
+    expect(
+      await call(IPC_CHANNELS.BOT_THREAD_SELECT, {
+        chatId,
+        threadId: (other.chat as { id: string }).id,
+      })
+    ).toMatchObject({ ok: false });
+
+    await call(IPC_CHANNELS.BOT_THREAD_SELECT, { chatId, threadId: second.id });
+    expect(await call(IPC_CHANNELS.BOT_THREAD_DELETE, { chatId })).toMatchObject({ ok: false });
+    expect(await call(IPC_CHANNELS.BOT_THREAD_DELETE, { chatId: second.id })).toEqual({ ok: true });
+    expect(services.chats.get(second.id)).toBeUndefined();
+    expect(services.chats.get(chatId)).not.toHaveProperty('activeThreadId');
+    expect(services.chats.threadsOf(chatId).map((chat) => chat.id)).toEqual([chatId, thread.id]);
+  });
+
   it('根群移出成员：各话题里该成员的会话结束；删根群连同话题一起删', async () => {
     const { carol, chatId, services, alice, bob } = await team();
     const registry = mocks.registry as SourceAuthorityRegistry;
