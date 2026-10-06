@@ -43,6 +43,7 @@ import { GroupInfoPanel } from './GroupInfoPanel';
 import { GroupTimeline } from './GroupTimeline';
 import { LiveSessionDialog, LiveSessionTimeline, type MessageFocus } from './LiveSessionTimeline';
 import { SessionHistoryDialog } from './SessionHistoryDialog';
+import { SessionSwitcher } from './SessionSwitcher';
 import { SilenceNote } from './SilenceNote';
 import { ThreadSwitcher } from './ThreadSwitcher';
 import { WorkspaceMenu } from './WorkspaceMenu';
@@ -274,21 +275,29 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
           <div className="flex-1" />
           <WorkspaceMenu chat={group} />
           {direct ? (
-            <button
-              type="button"
-              disabled={archived}
-              onClick={() =>
-                void window.electronAPI.bots.newSession(chat.id).then((result) => {
-                  if (!result.ok)
-                    addToast({ type: 'error', title: chatErrorText(result.error, t) });
-                  else void useBotsStore.getState().refreshChats();
-                })
-              }
-              className="flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" />
-              {t('New conversation')}
-            </button>
+            <>
+              <SessionSwitcher
+                chat={chat}
+                botId={direct.id}
+                running={summary.running}
+                onView={(id, title) => setHistory({ id, title })}
+              />
+              <button
+                type="button"
+                disabled={archived}
+                onClick={() =>
+                  void window.electronAPI.bots.newSession(chat.id).then((result) => {
+                    if (!result.ok)
+                      addToast({ type: 'error', title: chatErrorText(result.error, t) });
+                    else void useBotsStore.getState().refreshChats();
+                  })
+                }
+                className="flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5" />
+                {t('New conversation')}
+              </button>
+            </>
           ) : (
             <ThreadSwitcher group={group} thread={chat} />
           )}

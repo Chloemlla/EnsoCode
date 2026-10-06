@@ -488,6 +488,18 @@ export function parseThreadUpdateInput(value: unknown): { chatId: string; title:
   return title && title.length <= BOT_THREAD_TITLE_MAX ? { chatId: input.chatId, title } : null;
 }
 
+export function parseSessionSwitchInput(
+  value: unknown
+): { chatId: string; conversationId: string } | null {
+  const input = record(value);
+  return input &&
+    onlyKeys(input, ['chatId', 'conversationId']) &&
+    isBotId(input.chatId) &&
+    isBotId(input.conversationId)
+    ? { chatId: input.chatId, conversationId: input.conversationId }
+    : null;
+}
+
 export function parseSessionHistoryInput(
   value: unknown
 ): { conversationId: string; beforeIndex?: number } | null {

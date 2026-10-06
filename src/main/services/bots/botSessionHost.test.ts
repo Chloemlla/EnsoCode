@@ -647,6 +647,71 @@ describe('BotSessionHost.ensureSession', () => {
     expect(host.sessionsOf(chat.id).map((s) => s.current)).toEqual([false, true]);
   });
 
+  it('私聊切回旧对话：重新打开原会话续写，当前会话结束只读；不属于本聊天或工作区已换的拒绝', async () => {
+    const alice = bot('Alice');
+    const bob = bot('Bob');
+    const chat = direct(alice.id);
+    const other = direct(bob.id);
+    const first = await host.deliver(chat.id, alice.id, 'one');
+    if (!first.ok) throw new Error(first.error);
+    host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+    registry.markReady(first.conversationId, join(root, 'first.jsonl'), {
+      providerId: 'p',
+      modelId: 'm',
+    });
+    const second = host.ensureSession(chat.id, alice.id, { fresh: true });
+    if (!second.ok) throw new Error(second.error);
+    const bobSession = host.ensureSession(other.id, bob.id);
+    if (!bobSession.ok) throw new Error(bobSession.error);
+
+    expect(host.switchSession(chat.id, alice.id, bobSession.conversationId)).toEqual({
+      ok: false,
+      error: 'session-not-found',
+    });
+    expect(host.switchSession(chat.id, alice.id, first.conversationId)).toEqual({ ok: true });
+    expect(chats.get(chat.id)?.sessions[alice.id].conversationId).toBe(first.conversationId);
+    expect(registry.conversation(first.conversationId)?.lifecycle).toBe('ready');
+    expect(registry.conversation(second.conversationId)?.lifecycle).toBe('ended');
+    expect(
+      host
+        .sessionsOf(chat.id)
+        .filter((s) => s.current)
+        .map((s) => s.conversationId)
+    ).toEqual([first.conversationId]);
+    expect(events).toContainEqual({ kind: 'chat', chatId: chat.id });
+    expect(host.switchSession(chat.id, alice.id, first.conversationId)).toEqual({ ok: true });
+    expect(host.sessionsOf(chat.id).map((s) => s.resumable)).toEqual([true, true]);
+
+    await flush();
+    const again = await host.deliver(chat.id, alice.id, 'two');
+    expect(again.ok && again.conversationId).toBe(first.conversationId);
+    await flush();
+    expect(runtime.spawns.at(-1)).toMatchObject({
+      conversationId: first.conversationId,
+      resumeFile: join(root, 'first.jsonl'),
+    });
+
+    const code = join(root, 'code');
+    mkdirSync(code);
+    const project = registry.createProject({ requestId: 'p', path: code });
+    if (!project.accepted) throw new Error('project');
+    const moved = chats.update(chat.id, (draft) => {
+      draft.workspace = { kind: 'project', projectId: project.value.projectId };
+      return draft;
+    });
+    expect(moved?.workspace.kind).toBe('project');
+    expect(host.sessionsOf(chat.id).map((s) => s.resumable)).toEqual([false, false]);
+    expect(host.canSwitch(chat.id, alice.id, second.conversationId)).toEqual({
+      ok: false,
+      error: 'workspace-changed',
+    });
+    expect(host.switchSession(chat.id, alice.id, second.conversationId)).toEqual({
+      ok: false,
+      error: 'workspace-changed',
+    });
+    expect(registry.conversation(second.conversationId)?.lifecycle).toBe('ended');
+  });
+
   it('Code 项目工作区：cwd 取项目路径；项目移除或 ssh 时报错', () => {
     const alice = bot('Alice');
     const code = join(root, 'code');

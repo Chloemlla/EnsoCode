@@ -1,4 +1,6 @@
 import type { BotChat } from '../types/bot';
+import { splitChatReferences } from './composerRefs';
+import { stripBotNotesUpdate } from './notes';
 
 const TITLE_CHARS = 30;
 
@@ -11,6 +13,16 @@ export function threadTitleFrom(text: string): string | undefined {
   if (!line) return undefined;
   const chars = [...line];
   return chars.length > TITLE_CHARS ? `${chars.slice(0, TITLE_CHARS).join('')}…` : line;
+}
+
+const SKILL_BLOCK = /<skill name="[^"]*" location="[^"]*">[\s\S]*?<\/skill>/g;
+const ROUTINE_TITLE = /^\s*<routine title="([^"]*)"/;
+
+/** 私聊对话标题：首条用户消息去掉 Main 追加的块后取首行；例行取例行标题 */
+export function sessionTitleFrom(text: string): string | undefined {
+  const body = splitChatReferences(stripBotNotesUpdate(text)).body;
+  const routine = ROUTINE_TITLE.exec(body)?.[1];
+  return threadTitleFrom(routine ?? body.replace(SKILL_BLOCK, ''));
 }
 
 type ThreadChat = Pick<BotChat, 'id' | 'parentId' | 'activeThreadId' | 'createdAt'>;

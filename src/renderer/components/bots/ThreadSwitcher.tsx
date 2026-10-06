@@ -33,17 +33,18 @@ import { chatSummary } from '@/stores/bots/selectors';
 import { isUnread } from '@/stores/bots/unread';
 import { chatErrorText } from './botText';
 
-const BUTTON =
+export const SWITCHER_BUTTON =
   'flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50';
 
-interface ThreadEntry {
+export interface SwitcherEntry {
   id: string;
-  chat: BotChat;
   title: string;
   preview: string;
   activityAt: number;
   unread: boolean;
   running: boolean;
+  canRename?: boolean;
+  canDelete?: boolean;
 }
 
 /** 群话题切换：下拉列常用话题，其余进「全部话题」弹窗；切走的话题在后台照常运行 */
@@ -62,16 +63,17 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
   const names = useMemo(() => Object.fromEntries(bots.map((bot) => [bot.id, bot.name])), [bots]);
   const label = (chat: BotChat) =>
     chat.threadTitle ?? (chat.parentId ? t('New topic') : t('Main topic'));
-  const entries: ThreadEntry[] = chatThreads(chats, group).map((chat) => {
+  const entries: SwitcherEntry[] = chatThreads(chats, group).map((chat) => {
     const summary = chatSummary(chat, { sessions, timeline: timelines[chat.id], queue, names });
     return {
       id: chat.id,
-      chat,
       title: label(chat),
       preview: summary.preview,
       activityAt: Math.max(summary.activityAt, chat.createdAt),
       unread: chat.id !== thread.id && isUnread(summary.marker, reads[summary.key]),
       running: summary.running,
+      canRename: !archived,
+      canDelete: Boolean(chat.parentId),
     };
   });
   const shown = menuThreads(entries, { currentId: thread.id, rootId: group.id });
@@ -91,7 +93,7 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
   return (
     <>
       <Menu>
-        <MenuTrigger className={cn(BUTTON, 'max-w-56')}>
+        <MenuTrigger className={cn(SWITCHER_BUTTON, 'max-w-56')}>
           <span className="truncate">{label(thread)}</span>
           {entries.some((entry) => entry.unread) && (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-info" />
@@ -135,15 +137,23 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
           )}
         </MenuPopup>
       </Menu>
-      <button type="button" disabled={archived} onClick={() => void create()} className={BUTTON}>
+      <button
+        type="button"
+        disabled={archived}
+        onClick={() => void create()}
+        className={SWITCHER_BUTTON}
+      >
         <MessageSquarePlus className="h-3.5 w-3.5" />
         {t('New topic')}
       </button>
       {listOpen && (
         <ThreadsDialog
+          heading={t('Topics')}
+          placeholder={t('Search topics...')}
+          empty={t('No matching topics')}
+          filters
           entries={entries}
           currentId={thread.id}
-          archived={archived}
           onClose={() => setListOpen(false)}
           onOpen={(id) => {
             open(id);
@@ -184,7 +194,7 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
   );
 }
 
-function ThreadMarks({ entry }: { entry: ThreadEntry }) {
+export function ThreadMarks({ entry }: { entry: SwitcherEntry }) {
   const { locale } = useI18n();
   return (
     <>
@@ -197,22 +207,30 @@ function ThreadMarks({ entry }: { entry: ThreadEntry }) {
   );
 }
 
-function ThreadsDialog({
+/** 话题 / 私聊对话的全部列表：搜索、可选状态筛选，逐行改名或删除 */
+export function ThreadsDialog({
+  heading,
+  placeholder,
+  empty,
+  filters = false,
   entries,
   currentId,
-  archived,
   onClose,
   onOpen,
   onRename,
   onDelete,
 }: {
-  entries: ThreadEntry[];
+  heading: string;
+  placeholder: string;
+  empty: string;
+  /** 显示 全部 / 未读 / 进行中 筛选 */
+  filters?: boolean;
+  entries: SwitcherEntry[];
   currentId: string;
-  archived: boolean;
   onClose: () => void;
   onOpen: (id: string) => void;
-  onRename: (entry: ThreadEntry) => void;
-  onDelete: (entry: ThreadEntry) => void;
+  onRename?: (entry: SwitcherEntry) => void;
+  onDelete?: (entry: SwitcherEntry) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState('');
@@ -226,7 +244,7 @@ function ThreadsDialog({
       <DialogContent className="h-[min(40rem,85vh)] max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-baseline gap-2">
-            {t('Topics')}
+            {heading}
             <span className="font-sans text-muted-foreground text-sm tabular-nums">
               {entries.length}
             </span>
@@ -238,29 +256,29 @@ function ThreadsDialog({
             <InputGroupInput
               autoFocus
               value={query}
-              placeholder={t('Search topics...')}
+              placeholder={placeholder}
               onChange={(event) => setQuery(event.target.value)}
             />
           </InputGroup>
-          <Tabs value={filter} onValueChange={(value) => setFilter(value as ThreadFilter)}>
-            <TabsList>
-              <TabsTab value="all">{t('All')}</TabsTab>
-              <TabsTab value="unread">
-                {t('Unread')}
-                {count('unread') > 0 && <span className="tabular-nums">{count('unread')}</span>}
-              </TabsTab>
-              <TabsTab value="running">
-                {t('In progress')}
-                {count('running') > 0 && <span className="tabular-nums">{count('running')}</span>}
-              </TabsTab>
-            </TabsList>
-          </Tabs>
+          {filters && (
+            <Tabs value={filter} onValueChange={(value) => setFilter(value as ThreadFilter)}>
+              <TabsList>
+                <TabsTab value="all">{t('All')}</TabsTab>
+                <TabsTab value="unread">
+                  {t('Unread')}
+                  {count('unread') > 0 && <span className="tabular-nums">{count('unread')}</span>}
+                </TabsTab>
+                <TabsTab value="running">
+                  {t('In progress')}
+                  {count('running') > 0 && <span className="tabular-nums">{count('running')}</span>}
+                </TabsTab>
+              </TabsList>
+            </Tabs>
+          )}
         </DialogHeader>
         <DialogPanel className="flex flex-col gap-y-0.5 border-t pt-3!">
           {shown.length === 0 && (
-            <p className="py-10 text-center text-muted-foreground text-sm">
-              {t('No matching topics')}
-            </p>
+            <p className="py-10 text-center text-muted-foreground text-sm">{empty}</p>
           )}
           {shown.map((entry) => (
             <div
@@ -285,7 +303,7 @@ function ThreadsDialog({
                 </span>
                 <ThreadMarks entry={entry} />
               </button>
-              {!archived && (
+              {onRename && entry.canRename && (
                 <button
                   type="button"
                   className={action}
@@ -296,7 +314,7 @@ function ThreadsDialog({
                   <Pencil className="h-3.5 w-3.5" />
                 </button>
               )}
-              {entry.chat.parentId ? (
+              {onDelete && entry.canDelete ? (
                 <button
                   type="button"
                   className={cn(action, 'hover:text-destructive')}
@@ -306,9 +324,9 @@ function ThreadsDialog({
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
-              ) : (
+              ) : onDelete ? (
                 <span className="w-5.5 shrink-0" aria-hidden />
-              )}
+              ) : null}
             </div>
           ))}
         </DialogPanel>

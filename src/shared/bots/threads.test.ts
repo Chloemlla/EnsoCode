@@ -5,6 +5,7 @@ import {
   chatThreads,
   filterThreads,
   menuThreads,
+  sessionTitleFrom,
   threadTitleFrom,
 } from './threads';
 
@@ -13,6 +14,22 @@ describe('threadTitleFrom', () => {
     expect(threadTitleFrom('\n  发布   清单\n第二行')).toBe('发布 清单');
     expect(threadTitleFrom('a'.repeat(40))).toBe(`${'a'.repeat(30)}…`);
     expect(threadTitleFrom('   \n ')).toBeUndefined();
+  });
+});
+
+describe('sessionTitleFrom', () => {
+  it('去掉 Main 追加的笔记块、补充说明、引用与技能块；例行取标题', () => {
+    expect(sessionTitleFrom('<notes-updated>x</notes-updated>\n帮我看下日志')).toBe('帮我看下日志');
+    expect(
+      sessionTitleFrom(
+        '查一下\n\n<chat-reference id="a" title="群" kind="group">\n内容\n</chat-reference>'
+      )
+    ).toBe('查一下');
+    expect(sessionTitleFrom('<skill name="s" location="/x">\nbody\n</skill>\n\n写周报')).toBe(
+      '写周报'
+    );
+    expect(sessionTitleFrom('<routine title="早报">每天汇总</routine>')).toBe('早报');
+    expect(sessionTitleFrom('<skill name="s" location="/x">\nbody\n</skill>')).toBeUndefined();
   });
 });
 

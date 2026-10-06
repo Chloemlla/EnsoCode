@@ -382,6 +382,7 @@ export const IPC_CHANNELS = {
   BOT_CHAT_UPDATE: 'bots:chat-update',
   BOT_CHAT_DELETE: 'bots:chat-delete',
   BOT_CHAT_NEW_SESSION: 'bots:chat-new-session',
+  BOT_CHAT_SWITCH_SESSION: 'bots:chat-switch-session',
   BOT_CHAT_CLONE: 'bots:chat-clone',
   /** 群话题：根群下新建 / 切换 / 改名 / 删除 */
   BOT_THREAD_CREATE: 'bots:thread-create',

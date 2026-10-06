@@ -271,6 +271,12 @@ export interface BotSessionRecord {
   lifecycle: ConversationAuthority['lifecycle'];
   /** 是否为 chat.sessions 里当前在用的会话；其余为只读历史 */
   current: boolean;
+  /** 私聊：可切回续聊（工作区未换）；群聊恒为 false */
+  resumable: boolean;
+  /** 首条用户消息摘出的标题；还没有消息时缺省 */
+  title?: string;
+  /** 会话文件最后修改时间（ms） */
+  activityAt?: number;
 }
 
 export type BotsListResult = { ok: true; bots: BotProfile[]; enabled: boolean } | BotIpcError;

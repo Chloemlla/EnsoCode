@@ -1674,3 +1674,86 @@ describe('群话题', () => {
     expect(existsSync(join(mocks.root, 'bot-chats', thread.id))).toBe(false);
   });
 });
+
+describe('私聊切换对话', () => {
+  it('列出对话带标题与时间；切回旧对话先停当前回合并提炼记忆，再续用原会话', async () => {
+    const alice = await createBot('Alice');
+    const created = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'direct',
+      members: [alice],
+      workspace: { kind: 'member-home' },
+    });
+    const chatId = (created.chat as { id: string }).id;
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    const registry = mocks.registry as SourceAuthorityRegistry;
+    const old = services.host.ensureSession(chatId, alice);
+    if (!old.ok) throw new Error(old.error);
+    const dir = join(mocks.root, 'agent', 'sessions');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, 'old.jsonl');
+    writeFileSync(
+      file,
+      `${JSON.stringify({ type: 'message', id: 'u', message: { role: 'user', content: '整理发布清单' } })}\n`
+    );
+    registry.markReady(old.conversationId, file, { providerId: 'p', modelId: 'm' });
+    const fresh = services.host.ensureSession(chatId, alice, { fresh: true });
+    if (!fresh.ok) throw new Error(fresh.error);
+
+    const listed = await call(IPC_CHANNELS.BOT_CHAT_SESSIONS, { chatId });
+    expect(listed).toMatchObject({
+      ok: true,
+      sessions: [
+        {
+          conversationId: old.conversationId,
+          current: false,
+          resumable: true,
+          title: '整理发布清单',
+        },
+        { conversationId: fresh.conversationId, current: true, resumable: true },
+      ],
+    });
+    expect((listed.sessions as { activityAt?: number }[])[0].activityAt).toBeGreaterThan(0);
+
+    const stop = vi.spyOn(services.host, 'stopTurn');
+    const distill = vi.spyOn(services.memory, 'distill').mockResolvedValue(undefined);
+    for (const bad of [
+      { chatId, conversationId: 'x' },
+      { chatId, conversationId: '77777777-7777-4777-8777-777777777777' },
+      { chatId },
+    ])
+      expect(await call(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, bad)).toMatchObject({ ok: false });
+    expect(stop).not.toHaveBeenCalled();
+
+    expect(
+      await call(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, {
+        chatId,
+        conversationId: old.conversationId,
+      })
+    ).toEqual({ ok: true });
+    expect(stop).toHaveBeenCalledWith(chatId, alice);
+    expect(distill).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: fresh.conversationId })
+    );
+    expect(services.chats.get(chatId)?.sessions[alice].conversationId).toBe(old.conversationId);
+    expect(registry.conversation(old.conversationId)?.lifecycle).toBe('ready');
+    expect(registry.conversation(fresh.conversationId)?.lifecycle).toBe('ended');
+
+    const group = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'group',
+      title: 'g',
+      members: [alice, await createBot('Bob')],
+      bossBotId: alice,
+      workspace: { kind: 'chat-home' },
+    });
+    const groupId = (group.chat as { id: string }).id;
+    const member = services.host.ensureSession(groupId, alice);
+    if (!member.ok) throw new Error(member.error);
+    expect(
+      await call(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, {
+        chatId: groupId,
+        conversationId: member.conversationId,
+      })
+    ).toMatchObject({ ok: false });
+  });
+});

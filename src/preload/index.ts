@@ -1257,6 +1257,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_DELETE, { chatId }),
     newSession: (chatId: string): Promise<BotNewSessionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, { chatId }),
+    switchSession: (chatId: string, conversationId: string): Promise<BotActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, { chatId, conversationId }),
     cloneChat: (request: { chatId: string; title: string }): Promise<BotChatWriteResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_CLONE, request),
     createThread: (chatId: string): Promise<BotChatWriteResult> =>

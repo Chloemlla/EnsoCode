@@ -50,6 +50,7 @@ export interface BotAuthorityPort {
     bot: ConversationBotBinding
   ): ConversationAuthority | undefined;
   endBotConversation(conversationId: string): ConversationAuthority | undefined;
+  reopenBotConversation(conversationId: string): ConversationAuthority | undefined;
   removeBotConversation(conversationId: string): ConversationAuthority | undefined;
   botConversations(): ConversationAuthority[];
 }
@@ -609,6 +610,14 @@ export class BotSessionHost {
   sessionsOf(chatId: string): BotSessionRecord[] {
     const chat = this.deps.chats.get(chatId);
     const current = new Set(Object.values(chat?.sessions ?? {}).map((s) => s.conversationId));
+    const projects = new Map<string, string | undefined>();
+    const projectOf = (botId: string) => {
+      if (!projects.has(botId)) {
+        const workspace = chat && this.resolveWorkspace(chat, botId);
+        projects.set(botId, workspace?.ok ? workspace.projectId : undefined);
+      }
+      return projects.get(botId);
+    };
     return this.deps.authority
       .botConversations()
       .filter((conversation) => conversation.bot?.chatId === chatId)
@@ -617,6 +626,8 @@ export class BotSessionHost {
         botId: conversation.bot!.botId,
         lifecycle: conversation.lifecycle,
         current: current.has(conversation.conversationId),
+        resumable:
+          chat?.kind === 'direct' && conversation.projectId === projectOf(conversation.bot!.botId),
       }));
   }
 
@@ -669,6 +680,43 @@ export class BotSessionHost {
     }
     this.deps.emit({ kind: 'chat', chatId });
     return { ok: true, conversationId: created.conversationId };
+  }
+
+  /** 切回本聊天该成员的旧对话：重新打开它作当前会话，原当前会话结束只读；工作区已换的不能续 */
+  switchSession(chatId: string, botId: string, conversationId: string): { ok: true } | Fail {
+    const checked = this.canSwitch(chatId, botId, conversationId);
+    if (!checked.ok) return checked;
+    const current = this.deps.chats.get(chatId)?.sessions[botId];
+    if (current?.conversationId === conversationId) return { ok: true };
+    if (!this.deps.authority.reopenBotConversation(conversationId))
+      return { ok: false, error: 'authority-unavailable' };
+    if (current) this.retireSession(current.conversationId);
+    this.bindings.set(conversationId, { botId, chatId });
+    const cursor = this.deps.chats.lastSeq(chatId);
+    this.deps.chats.update(chatId, (draft) => {
+      draft.sessions[botId] = { conversationId, cursor };
+      return draft;
+    });
+    this.deps.emit({ kind: 'chat', chatId });
+    return { ok: true };
+  }
+
+  /** switchSession 的前置校验（无副作用），调用方据此决定是否先停掉当前回合 */
+  canSwitch(chatId: string, botId: string, conversationId: string): { ok: true } | Fail {
+    const chat = this.deps.chats.get(chatId);
+    if (!chat) return { ok: false, error: 'chat-not-found' };
+    if (!chat.members.includes(botId)) return { ok: false, error: 'not-member' };
+    const bot = this.deps.bots.get(botId);
+    if (!bot) return { ok: false, error: 'bot-not-found' };
+    if (bot.archivedAt !== undefined) return { ok: false, error: 'bot-archived' };
+    const target = this.deps.authority.conversation(conversationId);
+    if (target?.bot?.botId !== botId || target.bot.chatId !== chatId)
+      return { ok: false, error: 'session-not-found' };
+    if (chat.sessions[botId]?.conversationId === conversationId) return { ok: true };
+    const workspace = this.resolveWorkspace(chat, botId);
+    if (!workspace.ok) return workspace;
+    if (target.projectId !== workspace.projectId) return { ok: false, error: 'workspace-changed' };
+    return { ok: true };
   }
 
   /** 返回 ok 前确认命令已交给 worker；排队时 queued=true，之后失败经 onTurnFinished 回报 */

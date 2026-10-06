@@ -112,6 +112,7 @@ import {
   type BranchEntry,
   readBotSessionBranch,
   readBotSessionMessages,
+  readBotSessionSummary,
 } from '../services/bots/sessionMessages';
 import { createSmartRouter, type SmartRouterDeps } from '../services/bots/smartRouter';
 import { createTeam } from '../services/bots/teamCreate';
@@ -150,6 +151,7 @@ import {
   parsePersonaSuggestRequest,
   parseSendInput,
   parseSessionHistoryInput,
+  parseSessionSwitchInput,
   parseThreadChatInput,
   parseThreadSelectInput,
   parseThreadUpdateInput,
@@ -784,6 +786,29 @@ export async function newBotSession(
     const conversation = old && getSourceAuthorityRegistry()?.conversation(old.conversationId);
     if (conversation) await memory.distill(conversation);
     return host.ensureSession(chat.id, chat.members[0], { fresh: true });
+  } finally {
+    resettingChats.delete(chat.id);
+  }
+}
+
+/** 私聊切回旧对话：先停当前回合并提炼当前会话记忆，再重新打开目标会话；回复中由桌面先确认 */
+async function switchBotSession(services: BotServices, request: unknown): Promise<BotActionResult> {
+  const { chats, host, memory } = services;
+  const input = parseSessionSwitchInput(request);
+  const chat = input ? chats.get(input.chatId) : undefined;
+  if (!input || chat?.kind !== 'direct') return INVALID;
+  const botId = chat.members[0];
+  const checked = host.canSwitch(chat.id, botId, input.conversationId);
+  if (!checked.ok) return checked;
+  if (resettingChats.has(chat.id)) return { ok: false, error: 'session-busy' };
+  resettingChats.add(chat.id);
+  try {
+    const old = chat.sessions[botId];
+    if (old?.conversationId === input.conversationId) return { ok: true };
+    if (old) await host.stopTurn(chat.id, botId);
+    const conversation = old && getSourceAuthorityRegistry()?.conversation(old.conversationId);
+    if (conversation) await memory.distill(conversation);
+    return host.switchSession(chat.id, botId, input.conversationId);
   } finally {
     resettingChats.delete(chat.id);
   }
@@ -1690,6 +1715,9 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, 'write', (_sender, request, services) =>
     newBotSession(services, request)
   );
+  handle(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, 'write', (_sender, request, services) =>
+    switchBotSession(services, request)
+  );
 
   handle(
     IPC_CHANNELS.BOT_THREAD_CREATE,
@@ -1801,11 +1829,22 @@ export function registerBotHandlers(): void {
   handle(
     IPC_CHANNELS.BOT_CHAT_SESSIONS,
     'read',
-    (_sender, request, { chats, host }): BotChatSessionsResult => {
+    async (_sender, request, { chats, host }): Promise<BotChatSessionsResult> => {
       const chatId = chatIdOf(request);
-      return chatId && chats.get(chatId)
-        ? { ok: true, sessions: host.sessionsOf(chatId) }
-        : INVALID;
+      if (!chatId || !chats.get(chatId)) return INVALID;
+      const authority = getSourceAuthorityRegistry();
+      const sessions = await Promise.all(
+        host.sessionsOf(chatId).map(async (session) => {
+          const file = authority?.conversation(session.conversationId)?.sessionFile;
+          const summary = await readBotSessionSummary(sessionDir(), file);
+          return {
+            ...session,
+            ...(summary?.title ? { title: summary.title } : {}),
+            ...(summary ? { activityAt: summary.activityAt } : {}),
+          };
+        })
+      );
+      return { ok: true, sessions };
     }
   );
 
