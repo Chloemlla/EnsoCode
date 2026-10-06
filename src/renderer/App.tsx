@@ -329,7 +329,7 @@ export default function App() {
       <OauthCredentialBootstrap />
       <TitleBar
         title="EnsoCode"
-        leading={botModeEnabled && !remoteNodeActive ? <ModeSwitch /> : undefined}
+        centered={botModeEnabled && !remoteNodeActive ? <ModeSwitch /> : undefined}
         actions={
           <>
             <button
