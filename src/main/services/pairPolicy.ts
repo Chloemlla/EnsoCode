@@ -74,6 +74,23 @@ function parseBotCommand(v: Record<string, unknown>): CommandCheck {
     case 'bot-stop':
       if (!isChatId(v.chatId)) return { ok: false, error: 'invalid chatId' };
       return { ok: true, command: { type: v.type, chatId: v.chatId } };
+    case 'bot-new-session':
+      if (
+        !isChatId(v.chatId) ||
+        !isStr(v.requestId) ||
+        v.requestId.length > 200 ||
+        (v.confirmed !== undefined && typeof v.confirmed !== 'boolean')
+      )
+        return { ok: false, error: 'invalid new-session request' };
+      return {
+        ok: true,
+        command: {
+          type: 'bot-new-session',
+          chatId: v.chatId,
+          requestId: v.requestId,
+          ...(v.confirmed !== undefined ? { confirmed: v.confirmed } : {}),
+        },
+      };
     case 'bot-retry':
       if (!isChatId(v.chatId) || !isStr(v.entryId) || v.entryId.length > 200)
         return { ok: false, error: 'invalid retry target' };

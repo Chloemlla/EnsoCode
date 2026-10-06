@@ -67,6 +67,21 @@ const render = (patch: Partial<Parameters<typeof GroupChatScreen>[0]> = {}) =>
   );
 
 describe('phone group recovery and folding UI', () => {
+  it('shows new session and disables it for unsupported, offline, read-only or busy states', () => {
+    const button = (patch: Partial<Parameters<typeof GroupChatScreen>[0]>) =>
+      render({ onNewSession: noop, canCreate: true, ...patch }).match(
+        /<button[^>]*aria-label="新建会话"[^>]*>/
+      )?.[0];
+    expect(button({})).toBeDefined();
+    expect(button({})).not.toContain('disabled=""');
+    for (const patch of [
+      { canCreate: false },
+      { deviceReadOnly: true },
+      { connState: 'offline' as const },
+    ]) {
+      expect(button(patch)).toContain('disabled=""');
+    }
+  });
   it('folds old messages by default while keeping the current task and recovery button', () => {
     const html = render();
     expect(html).not.toContain('OLD_SECRET');

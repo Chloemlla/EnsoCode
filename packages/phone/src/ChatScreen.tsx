@@ -11,7 +11,15 @@ import {
   PanelLeft,
   SquarePen,
 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ApprovalBar } from '@/components/chat/ApprovalBar';
 import { AskBar } from '@/components/chat/AskBar';
 import { Composer } from '@/components/chat/Composer';
@@ -56,6 +64,8 @@ interface Props {
   /** 大屏横屏侧栏已常驻：左上不再显示抽屉入口（bot.onBack 仍优先显示返回） */
   drawerDocked?: boolean;
   onNewSession(): void;
+  newSessionHint?: string;
+  newSessionBusy?: boolean;
   /** 当前模型标签；undefined = 子会话或目录未含模型信息，不显示切换入口 */
   modelLabel?: string;
   onOpenConfig?(): void;
@@ -84,7 +94,13 @@ interface Props {
   onApproval(requestId: string, decision: 'allow' | 'allowSession' | 'deny'): void;
   onAsk(requestId: string, answer: string): void;
   /** Bot 成员会话：发送走 bot-send，无回退/重试/斜杠命令；readOnly = 群聊「查看过程」 */
-  bot?: { readOnly?: boolean; onBack?(): void; notice?: string | null; outbox?: ReactNode };
+  bot?: {
+    chatId?: string;
+    readOnly?: boolean;
+    onBack?(): void;
+    notice?: string | null;
+    outbox?: ReactNode;
+  };
   /** Bot 私聊：每轮最终回复下方挂产物卡片与 send_image 图 */
   artifacts?: { chatId: string; conversationId: string };
   /** 桌面把本设备设为只读：只能查看，隐藏输入/审批/回答等写操作 */
@@ -97,6 +113,7 @@ interface Props {
 export function ChatScreen(props: Props) {
   const { view, sessionId } = props;
   const timelineRef = useRef<MessageTimelineHandle>(null);
+  const [sending, setSending] = useState(false);
   // tabs sliding：pill 位置/尺寸由 JS 测量写入，CSS 负责补间；首帧挂起过渡避免从 0 宽飞入
   const tabsRef = useRef<HTMLDivElement>(null);
   const pillRef = useRef<HTMLSpanElement>(null);
@@ -246,14 +263,19 @@ export function ChatScreen(props: Props) {
   }, [timeline]);
 
   const send = async (text: string, images: AttachedImage[]) => {
-    // 手机拍照动辄数 MB，压到单帧上限内再发
-    const budget = imageBudget(images.length);
-    const compressed: AttachedImage[] = [];
-    for (const image of images) {
-      compressed.push(await compressImageIfNeeded(image, budget));
+    setSending(true);
+    try {
+      // 手机拍照动辄数 MB，压到单帧上限内再发
+      const budget = imageBudget(images.length);
+      const compressed: AttachedImage[] = [];
+      for (const image of images) {
+        compressed.push(await compressImageIfNeeded(image, budget));
+      }
+      props.onSend(text, compressed);
+      timelineRef.current?.scrollToBottom();
+    } finally {
+      setSending(false);
     }
-    props.onSend(text, compressed);
-    timelineRef.current?.scrollToBottom();
   };
 
   return (
@@ -297,14 +319,20 @@ export function ChatScreen(props: Props) {
               {props.projectName || props.stateLabel}
             </p>
           </div>
-          {bot ? (
+          {bot?.readOnly ? (
             <span className="h-9 w-9 shrink-0" />
           ) : (
             <button
               type="button"
               onClick={props.onNewSession}
-              disabled={!props.canCreate}
+              disabled={
+                !props.canCreate ||
+                readOnly ||
+                (Boolean(bot) && sending) ||
+                props.connState !== 'online'
+              }
               aria-label="新建会话"
+              title={props.newSessionHint ?? '新建会话'}
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
             >
               <SquarePen className="h-4.5 w-4.5" />
@@ -451,8 +479,12 @@ export function ChatScreen(props: Props) {
                   commands={slashCommands}
                   running={running}
                   busy={running}
-                  locked={(view?.approvals ?? []).length > 0}
-                  focusKey={sessionId}
+                  locked={
+                    props.newSessionBusy ||
+                    (Boolean(bot) && sending) ||
+                    (view?.approvals ?? []).length > 0
+                  }
+                  focusKey={bot?.chatId ? `bot-chat:${bot.chatId}` : sessionId}
                   // 移动端不自动聚焦：一进会话就弹键盘会挡住消息
                   autoFocus={false}
                   // 软键盘的「换行」就是 Enter：Enter 只换行，发送必须点按钮

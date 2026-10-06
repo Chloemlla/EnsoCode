@@ -71,6 +71,19 @@ describe('配对作用域', () => {
     expect(commandAllowedForScope('read', 'bot-delegation-cancel')).toBe(false);
   });
 
+  it('rejects new-session with the original request identity', () => {
+    expect(commandAllowedForScope('read', 'bot-new-session')).toBe(false);
+    expect(
+      scopeRejection({ type: 'bot-new-session', chatId: 'chat', requestId: 'request' })
+    ).toEqual({
+      type: 'bot-new-session-result',
+      chatId: 'chat',
+      requestId: 'request',
+      ok: false,
+      error: 'read-only',
+    });
+  });
+
   it('拦截后回执：bot-send 走 bot-send-result，其余写命令回 command-rejected', () => {
     expect(scopeRejection({ type: 'bot-send', chatId: 'c', deliveryId: 'd', text: 'hi' })).toEqual({
       type: 'bot-send-result',

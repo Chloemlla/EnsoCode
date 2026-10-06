@@ -12,6 +12,27 @@ import {
 } from './pairPolicy';
 
 describe('手机命令白名单', () => {
+  it('validates bot new-session IDs and explicit confirmation, dropping unknown fields', () => {
+    const command = { type: 'bot-new-session', chatId: 'chat', requestId: 'request' };
+    for (const confirmed of [undefined, false, true]) {
+      const input = { ...command, ...(confirmed === undefined ? {} : { confirmed }) };
+      expect(parsePhoneCommand({ ...input, path: '/ignored' })).toEqual({
+        ok: true,
+        command: input,
+      });
+    }
+    for (const patch of [
+      { chatId: '' },
+      { chatId: 'x'.repeat(129) },
+      { requestId: '' },
+      { requestId: 'x'.repeat(201) },
+      { requestId: null },
+      { confirmed: 'true' },
+      { confirmed: 1 },
+    ])
+      expect(parsePhoneCommand({ ...command, ...patch }).ok).toBe(false);
+  });
+
   it('Bot sessions reject generic execution/queue/policy commands but permit abort and answers', () => {
     for (const type of [
       'prompt',

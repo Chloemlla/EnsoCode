@@ -27,6 +27,7 @@ import { getSourceAuthorityRegistry } from './agent';
 import {
   botModeEnabled,
   getBotServices,
+  newBotSession,
   observeBotEvents,
   readBotTimeline,
   retryBotChat,
@@ -44,6 +45,20 @@ const TIMELINE_PAGE = 50;
 const PUSH_DEBOUNCE_MS = 250;
 /** 运行态节流：流式输出事件很密，按固定间隔合并 */
 const ACTIVITY_THROTTLE_MS = 500;
+const NEW_SESSION_CACHE_MS = 10 * 60_000;
+const NEW_SESSION_CACHE_LIMIT = 1024;
+
+type NewSessionCommand = Extract<PairBotCommand, { type: 'bot-new-session' }>;
+type NewSessionReply = Extract<HostToPhone, { type: 'bot-new-session-result' }>;
+const newSessionRequests = new Map<
+  string,
+  {
+    chatId: string;
+    confirmed: boolean;
+    result: Promise<NewSessionReply>;
+    settledAt?: number;
+  }
+>();
 
 type Services = NonNullable<ReturnType<typeof getBotServices>>;
 
@@ -87,6 +102,7 @@ function catalogFrame(services: Services): HostToPhone {
   return {
     type: 'bot-catalog',
     enabled: true,
+    newSession: true,
     bots: services.bots
       .list()
       .map((bot) =>
@@ -203,8 +219,70 @@ function replyState(services: Services, chatId: string, reply: PairReply): void 
   void reply({ type: 'bot-chat-state', chatId, ...rest });
 }
 
-async function handle(_pairId: string, command: PairBotCommand, reply: PairReply): Promise<void> {
+function newSessionResult(
+  pairId: string,
+  command: NewSessionCommand,
+  services: Services | null
+): Promise<NewSessionReply> {
+  const { chatId, requestId } = command;
+  const confirmed = command.confirmed === true;
+  const base = { type: 'bot-new-session-result' as const, chatId, requestId };
+  const now = Date.now();
+  for (const [key, entry] of newSessionRequests) {
+    if (entry.settledAt !== undefined && now - entry.settledAt > NEW_SESSION_CACHE_MS) {
+      newSessionRequests.delete(key);
+    }
+  }
+  const key = JSON.stringify([pairId, requestId]);
+  const previous = newSessionRequests.get(key);
+  if (previous) {
+    return previous.chatId === chatId && previous.confirmed === confirmed
+      ? previous.result
+      : Promise.resolve({ ...base, ok: false, error: 'invalid-request' });
+  }
+  // 不淘汰执行中的请求；缓存满时拒绝，不能冒险重复 reset。
+  if (newSessionRequests.size >= NEW_SESSION_CACHE_LIMIT) {
+    return Promise.resolve({ ...base, ok: false, error: 'session-busy' });
+  }
+  const result = (async (): Promise<NewSessionReply> => {
+    if (!services) return { ...base, ok: false, error: 'disabled' };
+    try {
+      const result = await newBotSession(services, { chatId }, confirmed);
+      if (result.ok) return { ...base, ok: true };
+      return 'needsConfirmation' in result
+        ? { ...base, ok: false, needsConfirmation: true }
+        : { ...base, ok: false, error: result.error };
+    } catch {
+      return { ...base, ok: false, error: 'failed' };
+    }
+  })();
+  const entry: {
+    chatId: string;
+    confirmed: boolean;
+    result: Promise<NewSessionReply>;
+    settledAt?: number;
+  } = { chatId, confirmed, result };
+  newSessionRequests.set(key, entry);
+  void result.then(() => {
+    entry.settledAt = Date.now();
+  });
+  return result;
+}
+
+async function handle(pairId: string, command: PairBotCommand, reply: PairReply): Promise<void> {
   const services = enabledServices();
+  if (command.type === 'bot-new-session') {
+    const result = await newSessionResult(pairId, command, services);
+    await reply(result);
+    if (result.ok && services) {
+      await reply(chatsFrame(services));
+      if (services.chats.get(command.chatId)?.kind === 'group') {
+        await replyTimeline(services, command.chatId, undefined, reply);
+        replyState(services, command.chatId, reply);
+      }
+    }
+    return;
+  }
   if (!services) {
     if (command.type === 'bot-catalog-request' && announced) {
       await reply({ type: 'bot-catalog', enabled: false, bots: [] });

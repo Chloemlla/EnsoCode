@@ -116,12 +116,13 @@ export interface ClientEvents {
   /** 写命令被 host 拦截（如作用域刚被改成只读） */
   onCommandRejected?(command: string, error: string): void;
   /** Bot 模式（桌面开启时才下发；enabled=false = 已关闭） */
-  onBotCatalog?(enabled: boolean, bots: PairBotMember[]): void;
+  onBotCatalog?(enabled: boolean, bots: PairBotMember[], newSession: boolean): void;
   onBotChats?(chats: PairBotChatSummary[]): void;
   onGroupTimeline?(frame: GroupTimelineFrame): void;
   onBotEvent?(event: PairBotEvent): void;
   onBotChatState?(frame: BotChatStateFrame): void;
   onBotSendResult?(frame: BotSendResultFrame): void;
+  onBotNewSessionResult?(frame: Extract<HostToPhone, { type: 'bot-new-session-result' }>): void;
   onBotRetryResult?(frame: Extract<HostToPhone, { type: 'bot-retry-result' }>): void;
   /** Bot 收件箱整表（未结束且未忽略） */
   onBotInbox?(items: PairBotInboxItem[]): void;
@@ -553,7 +554,11 @@ export class PairClient {
       }
       case 'bot-catalog':
         if (Array.isArray(payload.bots)) {
-          this.events.onBotCatalog?.(payload.enabled === true, payload.bots);
+          this.events.onBotCatalog?.(
+            payload.enabled === true,
+            payload.bots,
+            payload.newSession === true
+          );
         }
         break;
       case 'bot-chats':
@@ -574,6 +579,14 @@ export class PairClient {
         break;
       case 'bot-send-result':
         if (typeof payload.deliveryId === 'string') this.events.onBotSendResult?.(payload);
+        break;
+      case 'bot-new-session-result':
+        if (
+          typeof payload.chatId === 'string' &&
+          typeof payload.requestId === 'string' &&
+          typeof payload.ok === 'boolean'
+        )
+          this.events.onBotNewSessionResult?.(payload);
         break;
       case 'bot-retry-result':
         if (typeof payload.chatId === 'string' && typeof payload.entryId === 'string')

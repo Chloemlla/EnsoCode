@@ -9,7 +9,16 @@ import type {
 } from '@enso/pair';
 import { retryableGroupFailures } from '@shared/bots/groupRetry';
 import type { StartVoiceSession } from '@shared/types/speech';
-import { ArrowUp, ChevronRight, ImagePlus, Loader2, PanelLeft, Square, X } from 'lucide-react';
+import {
+  ArrowUp,
+  ChevronRight,
+  ImagePlus,
+  Loader2,
+  PanelLeft,
+  Square,
+  SquarePen,
+  X,
+} from 'lucide-react';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ApprovalBar } from '@/components/chat/ApprovalBar';
 import { AskBar } from '@/components/chat/AskBar';
@@ -56,6 +65,10 @@ interface Props {
   /** 有写操作刚被桌面以只读拦下 */
   readOnlyRejected?: boolean;
   onOpenDrawer(): void;
+  onNewSession?(): void;
+  canCreate?: boolean;
+  newSessionHint?: string;
+  newSessionBusy?: boolean;
   /** 大屏横屏侧栏已常驻：左上不再显示抽屉入口 */
   drawerDocked?: boolean;
   onLoadOlder(): void;
@@ -211,7 +224,7 @@ export function GroupChatScreen(props: Props) {
   };
 
   const submit = async () => {
-    if ((!text.trim() && picked.length === 0) || sending) return;
+    if ((!text.trim() && picked.length === 0) || sending || props.newSessionBusy) return;
     let images: AttachedImage[] = [];
     if (picked.length) {
       setSending(true);
@@ -361,7 +374,18 @@ export function GroupChatScreen(props: Props) {
             {props.connState === 'online' ? `${chat.members.length} 位成员` : props.stateLabel}
           </p>
         </div>
-        <span className="h-9 w-9 shrink-0" />
+        <button
+          type="button"
+          onClick={props.onNewSession}
+          disabled={
+            !props.canCreate || props.deviceReadOnly || sending || props.connState !== 'online'
+          }
+          aria-label="新建会话"
+          title={props.newSessionHint ?? '新建会话'}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+        >
+          <SquarePen className="h-4.5 w-4.5" />
+        </button>
       </header>
 
       <div
@@ -585,6 +609,7 @@ export function GroupChatScreen(props: Props) {
               disabled={
                 (!text.trim() && picked.length === 0) ||
                 sending ||
+                props.newSessionBusy ||
                 (!props.outbox && props.connState !== 'online')
               }
               onClick={() => void submit()}

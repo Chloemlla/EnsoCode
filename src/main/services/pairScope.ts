@@ -29,7 +29,7 @@ export const commandAllowedForScope = (scope: PairScope, type: string): boolean 
 export const isPairScope = (value: unknown): value is PairScope =>
   value === 'read' || value === 'operate';
 
-/** 作用域拦截的回执：bot-send 要结算手机离线队列，其余让手机提示「此设备为只读」 */
+/** 写操作有专用回执时保留请求标识，让手机结算等待状态。 */
 export const scopeRejection = (command: PhoneToHost): HostToPhone =>
   command.type === 'bot-send'
     ? {
@@ -39,7 +39,15 @@ export const scopeRejection = (command: PhoneToHost): HostToPhone =>
         ok: false,
         error: 'read-only',
       }
-    : { type: 'command-rejected', command: command.type, error: 'read-only' };
+    : command.type === 'bot-new-session'
+      ? {
+          type: 'bot-new-session-result',
+          chatId: command.chatId,
+          requestId: command.requestId,
+          ok: false,
+          error: 'read-only',
+        }
+      : { type: 'command-rejected', command: command.type, error: 'read-only' };
 
 export function setScopeInList(
   list: readonly PairedDevice[],

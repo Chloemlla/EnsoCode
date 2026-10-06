@@ -137,6 +137,7 @@ export type PhoneToHost =
   /** 群时间线分页：缺省 beforeSeq = 最新一页 */
   | { type: 'bot-timeline'; chatId: string; beforeSeq?: number }
   | { type: 'bot-stop'; chatId: string }
+  | { type: 'bot-new-session'; chatId: string; requestId: string; confirmed?: boolean }
   | { type: 'bot-retry'; chatId: string; entryId: string }
   /** 收件箱：请求当前条目；忽略只对提示类条目有效（审批、提问、例程需要处理） */
   | { type: 'bot-inbox-request' }
@@ -194,6 +195,7 @@ export const PHONE_COMMAND_TYPES = [
   'bot-chat-open',
   'bot-timeline',
   'bot-stop',
+  'bot-new-session',
   'bot-retry',
   'bot-inbox-request',
   'bot-inbox-dismiss',
@@ -539,7 +541,7 @@ export type HostToPhone =
    * Bot 模式目录。enabled=false 表示桌面已关闭 Bot 模式（手机隐藏 Bot 分段）。
    * 旧手机 switch 无 default 分支，以下 bot 帧一律忽略。
    */
-  | { type: 'bot-catalog'; enabled: boolean; bots: PairBotMember[] }
+  | { type: 'bot-catalog'; enabled: boolean; bots: PairBotMember[]; newSession?: boolean }
   | { type: 'bot-chats'; chats: PairBotChatSummary[] }
   /** 群时间线一页（升序）；beforeSeq 回显请求，缺省 = 最新一页；单帧超限时由 host 减少条数 */
   | {
@@ -556,6 +558,14 @@ export type HostToPhone =
   /** bot-send 的应答：失败时手机提示并恢复输入 */
   | { type: 'bot-send-result'; chatId: string; deliveryId: string; ok: boolean; error?: string }
   | { type: 'bot-retry-result'; chatId: string; entryId: string; ok: boolean; error?: string }
+  | {
+      type: 'bot-new-session-result';
+      chatId: string;
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      needsConfirmation?: boolean;
+    }
   /** 只读设备的写命令被 host 拦截（bot-send 走 bot-send-result）；旧手机忽略 */
   | { type: 'command-rejected'; command: string; error: 'read-only' }
   /** Bot 收件箱：未结束且未忽略的条目（新的在前），变化时整表重推 */

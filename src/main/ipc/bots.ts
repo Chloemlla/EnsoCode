@@ -741,6 +741,49 @@ async function startGroupConversation(
   return { ok: true, epochSeq: divider.seq };
 }
 
+const resettingChats = new Set<string>();
+
+function groupHasPendingWork(services: BotServices, chat: BotChat): boolean {
+  const state = services.groups.state(chat.id);
+  return Boolean(
+    (state.ok && (state.current || state.queue.length || state.pendingHuman || state.routing)) ||
+      Object.values(chat.sessions).some(({ conversationId }) =>
+        services.host.isBusy(conversationId)
+      ) ||
+      services.host.queueState().some((item) => item.chatId === chat.id) ||
+      services.delegations
+        .list(chat.id)
+        .some((item) => item.state === 'queued' || item.state === 'running')
+  );
+}
+
+/** 桌面已在 UI 确认；手机必须在 Main 按当前运行态检查是否需要确认。 */
+export async function newBotSession(
+  services: BotServices,
+  request: unknown,
+  confirmed = true
+): Promise<BotNewSessionResult | { ok: false; needsConfirmation: true }> {
+  const { chats, host, memory } = services;
+  const chatId = chatIdOf(request);
+  const chat = chatId ? chats.get(chatId) : undefined;
+  if (!chat) return INVALID;
+  if (resettingChats.has(chat.id)) return { ok: false, error: 'session-busy' };
+  if (chat.kind === 'group' && !confirmed && groupHasPendingWork(services, chat)) {
+    return { ok: false, needsConfirmation: true };
+  }
+  resettingChats.add(chat.id);
+  try {
+    if (chat.kind === 'group') return await startGroupConversation(services, chat);
+    const old = chat.sessions[chat.members[0]];
+    if (old) await host.stopTurn(chat.id, chat.members[0]);
+    const conversation = old && getSourceAuthorityRegistry()?.conversation(old.conversationId);
+    if (conversation) await memory.distill(conversation);
+    return host.ensureSession(chat.id, chat.members[0], { fresh: true });
+  } finally {
+    resettingChats.delete(chat.id);
+  }
+}
+
 type Handler = (sender: number, request: unknown, bots: BotServices) => unknown;
 
 /**
@@ -1616,21 +1659,8 @@ export function registerBotHandlers(): void {
     }
   );
 
-  handle(
-    IPC_CHANNELS.BOT_CHAT_NEW_SESSION,
-    'write',
-    async (_sender, request, services): Promise<BotNewSessionResult> => {
-      const { chats, host, memory } = services;
-      const chatId = chatIdOf(request);
-      const chat = chatId ? chats.get(chatId) : undefined;
-      if (chat?.kind === 'group') return startGroupConversation(services, chat);
-      if (chat?.kind !== 'direct') return INVALID;
-      const old = chat.sessions[chat.members[0]];
-      if (old) await host.stopTurn(chat.id, chat.members[0]);
-      const conversation = old && getSourceAuthorityRegistry()?.conversation(old.conversationId);
-      if (conversation) await memory.distill(conversation);
-      return host.ensureSession(chat.id, chat.members[0], { fresh: true });
-    }
+  handle(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, 'write', (_sender, request, services) =>
+    newBotSession(services, request)
   );
 
   handle(IPC_CHANNELS.BOT_CHAT_CLONE, 'write', (_sender, request, services): BotChatWriteResult => {

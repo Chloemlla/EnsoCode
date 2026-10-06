@@ -21,6 +21,7 @@ import { applyAppBadge, attentionBadgeCount } from './attentionBadge';
 import { BotArtifactsContext } from './BotArtifacts';
 import { BotDrawerPanel } from './BotDrawerPanel';
 import { BotArtifactsPort } from './botArtifactsPort';
+import { BotNewSessionPort } from './botNewSessionPort';
 import { BotOutbox, type OutboxItem, phoneOutboxStorage } from './botOutbox';
 import { chatActivities, type GroupTimelineState, mergeGroupTimeline } from './botState';
 import { ChatScreen } from './ChatScreen';
@@ -170,6 +171,9 @@ export function App() {
   const [pushError, setPushError] = useState<PushFailureReason | null>(null);
   /** Bot 模式：只有桌面开启并下发过 bot-catalog 才出现 */
   const [botEnabled, setBotEnabled] = useState(false);
+  const [botNewSessionSupported, setBotNewSessionSupported] = useState(false);
+  const [botNewSessionBusy, setBotNewSessionBusy] = useState(false);
+  const botNewSessionBusyRef = useRef(false);
   const [bots, setBots] = useState<PairBotMember[]>([]);
   const [botChats, setBotChats] = useState<PairBotChatSummary[]>([]);
   const [botChatsReady, setBotChatsReady] = useState(false);
@@ -193,6 +197,10 @@ export function App() {
   const outboxRef = useRef<BotOutbox | null>(null);
   const artifactsPort = useMemo(
     () => new BotArtifactsPort((command) => clientRef.current?.send(command)),
+    []
+  );
+  const newSessionPort = useMemo(
+    () => new BotNewSessionPort((command) => clientRef.current?.send(command)),
     []
   );
   const [outbox, setOutbox] = useState<OutboxItem[]>([]);
@@ -310,6 +318,9 @@ export function App() {
     setVoiceInput(false);
     setDeviceReadOnly(false);
     setReadOnlyRejected(false);
+    setBotNewSessionSupported(false);
+    setBotNewSessionBusy(false);
+    botNewSessionBusyRef.current = false;
     const rejectedReadOnly = () => {
       setDeviceReadOnly(true);
       setReadOnlyRejected(true);
@@ -319,11 +330,17 @@ export function App() {
         if (next !== 'online') {
           outboxRef.current?.interrupted();
           artifactsPort.reset();
+          newSessionPort.reset();
+          setBotNewSessionSupported(false);
         }
         setState(next);
       },
       onBotArtifacts: (frame) => artifactsPort.receive(frame),
       onBotArtifactImage: (frame) => artifactsPort.receiveImage(frame),
+      onBotNewSessionResult: (frame) => {
+        newSessionPort.receive(frame);
+        if (frame.error === READ_ONLY_ERROR) rejectedReadOnly();
+      },
       onTransport: (next) => {
         setTransport(next);
         setRttMs(null);
@@ -350,8 +367,9 @@ export function App() {
         setView((prev) => (id === subscribedRef.current ? next : prev));
         if (memberIdsRef.current.has(id)) setMemberViews((prev) => ({ ...prev, [id]: next }));
       },
-      onBotCatalog: (enabled, list) => {
+      onBotCatalog: (enabled, list, newSession) => {
         setBotEnabled(enabled);
+        setBotNewSessionSupported(enabled && newSession);
         setBots(list);
         if (enabled) return;
         setBotChats([]);
@@ -483,6 +501,7 @@ export function App() {
       botRefreshRef.current = null;
       client.close();
       clientRef.current = null;
+      newSessionPort.reset();
     };
   }, [device?.pairId, device?.token, device?.relayUrl, device?.contentKey]);
 
@@ -802,6 +821,57 @@ export function App() {
 
   const botById = new Map(bots.map((bot) => [bot.id, bot]));
 
+  const newSessionHint = (chatId: string) =>
+    deviceReadOnly
+      ? '只读设备不能新建会话'
+      : state !== 'online'
+        ? '请先连接桌面端'
+        : !botNewSessionSupported
+          ? '请升级桌面端以支持新建会话'
+          : botNewSessionBusy
+            ? '正在新建会话…'
+            : outbox.some((item) => item.chatId === chatId)
+              ? '请先处理待发送消息'
+              : undefined;
+
+  const newBotSession = async (chatId: string) => {
+    if (newSessionHint(chatId) || botNewSessionBusyRef.current) return;
+    const client = clientRef.current;
+    botNewSessionBusyRef.current = true;
+    setBotNewSessionBusy(true);
+    setBotNotice(null);
+    try {
+      const result = await newSessionPort.start(
+        chatId,
+        () =>
+          client === clientRef.current &&
+          botChatIdRef.current === chatId &&
+          window.confirm(
+            '群聊中仍有回复、排队或委派任务。新建会话将停止成员回复，并取消未标记保留的委派。旧消息会保留。继续吗？'
+          )
+      );
+      if (client !== clientRef.current || botChatIdRef.current !== chatId) return;
+      setBotNotice(
+        !result || result.ok
+          ? null
+          : result.error === READ_ONLY_ERROR
+            ? '只读设备不能新建会话'
+            : result.error === 'timeout' || result.error === 'offline'
+              ? '未收到新会话确认，请连接后核对聊天状态，勿重复操作'
+              : `新建会话失败：${result.error ?? '请稍后重试'}`
+      );
+      if (result?.ok) {
+        client?.send({ type: 'bot-catalog-request' });
+        client?.send({ type: 'bot-chat-open', chatId });
+      }
+    } finally {
+      if (client === clientRef.current) {
+        botNewSessionBusyRef.current = false;
+        setBotNewSessionBusy(false);
+      }
+    }
+  };
+
   const renderBotScreen = (chat: PairBotChatSummary) => {
     if (chat.kind === 'group' && !processId) {
       const pending: MemberPending[] = Object.entries(chat.sessions).flatMap(
@@ -827,6 +897,10 @@ export function App() {
           readOnlyRejected={readOnlyRejected}
           onOpenDrawer={openDrawer}
           drawerDocked={docked}
+          onNewSession={() => void newBotSession(chat.id)}
+          canCreate={!newSessionHint(chat.id)}
+          newSessionHint={newSessionHint(chat.id)}
+          newSessionBusy={botNewSessionBusy}
           voice={voice}
           onLoadOlder={() => {
             const beforeSeq = timelines[chat.id]?.entries[0]?.seq;
@@ -888,8 +962,10 @@ export function App() {
         syncing={syncing && Boolean(subscribedId)}
         onOpenDrawer={openDrawer}
         drawerDocked={docked}
-        onNewSession={() => {}}
-        canCreate={false}
+        onNewSession={() => !process && void newBotSession(chat.id)}
+        canCreate={!process && !newSessionHint(chat.id)}
+        newSessionHint={newSessionHint(chat.id)}
+        newSessionBusy={botNewSessionBusy}
         hasOlder={Boolean(
           subscribedId && view && view.messages.size > 0 && Math.min(...view.messages.keys()) > 0
         )}
@@ -899,7 +975,7 @@ export function App() {
         bot={
           process
             ? { readOnly: true, onBack: () => setProcessId(null) }
-            : { notice: botNotice, outbox: outboxBar(chat.id) }
+            : { chatId: chat.id, notice: botNotice, outbox: outboxBar(chat.id) }
         }
         artifacts={
           !process && subscribedId ? { chatId: chat.id, conversationId: subscribedId } : undefined

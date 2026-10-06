@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { HostToPhone } from '@enso/pair';
 import { IPC_CHANNELS } from '@shared/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PairBotPort } from '../services/pairHost';
 import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
 
 const mocks = vi.hoisted(() => ({
@@ -18,6 +20,15 @@ const mocks = vi.hoisted(() => ({
   setSessionReasoning: vi.fn((..._args: unknown[]) => ({ ok: true })),
   setSessionThinking: vi.fn((..._args: unknown[]) => ({ ok: true })),
   identities: new Map<string, { sessionId: string; generation: string }>(),
+  pairPort: null as PairBotPort | null,
+}));
+
+vi.mock('../services/pairHost', () => ({
+  setPairBotPort: (port: PairBotPort) => {
+    mocks.pairPort = port;
+  },
+  broadcastPairFrame: vi.fn(),
+  isPairSessionRunning: () => false,
 }));
 
 vi.mock('electron', () => ({
@@ -1121,6 +1132,252 @@ describe('群聊新对话与克隆', () => {
     });
     return { alice, bob, carol, chatId: (created.chat as { id: string }).id };
   }
+
+  async function phone() {
+    const { registerPairBotHandlers } = await import('./pairBots');
+    registerPairBotHandlers();
+    return async (chatId: string, requestId: string, confirmed?: boolean, peer = 'peer') => {
+      const frames: HostToPhone[] = [];
+      await mocks.pairPort!.handle(
+        peer,
+        {
+          type: 'bot-new-session',
+          chatId,
+          requestId,
+          ...(confirmed === undefined ? {} : { confirmed }),
+        },
+        async (frame) => {
+          frames.push(frame);
+          return true;
+        }
+      );
+      return frames;
+    };
+  }
+
+  it('phone direct reset shares desktop lifecycle, deduplicates requests and refreshes chat sessions', async () => {
+    const alice = await createBot('Alice');
+    const created = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'direct',
+      members: [alice],
+      workspace: { kind: 'member-home' },
+    });
+    const chatId = (created.chat as { id: string }).id;
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    const old = services.host.ensureSession(chatId, alice);
+    if (!old.ok) throw new Error(old.error);
+    const distill = vi.spyOn(services.memory, 'distill').mockResolvedValue(undefined);
+    const send = await phone();
+    const first = await send(chatId, 'request');
+    expect(first).toContainEqual({
+      type: 'bot-new-session-result',
+      chatId,
+      requestId: 'request',
+      ok: true,
+    });
+    const current = services.chats.get(chatId)!.sessions[alice].conversationId;
+    expect(current).not.toBe(old.conversationId);
+    expect(
+      (mocks.registry as SourceAuthorityRegistry).conversation(old.conversationId)?.lifecycle
+    ).toBe('ended');
+    expect(first).toContainEqual(
+      expect.objectContaining({
+        type: 'bot-chats',
+        chats: [
+          expect.objectContaining({
+            id: chatId,
+            sessions: { [alice]: { conversationId: current } },
+          }),
+        ],
+      })
+    );
+    await send(chatId, 'request');
+    expect(services.chats.get(chatId)!.sessions[alice].conversationId).toBe(current);
+    expect(distill).toHaveBeenCalledTimes(1);
+    await send(chatId, 'request', undefined, 'other-peer');
+    expect(services.chats.get(chatId)!.sessions[alice].conversationId).not.toBe(current);
+    expect(distill).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    'current',
+    'queue',
+    'pendingHuman',
+    'routing',
+    'host',
+    'hostQueue',
+    'delegation',
+  ] as const)(
+    'phone busy group (%s) only resets after confirmation with a new request ID',
+    async (source) => {
+      const { alice, chatId } = await team();
+      const { getBotServices } = await import('./bots');
+      const services = getBotServices()!;
+      services.chats.appendEntry(chatId, {
+        kind: 'human',
+        text: 'old',
+        mentions: [],
+        id: 'old',
+        at: 1,
+      });
+      const session = services.host.ensureSession(chatId, alice);
+      if (!session.ok) throw new Error(session.error);
+      const before = services.chats.get(chatId);
+      const state = services.groups.state(chatId);
+      if (!state.ok) throw new Error(state.error);
+      const busy =
+        source === 'host'
+          ? vi.spyOn(services.host, 'isBusy').mockReturnValue(true)
+          : source === 'hostQueue'
+            ? vi
+                .spyOn(services.host, 'queueState')
+                .mockReturnValue([
+                  { chatId, botId: alice, conversationId: session.conversationId, position: 0 },
+                ])
+            : source === 'delegation'
+              ? vi
+                  .spyOn(services.delegations, 'list')
+                  .mockReturnValue([{ state: 'running' } as never])
+              : vi.spyOn(services.groups, 'state').mockReturnValue({
+                  ...state,
+                  [source]: source === 'current' ? alice : source === 'queue' ? [alice] : true,
+                });
+      const stop = vi.spyOn(services.groups, 'stop');
+      const send = await phone();
+      expect(await send(chatId, 'A')).toEqual([
+        {
+          type: 'bot-new-session-result',
+          chatId,
+          requestId: 'A',
+          ok: false,
+          needsConfirmation: true,
+        },
+      ]);
+      expect(services.chats.get(chatId)).toEqual(before);
+      expect(services.chats.lastSeq(chatId)).toBe(1);
+      expect(stop).not.toHaveBeenCalled();
+      expect(await send(chatId, 'A')).toEqual([
+        {
+          type: 'bot-new-session-result',
+          chatId,
+          requestId: 'A',
+          ok: false,
+          needsConfirmation: true,
+        },
+      ]);
+      expect(await send(chatId, 'A', true)).toEqual([
+        {
+          type: 'bot-new-session-result',
+          chatId,
+          requestId: 'A',
+          ok: false,
+          error: 'invalid-request',
+        },
+      ]);
+      expect(stop).not.toHaveBeenCalled();
+      const frames = await send(chatId, 'B', true);
+      busy.mockRestore();
+      expect(frames).toContainEqual({
+        type: 'bot-new-session-result',
+        chatId,
+        requestId: 'B',
+        ok: true,
+      });
+      expect(services.chats.get(chatId)).toMatchObject({ sessions: {}, epochSeq: 2 });
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(frames).toContainEqual(
+        expect.objectContaining({ type: 'group-timeline', epochSeq: 2 })
+      );
+    }
+  );
+
+  it('phone concurrent reset frames share a result while other requests and desktop resets are busy', async () => {
+    const { chatId } = await team();
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    services.chats.appendEntry(chatId, {
+      kind: 'human',
+      text: 'old',
+      mentions: [],
+      id: 'old',
+      at: 1,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = services.groups.stop.bind(services.groups);
+    const stop = vi.spyOn(services.groups, 'stop').mockImplementation(async (id) => {
+      await gate;
+      return original(id);
+    });
+    const send = await phone();
+    const one = send(chatId, 'same', true);
+    const duplicate = send(chatId, 'same', true);
+    expect(await send(chatId, 'other', true)).toContainEqual({
+      type: 'bot-new-session-result',
+      chatId,
+      requestId: 'other',
+      ok: false,
+      error: 'session-busy',
+    });
+    expect(await call(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, { chatId })).toMatchObject({
+      ok: false,
+      error: 'session-busy',
+    });
+    release();
+    const [a, b] = await Promise.all([one, duplicate]);
+    expect(a[0]).toEqual(b[0]);
+    expect(a[0]).toMatchObject({ ok: true });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(services.chats.lastSeq(chatId)).toBe(2);
+    await send(chatId, 'empty');
+    expect(services.chats.lastSeq(chatId)).toBe(2);
+  });
+
+  it('phone advertises support and returns correlated errors for missing/disabled chats and exceptions', async () => {
+    const { chatId } = await team();
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    const send = await phone();
+    const frames: HostToPhone[] = [];
+    await mocks.pairPort!.handle('peer', { type: 'bot-catalog-request' }, async (frame) => {
+      frames.push(frame);
+      return true;
+    });
+    expect(frames).toContainEqual(
+      expect.objectContaining({ type: 'bot-catalog', newSession: true })
+    );
+    expect(await send('missing', 'invalid')).toContainEqual(
+      expect.objectContaining({ requestId: 'invalid', ok: false, error: expect.any(String) })
+    );
+    services.chats.appendEntry(chatId, {
+      kind: 'human',
+      text: 'old',
+      mentions: [],
+      id: 'old',
+      at: 1,
+    });
+    const stop = vi.spyOn(services.groups, 'stop').mockRejectedValueOnce(new Error('private path'));
+    expect(await send(chatId, 'fail')).toEqual([
+      { type: 'bot-new-session-result', chatId, requestId: 'fail', ok: false, error: 'failed' },
+    ]);
+    expect(await send(chatId, 'next')).toContainEqual(
+      expect.objectContaining({ requestId: 'next', ok: true })
+    );
+    expect(stop).toHaveBeenCalledTimes(2);
+    mocks.settings.botModeEnabled = false;
+    expect(await send(chatId, 'disabled')).toEqual([
+      {
+        type: 'bot-new-session-result',
+        chatId,
+        requestId: 'disabled',
+        ok: false,
+        error: 'disabled',
+      },
+    ]);
+  });
 
   it('新对话：停掉成员、取消委派、结束旧会话并写分隔线；之后的上下文与 group_history 从分隔线开始', async () => {
     const { alice, bob, chatId } = await team();

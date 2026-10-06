@@ -888,6 +888,7 @@ describe('PairClient Bot 帧', () => {
       onBotEvent: vi.fn(),
       onBotChatState: vi.fn(),
       onBotSendResult: vi.fn(),
+      onBotNewSessionResult: vi.fn(),
       onBotInbox: vi.fn(),
       onBotActivity: vi.fn(),
     };
@@ -953,7 +954,7 @@ describe('PairClient Bot 帧', () => {
       error: 'x',
     });
     await settle();
-    expect(events.onBotCatalog).toHaveBeenCalledWith(true, []);
+    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], false);
     expect(events.onBotInbox).toHaveBeenCalledTimes(1);
     expect(events.onBotInbox).toHaveBeenCalledWith([{ key: 'k', kind: 'budget', chatId: null }]);
     expect(events.onBotActivity).toHaveBeenCalledTimes(1);
@@ -977,5 +978,23 @@ describe('PairClient Bot 帧', () => {
     expect(events.onBotCatalog).not.toHaveBeenCalled();
     expect(events.onGroupTimeline).not.toHaveBeenCalled();
     expect(events.onBotEvent).not.toHaveBeenCalled();
+  });
+
+  it('dispatches new-session capability and correlated result, rejects malformed results', async () => {
+    const socket = await start();
+    socket.receive({ type: 'bot-catalog', enabled: true, bots: [], newSession: true });
+    const result = {
+      type: 'bot-new-session-result',
+      chatId: 'chat',
+      requestId: 'request',
+      ok: false,
+      needsConfirmation: true,
+    };
+    socket.receive(result);
+    socket.receive({ ...result, requestId: 3 });
+    socket.receive({ ...result, ok: 'yes' });
+    await settle();
+    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], true);
+    expect(events.onBotNewSessionResult).toHaveBeenCalledExactlyOnceWith(result);
   });
 });
