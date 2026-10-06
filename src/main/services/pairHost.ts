@@ -64,6 +64,7 @@ import { app, powerMonitor, powerSaveBlocker } from 'electron';
 import { readTrayPreventDisplaySleep, readTraySleepPolicy } from '../ipc/settings';
 // 会话命令一律走 agentBridge（身份解析留在 ipc/agent.ts），这里只留无需身份的 snapshot。
 import { requestSnapshot, setPinnedSessions } from './agentHost';
+import { ApprovalNotificationGate } from './approvalNotificationGate';
 import { MacosSystemSleepAssertion } from './macosSystemSleepAssertion';
 import { readNotifyMainAgentOnly } from './notifications';
 import type { BotSessionAccess } from './pairBotFrames';
@@ -1441,8 +1442,11 @@ function forwardSnapshot(event: RendererAgentEvent): void {
   }
 }
 
+const approvalPushNotifications = new ApprovalNotificationGate();
+
 /** agentHost 事件出口：所有会话事件先入日志，再按订阅规则下发。 */
 export function forwardAgentEvent(event: RendererAgentEvent): void {
+  const shouldNotify = approvalPushNotifications.observe(event);
   runningTaskIds = applyPairPowerTaskEvent(runningTaskIds, event);
   syncPowerBlocker();
   botPort?.observe(event);
@@ -1466,7 +1470,7 @@ export function forwardAgentEvent(event: RendererAgentEvent): void {
   for (const conn of connections.values()) {
     // 离线或锁屏/切后台（socket 半开不算离线）都转系统推送，只发通用文案
     if (!conn.phoneOnline || !conn.phoneVisible) {
-      if (hasPushSubscription(conn.device.pairId)) {
+      if (shouldNotify && hasPushSubscription(conn.device.pairId)) {
         const payload = buildPushPayload(
           e,
           catalog.find((entry) => entry.id === flatSessionId)?.title ??

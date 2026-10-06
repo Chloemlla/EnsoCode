@@ -147,6 +147,36 @@ describe('ApprovalGate', () => {
 });
 
 describe('ApprovalGate assistant 档代审 (options.review)', () => {
+  it('请求回调与异步 reviewer 启动前的快照都保留 reviewing，转人工后才清除', async () => {
+    const infos: ApprovalRequestInfo[] = [];
+    const snapshots: ApprovalRequestInfo[][] = [];
+    let finish!: (value: { decision: 'ask_user' }) => void;
+    const gate = new ApprovalGate(
+      'assistant',
+      (info) => {
+        infos.push(info);
+        snapshots.push(gate.snapshot());
+      },
+      () => {},
+      {
+        review: () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      }
+    );
+    const result = gate.ask('bash', 'command', 'ls', undefined);
+    expect(snapshots[0]).toEqual([infos[0]]);
+    expect(gate.snapshot()[0]?.phase).toBe('reviewing');
+    await Promise.resolve();
+    finish({ decision: 'ask_user' });
+    await vi.waitFor(() => expect(infos).toHaveLength(2));
+    expect(snapshots[1]).toEqual([infos[1]]);
+    expect(gate.snapshot()[0]?.phase).toBeUndefined();
+    gate.respond(infos[0].requestId, 'deny');
+    await expect(result).resolves.toBe('deny');
+  });
+
   it('代审开始立刻 onRequest(phase=reviewing + toolCallId)，结束 resolved 且不弹真人卡', async () => {
     const review = vi.fn().mockResolvedValue({ decision: 'auto_allow' });
     const infos: ApprovalRequestInfo[] = [];

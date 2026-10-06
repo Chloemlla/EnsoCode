@@ -250,7 +250,11 @@ function broadcastAgentEvent(event: RendererAgentEvent): void {
   if (
     binding &&
     conversationId &&
-    (event.type === 'approval-request' || event.type === 'ask-request')
+    (event.type === 'approval-request' ||
+      event.type === 'approval-resolved' ||
+      event.type === 'parent-ended' ||
+      event.type === 'child-ended' ||
+      event.type === 'ask-request')
   ) {
     const enabled = botModeEnabled();
     void maybeNotifyBot(event, {

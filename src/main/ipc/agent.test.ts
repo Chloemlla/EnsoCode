@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
   sessionFile: vi.fn((): string | undefined => undefined),
   scheduleMemoryDistill: vi.fn(async () => undefined),
   getBotServices: vi.fn((): unknown => null),
+  maybeNotifyBot: vi.fn(async (_event: { type: string }) => {}),
 }));
 
 vi.mock('electron', () => ({
@@ -130,7 +131,10 @@ vi.mock('../services/agentDispatchService', async () => {
     },
   };
 });
-vi.mock('../services/notifications', () => ({ maybeNotify: vi.fn() }));
+vi.mock('../services/notifications', () => ({
+  maybeNotify: vi.fn(),
+  maybeNotifyBot: mocks.maybeNotifyBot,
+}));
 vi.mock('../services/pairHost', () => ({
   forwardAgentEvent: vi.fn(),
   setPairAgentBridge: mocks.setPairAgentBridge,
@@ -985,5 +989,18 @@ describe('压缩完成触发记忆整理', () => {
     emit({ type: 'compaction', state: 'end' });
     expect(distill).toHaveBeenCalledTimes(1);
     expect(markCompacted).not.toHaveBeenCalled();
+  });
+
+  it('Bot 审批解决及会话结束事件也到达通知门，防止异步通知迟发', () => {
+    conversation({ botId: 'bot-a', chatId: 'chat-1' });
+    mocks.maybeNotifyBot.mockClear();
+    emit({ type: 'approval-resolved', requestId: 'apr' });
+    emit({ type: 'parent-ended', reason: 'ended' });
+    emit({ type: 'child-ended', reason: 'ended' });
+    expect(mocks.maybeNotifyBot.mock.calls.map(([event]) => event.type)).toEqual([
+      'approval-resolved',
+      'parent-ended',
+      'child-ended',
+    ]);
   });
 });

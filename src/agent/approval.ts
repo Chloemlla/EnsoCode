@@ -107,6 +107,7 @@ export class ApprovalGate {
       };
       const onAbort = () => settle('cancel');
       const askHuman = () => {
+        info = { ...info, phase: undefined };
         const timeoutMs = this.options?.humanTimeoutMs;
         if (timeoutMs) info = { ...info, expiresAt: Date.now() + timeoutMs };
         this.pending.set(requestId, { info, settle });
@@ -125,7 +126,9 @@ export class ApprovalGate {
         askHuman();
         return;
       }
-      this.onRequest({ ...info, phase: 'reviewing' });
+      info = { ...info, phase: 'reviewing' };
+      this.pending.set(requestId, { info, settle });
+      this.onRequest(info);
       void Promise.resolve()
         .then(() => review(info, signal))
         .then((result) => {

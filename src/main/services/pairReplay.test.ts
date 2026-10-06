@@ -20,6 +20,8 @@ const hostMocks = vi.hoisted(() => ({
   setPinnedSessions: vi.fn(),
   resume: vi.fn(),
   loadDevices: vi.fn(),
+  pushSubscribed: false,
+  sendPush: vi.fn(),
 }));
 
 vi.mock('@enso/pair', async (importOriginal) => ({
@@ -68,12 +70,12 @@ vi.mock('./pairStore', () => ({
   saveRelayUrl: vi.fn(),
   upsertDevice: (devices: unknown) => devices,
 }));
-vi.mock('./pushNotifier', () => ({
-  buildPushPayload: () => null,
+vi.mock('./pushNotifier', async (importOriginal) => ({
+  buildPushPayload: (await importOriginal<typeof import('./pushNotifier')>()).buildPushPayload,
   clearPushSubscription: vi.fn(),
   getVapidPublicKey: () => '',
-  hasPushSubscription: () => false,
-  sendPush: vi.fn(),
+  hasPushSubscription: () => hostMocks.pushSubscribed,
+  sendPush: hostMocks.sendPush,
   setPushSubscription: vi.fn(),
 }));
 
@@ -281,6 +283,8 @@ describe('pairHost session-sync 接线', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    hostMocks.pushSubscribed = false;
+    forwardAgentEvent({ type: 'worker-exited' });
     hostMocks.socket = {
       readyState: 1,
       binaryType: '',
@@ -343,6 +347,34 @@ describe('pairHost session-sync 接线', () => {
         },
       ],
     }) as RendererAgentEvent;
+
+  it('离线手机代审不推送，同 ID 升级人工仅推一次，结束后的旧事件不推送', () => {
+    hostMocks.pushSubscribed = true;
+    hostMocks.socket?.onmessage?.({ data: JSON.stringify({ type: 'peer-left' }) });
+    const identity = { sessionId: 's1', generation: 'generation-1' };
+    const request = { requestId: 'apr', tool: 'bash', kind: 'command' as const, summary: 'ls' };
+    forwardAgentEvent({
+      type: 'approval-request',
+      identity,
+      seq: 1,
+      request: { ...request, phase: 'reviewing' },
+    });
+    expect(hostMocks.sendPush).not.toHaveBeenCalled();
+    forwardAgentEvent({ type: 'approval-request', identity, seq: 2, request });
+    forwardAgentEvent({ type: 'approval-request', identity, seq: 3, request });
+    forwardAgentEvent({
+      type: 'approval-resolved',
+      identity,
+      seq: 4,
+      requestId: request.requestId,
+    });
+    forwardAgentEvent({ type: 'approval-request', identity, seq: 2, request });
+    expect(hostMocks.sendPush).toHaveBeenCalledExactlyOnceWith('pair-1', {
+      title: '需要审批',
+      body: '会话',
+      sessionId: 's1',
+    });
+  });
 
   it('首次请求 snapshot，离线事件随后按 cursor replay，空增量不再请求 worker', async () => {
     await receive({ type: 'subscribe', sessionId: 's1', sync: { requestId: 'request-1' } });

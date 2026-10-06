@@ -5,6 +5,9 @@ import type { RendererAgentEvent } from '@shared/types/agent';
 import { app, BrowserWindow, Notification } from 'electron';
 import { readSettings } from '../ipc/settings';
 import { sendToWindow } from '../windows/createAppWindow';
+import { ApprovalNotificationGate } from './approvalNotificationGate';
+
+const approvalNotifications = new ApprovalNotificationGate();
 
 // 文案本地内联：main 段引入 @shared/i18n 会触发 rollup 多入口 chunk 异常
 // （index.js 被打成 0 字节空产物），故不走共享 i18n
@@ -87,9 +90,12 @@ export async function maybeNotifyBot(
   event: RendererAgentEvent,
   bot: { enabled: boolean; chatId: string | null; name: string; conversationId: string }
 ): Promise<void> {
+  const isCurrent = approvalNotifications.observe(event);
+  if (!isCurrent) return;
   if (!bot.enabled) return;
   if (event.type !== 'approval-request' && event.type !== 'ask-request') return;
   const { focusMainWindow, getMainWindow } = await import('../windows/MainWindow');
+  if (!isCurrent()) return;
   if (getMainWindow()?.isFocused()) return;
   const title = `${bot.name} · ${event.type === 'ask-request' ? texts().ask : texts().approval}`;
   const body =
@@ -125,6 +131,7 @@ export async function notifyBotChat(
  * 挂在 main 的 agent 事件广播流上,与 renderer 转发互不影响。
  */
 export function maybeNotify(event: RendererAgentEvent): void {
+  if (!approvalNotifications.observe(event)) return;
   const sessionId = (event as { identity?: { sessionId?: string } }).identity?.sessionId;
   if (mainWindowFocused() && sessionId !== undefined && sessionId === viewedSessionId) return;
   if (shouldMuteCoworkerCompletionNotification(event, readNotifyMainAgentOnly())) return;
