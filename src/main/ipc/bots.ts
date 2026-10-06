@@ -485,7 +485,7 @@ export function getBotServices(): BotServices | null {
           task: record.task,
         })),
       tasks: taskStore
-        .list(chatId)
+        .list(chats.rootOf(chatId)?.id ?? chatId)
         .filter((task) => task.status === 'todo' || task.status === 'doing'),
     }),
     responder: createSmartRouter(routingDeps),
@@ -1697,8 +1697,7 @@ export function registerBotHandlers(): void {
     (_sender, request, { chats }): BotChatWriteResult => {
       const chatId = parseThreadChatInput(request);
       const root = chatId ? chats.get(chatId) : undefined;
-      if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined)
-        return INVALID;
+      if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined) return INVALID;
       // 当前话题还没人说话：直接用它，不堆空话题
       const active = chats.activeThread(root.id);
       if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };

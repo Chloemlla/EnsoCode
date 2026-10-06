@@ -209,7 +209,10 @@ export class BotChatStore {
     });
     if (!chat) return undefined;
     this.persist(chat);
-    if (this.isRoot(chat))
+    if (
+      this.isRoot(chat) &&
+      THREAD_SHARED.some((key) => JSON.stringify(current[key]) !== JSON.stringify(chat[key]))
+    )
       for (const thread of this.threadsOf(chat.id).slice(1)) {
         const synced = parseBotChat({
           ...thread,

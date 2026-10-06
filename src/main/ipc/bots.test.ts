@@ -1563,6 +1563,29 @@ describe('群话题', () => {
     });
   });
 
+  it('压缩后的话题成员获得根群看板；群主删除提示只列根群一次', async () => {
+    const { alice, bob, chatId, services } = await team();
+    const thread = services.chats.createThread(chatId)!;
+    expect
+      .soft(services.host.discardBot(alice))
+      .toMatchObject({ reason: 'boss', chatIds: [chatId] });
+    services.tasks.add(chatId, 'human', { title: 'Shared pending task' });
+    const session = services.host.ensureSession(thread.id, bob);
+    if (!session.ok) throw new Error(session.error);
+    services.groups.markCompacted(thread.id, bob, session.conversationId);
+    expect(
+      await call(IPC_CHANNELS.BOT_SEND, {
+        chatId: thread.id,
+        text: '@Bob hello',
+        deliveryId: 'state',
+      })
+    ).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(mocks.promptSession).toHaveBeenCalled());
+    const prompts = mocks.promptSession.mock.calls.map((args) => String(args[1])).join('\n');
+    expect(prompts).toContain('<group-state>');
+    expect(prompts).toContain('Shared pending task');
+  });
+
   it('话题 IPC：新建并切换、空话题复用、首条消息定标题、改名、切换校验、删除回到根群', async () => {
     const { alice, bob, chatId, services } = await team();
     for (const bad of [undefined, { chatId: 'x' }, { chatId, extra: 1 }])

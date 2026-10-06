@@ -798,7 +798,9 @@ export class BotSessionHost {
   discardBot(botId: string): { ok: true } | { ok: false; reason: string; chatIds?: string[] } {
     if (!this.deps.bots.get(botId)) return { ok: false, reason: 'not-found' };
     const chats = this.deps.chats.list();
-    const bossOf = chats.filter((chat) => chat.bossBotId === botId).map((chat) => chat.id);
+    const bossOf = chats
+      .filter((chat) => !chat.parentId && chat.bossBotId === botId)
+      .map((chat) => chat.id);
     if (bossOf.length > 0) return { ok: false, reason: 'boss', chatIds: bossOf };
     for (const listener of this.discardListeners) listener({ botId });
     for (const chat of chats) {

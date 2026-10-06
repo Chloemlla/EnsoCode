@@ -171,6 +171,18 @@ describe('BotChatStore threads', () => {
     const reloaded = new BotChatStore(root, now);
     expect(reloaded.get(first.id)).toBeUndefined();
   });
+
+  it('根群会话 cursor 或当前话题变化不重写其他话题', () => {
+    const parent = group();
+    const thread = store.createThread(parent.id)!;
+    store.update(parent.id, (draft) => ({
+      ...draft,
+      sessions: { [BOT_A]: { conversationId: 'c1', cursor: 10 } },
+      activeThreadId: thread.id,
+    }));
+    expect(store.get(thread.id)).toEqual(thread);
+    expect(new BotChatStore(root, now).get(thread.id)).toEqual(thread);
+  });
 });
 
 describe('BotChatStore timeline', () => {
