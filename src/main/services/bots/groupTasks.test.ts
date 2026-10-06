@@ -319,6 +319,54 @@ describe('人类指派与成员离开', () => {
   });
 });
 
+describe('群话题', () => {
+  const texts = (id: string) =>
+    chats
+      .readEntries(id, { limit: 100 })
+      .map((entry) => (entry.kind === 'system' ? entry.text : ''));
+
+  it('看板归根群：话题里的成员与根群共用一份；成员动作写本话题，人类动作写当前话题', async () => {
+    const thread = chats.createThread(chatId)!;
+    const other = chats.createThread(chatId)!;
+    chats.update(chatId, (draft) => ({ ...draft, activeThreadId: other.id }));
+    expect(service.add(thread.id, alice, { title: 'Login page' })).toMatchObject({ ok: true });
+    expect(service.list(chatId).map((task) => task.title)).toEqual(['Login page']);
+    expect(service.list(thread.id)).toEqual(service.list(chatId));
+    expect(emit).toHaveBeenCalledWith({ kind: 'tasks', chatId });
+    expect(texts(thread.id)).toEqual(['Alice 新建了任务 #1 Login page']);
+
+    service.claim(chatId, bob, '#1');
+    expect(texts(chatId)).toEqual(['Bob 认领了 #1 Login page']);
+
+    service.add(chatId, 'human', { title: 'API' });
+    expect(texts(other.id)).toEqual(['用户 新建了任务 #2 API']);
+    await service.assign(chatId, '#2', alice);
+    expect(send).toHaveBeenCalledWith(other.id, '@Alice 请处理任务 #2：API');
+
+    const gate = service.gate(thread.id, '#1', bob);
+    expect(gate).toMatchObject({ ok: true });
+    service.sync(
+      delegation({
+        chatId: thread.id,
+        parentBotId: bob,
+        targetBotId: alice,
+        taskId: store().find(chatId, '#1')!.id,
+      })
+    );
+    expect(store().find(chatId, '#1')).toMatchObject({ assigneeBotId: alice });
+    expect(texts(thread.id).at(-1)).toBe('Bob 把 #1 Login page 委派给 Alice');
+  });
+
+  it('根群归档后话题里也不能用看板', () => {
+    const thread = chats.createThread(chatId)!;
+    chats.update(chatId, (draft) => ({ ...draft, archivedAt: 1 }));
+    expect(service.add(thread.id, alice, { title: 'x' })).toEqual({
+      ok: false,
+      error: 'This group is archived.',
+    });
+  });
+});
+
 const DELEGATION = '44444444-4444-4444-8444-444444444444';
 function store(): GroupTaskStore {
   return (service as unknown as { deps: { store: GroupTaskStore } }).deps.store;

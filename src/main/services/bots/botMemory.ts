@@ -74,7 +74,8 @@ export class BotMemoryService {
 
   context(conversation: MemoryAuthority) {
     const bot = conversation.bot;
-    const chat = bot?.chatId ? this.deps.chats.get(bot.chatId) : undefined;
+    // 群话题共用根群的群记忆
+    const chat = bot?.chatId ? this.deps.chats.rootOf(bot.chatId) : undefined;
     return {
       enabled: !bot || this.deps.bots.get(bot.botId)?.memory.enabled === true,
       context: memorySpaceContext(

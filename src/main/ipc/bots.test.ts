@@ -1511,3 +1511,72 @@ describe('群聊新对话与克隆', () => {
     expect(existsSync(services.chats.workspaceDir(copy.id))).toBe(true);
   });
 });
+
+describe('群话题', () => {
+  async function team() {
+    const alice = await createBot('Alice');
+    const bob = await createBot('Bob');
+    const carol = await createBot('Carol');
+    const created = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'group',
+      title: 'team',
+      members: [alice, bob, carol],
+      bossBotId: alice,
+      workspace: { kind: 'chat-home' },
+    });
+    const chatId = (created.chat as { id: string }).id;
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    return { alice, bob, carol, chatId, services };
+  }
+
+  it('话题成员会话用根群目录与群笔记；话题不能单独改配置或删除', async () => {
+    const { bob, chatId, services } = await team();
+    const empty = await call(IPC_CHANNELS.BOT_NOTES_GET, { chatId });
+    const version = (empty.notes as { version: string }).version;
+    await call(IPC_CHANNELS.BOT_NOTES_SAVE, { chatId, content: '- ship friday', version });
+    const thread = services.chats.createThread(chatId)!;
+    expect(await call(IPC_CHANNELS.BOT_NOTES_GET, { chatId: thread.id })).toMatchObject({
+      ok: false,
+    });
+
+    await services.host.deliver(thread.id, bob, 'hello');
+    await vi.waitFor(() => expect(mocks.spawnSession).toHaveBeenCalled());
+    const [, request, , , , options] = mocks.spawnSession.mock.calls[0] as [
+      unknown,
+      { cwd: string },
+      unknown,
+      unknown,
+      string,
+      { bot: { systemPrompt: string } },
+    ];
+    expect(request.cwd).toBe(services.chats.workspaceDir(chatId));
+    expect(options.bot.systemPrompt).toContain('<group-notes>\n- ship friday\n</group-notes>');
+
+    expect(await call(IPC_CHANNELS.BOT_CHAT_UPDATE, { chatId: thread.id, title: 'x' })).toEqual({
+      ok: false,
+      error: 'invalid',
+    });
+    expect(await call(IPC_CHANNELS.BOT_CHAT_DELETE, { chatId: thread.id })).toEqual({
+      ok: false,
+      error: 'invalid',
+    });
+  });
+
+  it('根群移出成员：各话题里该成员的会话结束；删根群连同话题一起删', async () => {
+    const { carol, chatId, services, alice, bob } = await team();
+    const registry = mocks.registry as SourceAuthorityRegistry;
+    const thread = services.chats.createThread(chatId)!;
+    const session = services.host.ensureSession(thread.id, carol);
+    if (!session.ok) throw new Error(session.error);
+    expect(
+      await call(IPC_CHANNELS.BOT_CHAT_UPDATE, { chatId, members: [alice, bob] })
+    ).toMatchObject({ ok: true });
+    expect(services.chats.get(thread.id)).toMatchObject({ members: [alice, bob], sessions: {} });
+    expect(registry.conversation(session.conversationId)?.lifecycle).toBe('ended');
+
+    expect(await call(IPC_CHANNELS.BOT_CHAT_DELETE, { chatId })).toEqual({ ok: true });
+    expect(services.chats.get(thread.id)).toBeUndefined();
+    expect(existsSync(join(mocks.root, 'bot-chats', thread.id))).toBe(false);
+  });
+});

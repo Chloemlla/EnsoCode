@@ -40,7 +40,7 @@ it('dispose cancels pending routines and clears approval timers', async () => {
         return { ok: true, conversationId: 's', queued: true };
       },
     } as unknown as BotSessionHost,
-    chats: { get: () => ({ kind: 'direct' }) } as unknown as BotChatStore,
+    chats: { rootOf: () => ({ kind: 'direct' }) } as unknown as BotChatStore,
     groups: {} as GroupChatService,
     deny,
   });
@@ -78,7 +78,7 @@ it('denies unanswered approvals after 30 minutes only for the routine delivery a
         return { ok: true, conversationId: 's' };
       },
     } as unknown as BotSessionHost,
-    chats: { get: () => ({ kind: 'direct' }) } as unknown as BotChatStore,
+    chats: { rootOf: () => ({ kind: 'direct' }) } as unknown as BotChatStore,
     groups: {} as GroupChatService,
     deny,
   });
@@ -118,14 +118,18 @@ it('以执行成员身份、用派生的 deliveryId 投递；试运行在提示�
     duplicate: true as const,
   }));
   const runAs = vi.fn(async () => ({ ok: false as const, error: 'group-busy' }));
-  const chats = { kind: 'direct' };
+  const chats = { id: 'c', kind: 'direct' };
+  let active = 'c';
   const runner = new RoutineRunner({
     host: {
       onTurnFinished: () => () => {},
       activeDeliveryId: () => undefined,
       deliver,
     } as unknown as BotSessionHost,
-    chats: { get: () => chats } as unknown as BotChatStore,
+    chats: {
+      rootOf: () => chats,
+      activeThread: () => ({ id: active }),
+    } as unknown as BotChatStore,
     groups: { runAs } as unknown as GroupChatService,
     deny: vi.fn(),
   });
@@ -149,5 +153,8 @@ it('以执行成员身份、用派生的 deliveryId 投递；试运行在提示�
   expect([chatId, botId, title]).toEqual(['c', 'b', 'run "x"（试运行）']);
   expect(text).toMatch(/^<routine title="run &quot;x&quot;" dry-run="true">\[Dry run\]/);
   expect(text).toMatch(/work<\/routine>$/);
+  active = 't';
+  await runner.run(ROUTINE, OPTIONS);
+  expect((runAs.mock.calls[1] as unknown as string[])[0]).toBe('t');
   runner.dispose();
 });

@@ -10,9 +10,11 @@ export function botBrowserChatId(key: string): string | null {
 export function browserSessionKey(
   sessionId: string,
   bot?: { chatId: string | null; delegationId?: string },
-  delegationChatId?: (delegationId: string) => string | null | undefined
+  delegationChatId?: (delegationId: string) => string | null | undefined,
+  /** 群话题 → 根群：同一群的所有话题共用一个浏览器 */
+  rootOf: (chatId: string) => string = (chatId) => chatId
 ): string {
   const chatId =
     bot?.chatId ?? (bot?.delegationId ? delegationChatId?.(bot.delegationId) : undefined);
-  return chatId ? botBrowserKey(chatId) : sessionId;
+  return chatId ? botBrowserKey(rootOf(chatId)) : sessionId;
 }

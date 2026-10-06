@@ -577,8 +577,11 @@ function botControlError(sessionId: unknown): { ok: false; error: string } | und
 
 /** 浏览器会话键：Bot 聊天（含委派子会话）共享一个，其余按会话隔离 */
 function browserKeyFor(sessionId: string): string {
-  return browserSessionKey(sessionId, sourceAuthority?.conversation(sessionId)?.bot, (id) =>
-    getBotServices()?.delegations.chatIdOf(id)
+  return browserSessionKey(
+    sessionId,
+    sourceAuthority?.conversation(sessionId)?.bot,
+    (id) => getBotServices()?.delegations.chatIdOf(id),
+    (chatId) => getBotServices()?.chats.rootOf(chatId)?.id ?? chatId
   );
 }
 

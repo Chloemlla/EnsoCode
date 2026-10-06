@@ -98,7 +98,7 @@ export class GroupTaskService {
   constructor(private readonly deps: Deps) {}
 
   list(chatId: string): GroupTask[] {
-    return this.group(chatId) ? this.deps.store.list(chatId) : [];
+    return this.group(chatId) ? this.deps.store.list(this.board(chatId)) : [];
   }
 
   add(
@@ -114,7 +114,7 @@ export class GroupTaskService {
     const check = input.check && parseTaskCheck(input.check);
     if (input.check && !check) return { ok: false, error: CHECK_INVALID };
     const task = this.deps.store.create(
-      chatId,
+      this.board(chatId),
       {
         title: input.title,
         ...(input.detail ? { detail: input.detail } : {}),
@@ -124,7 +124,7 @@ export class GroupTaskService {
       this.now()
     );
     if (!task) return { ok: false, error: 'Task not saved.' };
-    this.changed(chatId, `${this.name(actor)} 新建了任务 ${label(task)}`);
+    this.changed(chatId, `${this.name(actor)} 新建了任务 ${label(task)}`, actor);
     return { ok: true, task };
   }
 
@@ -179,7 +179,8 @@ export class GroupTaskService {
         claimedAt: now,
         updatedAt: now,
       },
-      `${this.name(botId)} 认领了 ${label(task)}`
+      `${this.name(botId)} 认领了 ${label(task)}`,
+      botId
     );
   }
 
@@ -230,7 +231,8 @@ export class GroupTaskService {
           ...(text ? { result: text } : {}),
           updatedAt: this.now(),
         },
-        `${this.name(actor)} 完成了 ${label(task)}${text ? `：${short(text)}` : ''}`
+        `${this.name(actor)} 完成了 ${label(task)}${text ? `：${short(text)}` : ''}`,
+        actor
       )
     );
   }
@@ -272,7 +274,8 @@ export class GroupTaskService {
       this.write(
         chatId,
         { ...task, status: 'canceled', updatedAt: this.now() },
-        `${this.name(actor)} 取消了 ${label(task)}`
+        `${this.name(actor)} 取消了 ${label(task)}`,
+        actor
       )
     );
   }
@@ -299,10 +302,13 @@ export class GroupTaskService {
     });
     if (!written.ok) return written;
     const sent = this.deps.send
-      ? await this.deps.send(chatId, `@${bot.name} 请处理任务 #${task.seq}：${task.title}`)
+      ? await this.deps.send(
+          this.timeline(chatId),
+          `@${bot.name} 请处理任务 #${task.seq}：${task.title}`
+        )
       : { ok: false as const, error: 'group-not-ready' };
     if (sent.ok) return written;
-    const current = this.deps.store.find(chatId, task.id);
+    const current = this.deps.store.find(this.board(chatId), task.id);
     if (current?.updatedAt === written.task.updatedAt && current.assigneeBotId === botId)
       this.write(chatId, { ...task, updatedAt: this.now() });
     return { ok: false, error: sent.error };
@@ -311,9 +317,10 @@ export class GroupTaskService {
   remove(chatId: string, ref: string): { ok: true } | { ok: false; error: string } {
     const found = this.resolve(chatId, 'human', ref);
     if (!found.ok) return found;
-    if (!this.deps.store.remove(chatId, found.task.id)) return { ok: false, error: 'not-found' };
+    if (!this.deps.store.remove(this.board(chatId), found.task.id))
+      return { ok: false, error: 'not-found' };
     this.cancelLinked(found.task);
-    this.deps.emit({ kind: 'tasks', chatId });
+    this.deps.emit({ kind: 'tasks', chatId: this.board(chatId) });
     return { ok: true };
   }
 
@@ -321,7 +328,7 @@ export class GroupTaskService {
   gate(chatId: string | null, ref: string, parentBotId: string): TaskGate {
     if (!chatId || !this.group(chatId))
       return { ok: false, error: 'Tasks are only available in group chats.' };
-    const task = this.deps.store.find(chatId, ref);
+    const task = this.deps.store.find(this.board(chatId), ref);
     if (!task)
       return {
         ok: false,
@@ -338,7 +345,7 @@ export class GroupTaskService {
   /** 委派记录每次落盘后调用：按状态机同步任务 */
   sync(record: Delegation): void {
     if (!record.taskId || !record.chatId || !this.group(record.chatId)) return;
-    const task = this.deps.store.find(record.chatId, record.taskId);
+    const task = this.deps.store.find(this.board(record.chatId), record.taskId);
     const next = task && taskAfterDelegation(task, record, this.now());
     if (!task || !next) return;
     const text = isActiveDelegation(record)
@@ -346,13 +353,13 @@ export class GroupTaskService {
       : next.status === 'done'
         ? `${this.name(record.targetBotId)} 完成了 ${label(task)}${next.result ? `：${short(next.result)}` : ''}`
         : `${label(task)} 的委派未完成，已退回待办`;
-    this.write(record.chatId, next, text);
+    this.write(record.chatId, next, text, record.parentBotId);
   }
 
   /** 成员离开某群 / 被删除：其认领中的任务退回 todo */
   releaseMember(chatId: string, botId: string): void {
     if (!this.deps.chats.get(chatId)) return;
-    for (const task of this.deps.store.list(chatId)) {
+    for (const task of this.deps.store.list(this.board(chatId))) {
       if (task.status !== 'doing' || task.assigneeBotId !== botId) continue;
       const {
         assigneeBotId: _assignee,
@@ -373,11 +380,11 @@ export class GroupTaskService {
 
   releaseBot(botId: string): void {
     for (const chat of this.deps.chats.list())
-      if (chat.kind === 'group') this.releaseMember(chat.id, botId);
+      if (chat.kind === 'group' && !chat.parentId) this.releaseMember(chat.id, botId);
   }
 
   forget(chatId: string): void {
-    this.deps.store.forget(chatId);
+    this.deps.store.forget(this.board(chatId));
   }
 
   /** group_tasks 工具入口；参数已在 worker 侧归一化，这里仍按 unknown 收窄；带 check 的 complete 异步 */
@@ -393,7 +400,9 @@ export class GroupTaskService {
       case 'list': {
         const denied = this.check(chatId, botId);
         if (denied) return denied;
-        const tasks = this.deps.store.list(chatId).filter((task) => task.status !== 'canceled');
+        const tasks = this.deps.store
+          .list(this.board(chatId))
+          .filter((task) => task.status !== 'canceled');
         return { ok: true, tasks: tasks.map((task) => this.brief(task)) };
       }
       case 'add': {
@@ -424,7 +433,7 @@ export class GroupTaskService {
         );
       }
       case 'complete': {
-        const task = id ? this.deps.store.find(chatId, id) : undefined;
+        const task = id ? this.deps.store.find(this.board(chatId), id) : undefined;
         if (id && task?.check && task.assigneeBotId === botId && !task.delegationId)
           return this.completeChecked(chatId, botId, id, text('result')).then((result) =>
             this.view(result)
@@ -465,8 +474,19 @@ export class GroupTaskService {
   }
 
   private group(chatId: string): BotChat | undefined {
-    const chat = this.deps.chats.get(chatId);
+    const chat = this.deps.chats.rootOf(chatId);
     return chat?.kind === 'group' ? chat : undefined;
+  }
+
+  /** 看板按根群存放，话题共用 */
+  private board(chatId: string): string {
+    return this.deps.chats.rootOf(chatId)?.id ?? chatId;
+  }
+
+  /** 人类 / 系统的看板动态写进根群当前话题；指定话题时写该话题 */
+  private timeline(chatId: string): string {
+    if (this.deps.chats.get(chatId)?.parentId) return chatId;
+    return this.deps.chats.activeThread(chatId)?.id ?? chatId;
   }
 
   /** 群存在且未归档；成员动作要求仍在群里且未归档 */
@@ -484,7 +504,7 @@ export class GroupTaskService {
   private resolve(chatId: string, actor: TaskActor, ref: string): TaskResult {
     const denied = this.check(chatId, actor);
     if (denied) return denied;
-    const task = this.deps.store.find(chatId, ref);
+    const task = this.deps.store.find(this.board(chatId), ref);
     return task
       ? { ok: true, task }
       : {
@@ -504,24 +524,31 @@ export class GroupTaskService {
       this.deps.cancelDelegation?.(task.delegationId);
   }
 
-  private write(chatId: string, task: GroupTask, systemText?: string): TaskResult {
-    const saved = this.deps.store.save(chatId, task);
+  /** actor 为成员时动态写进其所在话题 */
+  private write(
+    chatId: string,
+    task: GroupTask,
+    systemText?: string,
+    actor: TaskActor = 'human'
+  ): TaskResult {
+    const saved = this.deps.store.save(this.board(chatId), task);
     if (!saved) return { ok: false, error: 'Task not saved.' };
-    this.changed(chatId, systemText);
+    this.changed(chatId, systemText, actor);
     return { ok: true, task: saved };
   }
 
-  private changed(chatId: string, systemText?: string): void {
+  private changed(chatId: string, systemText?: string, actor: TaskActor = 'human'): void {
     if (systemText) {
-      const entry = this.deps.chats.appendEntry(chatId, {
+      const target = actor === 'human' ? this.timeline(chatId) : chatId;
+      const entry = this.deps.chats.appendEntry(target, {
         kind: 'system',
         id: randomUUID(),
         at: this.now(),
         text: systemText,
       });
-      if (entry) this.deps.emit({ kind: 'timeline', chatId, seq: entry.seq });
+      if (entry) this.deps.emit({ kind: 'timeline', chatId: target, seq: entry.seq });
     }
-    this.deps.emit({ kind: 'tasks', chatId });
+    this.deps.emit({ kind: 'tasks', chatId: this.board(chatId) });
   }
 
   private now(): number {

@@ -103,6 +103,18 @@ it('passes chatId to distill only for group chat sessions', async () => {
   expect(schedule).toHaveBeenLastCalledWith(
     expect.objectContaining({ botId, chatId: group.id, sessionId: 'g' })
   );
+  const thread = chats.createThread(group.id)!;
+  expect(
+    memory.context({ ...conversation(), bot: { botId, chatId: thread.id } }).context.chatId
+  ).toBe(group.id);
+  await memory.distill({
+    ...conversation(),
+    conversationId: 't',
+    bot: { botId, chatId: thread.id },
+  });
+  expect(schedule).toHaveBeenLastCalledWith(
+    expect.objectContaining({ chatId: group.id, sessionId: 't' })
+  );
 });
 
 it('does not overwrite a replacement session watermark', async () => {

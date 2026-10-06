@@ -34,8 +34,15 @@ export interface BotChatDraft {
 
 const TIMELINE = 'timeline.jsonl';
 const NEWLINE = 0x0a;
-/** 话题跟随根群的群配置字段 */
-const THREAD_SHARED = ['title', 'members', 'bossBotId', 'workspace', 'routing'] as const;
+/** 话题跟随根群的群配置字段（含归档，归档检查对话题同样生效） */
+const THREAD_SHARED = [
+  'title',
+  'members',
+  'bossBotId',
+  'workspace',
+  'routing',
+  'archivedAt',
+] as const;
 /** 倒读时每隔这么多 seq 记一个行首偏移，深翻页直接从附近开始读 */
 const CHECKPOINT_EVERY = 128;
 /** `{"seq":N,"id":"…"` 是 appendEntry 写出的固定前缀；建索引时免整行解析 */

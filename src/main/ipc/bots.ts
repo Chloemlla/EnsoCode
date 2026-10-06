@@ -233,10 +233,11 @@ function notifyQuietly(chatId: string, build: Parameters<typeof notifyBotChat>[1
 
 /** 新消息让已搁置的聊天回到进行中 */
 function wakeChat(chats: BotChatStore, chatId: string): void {
-  const chat = chats.get(chatId);
+  // 搁置状态在根群上，话题里的新消息同样唤醒
+  const chat = chats.rootOf(chatId);
   if (!chat || !wakeOnActivity(chat)) return;
-  if (chats.update(chatId, (draft) => wakeOnActivity(draft) ?? draft))
-    emitBotEvent({ kind: 'chat', chatId });
+  if (chats.update(chat.id, (draft) => wakeOnActivity(draft) ?? draft))
+    emitBotEvent({ kind: 'chat', chatId: chat.id });
 }
 
 function rootIdentity(conversationId: string): SessionIdentity | undefined {
@@ -860,7 +861,7 @@ async function recentDistilled(spaceId: string, since: number): Promise<string[]
 function notesOwnerExists({ bots, chats }: BotServices, target: BotNotesTarget): boolean {
   return target.kind === 'bot'
     ? bots.get(target.id) !== undefined
-    : chats.get(target.id)?.kind === 'group';
+    : chats.get(target.id)?.kind === 'group' && !chats.get(target.id)?.parentId;
 }
 
 /** Bot 辅助任务的一次性补全：Bot 助理模型 → 默认模型 */
@@ -1591,7 +1592,8 @@ export function registerBotHandlers(): void {
     async (_sender, request, services): Promise<BotChatWriteResult> => {
       const input = parseChatUpdateInput(request);
       const current = input ? services.chats.get(input.chatId) : undefined;
-      if (!input || !current) return INVALID;
+      // 话题的群配置随根群级联，不能单独改
+      if (!input || !current || current.parentId) return INVALID;
       if (input.expectedVersion !== undefined && input.expectedVersion !== current.version) {
         return { ok: false, error: 'conflict' };
       }
@@ -1605,17 +1607,20 @@ export function registerBotHandlers(): void {
       }
       const workspaceChanged =
         workspace !== undefined && JSON.stringify(workspace) !== JSON.stringify(current.workspace);
-      const routing = current.kind === 'group' ? services.groups.state(current.id) : undefined;
-      if (
-        routing?.ok &&
-        (workspaceChanged ||
-          input.archived === true ||
-          (routing.current && input.members && !input.members.includes(routing.current)))
-      ) {
-        const stopped = await services.groups.stop(current.id);
-        if (!stopped.ok) return stopped;
+      const threads = current.kind === 'group' ? services.chats.threadsOf(current.id) : [current];
+      for (const thread of threads) {
+        const routing = thread.kind === 'group' ? services.groups.state(thread.id) : undefined;
+        if (
+          routing?.ok &&
+          (workspaceChanged ||
+            input.archived === true ||
+            (routing.current && input.members && !input.members.includes(routing.current)))
+        ) {
+          const stopped = await services.groups.stop(thread.id);
+          if (!stopped.ok) return stopped;
+        }
       }
-      const before = current.sessions;
+      const before = threads.map((thread) => thread.sessions);
       const at = Date.now();
       const chat = services.chats.update(current.id, (draft) => {
         if (input.title !== undefined) draft.title = input.title;
@@ -1629,14 +1634,18 @@ export function registerBotHandlers(): void {
         return applyChatFlags(draft, input, at);
       });
       if (!chat) return INVALID;
-      for (const [botId, session] of Object.entries(before)) {
-        if (workspaceChanged || !chat.members.includes(botId)) {
-          services.host.retireSession(session.conversationId);
+      if (workspaceChanged)
+        for (const thread of threads.slice(1))
+          services.chats.update(thread.id, (draft) => ({ ...draft, sessions: {} }));
+      for (const sessions of before)
+        for (const [botId, session] of Object.entries(sessions)) {
+          if (workspaceChanged || !chat.members.includes(botId)) {
+            services.host.retireSession(session.conversationId);
+          }
         }
-      }
       for (const botId of current.members)
         if (!chat.members.includes(botId)) services.tasks.releaseMember(chat.id, botId);
-      emitBotEvent({ kind: 'chat', chatId: chat.id });
+      for (const thread of threads) emitBotEvent({ kind: 'chat', chatId: thread.id });
       return { ok: true, chat };
     }
   );
@@ -1646,11 +1655,16 @@ export function registerBotHandlers(): void {
     'write',
     async (_sender, request, { host, chats, groups, tasks }): Promise<BotActionResult> => {
       const chatId = chatIdOf(request);
-      if (!chatId || !chats.get(chatId)) return INVALID;
-      if (chats.get(chatId)?.kind === 'group') {
-        const stopped = await groups.stop(chatId);
+      const chat = chatId ? chats.get(chatId) : undefined;
+      if (!chatId || !chat || chat.parentId) return INVALID;
+      // 根群连同全部话题一起删：先全部停下，再逐个清理，最后删根群
+      const threads = chat.kind === 'group' ? chats.threadsOf(chatId) : [chat];
+      for (const thread of threads) {
+        if (thread.kind !== 'group') continue;
+        const stopped = await groups.stop(thread.id);
         if (!stopped.ok) return stopped;
       }
+      for (const thread of threads.slice(1)) host.discardChat(thread.id);
       if (!host.discardChat(chatId)) return INVALID;
       tasks.forget(chatId);
       await browserHost.closeSession(botBrowserKey(chatId));
@@ -1665,7 +1679,8 @@ export function registerBotHandlers(): void {
 
   handle(IPC_CHANNELS.BOT_CHAT_CLONE, 'write', (_sender, request, services): BotChatWriteResult => {
     const input = parseChatCloneInput(request);
-    const source = input ? services.chats.get(input.chatId) : undefined;
+    // 在话题里克隆等同克隆整个群（不带话题）
+    const source = input ? services.chats.rootOf(input.chatId) : undefined;
     if (!input || source?.kind !== 'group') return INVALID;
     const members = source.members.filter((id) => activeMembers(services, [id]));
     const chatId = randomUUID();

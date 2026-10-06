@@ -14,7 +14,7 @@ const SCHEDULE_HINT =
 
 interface Deps {
   bots: Pick<BotStore, 'get' | 'list'>;
-  chats: Pick<BotChatStore, 'get' | 'appendEntry'>;
+  chats: Pick<BotChatStore, 'get' | 'appendEntry' | 'rootOf'>;
   routines: Pick<BotRoutineStore, 'propose'>;
   emit: (event: BotEvent) => void;
 }
@@ -70,7 +70,8 @@ export function proposeRoutine(
     title,
     prompt,
     schedule: cron,
-    chatId: chat.id,
+    // 群话题里提议的例行任务归根群
+    chatId: deps.chats.rootOf(chat.id)?.id ?? chat.id,
     ...(executor ? { doneBy: executor.id } : {}),
   });
   if (!result.ok) return { ok: false, error: 'Invalid routine.' };

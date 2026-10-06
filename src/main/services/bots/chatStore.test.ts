@@ -133,14 +133,21 @@ describe('BotChatStore threads', () => {
       bossBotId: BOT_B,
       routing: { ...draft.routing, mode: 'boss' },
       workspace: { kind: 'project', projectId: 'p2' },
+      archivedAt: 5,
     }));
     expect(store.get(thread.id)).toMatchObject({
       title: '新名字',
       bossBotId: BOT_B,
       routing: { mode: 'boss' },
       workspace: { kind: 'project', projectId: 'p2' },
+      archivedAt: 5,
       sessions: { [BOT_B]: { conversationId: 'c2', cursor: 0 } },
     });
+    store.update(parent.id, (draft) => {
+      delete draft.archivedAt;
+      return draft;
+    });
+    expect(store.get(thread.id)).not.toHaveProperty('archivedAt');
     store.update(thread.id, (draft) => ({ ...draft, title: 'x', bossBotId: BOT_A }));
     expect(store.get(thread.id)).toMatchObject({ title: '新名字', bossBotId: BOT_B });
     expect(new BotChatStore(root, now).get(thread.id)).toMatchObject({ title: '新名字' });

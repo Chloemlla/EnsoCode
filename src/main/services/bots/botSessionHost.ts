@@ -1080,7 +1080,8 @@ export class BotSessionHost {
   private notesFor(conversationId: string, botId: string): BotNotesSnapshot | undefined {
     if (!this.deps.notes) return undefined;
     const chatId = this.deps.authority.conversation(conversationId)?.bot?.chatId;
-    const chat = chatId ? this.deps.chats.get(chatId) : undefined;
+    // 群话题共用根群的群笔记
+    const chat = chatId ? this.deps.chats.rootOf(chatId) : undefined;
     return this.deps.notes.snapshot(botId, chat?.kind === 'group' ? chat.id : null);
   }
 
@@ -1836,10 +1837,12 @@ export class BotSessionHost {
           : { ok: false, error: 'workspace-unavailable' };
       }
       case 'chat-home': {
-        const project = authority.ensureBotHomeProject(this.deps.chats.workspaceDir(chat.id));
+        // 群话题用根群的群目录；自愈也写回根群（话题配置随根群级联）
+        const home = chat.parentId ?? chat.id;
+        const project = authority.ensureBotHomeProject(this.deps.chats.workspaceDir(home));
         if (!project) return { ok: false, error: 'workspace-unavailable' };
         if (project.projectId !== chat.workspace.projectId) {
-          this.deps.chats.update(chat.id, (draft) => {
+          this.deps.chats.update(home, (draft) => {
             draft.workspace = { kind: 'chat-home', projectId: project.projectId };
             return draft;
           });
