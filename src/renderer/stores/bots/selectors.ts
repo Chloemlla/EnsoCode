@@ -4,7 +4,7 @@ import type { ApprovalRequestInfo, AskRequestInfo, ProjectedMessage } from '@sha
 import type { BotChat, GroupEntry } from '@shared/types/bot';
 import type { BotQueueItem } from '@shared/types/botIpc';
 import type { BotSessions } from './projection';
-import { directMarker, readKey } from './unread';
+import { directMarker, isUnread, readKey } from './unread';
 
 export interface SessionOwner {
   chatId: string;
@@ -152,6 +152,43 @@ export function chatSummary(
 }
 
 const pinRank = (chat: BotChat) => chat.pinOrder ?? Number.POSITIVE_INFINITY;
+
+/**
+ * 群话题并入根群行：运行 / 排队 / 待处理合并；预览、活动时间取最新活动的话题。
+ * 已读键优先取未读话题，侧栏据此显示任一话题未读。
+ */
+export function rollupThreads<T extends { chat: BotChat; summary: ChatSummary }>(
+  rows: readonly T[],
+  reads: Record<string, number>
+): T[] {
+  const threads = new Map<string, T[]>();
+  for (const row of rows)
+    if (row.chat.parentId)
+      threads.set(row.chat.parentId, [...(threads.get(row.chat.parentId) ?? []), row]);
+  return rows
+    .filter((row) => !row.chat.parentId)
+    .map((row) => {
+      const children = threads.get(row.chat.id);
+      if (!children) return row;
+      const all = [row, ...children];
+      const latest = all.reduce((a, b) => (b.summary.activityAt > a.summary.activityAt ? b : a));
+      const unread = all.filter((item) => isUnread(item.summary.marker, reads[item.summary.key]));
+      const lead = (unread.length ? unread : all).reduce((a, b) =>
+        b.summary.activityAt > a.summary.activityAt ? b : a
+      );
+      return {
+        ...row,
+        summary: {
+          ...lead.summary,
+          preview: latest.summary.preview,
+          activityAt: latest.summary.activityAt,
+          running: all.some((item) => item.summary.running),
+          queued: all.some((item) => item.summary.queued),
+          pending: all.reduce((sum, item) => sum + item.summary.pending, 0),
+        },
+      };
+    });
+}
 
 /** 置顶优先（置顶内按手动顺序，未排过的在后），其余按最近活动倒序 */
 export function sortChats<T extends { chat: BotChat; summary: ChatSummary }>(rows: T[]): T[] {

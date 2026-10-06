@@ -49,5 +49,10 @@ export async function openBotNotification(event: BotEvent): Promise<void> {
   if (useRemoteNodesStore.getState().activeNodeId !== 'local')
     useRemoteNodesStore.getState().switchNode('local');
   useAppModeStore.getState().setMode('bot');
-  bots.setView(openTarget({ chatId, conversationId }, useBotsStore.getState().delegations));
+  const target = openTarget({ chatId, conversationId }, useBotsStore.getState().delegations);
+  if (target.kind === 'chat') {
+    const chat = bots.chats.find((item) => item.id === target.chatId);
+    if (chat?.kind === 'group') bots.openThread(chat.parentId ?? chat.id, chat.id);
+  }
+  bots.setView(target);
 }

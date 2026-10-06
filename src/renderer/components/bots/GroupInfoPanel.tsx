@@ -99,14 +99,16 @@ async function saveTeamTemplate(chat: BotChat, bots: readonly BotProfile[]): Pro
 
 export function GroupInfoPanel({
   chat,
+  thread = chat,
   onOpenConversation,
 }: {
   chat: BotChat;
+  thread?: BotChat;
   onOpenConversation: (conversationId: string, title: string) => void;
 }) {
   const { t } = useI18n();
   const bots = useBotsStore((s) => s.bots);
-  const runtime = useBotsStore((s) => s.runtime[chat.id]);
+  const runtime = useBotsStore((s) => s.runtime[thread.id]);
   const upsertChat = useBotsStore((s) => s.upsertChat);
   const openDirect = useBotsStore((s) => s.openDirect);
   const projects = useSettingsStore((s) => s.projects);
@@ -165,7 +167,7 @@ export function GroupInfoPanel({
           <TaskBoard chat={chat} />
         </TabsPanel>
         <TabsPanel value="delegations">
-          <GroupDelegations chat={chat} onOpenConversation={onOpenConversation} />
+          <GroupDelegations chat={thread} onOpenConversation={onOpenConversation} />
         </TabsPanel>
         <TabsPanel value="routines">
           <RoutineList chatId={chat.id} />
@@ -188,7 +190,7 @@ export function GroupInfoPanel({
                   onClick={() => void openDirect(id)}
                   className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 >
-                  <PresenceAvatar chatId={chat.id} botId={id} bot={bot} />
+                  <PresenceAvatar chatId={thread.id} botId={id} bot={bot} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 text-sm">
                       <span className="truncate">{bot?.name ?? t('Deleted member')}</span>

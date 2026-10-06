@@ -62,7 +62,7 @@ const delegation = (patch: Partial<Delegation> = {}): Delegation => ({
   createdAt: 1,
   ...patch,
 });
-const renderRows = () => {
+const renderDocument = () => {
   const noop = () => {};
   const { document } = parseHTML(
     renderToStaticMarkup(
@@ -76,13 +76,15 @@ const renderRows = () => {
       />
     )
   );
-  return Object.fromEntries(
-    [...document.querySelectorAll('[role="button"]')].map((row) => [
+  return document;
+};
+const renderRows = () =>
+  Object.fromEntries(
+    [...renderDocument().querySelectorAll('[role="button"]')].map((row) => [
       row.querySelector('.font-medium')?.textContent,
       Boolean(row.querySelector('.animate-pulse.bg-success')),
     ])
   );
-};
 
 describe('BotSidebar running dots', () => {
   beforeEach(() => {
@@ -166,5 +168,21 @@ describe('BotSidebar running dots', () => {
       delegation({ id: 'second', state: 'queued' }),
     ];
     expect(renderRows()).toMatchObject({ Group: true, Target: true, Parent: false });
+  });
+
+  it('正在看主话题时，后台话题的新消息仍显示群未读且不多出群行', () => {
+    const parent = chat('Group', 'group', ['Parent', 'Target']);
+    const thread = { ...parent, id: 'Topic', parentId: parent.id };
+    store.state.chats = [parent, thread];
+    store.state.view = { kind: 'chat', chatId: parent.id };
+    store.state.timelines = {
+      Topic: { entries: [{ seq: 1, kind: 'human', text: 'Background reply', at: 10 }], lastSeq: 1 },
+    };
+    const rows = [...renderDocument().querySelectorAll('[role="button"]')];
+    const groups = rows.filter((row) => row.querySelector('.font-medium')?.textContent === 'Group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].textContent).toContain('Background reply');
+    expect(groups[0].querySelector('.bg-info')).not.toBeNull();
+    expect(renderRows()).not.toHaveProperty('Topic');
   });
 });

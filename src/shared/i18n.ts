@@ -2250,11 +2250,15 @@ export const zhTranslations: Record<string, string> = {
   'Chat history, group notes, routines, task board and group memory':
     '聊天记录（新群是空的）、群笔记、例行任务、任务板、群记忆',
   'Cloned. The chat history is empty.': '已克隆。聊天记录是空的。',
-  'Start a new conversation?': '开始新对话？',
-  'Members still replying are stopped, and delegations not marked keep are canceled. Earlier messages fold into one row; members start fresh after the divider.':
-    '确认后会停掉所有人正在进行的回复，没标「保留」的委派会取消，再插入分隔线。上面的消息还在，先收成一行；成员从分隔线之后重新开始。',
-  'Stop and start': '停掉并开始',
-  'This conversation has no messages yet.': '这一段还没有消息。',
+  Topics: '话题',
+  'New topic': '新话题',
+  'Main topic': '主话题',
+  'Rename topic': '重命名话题',
+  'Delete topic': '删除话题',
+  'Delete this topic?': '删除这个话题？',
+  'Its messages and member sessions are removed; replies in progress are stopped. Group notes, memory and the task board stay.':
+    '话题里的消息和成员会话会被删除，正在进行的回复会停止。群笔记、群记忆和任务看板保留。',
+  'Could not create topic': '无法新建话题',
   'Earlier conversation · {{n}} messages': '上一段对话 · {{n}} 条',
   'Collapse earlier conversation': '收起上一段对话',
   'Create members with their own persona, model and tools, then chat with them alone or in groups.':

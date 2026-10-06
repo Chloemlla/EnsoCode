@@ -1,3 +1,4 @@
+import { activeThreadOf } from '@shared/bots/threads';
 import {
   Bot,
   Inbox,
@@ -61,6 +62,7 @@ export function BotView({ sidebarWidth, collapsed, onToggleCollapse, onResize }:
   const inboxCount = useBotPendingCount();
 
   const chat = view?.kind === 'chat' ? chats.find((item) => item.id === view.chatId) : undefined;
+  const thread = chat?.kind === 'group' ? activeThreadOf(chats, chat) : undefined;
 
   // 记住的聊天已被删除：回到空态
   useEffect(() => {
@@ -184,7 +186,7 @@ export function BotView({ sidebarWidth, collapsed, onToggleCollapse, onResize }:
       {view?.kind === 'inbox' ? (
         <BotInbox />
       ) : chat ? (
-        <BotChatView key={chat.id} chat={chat} />
+        <BotChatView key={thread?.id ?? chat.id} chat={thread ?? chat} group={chat} />
       ) : (
         <div className="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-background px-6 text-center">
           <Bot className="h-8 w-8 text-muted-foreground" />

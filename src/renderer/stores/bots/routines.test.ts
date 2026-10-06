@@ -51,6 +51,7 @@ describe('routineTargets', () => {
       chat({ id: 'd1' }),
       chat({ id: 'd2', members: ['b2'] }),
       chat({ id: 'g2', kind: 'group', members: ['b1'], archivedAt: 5 }),
+      chat({ id: 't1', kind: 'group', members: ['b1', 'b2'], parentId: 'g1' }),
     ];
     expect(routineTargets(chats, 'b1').map((item) => item.id)).toEqual(['d1', 'g1']);
   });

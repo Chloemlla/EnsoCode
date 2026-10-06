@@ -26,7 +26,7 @@ interface BotChat {
 
 - 不升 `schemaVersion`：新字段可选，旧版本读到子话题会当成普通群（可接受，降级不丢数据）。
 - 子话题的 `members / bossBotId / routing / workspace` 是根群的副本，由 Main 在根群更新时级联同步，不允许单独修改。
-- `parentId` 只能指向存在的根群（根群不能再有 `parentId`）；加载时父群缺失的子话题视为孤儿，忽略并在下次清理。
+- `parentId` 只能指向存在的根群（根群不能再有 `parentId`）；加载时忽略孤儿，但保留磁盘文件。
 
 ## 根群映射（`rootOf(chat) = chat.parentId ?? chat.id`）
 
@@ -46,8 +46,8 @@ interface BotChat {
 
 - `BOT_THREAD_CREATE {chatId}`：在根群下建子话题并设为当前，返回新话题。替代群聊的「新对话」（私聊不变）。
 - `BOT_THREAD_SELECT {chatId, threadId}`：设置 `activeThreadId`。
-- `BOT_THREAD_RENAME {threadId, title}` / `BOT_THREAD_DELETE {threadId}`：删除根群自身话题不允许；删除当前话题后回到根群话题。
-- 话题列表随 `BOT_CATALOG` 下发（子话题从聊天列表剥离，挂到根群下）。
+- `BOT_THREAD_UPDATE {chatId, title}` / `BOT_THREAD_DELETE {chatId}`：删除根群自身话题不允许；删除当前话题后回到根群话题。
+- 话题列表随 `BOT_CHATS_LIST` 下发，renderer 将子话题折叠到根群行。
 - 发送、时间线读取、重试、停止等现有通道直接传话题 id；Main 校验它是群或群下的话题。
 
 入参一律按 `unknown` 收窄；renderer 只传 id。
@@ -58,6 +58,8 @@ interface BotChat {
 - 「新对话」按钮改为「新话题」：建好直接切过去。
 - 话题标题缺省取第一条用户消息截断，可改名。
 - 群信息面板（成员、笔记、看板、例行）始终作用于根群。
+- 面板里的回复队列、成员在场状态与委派列表跟随当前话题；浏览器标签仍共享根群。
+- 切换和新建有选择序号保护，在途旧目录快照不能抢回视图或丢掉新建话题。
 
 ## 不做
 
@@ -72,3 +74,13 @@ interface BotChat {
 3. IPC 与事件。
 4. Renderer 切换器、store、搜索跳转。
 5. 真机：两家模型，两个话题来回切换续聊，确认上下文不串、后台话题照常运行。
+
+## 验证记录
+
+真机（隔离 userData，Max claude-sonnet-4-6 + hei qwen3.8-max）：主话题约定暗号「苹果」，新话题约定「香蕉」；切回主话题问 Qwen 答「苹果」，切到新话题问 Clau 答「香蕉」。新话题里让 Qwen 写诗后立即切回主话题，回复在后台照常完成，切换器与侧栏显示未读与最新预览；重载后仍停在上次选中的话题。
+
+踩坑：`MenuGroupLabel` 必须包在 `MenuGroup` 里，否则打开菜单时 base-ui 抛错导致整窗白屏（单测不渲染菜单弹层，只有真机能发现）。
+
+边界回归覆盖：搜索与系统通知定位主话题、旧目录刷新晚到 / 新建期间再切换、后台话题未读聚合、根群 cursor 更新不重写其他话题、压缩后群状态注入共享看板，以及话题成员占用的根群浏览器标签。
+
+补充 Electron 回归（隔离 userData、fake provider）：连续切换 20 次保持最后选择；子话题看板展示共享任务；菜单改名持久化，删除当前话题后回到主话题，根群看板任务保留。

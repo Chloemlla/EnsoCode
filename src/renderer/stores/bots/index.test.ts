@@ -438,3 +438,106 @@ describe('群时间线历史窗口', () => {
     f.off();
   });
 });
+
+describe('群话题', () => {
+  it('切换前发出的刷新晚到时，不覆盖已确认的新选择；新建期间切到其他话题不被新建响应抢回', async () => {
+    const f = await fixture();
+    const root: BotChat = { ...chat, id: 'g', kind: 'group', sessions: {} };
+    const thread: BotChat = { ...root, id: 't', parentId: root.id };
+    f.store.setState({ chats: [root, thread], view: { kind: 'chat', chatId: root.id } });
+    let finishRefresh!: (value: { ok: true; enabled: true; chats: BotChat[]; queue: [] }) => void;
+    const chats = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = resolve;
+        })
+    );
+    const selectThread = vi.fn(async () => ({ ok: true }));
+    let finishCreate!: (value: { ok: true; chat: BotChat }) => void;
+    const createThread = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishCreate = resolve;
+        })
+    );
+    Object.assign(window.electronAPI.bots, { chats, selectThread, createThread });
+    const refreshing = f.store.getState().refreshChats();
+    await vi.waitFor(() => expect(chats).toHaveBeenCalled());
+    f.store.getState().openThread(root.id, thread.id);
+    await Promise.resolve();
+    finishRefresh({ ok: true, enabled: true, chats: [root, thread], queue: [] });
+    await refreshing;
+    const rootOf = () => f.store.getState().chats.find((item) => item.id === root.id)!;
+    expect(rootOf().activeThreadId).toBe(thread.id);
+
+    const creating = f.store.getState().createThread(root.id);
+    f.store.getState().openThread(root.id, root.id);
+    const next = { ...thread, id: 't2' };
+    finishCreate({ ok: true, chat: next });
+    await creating;
+    expect(rootOf()).not.toHaveProperty('activeThreadId');
+    expect(f.store.getState().chats.map((item) => item.id)).toContain(next.id);
+
+    const stale = f.store.getState().refreshChats();
+    await vi.waitFor(() => expect(chats).toHaveBeenCalledTimes(2));
+    const newTopic = f.store.getState().createThread(root.id);
+    const latest = { ...thread, id: 't3' };
+    finishCreate({ ok: true, chat: latest });
+    await newTopic;
+    finishRefresh({ ok: true, enabled: true, chats: [root, thread], queue: [] });
+    await stale;
+    expect(rootOf().activeThreadId).toBe(latest.id);
+    expect(f.store.getState().chats.map((item) => item.id)).toContain(latest.id);
+    f.off();
+  });
+
+  it('打开话题：视图落在根群并切换当前话题；新建话题后切过去', async () => {
+    const f = await fixture();
+    const root: BotChat = {
+      ...chat,
+      id: 'g',
+      kind: 'group',
+      members: ['b', 'b2'],
+      bossBotId: 'b',
+      workspace: { kind: 'project', projectId: 'p' },
+      sessions: {},
+    };
+    const thread: BotChat = { ...root, id: 't', parentId: 'g' };
+    const selectThread = vi.fn(async () => ({ ok: true }));
+    const createThread = vi.fn(async () => ({
+      ok: true,
+      chat: { ...root, id: 't2', parentId: 'g' },
+    }));
+    Object.assign(window.electronAPI.bots, { selectThread, createThread });
+    f.store.setState({ chats: [root, thread] });
+    const rootOf = () => f.store.getState().chats.find((item) => item.id === 'g');
+
+    f.store.getState().setView({ kind: 'chat', chatId: 't' });
+    expect(f.store.getState().view).toEqual({ kind: 'chat', chatId: 'g' });
+    expect(rootOf()?.activeThreadId).toBe('t');
+    expect(selectThread).toHaveBeenCalledWith('g', 't');
+
+    f.store.getState().openThread('g', 'g');
+    expect(rootOf()).not.toHaveProperty('activeThreadId');
+
+    expect(await f.store.getState().createThread('g')).toBe(true);
+    expect(f.store.getState().chats.map((item) => item.id)).toContain('t2');
+    expect(rootOf()?.activeThreadId).toBe('t2');
+
+    f.store.getState().focusHit(
+      {
+        chatId: 'g',
+        chatKind: 'group',
+        speaker: { kind: 'human' },
+        snippet: 'first topic',
+        at: 1,
+        ranges: [],
+        locator: { kind: 'timeline', seq: 1 },
+      },
+      'first'
+    );
+    expect(rootOf()).not.toHaveProperty('activeThreadId');
+    expect(f.store.getState().focus?.chatId).toBe('g');
+    f.off();
+  });
+});

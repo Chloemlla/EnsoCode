@@ -7,6 +7,7 @@ import {
   messagePreview,
   pendingItems,
   reorderPinned,
+  rollupThreads,
   sessionOwners,
   snoozeTimes,
   sortChats,
@@ -163,5 +164,39 @@ describe('snoozeTimes', () => {
     expect(times.hour).toBe(now + 3_600_000);
     expect(times.later).toBe(now + 3 * 3_600_000);
     expect(new Date(times.tomorrow)).toEqual(new Date(2026, 9, 5, 9, 0));
+  });
+});
+
+describe('rollupThreads', () => {
+  const summary = (key: string, marker: number, activityAt: number, extra = {}) => ({
+    key,
+    marker,
+    preview: key,
+    activityAt,
+    running: false,
+    queued: false,
+    pending: 0,
+    ...extra,
+  });
+  const root = chat({ id: 'g', kind: 'group' });
+  const rows = [
+    { chat: root, summary: summary('g', 5, 10) },
+    { chat: chat({ id: 't1', kind: 'group', parentId: 'g' }), summary: summary('t1', 3, 30) },
+    {
+      chat: chat({ id: 't2', kind: 'group', parentId: 'g' }),
+      summary: summary('t2', 2, 20, { running: true, pending: 1 }),
+    },
+    { chat: chat({ id: 'd' }), summary: summary('d', 1, 5) },
+  ];
+
+  it('话题并入根群：运行 / 待处理合并，预览取最新活动的话题', () => {
+    const out = rollupThreads(rows, { g: 5, t1: 3, t2: 2 });
+    expect(out.map((row) => row.chat.id)).toEqual(['g', 'd']);
+    expect(out[0].summary).toMatchObject({ key: 't1', activityAt: 30, running: true, pending: 1 });
+  });
+
+  it('有未读话题时优先取未读的那个，让根群行显示未读', () => {
+    const out = rollupThreads(rows, { g: 5, t1: 3, t2: 1 });
+    expect(out[0].summary).toMatchObject({ key: 't2', marker: 2, activityAt: 30, preview: 't1' });
   });
 });

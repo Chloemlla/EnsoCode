@@ -121,6 +121,21 @@ describe('MemberBusyBar', () => {
     expect(render()).toBe('');
   });
 
+  it('话题成员使用根群共享的浏览器标签，成员会话仍按话题取', () => {
+    store.state = {
+      ...store.state,
+      chats: [{ ...chat, id: 'topic', parentId: 'chat1' }],
+      sessions: { c2: session() },
+      browserTabs: { chat1: { tabs: ['tab1'] } },
+      browserHolders: { tab1: { conversationId: 'c2', name: 'Anran' } },
+      browserTitles: { tab1: 'Shared browser title' },
+    };
+    const html = renderToStaticMarkup(
+      createElement(PresenceAvatar, { chatId: 'topic', botId: 'b2', bot: bots.get('b2') })
+    );
+    expect(html).toContain('Shared browser title');
+  });
+
   it('只列非闲成员，委派在跑时附「名字 · 状态 · 短说明」', () => {
     store.state = { ...store.state, delegations: [delegation] };
     const html = render();
