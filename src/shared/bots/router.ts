@@ -296,7 +296,7 @@ export function onHumanMessage(
     return { action: 'route-parallel' };
   const targets = humanTargets(chat, members, humanEntry);
   const others = targets.filter((id) => id !== state.current);
-  if (others.length) return { action: 'parallel', targets: others };
+  if (others.length) return { action: 'parallel', targets };
   return targets.length === 1 && targets[0] === state.current
     ? { action: 'steer' }
     : { action: 'restart-after-current' };

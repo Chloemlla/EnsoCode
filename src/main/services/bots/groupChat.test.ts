@@ -16,7 +16,7 @@ let a: string;
 let b: string;
 let id: string;
 let finish: (event: BotTurnFinished) => void;
-let deliverySent: (event: { conversationId: string; deliveryId: string }) => void;
+let deliverySent: (event: { conversationId: string; deliveryId: string; steered?: true }) => void;
 const deliver = vi.fn();
 const stopTurn = vi.fn(async () => {});
 const retryConversation = vi.fn(async (id: string) => ({ ok: true as const, conversationId: id }));
@@ -579,9 +579,10 @@ it.each([true, false])(
   '并行回复先结束=%s：两人都写入时间线，新消息不重复投递也不接力',
   async (parallelFirst) => {
     await group.send(id, '@Alice first');
+    deliver.mockResolvedValueOnce({ ok: true, conversationId: a, steered: true });
     await group.send(id, '@Alice @Bob second');
-    expect(deliver.mock.calls.map((call) => call[1])).toEqual([a, b]);
-    const parallelId = deliver.mock.calls[1][3].deliveryId;
+    expect(deliver.mock.calls.map((call) => call[1])).toEqual([a, a, b]);
+    const parallelId = deliver.mock.calls[2][3].deliveryId;
     expect(deliver.mock.calls[1][2]).toContain('second');
     expect(group.state(id)).toMatchObject({ current: a, pendingHuman: false });
     expect(stopTurn).not.toHaveBeenCalled();
@@ -599,10 +600,26 @@ it.each([true, false])(
         .map((entry) => entry.text)
         .sort()
     ).toEqual(['parallel @Alice', 'primary']);
-    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledTimes(3);
     expect(group.state(id)).toMatchObject({ current: null, pendingHuman: false });
   }
 );
+
+it('宿主回报 queued 前已送出 steer 时，不等待第二份结束事件', async () => {
+  const onBatchSettled = vi.fn();
+  group.dispose();
+  group = new GroupChatService({ bots, chats, host, emit, onBatchSettled });
+  await group.send(id, '@Alice start');
+  deliver.mockImplementationOnce(async (_chatId, botId, _text, options) => {
+    deliverySent({ conversationId: botId, deliveryId: options.deliveryId, steered: true });
+    return { ok: true, conversationId: botId, queued: true };
+  });
+  await group.send(id, '@Alice supplement');
+  await done(a, 'combined');
+  expect(entries().filter((entry) => entry.kind === 'bot')).toHaveLength(1);
+  expect(onBatchSettled).toHaveBeenCalledTimes(1);
+  expect(deliver).toHaveBeenCalledTimes(2);
+});
 
 it('并行成员也在原队列中时，保留队列且并行结果不能推进其后续回合', async () => {
   await group.send(id, '@Alice @Bob first');
@@ -626,7 +643,7 @@ it('宿主达到并发上限时，保留排队投递并在时间线说明成员�
   deliver.mockImplementationOnce(async (...args) => ({ ...(await send(...args)), queued: true }));
   await group.send(id, '@Bob second');
   expect(deliver).toHaveBeenCalledTimes(2);
-  expect(deliver.mock.calls[1][3]).toMatchObject({ queueIfBusy: true });
+  expect(deliver.mock.calls[1][3].queueIfBusy).toBeUndefined();
   expect(entries().at(-1)).toMatchObject({
     kind: 'system',
     text: expect.stringMatching(/Bob.*排队/),
@@ -874,7 +891,7 @@ describe('smart routing', () => {
     expect(select).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
     expect(deliver.mock.calls[1][1]).toBe(b);
-    expect(deliver.mock.calls[1][3]).toMatchObject({ queueIfBusy: true });
+    expect(deliver.mock.calls[1][3].queueIfBusy).toBeUndefined();
     expect(group.state(id)).toMatchObject({ current: a, pendingHuman: false });
     expect(stopTurn).not.toHaveBeenCalled();
     await done(a, 'done');
@@ -907,7 +924,7 @@ describe('smart routing', () => {
     await group.send(id, 'follow up');
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(4));
     expect(deliver.mock.calls.slice(2).map((call) => call[1])).toEqual([a, b]);
-    expect(deliver.mock.calls.slice(2).every((call) => call[3].queueIfBusy)).toBe(true);
+    expect(deliver.mock.calls.slice(2).every((call) => !call[3].queueIfBusy)).toBe(true);
     expect(group.state(id)).toEqual(before);
     await done(b, 'parallel', true, parallelId);
     expect(deliver).toHaveBeenCalledTimes(4);
@@ -974,7 +991,7 @@ describe('smart routing', () => {
       expect(select.mock.calls[0][1].aborted).toBe(true);
       expect(deliver).toHaveBeenCalledTimes(2);
       expect(deliver.mock.calls[1][1]).toBe(text.includes('Alice') ? a : b);
-      expect(Boolean(deliver.mock.calls[1][3].queueIfBusy)).toBe(text.includes('Bob'));
+      expect(deliver.mock.calls[1][3].queueIfBusy).toBeUndefined();
       expect(group.state(id)).toMatchObject({ current: a, queue: [b], routing: false });
       pick.resolve({ ids: [b] });
       await group.settled(id);
@@ -997,14 +1014,15 @@ describe('smart routing', () => {
     await done(a, 'primary');
     expect(deliver.mock.calls.map((call) => call[1])).toEqual([a, b]);
     first.resolve({ ids: [a] });
+    deliver.mockResolvedValueOnce({ ok: true, conversationId: b, steered: true });
     second.resolve({ ids: [b, a] });
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(3));
-    expect(deliver.mock.calls[2][1]).toBe(a);
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(4));
+    expect(deliver.mock.calls.slice(2).map((call) => call[1])).toEqual([b, a]);
     expect(group.state(id)).toMatchObject({ current: b, queue: [], routing: false });
     expect(stopTurn).not.toHaveBeenCalled();
     await done(b, 'primary second');
-    await done(a, 'parallel', true, deliver.mock.calls[2][3].deliveryId);
-    expect(deliver).toHaveBeenCalledTimes(3);
+    await done(a, 'parallel', true, deliver.mock.calls[3][3].deliveryId);
+    expect(deliver).toHaveBeenCalledTimes(4);
   });
 
   it('旁路超时兜底群主，排队提示可见且主轮不变', async () => {
@@ -1016,7 +1034,7 @@ describe('smart routing', () => {
     await group.send(id, 'follow up');
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
     expect(deliver.mock.calls[1][1]).toBe(a);
-    expect(deliver.mock.calls[1][3]).toMatchObject({ queueIfBusy: true });
+    expect(deliver.mock.calls[1][3].queueIfBusy).toBeUndefined();
     expect(entries().at(-1)).toMatchObject({ text: 'Alice 正在排队，等待可用会话' });
     expect(group.state(id)).toMatchObject({ current: b, pendingHuman: false });
     warn.mockRestore();
@@ -1120,20 +1138,21 @@ describe('smart routing', () => {
     expect(chats.get(id)!.sessions[a].cursor).toBe(chats.lastSeq(id));
   });
 
-  it('多人选人含 current 只投其他人，保留原智能队列及标记', async () => {
+  it('多人选人含 current 时也补入当前轮，保留原智能队列及标记', async () => {
     select.mockResolvedValueOnce({ ids: [b, a] });
     await group.send(id, 'q');
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
     select.mockResolvedValueOnce({ ids: [b, a] });
+    deliver.mockResolvedValueOnce({ ok: true, conversationId: b, steered: true });
     await group.send(id, '换个问题');
-    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(3));
     expect(select.mock.calls[1][0].message).toBe('换个问题');
-    expect(deliver.mock.calls.map((c) => c[1])).toEqual([b, a]);
+    expect(deliver.mock.calls.map((c) => c[1])).toEqual([b, b, a]);
     expect(group.state(id)).toMatchObject({ current: b, queue: [a], pendingHuman: false });
-    await done(a, 'parallel', true, deliver.mock.calls[1][3].deliveryId);
+    await done(a, 'parallel', true, deliver.mock.calls[2][3].deliveryId);
     await done(b, 'answer');
     expect(entries().at(-1)).toMatchObject({ botId: b, routedBy: 'smart' });
-    expect(deliver.mock.calls.map((c) => c[1])).toEqual([b, a, a]);
+    expect(deliver.mock.calls.map((c) => c[1])).toEqual([b, b, a, a]);
     expect(group.state(id)).toMatchObject({ current: a, queue: [] });
   });
 

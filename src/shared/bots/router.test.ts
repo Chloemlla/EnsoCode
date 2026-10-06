@@ -467,18 +467,18 @@ describe('onHumanMessage', () => {
       const before = structuredClone(state);
       expect(onHumanMessage(state, chat(), members, human(text))).toEqual({
         action: 'parallel',
-        targets: ['be'],
+        targets: text.includes('@前端') ? ['fe', 'be'] : ['be'],
       });
       expect(state).toEqual(before);
     }
   });
 
-  it('立即投递目标去重并排除当前、归档和群外成员', () => {
+  it('立即投递目标保留当前成员，去重并排除归档和群外成员', () => {
     expect(
       onHumanMessage(busy(), chat(), members, human('x', ['fe', 'be', 'be', 'old', 'ghost']))
     ).toEqual({
       action: 'parallel',
-      targets: ['be'],
+      targets: ['fe', 'be'],
     });
   });
 

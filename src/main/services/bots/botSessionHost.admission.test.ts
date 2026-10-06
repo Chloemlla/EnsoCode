@@ -476,3 +476,35 @@ it('registers retry FIFO order before an immediately following new task', async 
   await flush();
   expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['old', 'new']);
 });
+
+it('keeps dequeued steering in same-member FIFO until its session lock is acquired', async () => {
+  host.setMaxRunningTurns(1);
+  const blocker = session(member());
+  const bot = member();
+  const a = session(bot);
+  const b = session(bot);
+  await host.deliverConversation(blocker, 'blocker');
+  await host.deliverConversation(a, 'first');
+  await host.deliverConversation(a, 'supplement');
+  await host.deliverConversation(b, 'other chat');
+  runtime.prompt.mockImplementationOnce(() => {
+    done(a);
+    return { ok: true };
+  });
+  done(blocker);
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual([
+    'blocker',
+    'first',
+    'supplement',
+  ]);
+  expect(runtime.steer).not.toHaveBeenCalled();
+  done(a);
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual([
+    'blocker',
+    'first',
+    'supplement',
+    'other chat',
+  ]);
+});

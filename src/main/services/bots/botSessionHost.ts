@@ -144,6 +144,8 @@ export type BotDeliverResult =
       ok: true;
       conversationId: string;
       queued?: boolean;
+      /** 已按 steer 下发，不另建宿主轮次；不是 worker 已消费的回执。 */
+      steered?: true;
       turnId?: string;
       /** 同一 deliveryId 已被该会话处理过，本次没有发出 */
       duplicate?: true;
@@ -263,11 +265,11 @@ export class BotSessionHost {
     return true;
   }
   private readonly sentListeners = new Set<
-    (event: { conversationId: string; deliveryId: string }) => void
+    (event: { conversationId: string; deliveryId: string; steered?: true }) => void
   >();
 
   onDeliverySent(
-    listener: (event: { conversationId: string; deliveryId: string }) => void
+    listener: (event: { conversationId: string; deliveryId: string; steered?: true }) => void
   ): () => void {
     this.sentListeners.add(listener);
     return () => this.sentListeners.delete(listener);
@@ -727,9 +729,13 @@ export class BotSessionHost {
       if (this.budgetExceeded(botId, binding.chatId, conversationId))
         return { ok: false, error: BOT_BUDGET_ERROR };
       if (this.turnActive(conversationId) && !options.queueIfBusy) {
-        if (!this.retrying.has(conversationId) && !this.stopping.has(conversationId))
+        if (
+          !this.retrying.has(conversationId) &&
+          !this.stopping.has(conversationId) &&
+          !this.awaitingTurnEnd(conversationId)
+        )
           return this.steer(delivery);
-        // 自动重试倒计时里没有活轮可插：排到下一轮，不打断重试
+        // 重试倒计时或已 idle 待结算时没有活轮可插：排到下一轮。
         delivery.queueIfBusy = true;
       }
       if (
@@ -941,6 +947,10 @@ export class BotSessionHost {
     return binding;
   }
 
+  private awaitingTurnEnd(conversationId: string): boolean {
+    return Boolean(this.slots.get(conversationId)?.sawRunning) && !this.running.has(conversationId);
+  }
+
   private turnActive(conversationId: string): boolean {
     return (
       this.slots.has(conversationId) ||
@@ -1079,11 +1089,11 @@ export class BotSessionHost {
       const task = `${previous ?? ''}\n${delivery.text}`;
       this.tasks.set(delivery.conversationId, previous && task.length <= 2000 ? task : '');
       this.retryTasks.set(delivery.conversationId, this.tasks.get(delivery.conversationId)!);
-      this.deliverySent(delivery);
+      this.deliverySent(delivery, true);
       this.pump();
     }
     return sent.ok
-      ? { ok: true, conversationId: delivery.conversationId }
+      ? { ok: true, conversationId: delivery.conversationId, steered: true }
       : { ok: false, error: sent.error ?? 'steer-failed' };
   }
 
@@ -1293,11 +1303,15 @@ export class BotSessionHost {
     });
   }
 
-  private deliverySent(delivery: Delivery): void {
+  private deliverySent(delivery: Delivery, steered?: true): void {
     if (!delivery.deliveryId) return;
     this.rememberDelivery(delivery.conversationId, delivery.deliveryId, 'sent');
     for (const listener of this.sentListeners)
-      listener({ conversationId: delivery.conversationId, deliveryId: delivery.deliveryId });
+      listener({
+        conversationId: delivery.conversationId,
+        deliveryId: delivery.deliveryId,
+        ...(steered ? { steered } : {}),
+      });
   }
 
   private rememberDelivery(
@@ -1412,7 +1426,23 @@ export class BotSessionHost {
       touched.add(next.chatId);
       if (active) {
         // 走同一把锁：同会话前一条可能还在 spawn
+        this.preparing.add(next);
         void this.withLock(next.conversationId, async () => {
+          this.preparing.delete(next);
+          if (
+            next.epoch === (this.epochs.get(next.conversationId) ?? 0) &&
+            !this.stopping.has(next.conversationId) &&
+            (!this.turnActive(next.conversationId) ||
+              this.retrying.has(next.conversationId) ||
+              this.awaitingTurnEnd(next.conversationId))
+          ) {
+            // 等锁期间活轮可能已结束；重新按空位/FIFO 准入，不能向空闲会话 steer。
+            if (this.retrying.has(next.conversationId) || this.awaitingTurnEnd(next.conversationId))
+              next.queueIfBusy = true;
+            this.enqueue(next);
+            this.pump();
+            return;
+          }
           const steered = this.steer(next);
           if (!steered.ok)
             this.finish(
@@ -1469,7 +1499,8 @@ export class BotSessionHost {
       if (this.runningCount() >= this.maxRunning) return false;
       return this.admitMember(item);
     }
-    if (this.retrying.has(item.conversationId)) item.queueIfBusy = true;
+    if (this.retrying.has(item.conversationId) || this.awaitingTurnEnd(item.conversationId))
+      item.queueIfBusy = true;
     return !item.queueIfBusy;
   }
 

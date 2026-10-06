@@ -151,7 +151,10 @@ export class GroupChatService {
   private rounds = new Map<string, Round>();
   private locks = new Map<string, Promise<unknown>>();
   private autonomous = new Map<string, AutonomousReply[]>();
-  private readonly cursors = new Map<string, { chatId: string; botId: string; cursor: number }>();
+  private readonly cursors = new Map<
+    string,
+    { chatId: string; botId: string; cursor: number; steered?: true }
+  >();
   /** 刚压缩过、下次投递需补 <group-state> 的成员会话；只在内存，重启丢失可接受 */
   private readonly compacted = new Map<string, { chatId: string; botId: string }>();
   private readonly unsubscribe: () => void;
@@ -197,6 +200,11 @@ export class GroupChatService {
       const pending = this.cursors.get(event.deliveryId);
       if (!pending) return;
       this.cursors.delete(event.deliveryId);
+      if (event.steered) {
+        pending.steered = true;
+        if (this.round(pending.chatId).parallel.delete(event.deliveryId))
+          this.persist(pending.chatId);
+      }
       deps.chats.update(pending.chatId, (chat) => {
         const session = chat.sessions[pending.botId];
         if (session?.conversationId === event.conversationId)
@@ -361,7 +369,7 @@ export class GroupChatService {
       }
       const decision = onHumanMessage(round.state, chat, members, entry);
       if (decision.action === 'steer') {
-        await this.steer(chat, round.state.current!, options);
+        await this.deliverParallel(chat, [round.state.current!], options);
       } else if (decision.action === 'parallel') {
         await this.deliverParallel(chat, decision.targets, options);
       } else if (
@@ -643,22 +651,7 @@ export class GroupChatService {
     }
     const targets = [picked.current, ...picked.queue];
     if (decision.noWriter) this.system(chat.id, '没有能改代码或执行命令的成员，交给群主处理');
-    if (targets.length === 1 && targets[0] === this.round(chat.id).state.current) {
-      await this.steer(chat, targets[0], options);
-      return;
-    }
     await this.deliverParallel(chat, targets, options, decision);
-  }
-
-  private async steer(chat: BotChat, botId: BotId, options: BotDeliverOptions): Promise<void> {
-    const deliveryId = options.deliveryId ?? randomUUID();
-    const sent = await this.deliver(chat, botId, { ...options, deliveryId });
-    if (!sent.ok) this.system(chat.id, `插话投递失败：${sent.error}`);
-    else if (sent.queued && !sent.duplicate) {
-      // 重试或主投递尚在排队时，宿主无法 steer；记录独立结束事件。
-      this.round(chat.id).parallel.set(deliveryId, { botId, conversationId: sent.conversationId });
-      this.system(chat.id, `${this.deps.bots.get(botId)?.name ?? botId} 正在排队，等待可用会话`);
-    }
   }
 
   private async deliverParallel(
@@ -671,18 +664,19 @@ export class GroupChatService {
     const smart = targets.filter((botId) => decision?.ids.includes(botId));
     const markSmart = smart.length > 1 || (smart.length === 1 && smart[0] !== chat.bossBotId);
     for (const botId of targets) {
-      if (botId === round.state.current) continue;
       const deliveryId = randomUUID();
       const sent = await this.deliver(
         chat,
         botId,
-        { ...options, deliveryId, queueIfBusy: true },
+        { ...options, deliveryId },
         decision?.intent === 'build' && decision.ids.length === 1 && decision.ids[0] === botId
           ? SMART_ROUTE_BUILD_NOTE
           : undefined
       );
       const name = this.deps.bots.get(botId)?.name ?? botId;
       if (sent.ok && !sent.duplicate) {
+        // 以宿主在会话锁内选择的投递方式为准；群的 current 可能已过期。
+        if (sent.steered) continue;
         round.parallel.set(deliveryId, {
           botId,
           conversationId: sent.conversationId,
@@ -994,7 +988,12 @@ export class GroupChatService {
       .join('\n');
     let result: BotDeliverResult;
     const deliveryId = options?.deliveryId ?? randomUUID();
-    this.cursors.set(deliveryId, { chatId: chat.id, botId, cursor: delta.cursor });
+    const pending: { chatId: string; botId: string; cursor: number; steered?: true } = {
+      chatId: chat.id,
+      botId,
+      cursor: delta.cursor,
+    };
+    this.cursors.set(deliveryId, pending);
     try {
       result = await this.deps.host.deliver(chat.id, botId, text, { ...options, deliveryId });
     } catch (error) {
@@ -1015,7 +1014,8 @@ export class GroupChatService {
     });
     if (!result.ok || !result.queued) this.cursors.delete(deliveryId);
     if (compacted && result.ok && !result.duplicate) this.compacted.delete(sessionId);
-    return result;
+    // 排队任务可能在 deliver 返回前已被 pump 转为 steer。
+    return result.ok && pending.steered ? { ...result, steered: true } : result;
   }
 
   dispose(): void {
