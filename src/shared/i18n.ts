@@ -2259,6 +2259,10 @@ export const zhTranslations: Record<string, string> = {
   'Its messages and member sessions are removed; replies in progress are stopped. Group notes, memory and the task board stay.':
     '话题里的消息和成员会话会被删除，正在进行的回复会停止。群笔记、群记忆和任务看板保留。',
   'Could not create topic': '无法新建话题',
+  'All topics ({{n}})': '全部话题（{{n}}）',
+  'Search topics...': '搜索话题...',
+  'No matching topics': '没有匹配的话题',
+  Unread: '未读',
   'Earlier conversation · {{n}} messages': '上一段对话 · {{n}} 条',
   'Collapse earlier conversation': '收起上一段对话',
   'Create members with their own persona, model and tools, then chat with them alone or in groups.':

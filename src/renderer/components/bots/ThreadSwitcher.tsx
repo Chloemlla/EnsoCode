@@ -1,6 +1,6 @@
-import { chatThreads } from '@shared/bots/threads';
+import { chatThreads, filterThreads, menuThreads, type ThreadFilter } from '@shared/bots/threads';
 import type { BotChat } from '@shared/types/bot';
-import { Check, ChevronDown, MessageSquarePlus, Pencil, Trash2 } from 'lucide-react';
+import { Check, ChevronDown, List, MessageSquarePlus, Pencil, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
 import {
   Menu,
   MenuGroup,
@@ -22,6 +23,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from '@/components/ui/menu';
+import { Tabs, TabsList, TabsTab } from '@/components/ui/tabs';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import { formatRelativeTime } from '@/lib/time';
@@ -34,32 +36,54 @@ import { chatErrorText } from './botText';
 const BUTTON =
   'flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50';
 
-/** 群话题切换：列出根群与其话题，新建 / 改名 / 删除；切走的话题在后台照常运行 */
+interface ThreadEntry {
+  id: string;
+  chat: BotChat;
+  title: string;
+  preview: string;
+  activityAt: number;
+  unread: boolean;
+  running: boolean;
+}
+
+/** 群话题切换：下拉列常用话题，其余进「全部话题」弹窗；切走的话题在后台照常运行 */
 export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotChat }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const chats = useBotsStore((s) => s.chats);
   const sessions = useBotsStore((s) => s.sessions);
   const timelines = useBotsStore((s) => s.timelines);
   const queue = useBotsStore((s) => s.queue);
   const reads = useBotsStore((s) => s.reads);
   const bots = useBotsStore((s) => s.bots);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const archived = group.archivedAt !== undefined;
   const names = useMemo(() => Object.fromEntries(bots.map((bot) => [bot.id, bot.name])), [bots]);
-  const threads = chatThreads(chats, group).map((chat) => {
-    const summary = chatSummary(chat, { sessions, timeline: timelines[chat.id], queue, names });
-    return { chat, summary, unread: isUnread(summary.marker, reads[summary.key]) };
-  });
   const label = (chat: BotChat) =>
     chat.threadTitle ?? (chat.parentId ? t('New topic') : t('Main topic'));
+  const entries: ThreadEntry[] = chatThreads(chats, group).map((chat) => {
+    const summary = chatSummary(chat, { sessions, timeline: timelines[chat.id], queue, names });
+    return {
+      id: chat.id,
+      chat,
+      title: label(chat),
+      preview: summary.preview,
+      activityAt: Math.max(summary.activityAt, chat.createdAt),
+      unread: chat.id !== thread.id && isUnread(summary.marker, reads[summary.key]),
+      running: summary.running,
+    };
+  });
+  const shown = menuThreads(entries, { currentId: thread.id, rootId: group.id });
+  const hidden = entries.length - shown.length;
+  const open = (id: string) => useBotsStore.getState().openThread(group.id, id);
 
   const create = async () => {
     if (!(await useBotsStore.getState().createThread(group.id)))
       addToast({ type: 'error', title: t('Could not create topic') });
   };
-  const remove = async () => {
-    const result = await window.electronAPI.bots.deleteThread(thread.id);
+  const remove = async (id: string) => {
+    const result = await window.electronAPI.bots.deleteThread(id);
     if (!result.ok) addToast({ type: 'error', title: chatErrorText(result.error, t) });
     void useBotsStore.getState().refreshChats();
   };
@@ -69,7 +93,7 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
       <Menu>
         <MenuTrigger className={cn(BUTTON, 'max-w-56')}>
           <span className="truncate">{label(thread)}</span>
-          {threads.some((item) => item.chat.id !== thread.id && item.unread) && (
+          {entries.some((entry) => entry.unread) && (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-info" />
           )}
           <ChevronDown className="h-3.5 w-3.5 shrink-0" />
@@ -77,36 +101,34 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
         <MenuPopup align="end" className="w-72">
           <MenuGroup>
             <MenuGroupLabel>{t('Topics')}</MenuGroupLabel>
-            {threads.map(({ chat, summary, unread }) => (
-              <MenuItem
-                key={chat.id}
-                onClick={() => useBotsStore.getState().openThread(group.id, chat.id)}
-              >
-                <Check className={cn(chat.id !== thread.id && 'invisible')} />
-                <span className="min-w-0 flex-1 truncate">{label(chat)}</span>
-                {summary.running && <span className="h-1.5 w-1.5 rounded-full bg-warning" />}
-                {unread && chat.id !== thread.id && (
-                  <span className="h-1.5 w-1.5 rounded-full bg-info" />
-                )}
-                {summary.activityAt > 0 && (
-                  <span className="text-muted-foreground text-xs">
-                    {formatRelativeTime(summary.activityAt, locale)}
-                  </span>
-                )}
+            {shown.map((entry) => (
+              <MenuItem key={entry.id} onClick={() => open(entry.id)}>
+                <Check className={cn(entry.id !== thread.id && 'invisible')} />
+                <span className="min-w-0 flex-1 truncate">{entry.title}</span>
+                <ThreadMarks entry={entry} />
               </MenuItem>
             ))}
           </MenuGroup>
           <MenuSeparator />
+          {hidden > 0 && (
+            <MenuItem onClick={() => setListOpen(true)}>
+              <List />
+              {t('All topics ({{n}})', { n: entries.length })}
+            </MenuItem>
+          )}
           <MenuItem disabled={archived} onClick={() => void create()}>
             <MessageSquarePlus />
             {t('New topic')}
           </MenuItem>
-          <MenuItem disabled={archived} onClick={() => setRenaming(label(thread))}>
+          <MenuItem
+            disabled={archived}
+            onClick={() => setRenaming({ id: thread.id, title: label(thread) })}
+          >
             <Pencil />
             {t('Rename topic')}
           </MenuItem>
           {thread.parentId && (
-            <MenuItem variant="destructive" onClick={() => setDeleting(true)}>
+            <MenuItem variant="destructive" onClick={() => setDeleting(thread.id)}>
               <Trash2 />
               {t('Delete topic')}
             </MenuItem>
@@ -117,22 +139,38 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
         <MessageSquarePlus className="h-3.5 w-3.5" />
         {t('New topic')}
       </button>
+      {listOpen && (
+        <ThreadsDialog
+          entries={entries}
+          currentId={thread.id}
+          archived={archived}
+          onClose={() => setListOpen(false)}
+          onOpen={(id) => {
+            open(id);
+            setListOpen(false);
+          }}
+          onRename={(entry) => setRenaming({ id: entry.id, title: entry.title })}
+          onDelete={(entry) => setDeleting(entry.id)}
+        />
+      )}
       <ConfirmDialog
-        open={deleting}
-        onOpenChange={setDeleting}
+        open={deleting !== null}
+        onOpenChange={(value) => !value && setDeleting(null)}
         title={t('Delete this topic?')}
         description={t(
           'Its messages and member sessions are removed; replies in progress are stopped. Group notes, memory and the task board stay.'
         )}
         confirmLabel={t('Delete')}
-        onConfirm={() => void remove()}
+        onConfirm={() => deleting && void remove(deleting)}
+        zIndexLevel={listOpen ? 'nested' : 'base'}
       />
       {renaming !== null && (
         <RenameDialog
-          initial={renaming}
+          initial={renaming.title}
+          nested={listOpen}
           onClose={() => setRenaming(null)}
           onSave={async (title) => {
-            const result = await window.electronAPI.bots.renameThread(thread.id, title);
+            const result = await window.electronAPI.bots.renameThread(renaming.id, title);
             if (!result.ok) {
               addToast({ type: 'error', title: chatErrorText(result.error, t) });
               return;
@@ -146,12 +184,147 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
   );
 }
 
+function ThreadMarks({ entry }: { entry: ThreadEntry }) {
+  const { locale } = useI18n();
+  return (
+    <>
+      {entry.running && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" />}
+      {entry.unread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-info" />}
+      <span className="shrink-0 text-muted-foreground text-xs">
+        {formatRelativeTime(entry.activityAt, locale)}
+      </span>
+    </>
+  );
+}
+
+function ThreadsDialog({
+  entries,
+  currentId,
+  archived,
+  onClose,
+  onOpen,
+  onRename,
+  onDelete,
+}: {
+  entries: ThreadEntry[];
+  currentId: string;
+  archived: boolean;
+  onClose: () => void;
+  onOpen: (id: string) => void;
+  onRename: (entry: ThreadEntry) => void;
+  onDelete: (entry: ThreadEntry) => void;
+}) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<ThreadFilter>('all');
+  const shown = filterThreads(entries, query, filter);
+  const count = (value: ThreadFilter) => filterThreads(entries, '', value).length;
+  const action =
+    'shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100';
+  return (
+    <Dialog open onOpenChange={(value) => !value && onClose()}>
+      <DialogContent className="h-[min(40rem,85vh)] max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-baseline gap-2">
+            {t('Topics')}
+            <span className="font-sans text-muted-foreground text-sm tabular-nums">
+              {entries.length}
+            </span>
+          </DialogTitle>
+          <InputGroup data-size="sm" className="mt-1">
+            <InputGroupAddon>
+              <Search />
+            </InputGroupAddon>
+            <InputGroupInput
+              autoFocus
+              value={query}
+              placeholder={t('Search topics...')}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </InputGroup>
+          <Tabs value={filter} onValueChange={(value) => setFilter(value as ThreadFilter)}>
+            <TabsList>
+              <TabsTab value="all">{t('All')}</TabsTab>
+              <TabsTab value="unread">
+                {t('Unread')}
+                {count('unread') > 0 && <span className="tabular-nums">{count('unread')}</span>}
+              </TabsTab>
+              <TabsTab value="running">
+                {t('In progress')}
+                {count('running') > 0 && <span className="tabular-nums">{count('running')}</span>}
+              </TabsTab>
+            </TabsList>
+          </Tabs>
+        </DialogHeader>
+        <DialogPanel className="flex flex-col gap-y-0.5 border-t pt-3!">
+          {shown.length === 0 && (
+            <p className="py-10 text-center text-muted-foreground text-sm">
+              {t('No matching topics')}
+            </p>
+          )}
+          {shown.map((entry) => (
+            <div
+              key={entry.id}
+              className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/60"
+            >
+              <button
+                type="button"
+                onClick={() => onOpen(entry.id)}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <Check
+                  className={cn('h-3.5 w-3.5 shrink-0', entry.id !== currentId && 'invisible')}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm">{entry.title}</span>
+                  {entry.preview && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {entry.preview}
+                    </span>
+                  )}
+                </span>
+                <ThreadMarks entry={entry} />
+              </button>
+              {!archived && (
+                <button
+                  type="button"
+                  className={action}
+                  onClick={() => onRename(entry)}
+                  title={t('Rename topic')}
+                  aria-label={t('Rename topic')}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {entry.chat.parentId ? (
+                <button
+                  type="button"
+                  className={cn(action, 'hover:text-destructive')}
+                  onClick={() => onDelete(entry)}
+                  title={t('Delete topic')}
+                  aria-label={t('Delete topic')}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <span className="w-5.5 shrink-0" aria-hidden />
+              )}
+            </div>
+          ))}
+        </DialogPanel>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function RenameDialog({
   initial,
+  nested,
   onClose,
   onSave,
 }: {
   initial: string;
+  nested: boolean;
   onClose: () => void;
   onSave: (title: string) => Promise<void>;
 }) {
@@ -162,7 +335,7 @@ function RenameDialog({
   };
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-w-sm" zIndexLevel={nested ? 'nested' : 'base'}>
         <DialogHeader>
           <DialogTitle>{t('Rename topic')}</DialogTitle>
         </DialogHeader>
