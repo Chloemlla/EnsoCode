@@ -55,7 +55,10 @@ interface Round {
   pending: HumanEntry[];
   options?: BotDeliverOptions;
   generation: number;
-  stopping?: string;
+  deliveryId?: string;
+  /** 人类追加 @ 的独立投递，不属于 current 的接力代际 */
+  parallel: Map<string, { botId: BotId; conversationId: string }>;
+  stopping?: BotId[];
   /** 进行中的智能选人；abort 同时充当本次结果的身份 */
   routing?: { entry: HumanEntry; abort: AbortController };
   /** 本轮由智能选人选出、尚未发言的成员；其发言标 routedBy */
@@ -152,6 +155,7 @@ export class GroupChatService {
     for (const chat of deps.chats.list()) {
       if (chat.kind !== 'group') continue;
       const saved = readJson(this.file(chat.id));
+      const interrupted = new Set<string>();
       if (
         saved &&
         typeof saved === 'object' &&
@@ -159,14 +163,25 @@ export class GroupChatService {
         saved.state &&
         typeof saved.state === 'object' &&
         'current' in saved.state &&
-        saved.state.current
+        typeof saved.state.current === 'string'
       ) {
-        const botId = typeof saved.state.current === 'string' ? saved.state.current : undefined;
-        const conversationId = botId ? chat.sessions[botId]?.conversationId : undefined;
+        interrupted.add(saved.state.current);
+      }
+      if (
+        saved &&
+        typeof saved === 'object' &&
+        'parallel' in saved &&
+        Array.isArray(saved.parallel)
+      ) {
+        for (const botId of saved.parallel)
+          if (typeof botId === 'string' && chat.members.includes(botId)) interrupted.add(botId);
+      }
+      for (const botId of interrupted) {
+        const conversationId = chat.sessions[botId]?.conversationId;
         this.system(
           chat.id,
           '回复被中断',
-          botId && conversationId ? { botId, conversationId, mode: 'resume' } : undefined
+          conversationId ? { botId, conversationId, mode: 'resume' } : undefined
         );
       }
       this.persist(chat.id);
@@ -210,7 +225,13 @@ export class GroupChatService {
       if (this.disposed || chat?.kind !== 'group' || chat.archivedAt !== undefined)
         return { ok: false, error: 'group-unavailable' };
       const round = this.round(chatId);
-      if (round.state.current || round.routing || round.stopping || round.pending.length)
+      if (
+        round.state.current ||
+        round.parallel.size ||
+        round.routing ||
+        round.stopping ||
+        round.pending.length
+      )
         return { ok: false, error: 'session-busy' };
       const entry = this.deps.chats.findEntry(chatId, entryId);
       const entries = this.deps.chats.readAfter(chatId, chat.epochSeq ?? 0);
@@ -232,6 +253,7 @@ export class GroupChatService {
       round.state = { ...empty(), current: botId, turnsByBot: { [botId]: 1 } };
       round.options = undefined;
       round.retrying = true;
+      delete round.deliveryId;
       round.generation++;
       this.persist(chatId);
       try {
@@ -330,6 +352,26 @@ export class GroupChatService {
       if (decision.action === 'steer') {
         const sent = await this.deliver(chat, round.state.current!, options);
         if (!sent.ok) this.system(chatId, `插话投递失败：${sent.error}`);
+      } else if (decision.action === 'parallel') {
+        for (const botId of decision.targets) {
+          const deliveryId = randomUUID();
+          const sent = await this.deliver(chat, botId, {
+            ...options,
+            deliveryId,
+            queueIfBusy: true,
+          });
+          const name = this.deps.bots.get(botId)?.name ?? botId;
+          if (sent.ok && !sent.duplicate) {
+            round.parallel.set(deliveryId, { botId, conversationId: sent.conversationId });
+            if (sent.queued) this.system(chatId, `${name} 正在排队，等待可用会话`);
+          } else {
+            this.system(
+              chatId,
+              sent.ok ? `${name} 的投递已处理过，本次未发出` : `${name} 投递失败：${sent.error}`,
+              sent.ok ? undefined : { botId, mode: 'deliver' }
+            );
+          }
+        }
       } else if (decision.action === 'restart-after-current') {
         round.pending.push(entry);
         round.options = options;
@@ -377,9 +419,16 @@ export class GroupChatService {
       if (this.deps.chats.get(chatId)?.kind !== 'group')
         return { ok: false, error: 'group-not-found' };
       const round = this.round(chatId);
-      const current = round.state.current ?? round.stopping;
+      const targets = [
+        ...new Set([
+          ...(round.stopping ?? []),
+          ...(round.state.current ? [round.state.current] : []),
+          ...Array.from(round.parallel.values(), (delivery) => delivery.botId),
+        ]),
+      ];
       round.generation++;
       round.state = empty();
+      round.parallel.clear();
       round.pending = [];
       delete round.batch;
       delete round.retrying;
@@ -389,10 +438,13 @@ export class GroupChatService {
         job.resolve({ ok: false, error: 'chat-stopped' });
       this.autonomous.delete(chatId);
       this.persist(chatId);
-      if (current) {
-        round.stopping = current;
+      if (targets.length) {
+        round.stopping = targets;
         try {
-          await this.deps.host.stopTurn(chatId, current);
+          while (targets.length) {
+            await this.deps.host.stopTurn(chatId, targets[0]);
+            targets.shift();
+          }
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : 'stop-failed' };
         }
@@ -407,14 +459,29 @@ export class GroupChatService {
     const chat = event.chatId ? this.deps.chats.get(event.chatId) : undefined;
     if (chat?.kind !== 'group') return;
     const round = this.round(chat.id);
+    const parallel = event.deliveryId ? round.parallel.get(event.deliveryId) : undefined;
     if (
-      generation !== round.generation ||
-      round.state.current !== event.botId ||
-      chat.sessions[event.botId]?.conversationId !== event.conversationId
+      parallel &&
+      (parallel.botId !== event.botId || parallel.conversationId !== event.conversationId)
     )
       return;
+    if (parallel && event.deliveryId) round.parallel.delete(event.deliveryId);
+    if (
+      (!parallel &&
+        (generation !== round.generation ||
+          round.state.current !== event.botId ||
+          (event.deliveryId && round.deliveryId && event.deliveryId !== round.deliveryId))) ||
+      chat.sessions[event.botId]?.conversationId !== event.conversationId
+    ) {
+      if (parallel) {
+        this.persist(chat.id);
+        this.settleBatch(chat.id);
+      }
+      return;
+    }
     let seq: number | undefined;
-    const summarized = round.summary?.botId === event.botId && round.summary.note === undefined;
+    const summarized =
+      !parallel && round.summary?.botId === event.botId && round.summary.note === undefined;
     if (summarized) delete round.summary;
     if (!event.ok) {
       const name = this.deps.bots.get(event.botId)?.name ?? '已删除成员';
@@ -428,7 +495,7 @@ export class GroupChatService {
         { botId: event.botId, conversationId: event.conversationId, mode: 'resume' }
       );
     } else if (!isSkipReply(event.text) && event.turnId) {
-      const smart = round.smartPicked?.includes(event.botId) ?? false;
+      const smart = !parallel && (round.smartPicked?.includes(event.botId) ?? false);
       seq = this.append(chat.id, {
         kind: 'bot',
         botId: event.botId,
@@ -447,8 +514,13 @@ export class GroupChatService {
         at: Date.now(),
       })?.seq;
     }
-    round.smartPicked = round.smartPicked?.filter((botId) => botId !== event.botId);
     this.recordBatch(round, event);
+    if (parallel && event.deliveryId) {
+      this.persist(chat.id);
+      this.settleBatch(chat.id);
+      return;
+    }
+    round.smartPicked = round.smartPicked?.filter((botId) => botId !== event.botId);
     const retrying = round.retrying;
     delete round.retrying;
     if (retrying) round.state = empty();
@@ -488,6 +560,7 @@ export class GroupChatService {
     if (
       !batch ||
       round.state.current ||
+      round.parallel.size > 0 ||
       round.routing ||
       round.pending.length > 0 ||
       this.autonomous.get(chatId)?.length
@@ -677,9 +750,16 @@ export class GroupChatService {
         this.clearSmart(round);
         round.state = { ...empty(), current: job.botId, turnsByBot: { [job.botId]: 1 } };
         round.options = { ...job.options, queueIfBusy: true };
+        round.deliveryId = round.options.deliveryId ?? randomUUID();
         round.generation++;
         // 委派结果 / 例行任务不经路由，也要补上该成员没看过的群消息，否则会基于过时群况回复
-        const sent = await this.deliver(chat, job.botId, round.options, undefined, job.text);
+        const sent = await this.deliver(
+          chat,
+          job.botId,
+          { ...round.options, deliveryId: round.deliveryId },
+          undefined,
+          job.text
+        );
         job.resolve(sent);
         round.options = relayOptions(round.options);
         if (sent.ok && !sent.duplicate) {
@@ -712,7 +792,19 @@ export class GroupChatService {
       if (summary !== undefined) round.summary = { botId };
       const note = round.buildNote === botId ? SMART_ROUTE_BUILD_NOTE : summary;
       delete round.buildNote;
-      const sent = await this.deliver(chat, botId, round.options, note);
+      round.deliveryId = round.options?.deliveryId ?? randomUUID();
+      const sent = await this.deliver(
+        chat,
+        botId,
+        {
+          ...round.options,
+          deliveryId: round.deliveryId,
+          ...(Array.from(round.parallel.values()).some((delivery) => delivery.botId === botId)
+            ? { queueIfBusy: true }
+            : {}),
+        },
+        note
+      );
       round.options = relayOptions(round.options);
       if (sent.ok && !sent.duplicate) return;
       if (round.summary?.botId === botId) delete round.summary;
@@ -767,12 +859,17 @@ export class GroupChatService {
     lead?: string
   ) {
     const cursor = chat.sessions[botId]?.cursor ?? 0;
+    // 排队尚未提交水位，但后续投递不能再次携带已排队的消息。
+    let queuedCursor = cursor;
+    for (const pending of this.cursors.values())
+      if (pending.chatId === chat.id && pending.botId === botId)
+        queuedCursor = Math.max(queuedCursor, pending.cursor);
     const floor = chat.epochSeq ?? 0;
-    const entries = this.deps.chats.readAfter(chat.id, Math.max(cursor, floor));
+    const entries = this.deps.chats.readAfter(chat.id, Math.max(queuedCursor, floor));
     const delta = buildGroupDelta({
       entries,
       botId,
-      cursor,
+      cursor: queuedCursor,
       floor,
       members: this.members(chat),
       chatTitle: chat.title,
@@ -807,7 +904,10 @@ export class GroupChatService {
     this.deps.chats.update(chat.id, (draft) => {
       const session = draft.sessions[botId];
       if (session)
-        session.cursor = result.ok && !result.queued && !result.duplicate ? delta.cursor : cursor;
+        session.cursor = Math.max(
+          session.conversationId === sessionId ? session.cursor : cursor,
+          result.ok && !result.queued && !result.duplicate ? delta.cursor : cursor
+        );
       return draft;
     });
     if (!result.ok || !result.queued) this.cursors.delete(deliveryId);
@@ -823,7 +923,7 @@ export class GroupChatService {
       for (const job of this.autonomous.get(id) ?? [])
         job.resolve({ ok: false, error: 'canceled' });
       this.cancelRouting(this.round(id));
-      this.rounds.set(id, { state: empty(), pending: [], generation: 0 });
+      this.rounds.set(id, { state: empty(), pending: [], generation: 0, parallel: new Map() });
       this.persist(id);
     }
     this.rounds.clear();
@@ -852,7 +952,7 @@ export class GroupChatService {
   private round(id: string): Round {
     let round = this.rounds.get(id);
     if (!round) {
-      round = { state: empty(), pending: [], generation: 0 };
+      round = { state: empty(), pending: [], generation: 0, parallel: new Map() };
       this.rounds.set(id, round);
     }
     return round;
@@ -862,8 +962,13 @@ export class GroupChatService {
   }
   private persist(id: string): void {
     if (!this.deps.chats.get(id)) return;
-    const { state, pending } = this.round(id);
-    writeJsonAtomic(this.file(id), { version: 1, state, pending });
+    const { state, pending, parallel } = this.round(id);
+    writeJsonAtomic(this.file(id), {
+      version: 1,
+      state,
+      pending,
+      parallel: [...new Set(Array.from(parallel.values(), (delivery) => delivery.botId))],
+    });
     this.deps.emit({ kind: 'chat', chatId: id });
   }
   private append(id: string, entry: GroupEntryInput) {

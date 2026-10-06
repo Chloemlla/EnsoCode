@@ -35,8 +35,9 @@ const host = {
   },
 };
 const entries = () => chats.readEntries(id);
-const done = async (botId: string, text: string, ok = true) => {
+const done = async (botId: string, text: string, ok = true, deliveryId?: string) => {
   finish({
+    deliveryId,
     chatId: id,
     botId,
     conversationId: botId,
@@ -436,7 +437,7 @@ describe('all-skipped human rounds', () => {
 
   it('starts a pending human message without announcing a discarded fallback', async () => {
     await group.send(id, '@Bob old');
-    await group.send(id, '@Alice new');
+    await group.send(id, 'new');
     await done(b, '[skip]');
     expect(targets()).toEqual([b, a]);
     expect(notices()).toEqual([]);
@@ -489,16 +490,16 @@ it('steers only current mentions and restarts with merged pending humans', async
   await group.send(id, '@Alice detail');
   expect(deliver.mock.calls[1][2]).toContain('detail');
   expect(group.state(id)).toMatchObject({ pendingHuman: false });
-  await group.send(id, '@Bob next');
+  await group.send(id, 'next');
   await group.send(id, 'another');
   expect(deliver).toHaveBeenCalledTimes(2);
   expect(group.state(id)).toMatchObject({ pendingHuman: true });
   await done(a, '@Alice ignored');
   expect(group.state(id)).toMatchObject({
-    current: b,
+    current: a,
     queue: [],
     hops: 0,
-    turnsByBot: { [b]: 1 },
+    turnsByBot: { [a]: 1 },
     pendingHuman: false,
   });
 });
@@ -559,13 +560,179 @@ it('rolls back a newly created session cursor when delivery fails', async () => 
   expect(group.state(id)).toMatchObject({ current: b });
 });
 
-it('serializes simultaneous human messages without starting two members', async () => {
+it('串行归并同时到达的人类消息，但被 @ 的其他成员立即收到投递', async () => {
   await Promise.all([group.send(id, '@Alice first'), group.send(id, '@Bob second')]);
-  expect(deliver).toHaveBeenCalledTimes(1);
-  expect(group.state(id)).toMatchObject({ current: a, pendingHuman: true });
+  expect(deliver.mock.calls.map((call) => call[1])).toEqual([a, b]);
+  expect(group.state(id)).toMatchObject({ current: a, pendingHuman: false });
   await done(a, 'done');
-  expect(group.state(id)).toMatchObject({ current: b });
+  expect(group.state(id)).toMatchObject({ current: null });
+  expect(deliver).toHaveBeenCalledTimes(2);
   expect(entries().map((e) => e.seq)).toEqual([1, 2, 3]);
+});
+
+it.each([true, false])(
+  '并行回复先结束=%s：两人都写入时间线，新消息不重复投递也不接力',
+  async (parallelFirst) => {
+    await group.send(id, '@Alice first');
+    await group.send(id, '@Alice @Bob second');
+    expect(deliver.mock.calls.map((call) => call[1])).toEqual([a, b]);
+    const parallelId = deliver.mock.calls[1][3].deliveryId;
+    expect(deliver.mock.calls[1][2]).toContain('second');
+    expect(group.state(id)).toMatchObject({ current: a, pendingHuman: false });
+    expect(stopTurn).not.toHaveBeenCalled();
+    if (parallelFirst) {
+      await done(b, 'parallel @Alice', true, parallelId);
+      expect(group.state(id)).toMatchObject({ current: a });
+      await done(a, 'primary');
+    } else {
+      await done(a, 'primary');
+      await done(b, 'parallel @Alice', true, parallelId);
+    }
+    expect(
+      entries()
+        .filter((entry) => entry.kind === 'bot')
+        .map((entry) => entry.text)
+        .sort()
+    ).toEqual(['parallel @Alice', 'primary']);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(group.state(id)).toMatchObject({ current: null, pendingHuman: false });
+  }
+);
+
+it('并行成员也在原队列中时，保留队列且并行结果不能推进其后续回合', async () => {
+  await group.send(id, '@Alice @Bob first');
+  await group.send(id, '@Bob second');
+  expect(group.state(id)).toMatchObject({ current: a, queue: [b] });
+  expect(deliver).toHaveBeenCalledTimes(2);
+  const parallelId = deliver.mock.calls[1][3].deliveryId;
+  await done(a, 'primary');
+  expect(deliver).toHaveBeenCalledTimes(3);
+  expect(deliver.mock.calls[2][3]).toMatchObject({ queueIfBusy: true });
+  await done(b, 'parallel @Alice', true, parallelId);
+  expect(group.state(id)).toMatchObject({ current: b });
+  await done(b, 'queued', true, deliver.mock.calls[2][3].deliveryId);
+  expect(group.state(id)).toMatchObject({ current: null });
+  expect(deliver).toHaveBeenCalledTimes(3);
+});
+
+it('宿主达到并发上限时，保留排队投递并在时间线说明成员名字', async () => {
+  await group.send(id, '@Alice first');
+  const send = deliver.getMockImplementation()!;
+  deliver.mockImplementationOnce(async (...args) => ({ ...(await send(...args)), queued: true }));
+  await group.send(id, '@Bob second');
+  expect(deliver).toHaveBeenCalledTimes(2);
+  expect(deliver.mock.calls[1][3]).toMatchObject({ queueIfBusy: true });
+  expect(entries().at(-1)).toMatchObject({
+    kind: 'system',
+    text: expect.stringMatching(/Bob.*排队/),
+  });
+  await done(a, 'primary');
+  await done(b, 'parallel', true, deliver.mock.calls[1][3].deliveryId);
+  expect(deliver).toHaveBeenCalledTimes(2);
+  expect(entries().at(-1)).toMatchObject({ kind: 'bot', botId: b });
+});
+
+it('停止群回复会同时停止并行成员并忽略迟到结果', async () => {
+  await group.send(id, '@Alice first');
+  await group.send(id, '@Bob second');
+  expect(deliver).toHaveBeenCalledTimes(2);
+  const parallelId = deliver.mock.calls[1][3].deliveryId;
+  await group.stop(id);
+  expect(stopTurn.mock.calls).toEqual([
+    [id, a],
+    [id, b],
+  ]);
+  await done(b, 'late', true, parallelId);
+  expect(entries().filter((entry) => entry.kind === 'bot')).toEqual([]);
+});
+
+it('并行投递失败有明确反馈，原回复正常结束且不重投失败消息', async () => {
+  await group.send(id, '@Alice first');
+  deliver.mockResolvedValueOnce({ ok: false, error: 'offline' });
+  await group.send(id, '@Bob second');
+  expect(entries().at(-1)).toMatchObject({
+    kind: 'system',
+    text: 'Bob 投递失败：offline',
+    failure: { botId: b, mode: 'deliver' },
+  });
+  await done(a, 'primary');
+  expect(deliver).toHaveBeenCalledTimes(2);
+  expect(entries().at(-1)).toMatchObject({ kind: 'bot', botId: a });
+});
+
+it('原回复已结束而并行成员仍在回复时，不提前发送整批完成通知', async () => {
+  const settled = vi.fn();
+  group.dispose();
+  group = new GroupChatService({ bots, chats, host, emit, onBatchSettled: settled });
+  await group.send(id, '@Alice first');
+  await group.send(id, '@Bob second');
+  await done(a, 'primary');
+  expect(settled).not.toHaveBeenCalled();
+  await done(b, 'parallel', true, deliver.mock.calls[1][3].deliveryId);
+  expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ botIds: [a, b] }));
+});
+
+it('并行成员在重启后保留中断提示，不自动重放任务', async () => {
+  await group.send(id, '@Alice first');
+  await group.send(id, '@Bob second');
+  await done(a, 'primary');
+  group = new GroupChatService({ bots, chats, host, emit });
+  expect(entries().at(-1)).toMatchObject({
+    kind: 'system',
+    text: '回复被中断',
+    failure: { botId: b, conversationId: b, mode: 'resume' },
+  });
+  expect(deliver).toHaveBeenCalledTimes(2);
+});
+
+it('并行成员会话被移除后的结束事件不会永久阻塞整批结算', async () => {
+  const settled = vi.fn();
+  group.dispose();
+  group = new GroupChatService({ bots, chats, host, emit, onBatchSettled: settled });
+  await group.send(id, '@Alice first');
+  await group.send(id, '@Bob second');
+  await done(a, 'primary');
+  chats.update(id, (chat) => {
+    delete chat.sessions[b];
+    return chat;
+  });
+  await done(b, 'removed', false, deliver.mock.calls[1][3].deliveryId);
+  expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ botIds: [a] }));
+  expect(entries().filter((entry) => entry.kind === 'bot')).toHaveLength(1);
+});
+
+it('同一成员的多个排队投递不重复包含已排队的人类消息', async () => {
+  await group.send(id, '@Alice first');
+  const send = deliver.getMockImplementation()!;
+  deliver.mockImplementation(async (...args) => ({ ...(await send(...args)), queued: true }));
+  await group.send(id, '@Bob second');
+  await group.send(id, '@Bob third');
+  expect(deliver.mock.calls[1][2]).toContain('second');
+  expect(deliver.mock.calls[2][2]).toContain('third');
+  expect(deliver.mock.calls[2][2]).not.toContain('second');
+  expect(chats.get(id)!.sessions[b].cursor).toBe(0);
+});
+
+it('多次追加 @ 同一成员使用不同投递身份，迟到的重复结果不结算后续接力', async () => {
+  await group.send(id, '@Alice @Bob first');
+  await group.send(id, '@Bob second');
+  await group.send(id, '@Bob third');
+  const second = deliver.mock.calls[1][3].deliveryId;
+  const third = deliver.mock.calls[2][3].deliveryId;
+  expect(second).not.toBe(third);
+  await done(a, 'primary');
+  await done(b, 'second', true, second);
+  await done(b, 'second duplicate', true, second);
+  expect(group.state(id)).toMatchObject({ current: b });
+  await done(b, 'third', true, third);
+  expect(group.state(id)).toMatchObject({ current: b });
+  await done(b, 'relay', true, deliver.mock.calls[3][3].deliveryId);
+  expect(
+    entries()
+      .filter((entry) => entry.kind === 'bot')
+      .map((entry) => entry.text)
+  ).toEqual(['primary', 'second', 'third', 'relay']);
+  expect(deliver).toHaveBeenCalledTimes(4);
 });
 
 it('refuses a new round until a failed stop is successfully retried', async () => {

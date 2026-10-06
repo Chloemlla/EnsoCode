@@ -461,12 +461,31 @@ describe('onHumanMessage', () => {
     });
   });
 
-  it('@ 了其他人、或没有 @ 时等当前说完后重开', () => {
-    for (const text of ['@前端 @Backend', '@Backend', '换个话题']) {
-      expect(onHumanMessage(busy(), chat(), members, human(text)).action).toBe(
-        'restart-after-current'
-      );
+  it('@ 其他成员时立即投递，不改当前回复人和原队列', () => {
+    for (const text of ['@前端 @Backend', '@Backend']) {
+      const state = busy();
+      const before = structuredClone(state);
+      expect(onHumanMessage(state, chat(), members, human(text))).toEqual({
+        action: 'parallel',
+        targets: ['be'],
+      });
+      expect(state).toEqual(before);
     }
+  });
+
+  it('立即投递目标去重并排除当前、归档和群外成员', () => {
+    expect(
+      onHumanMessage(busy(), chat(), members, human('x', ['fe', 'be', 'be', 'old', 'ghost']))
+    ).toEqual({
+      action: 'parallel',
+      targets: ['be'],
+    });
+  });
+
+  it('没有 @ 时仍等当前说完后重开', () => {
+    expect(onHumanMessage(busy(), chat(), members, human('换个话题')).action).toBe(
+      'restart-after-current'
+    );
   });
 });
 
