@@ -1,7 +1,7 @@
 import { type LiveSession, liveActivity } from '@shared/bots/liveActivity';
 import type { ApprovalRequestInfo, AskRequestInfo } from '@shared/types/agent';
 import type { Delegation, GroupEntry } from '@shared/types/bot';
-import type { BotQueueItem, BotSilence } from '@shared/types/botIpc';
+import type { BotQueueItem, BotQueueReason, BotSilence } from '@shared/types/botIpc';
 import type { BrowserTabHolder } from '@shared/types/browser';
 import { isActiveDelegation } from './delegations';
 
@@ -13,7 +13,7 @@ export type PresenceWait =
   | { kind: 'approval' | 'ask'; conversationId: string; title: string }
   | { kind: 'file'; holder: string; file: string }
   | { kind: 'workspace'; holder: string }
-  | { kind: 'turn' | 'capacity' };
+  | { kind: BotQueueReason };
 
 export interface PresenceInfo {
   state: Presence;

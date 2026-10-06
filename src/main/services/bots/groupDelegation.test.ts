@@ -11,6 +11,7 @@ import { turnDelegationTargets } from './delegationBatch';
 import { DelegationService } from './delegationService';
 import { DelegationStore } from './delegationStore';
 import { GroupChatService } from './groupChat';
+import type { MemberTaskClassifier } from './memberTaskClassifier';
 
 let root: string;
 beforeEach(() => {
@@ -22,7 +23,7 @@ const settle = async () => {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-function fixture(names = ['林经理', '阿后']) {
+function fixture(names = ['林经理', '阿后'], classifyMemberTask?: MemberTaskClassifier) {
   const bots = new BotStore(join(root, 'bots'));
   // 全员只读：本文件只验证委派接力与回传，工作区写锁见 botSessionHost.lock.test
   const ids = names.map((name) => {
@@ -45,6 +46,7 @@ function fixture(names = ['林经理', '阿后']) {
     chats,
     authority,
     emit: () => {},
+    classifyMemberTask,
     runtime: {
       spawn: async () => ({ ok: true }),
       prompt: (id, text, _images, deliveryId) => {
@@ -135,7 +137,10 @@ function fixture(names = ['林经理', '阿后']) {
 }
 
 it('does not relay to a member delegated in the same turn and delivers single results across rounds', async () => {
-  const { host, groups, delegations, start, reply, to, child, conversation, ...f } = fixture();
+  const { host, groups, delegations, start, reply, to, child, conversation, ...f } = fixture(
+    undefined,
+    async () => 'parallel'
+  );
 
   // 人类消息（带 renderer 生成的 deliveryId）→ 群主林经理
   await groups.send(f.chat.id, '请让阿后把 hello.txt 改成 hello world', { deliveryId: 'human-1' });

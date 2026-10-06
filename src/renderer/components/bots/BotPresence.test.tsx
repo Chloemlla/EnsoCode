@@ -170,6 +170,23 @@ describe('MemberBusyBar', () => {
     expect(html).toContain('去处理');
   });
 
+  it.each([
+    ['member-check', '正在判断是否可并行'],
+    ['member-serial', '等待成员当前任务完成'],
+    ['member-fifo', '等待成员前序任务'],
+    ['member-stopping', '等待成员停止完成'],
+  ])('shows the fixed queue reason %s without other conversations', (reason, text) => {
+    store.state = {
+      ...store.state,
+      queue: [
+        { chatId: 'other', botId: 'b2', conversationId: 'private', reason: 'private task' },
+        { chatId: 'chat1', botId: 'b2', conversationId: 'c2', reason, position: 0 },
+      ],
+    };
+    expect(render()).toContain(text);
+    expect(render()).not.toContain('private task');
+  });
+
   it('uses the shared label on active delegation cards without changing English or queued labels', () => {
     const card = () =>
       renderToStaticMarkup(

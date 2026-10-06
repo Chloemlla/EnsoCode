@@ -8,6 +8,7 @@ import { BotStore } from './botStore';
 import { BotChatStore } from './chatStore';
 import { DelegationService } from './delegationService';
 import { DelegationStore } from './delegationStore';
+import type { MemberTaskClassifier } from './memberTaskClassifier';
 
 let root: string;
 beforeEach(() => {
@@ -18,7 +19,11 @@ afterEach(() => {
   vi.useRealTimers();
   rmSync(root, { recursive: true, force: true });
 });
-function fixture(autoStart = true, over = new Set<string>()) {
+function fixture(
+  autoStart = true,
+  over = new Set<string>(),
+  classifyMemberTask?: MemberTaskClassifier
+) {
   const bots = new BotStore(join(root, 'bots'));
   const a = bots.create({ name: 'Alice' }, []),
     b = bots.create({ name: 'Bob' }, []);
@@ -50,6 +55,7 @@ function fixture(autoStart = true, over = new Set<string>()) {
     chats,
     authority,
     emit: () => {},
+    classifyMemberTask,
     budget: { prepare: async () => {}, verdict: (botId) => (over.has(botId) ? 'tokens' : null) },
     runtime: {
       spawn: async (spec) =>
@@ -121,7 +127,7 @@ it('runs queued delegations at capacity one after the parent yields, then delive
   });
   await vi.advanceTimersByTimeAsync(0);
   expect(f.prompts).toHaveLength(1);
-  expect(f.host.queueState().map((item) => item.reason)).toEqual(['capacity', 'capacity']);
+  expect(f.host.queueState().map((item) => item.reason)).toEqual(['capacity', 'member-fifo']);
   f.finish(f.parent);
   await vi.advanceTimersByTimeAsync(0);
   for (const record of records) {
@@ -465,7 +471,7 @@ it('publishes only a delegation summary in groups without duplicating a bot mess
   restarted.dispose();
 });
 it('group new conversation: cancels non-keep delegations; kept results only land on the timeline', async () => {
-  const f = fixture();
+  const f = fixture(true, undefined, async () => 'parallel');
   f.service.dispose();
   const deliverGroupResult = vi.fn(async () => ({ ok: true as const }));
   const service = new DelegationService({ ...f.deps, deliverGroupResult });
@@ -485,6 +491,10 @@ it('group new conversation: cancels non-keep delegations; kept results only land
   const other = service.delegate(f.parent, { to: 'Bob', task: 'other chat' });
   if (!kept.ok || !drop.ok || !other.ok) throw new Error('delegate');
   await vi.advanceTimersByTimeAsync(0);
+  const otherChild = f.store.get(other.delegationId)!.childConversationId;
+  expect(f.prompts.some((prompt) => prompt.id === otherChild)).toBe(true);
+  // 异步准入后由 IPC 转发 running，更新此前排队的委派状态。
+  service.observeRunning(otherChild);
 
   service.startOver(chat.id);
   f.host.resetSessions(chat.id);
@@ -1008,8 +1018,11 @@ describe('stopping the parent turn', () => {
   });
 
   it('normal completion, errors and other turns leave delegations running', async () => {
-    const f = fixture();
+    const f = fixture(true, undefined, async () => 'parallel');
     const ids = await started(f);
+    const dropChild = f.store.get(ids.drop)!.childConversationId;
+    expect(f.prompts.some((prompt) => prompt.id === dropChild)).toBe(true);
+    f.service.observeRunning(dropChild);
     f.host.observe({
       type: 'message-upsert',
       identity: { sessionId: f.parent, generation: 'g' },

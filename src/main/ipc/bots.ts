@@ -100,6 +100,7 @@ import { BotInboxService } from '../services/bots/inbox';
 import { BotInboxStore } from '../services/bots/inboxStore';
 import { mediaFile, ScreenshotCache, sendImage, storeMedia } from '../services/bots/media';
 import { compressImage } from '../services/bots/mediaImage';
+import { createMemberTaskClassifier } from '../services/bots/memberTaskClassifier';
 import { removeBotMemorySpace } from '../services/bots/memoryCleanup';
 import { proposeRoutine } from '../services/bots/routineProposal';
 import { RoutineRunner } from '../services/bots/routineRunner';
@@ -111,7 +112,7 @@ import {
   readBotSessionBranch,
   readBotSessionMessages,
 } from '../services/bots/sessionMessages';
-import { createSmartRouter } from '../services/bots/smartRouter';
+import { createSmartRouter, type SmartRouterDeps } from '../services/bots/smartRouter';
 import { createTeam } from '../services/bots/teamCreate';
 import { browserHost } from '../services/browserHost';
 import { searchFiles } from '../services/fileSearch';
@@ -385,6 +386,31 @@ export function getBotServices(): BotServices | null {
     load: loadUsageSession,
     pricing: getUsagePricing,
   });
+  const routingDeps: SmartRouterDeps = {
+    settings: () => readSettingsState(),
+    judge: async ({ preferred, ...request }, signal) => {
+      const state = readSettingsState();
+      if (!state || !isAgentWorkerReady()) return null;
+      const candidates = await remoteCandidates(state, preferred);
+      if (candidates.length === 0 || signal.aborted) return null;
+      const requestId = randomUUID();
+      const abort = () => abortCompleteText(requestId);
+      signal.addEventListener('abort', abort, { once: true });
+      try {
+        return await completeText({ requestId, ...request, candidates, maxTokens: 1024 });
+      } finally {
+        signal.removeEventListener('abort', abort);
+      }
+    },
+    classify: async (config, question, signal) => {
+      const resolved = resolveVirtualClassifier(config, await readStoredOauthCredentialKeys());
+      if (!resolved?.classifier || !isAgentWorkerReady()) return null;
+      return classifyChoice(
+        { classifier: resolved.classifier, ...question, timeoutMs: config.timeoutMs },
+        signal
+      );
+    },
+  };
   const host = new BotSessionHost({
     bots,
     chats,
@@ -394,6 +420,7 @@ export function getBotServices(): BotServices | null {
     emit: emitBotEvent,
     notes,
     budget: usage,
+    classifyMemberTask: createMemberTaskClassifier(routingDeps),
     language: () => (String(readSettingsState()?.language ?? 'zh').startsWith('zh') ? 'zh' : 'en'),
   });
   const delegationStore = new DelegationStore(
@@ -456,31 +483,7 @@ export function getBotServices(): BotServices | null {
         .list(chatId)
         .filter((task) => task.status === 'todo' || task.status === 'doing'),
     }),
-    responder: createSmartRouter({
-      settings: () => readSettingsState(),
-      judge: async ({ preferred, ...request }, signal) => {
-        const state = readSettingsState();
-        if (!state || !isAgentWorkerReady()) return null;
-        const candidates = await remoteCandidates(state, preferred);
-        if (candidates.length === 0 || signal.aborted) return null;
-        const requestId = randomUUID();
-        const abort = () => abortCompleteText(requestId);
-        signal.addEventListener('abort', abort, { once: true });
-        try {
-          return await completeText({ requestId, ...request, candidates, maxTokens: 1024 });
-        } finally {
-          signal.removeEventListener('abort', abort);
-        }
-      },
-      classify: async (config, question, signal) => {
-        const resolved = resolveVirtualClassifier(config, await readStoredOauthCredentialKeys());
-        if (!resolved?.classifier || !isAgentWorkerReady()) return null;
-        return classifyChoice(
-          { classifier: resolved.classifier, ...question, timeoutMs: config.timeoutMs },
-          signal
-        );
-      },
-    }),
+    responder: createSmartRouter(routingDeps),
   });
   host.onDiscard((scope) => {
     if (scope.chatId) groups.discard(scope.chatId);

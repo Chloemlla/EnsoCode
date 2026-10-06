@@ -174,13 +174,18 @@ const STATE_TEXT: Record<Exclude<PairBotActivity['state'], 'queued'>, string> = 
   retrying: '重试中',
 };
 
+const QUEUE_TEXT: Record<NonNullable<PairBotActivity['reason']>, string> = {
+  turn: '排队 · 等上一轮结束',
+  capacity: '排队 · 并发已满',
+  'member-check': '排队 · 正在判断是否可并行',
+  'member-serial': '排队 · 等待成员当前任务完成',
+  'member-fifo': '排队 · 等待成员前序任务',
+  'member-stopping': '排队 · 等待成员停止完成',
+};
+
 export function activityStateText(item: PairBotActivity): string {
   if (item.state !== 'queued') return STATE_TEXT[item.state];
-  return item.reason === 'turn'
-    ? '排队 · 等上一轮结束'
-    : item.reason === 'capacity'
-      ? '排队 · 并发已满'
-      : '排队中';
+  return item.reason && Object.hasOwn(QUEUE_TEXT, item.reason) ? QUEUE_TEXT[item.reason] : '排队中';
 }
 
 /** 一行摘要：运行中的工具（名 + 参数）优先，否则状态 */

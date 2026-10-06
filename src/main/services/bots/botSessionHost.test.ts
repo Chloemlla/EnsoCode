@@ -113,11 +113,12 @@ describe('BotSessionHost live capacity', () => {
     host.setMaxRunningTurns(1);
     const alice = bot('Alice');
     const one = direct(alice.id);
-    const two = direct(alice.id);
+    const bob = bot('Bob');
+    const two = direct(bob.id);
     const first = await host.deliver(one.id, alice.id, 'first');
     if (!first.ok) throw new Error(first.error);
     await host.deliver(one.id, alice.id, 'same', { queueIfBusy: true });
-    await host.deliver(two.id, alice.id, 'other');
+    await host.deliver(two.id, bob.id, 'other');
     expect(host.queueState().map((item) => item.reason)).toEqual(['turn', 'capacity']);
     host.setMaxRunningTurns(2);
     await flush();
@@ -131,9 +132,9 @@ describe('BotSessionHost live capacity', () => {
 
   it('does not interrupt active turns on decrease and waits until below the new limit', async () => {
     host.setMaxRunningTurns(2);
-    const alice = bot('Alice');
     const ids: string[] = [];
     for (const text of ['first', 'second', 'third']) {
+      const alice = bot(text);
       const sent = await host.deliver(direct(alice.id).id, alice.id, text);
       if (!sent.ok) throw new Error(sent.error);
       ids.push(sent.conversationId);
@@ -585,6 +586,7 @@ describe('BotSessionHost.ensureSession', () => {
     expect(results.filter((event) => event.deliveryId === 'routine')).toMatchObject([
       { ok: false, error: 'canceled' },
     ]);
+    await flush();
     expect(host.runningCount()).toBe(0);
   });
 
@@ -882,6 +884,7 @@ describe('BotSessionHost cleanup', () => {
     host.resetSessions(chat.id);
     expect(chats.get(chat.id)?.sessions).toEqual({});
     expect(registry.conversation(result.conversationId)?.lifecycle).toBe('ended');
+    await flush();
     expect(runtime.released).toContain(result.conversationId);
 
     const next = host.ensureSession(chat.id, alice.id);
@@ -1548,10 +1551,10 @@ describe('BotSessionHost 私聊回退与重试', () => {
     expect(host.runningCount()).toBe(1);
     host.setMaxRunningTurns(1);
     resume();
-    expect(await retry).toEqual({ ok: false, error: 'session-busy' });
+    expect(await retry).toMatchObject({ ok: true, queued: true });
     expect(control.retries).toEqual([]);
     expect(host.runningCount()).toBe(1);
-    expect(host.isBusy(session.conversationId)).toBe(false);
+    expect(host.isBusy(session.conversationId)).toBe(true);
   });
 
   it('冷会话先恢复（只 spawn 不 prompt）再回退；运行中拒绝', async () => {

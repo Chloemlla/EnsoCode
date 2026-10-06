@@ -20,7 +20,7 @@ import {
 } from '../../../shared/virtualModels';
 import type { GroupResponderSelector } from './groupChat';
 
-interface SmartRouterDeps {
+export interface SmartRouterDeps {
   settings: () => Record<string, unknown> | undefined;
   /** 便宜模型一次性补全：preferred 排最前，其后是标题模型回退链；没有可用模型返回 null */
   judge: (

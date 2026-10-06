@@ -1,4 +1,5 @@
 import { type LiveState, type LiveStep, liveActivity } from '@shared/bots/liveActivity';
+import type { BotQueueReason } from '@shared/types/botIpc';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useI18n } from '@/i18n';
 import { toolLabel } from '@/lib/toolLabels';
@@ -11,6 +12,15 @@ const STATE_LABELS: Record<Exclude<LiveState, 'queued'>, string> = {
   typing: 'Writing reply',
   tool: 'Calling tools',
   retrying: 'Retrying',
+};
+
+const QUEUE_LABELS: Record<BotQueueReason, string> = {
+  turn: 'Queued · waiting for the current turn to finish',
+  capacity: 'Queued · concurrency limit reached',
+  'member-check': 'Queued · checking whether tasks can run in parallel',
+  'member-serial': "Queued · waiting for the member's current task to finish",
+  'member-fifo': "Queued · waiting for the member's earlier tasks",
+  'member-stopping': 'Queued · waiting for the member to stop',
 };
 
 const STEP_LABELS: Record<LiveStep['status'], string> = {
@@ -63,11 +73,11 @@ export function BotLiveStatus({
     ? null
     : activity.state !== 'queued'
       ? t(STATE_LABELS[activity.state])
-      : queued?.reason === 'capacity'
-        ? t('Queued · concurrency limit reached')
-        : queued?.reason === 'turn'
-          ? t('Queued · waiting for the current turn to finish')
-          : t('Queued');
+      : t(
+          queued?.reason && Object.hasOwn(QUEUE_LABELS, queued.reason)
+            ? QUEUE_LABELS[queued.reason]
+            : 'Queued'
+        );
 
   return (
     <div className={cn('min-w-0 text-muted-foreground text-xs', className)}>

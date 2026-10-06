@@ -250,6 +250,28 @@ describe('成员运行态', () => {
     expect(activityStateText(act({ state: 'queued' }))).toBe('排队中');
   });
 
+  it.each([
+    ['member-check', '正在判断是否可并行'],
+    ['member-serial', '等待成员当前任务完成'],
+    ['member-fifo', '等待成员前序任务'],
+    ['member-stopping', '等待成员停止完成'],
+  ] as const)('排队原因 %s 只显示固定文案', (reason, text) => {
+    const item = act({ state: 'queued', reason });
+    expect(activityStateText(item)).toBe(`排队 · ${text}`);
+    expect(activityLine(item)).toBe(`排队 · ${text}`);
+  });
+
+  it('未知原因不泄露模型解释', () => {
+    expect(
+      activityStateText(
+        act({
+          state: 'queued',
+          reason: 'private model explanation' as PairBotActivity['reason'],
+        })
+      )
+    ).toBe('排队中');
+  });
+
   it('一行摘要优先显示运行中的工具', () => {
     expect(
       activityLine(

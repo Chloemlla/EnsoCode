@@ -427,8 +427,14 @@ export interface PairBotActivity {
   /** 委派会话：替这位成员干活 */
   ownerBotId?: string;
   state: 'queued' | 'thinking' | 'typing' | 'tool' | 'retrying';
-  /** queued 的原因：turn = 等自己上一轮；capacity = 并发名额满 */
-  reason?: 'turn' | 'capacity';
+  /** queued 的固定原因，不包含模型解释或其他会话的任务内容 */
+  reason?:
+    | 'turn'
+    | 'capacity'
+    | 'member-check'
+    | 'member-serial'
+    | 'member-fifo'
+    | 'member-stopping';
   /** 本轮开始时刻（host 时钟） */
   startedAt?: number;
   /** 本轮最近 3 个工具步骤 */

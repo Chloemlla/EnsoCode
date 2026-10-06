@@ -26,6 +26,7 @@ import type { BotNotesSnapshot } from './botNotes';
 import { buildBotModeInstruction, buildBotSystemPrompt } from './botPrompt';
 import type { BotStore } from './botStore';
 import type { BotChatStore } from './chatStore';
+import type { MemberTaskClassifier } from './memberTaskClassifier';
 import { StartedDeliveryIndex } from './startedDeliveries';
 import { messageTokens } from './turnTokens';
 
@@ -102,6 +103,7 @@ export interface BotSessionHostDeps {
   runtime: BotRuntimePort;
   emit: (event: BotEvent) => void;
   maxRunningTurns?: number;
+  classifyMemberTask?: MemberTaskClassifier;
   /** 轮次只收到 idle/failed 状态而迟迟没有 turn-completed/turn-failed 时的兜底结算延迟 */
   settleGraceMs?: number;
   /** 成员日预算：投递前与每条带用量的 assistant 消息结束后检查，超额拒绝 / 停止当前回合 */
@@ -171,6 +173,10 @@ export interface BotTurnFinished {
 }
 
 interface Delivery extends BotDeliverOptions {
+  order?: number;
+  retry?: boolean;
+  epoch?: number;
+  admission?: { key: string; controller: AbortController; verdict?: 'parallel' | 'serial' };
   chatId: string;
   botId: string;
   conversationId: string;
@@ -193,7 +199,13 @@ export class BotSessionHost {
   private readonly running = new Set<string>();
   /** 由本宿主发起、尚未结束的轮次；sawRunning 防止 spawn 后的 idle 误释放 */
   private readonly slots = new Map<string, { sawRunning: boolean }>();
+  private readonly stopping = new Map<string, string>();
+  private readonly epochs = new Map<string, number>();
+  private readonly tasks = new Map<string, string>();
+  private readonly retryTasks = new Map<string, string>();
   private queue: Delivery[] = [];
+  private nextOrder = 0;
+  private readonly preparing = new Set<Delivery>();
   private queueReasons = new Map<string, string>();
   private readonly lastAssistant = new Map<string, LastAssistant>();
   private readonly bindings = new Map<string, ConversationBotBinding | null>();
@@ -294,7 +306,7 @@ export class BotSessionHost {
   }
 
   runningCount(): number {
-    return new Set([...this.slots.keys(), ...this.running]).size;
+    return new Set([...this.slots.keys(), ...this.running, ...this.stopping.keys()]).size;
   }
 
   isBusy(conversationId: string): boolean {
@@ -403,6 +415,7 @@ export class BotSessionHost {
   }
 
   async abortConversation(conversationId: string): Promise<void> {
+    this.markStopping(conversationId);
     this.cancelQueued((item) => item.conversationId === conversationId);
     this.deps.runtime.abort?.(conversationId);
     await this.withLock(conversationId, async () => {
@@ -411,6 +424,7 @@ export class BotSessionHost {
       this.live.delete(conversationId);
       this.running.delete(conversationId);
       this.slots.delete(conversationId);
+      this.stopping.delete(conversationId);
     });
     this.pump();
   }
@@ -427,8 +441,16 @@ export class BotSessionHost {
 
   private queueReason(item: Delivery, position: number): Pick<BotQueueItem, 'reason'> {
     const id = item.conversationId;
+    if (
+      this.stopping.has(id) ||
+      this.memberActive(item).some((active) => this.stopping.has(active))
+    )
+      return { reason: 'member-stopping' };
     if (this.turnActive(id) || this.queue.slice(0, position).some((o) => o.conversationId === id))
       return { reason: 'turn' };
+    if (this.hasEarlierTask(item)) return { reason: 'member-fifo' };
+    if (this.memberActive(item).length && this.runningCount() < this.maxRunning)
+      return { reason: item.admission?.verdict === 'serial' ? 'member-serial' : 'member-check' };
     return this.runningCount() >= this.maxRunning ? { reason: 'capacity' } : {};
   }
 
@@ -456,6 +478,7 @@ export class BotSessionHost {
 
   /** 中止会话当前回合并清掉它的排队投递，回合以 reason 结算 */
   private async stopConversation(id: string, reason: string, estimated = false): Promise<void> {
+    this.markStopping(id);
     this.cancelQueued((item) => item.conversationId === id, reason);
     await this.withLock(id, async () => {
       this.deps.runtime.abort?.(id);
@@ -465,6 +488,7 @@ export class BotSessionHost {
       this.live.delete(id);
       this.running.delete(id);
       this.slots.delete(id);
+      this.stopping.delete(id);
       this.lastAssistant.delete(id);
     });
   }
@@ -666,7 +690,16 @@ export class BotSessionHost {
     if (!binding) return { ok: false, error: 'not-bot-session' };
     const { botId } = binding;
     const chatId = binding.chatId ?? '';
-    const delivery: Delivery = { ...options, chatId, botId, conversationId, text };
+    const delivery: Delivery = {
+      ...options,
+      chatId,
+      botId,
+      conversationId,
+      text,
+      order: this.nextOrder++,
+      epoch: this.epochs.get(conversationId) ?? 0,
+    };
+    this.preparing.add(delivery);
     return this.withLock(conversationId, async (): Promise<BotDeliverResult> => {
       if (this.disposed) return { ok: false, error: 'disabled' };
       if (options.deliveryId) {
@@ -687,25 +720,34 @@ export class BotSessionHost {
       )
         return { ok: false, error: 'session-busy' };
       await this.prepareBudget(botId);
+      this.preparing.delete(delivery);
+      if (this.disposed) return { ok: false, error: 'disabled' };
+      if (delivery.epoch !== (this.epochs.get(conversationId) ?? 0))
+        return { ok: false, error: 'canceled' };
       if (this.budgetExceeded(botId, binding.chatId, conversationId))
         return { ok: false, error: BOT_BUDGET_ERROR };
       if (this.turnActive(conversationId) && !options.queueIfBusy) {
-        if (!this.retrying.has(conversationId)) return this.steer(delivery);
+        if (!this.retrying.has(conversationId) && !this.stopping.has(conversationId))
+          return this.steer(delivery);
         // 自动重试倒计时里没有活轮可插：排到下一轮，不打断重试
         delivery.queueIfBusy = true;
       }
       if (
         this.turnActive(conversationId) ||
-        this.queue.some((item) => item.conversationId === conversationId) ||
+        this.queue.some((item) => item.botId === botId) ||
+        this.hasEarlierTask(delivery) ||
+        this.memberActive(delivery).length > 0 ||
         this.runningCount() >= this.maxRunning
       ) {
-        this.queue = enqueueByLane(this.queue, delivery);
-        this.deps.emit({ kind: 'queue', chatId });
+        this.enqueue(delivery);
         return { ok: true, conversationId, queued: true };
       }
       const started = await this.start(delivery);
       if (!started.ok) this.pump();
       return started;
+    }).finally(() => {
+      this.preparing.delete(delivery);
+      this.pump();
     });
   }
 
@@ -765,7 +807,8 @@ export class BotSessionHost {
   observe(event: AgentWorkerEvent | { type: 'worker-exited' }): void {
     if (this.disposed) return;
     if (event.type === 'worker-exited') {
-      const interrupted = [...this.slots.keys()];
+      const interrupted = [...this.slots.keys()].filter((id) => !this.stopping.has(id));
+      for (const id of this.stopping.keys()) this.confirmRelease(id);
       for (const id of [...this.settleTimers.keys()]) this.cancelSettle(id);
       this.live.clear();
       this.running.clear();
@@ -774,8 +817,10 @@ export class BotSessionHost {
       this.waiting.clear();
       this.retrying.clear();
       for (const id of [...this.lastOutput.keys()]) this.quiet(id);
-      for (const id of interrupted)
+      for (const id of interrupted) {
         this.finish(id, undefined, false, 'worker-exited', '', undefined, true);
+        this.turnKeys.delete(id);
+      }
       this.pump();
       return;
     }
@@ -783,6 +828,11 @@ export class BotSessionHost {
     this.noteOutput(event);
     if ('parent' in event.identity) return;
     const id = event.identity.sessionId;
+    if (this.stopping.has(id)) {
+      if (event.type === 'parent-ended' || event.type === 'parent-rejected')
+        this.confirmRelease(id);
+      return;
+    }
     if (!this.isBotConversation(id)) return;
     switch (event.type) {
       case 'status': {
@@ -892,7 +942,11 @@ export class BotSessionHost {
   }
 
   private turnActive(conversationId: string): boolean {
-    return this.slots.has(conversationId) || this.running.has(conversationId);
+    return (
+      this.slots.has(conversationId) ||
+      this.running.has(conversationId) ||
+      this.stopping.has(conversationId)
+    );
   }
 
   /** 当前处于静默的运行中轮次 */
@@ -938,7 +992,7 @@ export class BotSessionHost {
     const raw = 'parent' in identity ? identity.parent.sessionId : identity.sessionId;
     const sep = raw.indexOf('::');
     const id = sep === -1 ? raw : raw.slice(0, sep);
-    if (!this.turnActive(id)) return;
+    if (!this.turnActive(id) || this.stopping.has(id)) return;
     if (event.type === 'approval-request' || event.type === 'ask-request') {
       const requestId =
         event.type === 'approval-request' ? event.request.requestId : event.ask.requestId;
@@ -1000,6 +1054,12 @@ export class BotSessionHost {
   }
 
   private steer(delivery: Delivery): BotDeliverResult {
+    if (this.disposed) return { ok: false, error: 'disabled' };
+    if (
+      this.stopping.has(delivery.conversationId) ||
+      delivery.epoch !== (this.epochs.get(delivery.conversationId) ?? 0)
+    )
+      return { ok: false, error: 'canceled' };
     const notes = this.withNotesUpdate(
       delivery,
       delivery.source === 'human'
@@ -1014,7 +1074,14 @@ export class BotSessionHost {
     );
     if (sent.ok && notes.seen !== undefined)
       this.notesSeen.set(delivery.conversationId, notes.seen);
-    if (sent.ok) this.deliverySent(delivery);
+    if (sent.ok) {
+      const previous = this.tasks.get(delivery.conversationId);
+      const task = `${previous ?? ''}\n${delivery.text}`;
+      this.tasks.set(delivery.conversationId, previous && task.length <= 2000 ? task : '');
+      this.retryTasks.set(delivery.conversationId, this.tasks.get(delivery.conversationId)!);
+      this.deliverySent(delivery);
+      this.pump();
+    }
     return sent.ok
       ? { ok: true, conversationId: delivery.conversationId }
       : { ok: false, error: sent.error ?? 'steer-failed' };
@@ -1023,16 +1090,25 @@ export class BotSessionHost {
   private async start(delivery: Delivery): Promise<BotDeliverResult> {
     if (this.disposed) return { ok: false, error: 'disabled' };
     const { conversationId } = delivery;
+    if (
+      this.stopping.has(conversationId) ||
+      delivery.epoch !== (this.epochs.get(conversationId) ?? 0)
+    )
+      return { ok: false, error: 'canceled' };
     const bot = this.usableBot(delivery);
     if (!bot) return { ok: false, error: 'session-unavailable' };
     this.slots.set(conversationId, { sawRunning: false });
-    this.turnKeys.set(conversationId, randomUUID());
+    if (!this.turnKeys.has(conversationId)) this.turnKeys.set(conversationId, randomUUID());
+    this.tasks.set(conversationId, delivery.text.length <= 2000 ? delivery.text : '');
     this.lastAssistant.delete(conversationId);
     this.touch(conversationId);
     if (delivery.deliveryId) this.activeDeliveries.set(conversationId, delivery.deliveryId);
     else this.activeDeliveries.delete(conversationId);
     const fail = (error: string): Fail => {
-      this.slots.delete(conversationId);
+      if (!this.stopping.has(conversationId)) {
+        this.slots.delete(conversationId);
+        this.turnKeys.delete(conversationId);
+      }
       this.quiet(conversationId);
       return { ok: false, error };
     };
@@ -1045,6 +1121,17 @@ export class BotSessionHost {
       if (error) return fail(error);
       notes = this.withNotesUpdate(delivery);
     }
+    if (
+      this.stopping.has(conversationId) ||
+      delivery.epoch !== (this.epochs.get(conversationId) ?? 0)
+    )
+      return fail('canceled');
+    if (delivery.retry) {
+      const sent = this.deps.runtime.retry?.(conversationId);
+      if (!sent?.ok) return fail(sent?.error ?? 'retry-failed');
+      this.scheduleSettle(conversationId, this.slots.get(conversationId)!, 'nothing-to-retry');
+      return { ok: true, conversationId };
+    }
     const sent = this.deps.runtime.prompt(
       conversationId,
       notes.text,
@@ -1052,6 +1139,7 @@ export class BotSessionHost {
       delivery.deliveryId
     );
     if (!sent.ok) return fail(sent.error ?? 'prompt-failed');
+    this.retryTasks.set(conversationId, this.tasks.get(conversationId) ?? '');
     if (notes.seen !== undefined) this.notesSeen.set(conversationId, notes.seen);
     this.deliverySent(delivery);
     return { ok: true, conversationId };
@@ -1106,7 +1194,11 @@ export class BotSessionHost {
   }
 
   /** 回退 / 重试的公共前置：会话空闲、可用，且已在 worker 里（冷会话只恢复不 prompt）；delegation 只认已登记的委派子会话 */
-  private async controllable(conversationId: string, delegation = false): Promise<Delivery | Fail> {
+  private async controllable(
+    conversationId: string,
+    delegation = false,
+    restore = true
+  ): Promise<Delivery | Fail> {
     if (this.disposed) return { ok: false, error: 'disabled' };
     const binding = this.binding(conversationId);
     if (
@@ -1122,9 +1214,11 @@ export class BotSessionHost {
       botId: binding.botId,
       conversationId,
       text: '',
+      epoch: this.epochs.get(conversationId) ?? 0,
     };
     const bot = this.usableBot(delivery);
     if (!bot) return { ok: false, error: 'session-unavailable' };
+    if (!restore) return delivery;
     if (!this.live.has(conversationId)) {
       const failed = await this.spawnLive(delivery, bot);
       if (failed) return { ok: false, error: failed };
@@ -1145,6 +1239,7 @@ export class BotSessionHost {
       if ('ok' in ready) return ready;
       if (!this.deps.runtime.rewind) return { ok: false, error: 'unsupported' };
       const sent = this.deps.runtime.rewind(conversationId, entryId, restoreFiles);
+      if (sent.ok) this.retryTasks.delete(conversationId);
       if (!sent.ok) return { ok: false, error: sent.error ?? 'rewind-failed' };
       this.lastAssistant.delete(conversationId);
       return { ok: true };
@@ -1156,30 +1251,45 @@ export class BotSessionHost {
     conversationId: string,
     options: { delegation?: boolean } = {}
   ): Promise<BotDeliverResult> {
+    const binding = this.binding(conversationId);
+    if (!binding) return Promise.resolve({ ok: false, error: 'not-bot-session' });
+    const ready: Delivery = {
+      botId: binding.botId,
+      chatId: binding.chatId ?? '',
+      conversationId,
+      text: '',
+      order: this.nextOrder++,
+      epoch: this.epochs.get(conversationId) ?? 0,
+      retry: true,
+      queueIfBusy: true,
+    };
+    this.preparing.add(ready);
     return this.withLock(conversationId, async (): Promise<BotDeliverResult> => {
-      if (this.runningCount() >= this.maxRunning) return { ok: false, error: 'session-busy' };
-      const ready = await this.controllable(conversationId, options.delegation);
-      if ('ok' in ready) return ready;
+      const checked = await this.controllable(conversationId, options.delegation, false);
+      if ('ok' in checked) return checked;
       if (!this.deps.runtime.retry) return { ok: false, error: 'unsupported' };
-      if (await this.overBudget(ready.botId, ready.chatId || null))
-        return { ok: false, error: BOT_BUDGET_ERROR };
-      if (this.runningCount() >= this.maxRunning) return { ok: false, error: 'session-busy' };
-      const slot = { sawRunning: false };
-      this.slots.set(conversationId, slot);
-      this.turnKeys.set(conversationId, randomUUID());
-      this.lastAssistant.delete(conversationId);
-      this.activeDeliveries.delete(conversationId);
-      this.touch(conversationId);
-      const sent = this.deps.runtime.retry(conversationId);
-      if (!sent.ok) {
-        this.slots.delete(conversationId);
-        this.turnKeys.delete(conversationId);
-        this.quiet(conversationId);
-        return { ok: false, error: sent.error ?? 'retry-failed' };
+      const overBudget = await this.overBudget(ready.botId, ready.chatId || null);
+      this.preparing.delete(ready);
+      if (this.disposed) return { ok: false, error: 'disabled' };
+      if (overBudget) return { ok: false, error: BOT_BUDGET_ERROR };
+      if (ready.epoch !== (this.epochs.get(conversationId) ?? 0))
+        return { ok: false, error: 'canceled' };
+      ready.text = this.retryTasks.get(conversationId) ?? '';
+      if (
+        this.memberActive(ready).length ||
+        this.hasEarlierTask(ready) ||
+        this.queue.some((item) => item.botId === ready.botId) ||
+        this.runningCount() >= this.maxRunning
+      ) {
+        this.enqueue(ready);
+        return { ok: true, conversationId, queued: true };
       }
-      // worker 认为无需续跑时不会进入 running：宽限期后按未运行结算，回合不悬挂
-      this.scheduleSettle(conversationId, slot, 'nothing-to-retry');
-      return { ok: true, conversationId };
+      const result = await this.start(ready);
+      if (!result.ok) this.pump();
+      return result;
+    }).finally(() => {
+      this.preparing.delete(ready);
+      this.pump();
     });
   }
 
@@ -1281,12 +1391,24 @@ export class BotSessionHost {
     if (this.disposed) return;
     const touched = new Set<string>();
     while (this.queue.length > 0) {
-      const index = this.queue.findIndex((item) => this.dequeueable(item));
+      const heads = this.queue.filter(
+        (item) =>
+          (this.turnActive(item.conversationId) &&
+            !item.queueIfBusy &&
+            !this.retrying.has(item.conversationId)) ||
+          !this.hasEarlierTask(item)
+      );
+      const candidates = heads
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        .reduce<Delivery[]>((sorted, item) => enqueueByLane(sorted, item), []);
+      const eligible = candidates.find((item) => this.dequeueable(item));
+      const index = eligible ? this.queue.indexOf(eligible) : -1;
       if (index < 0) break;
       const next = this.queue[index];
       const active = this.turnActive(next.conversationId);
       if (!active && this.runningCount() >= this.maxRunning) break;
       this.queue.splice(index, 1);
+      next.admission?.controller.abort();
       touched.add(next.chatId);
       if (active) {
         // 走同一把锁：同会话前一条可能还在 spawn
@@ -1305,19 +1427,23 @@ export class BotSessionHost {
         continue;
       }
       this.slots.set(next.conversationId, { sawRunning: false });
+      this.turnKeys.set(next.conversationId, randomUUID());
+      this.tasks.set(next.conversationId, next.text.length <= 2000 ? next.text : '');
       if (next.deliveryId) this.activeDeliveries.set(next.conversationId, next.deliveryId);
       void this.withLock(next.conversationId, async () => {
         await this.prepareBudget(next.botId);
         // 预算备好后才让出占位：期间别的投递抢不走并发位与工作区写锁
-        this.slots.delete(next.conversationId);
-        const started: BotDeliverResult = this.budgetExceeded(
-          next.botId,
-          next.chatId || null,
-          next.conversationId
-        )
-          ? { ok: false, error: BOT_BUDGET_ERROR }
-          : await this.start(next);
+        const canceled =
+          next.epoch !== (this.epochs.get(next.conversationId) ?? 0) ||
+          this.stopping.has(next.conversationId);
+        if (!this.stopping.has(next.conversationId)) this.slots.delete(next.conversationId);
+        const started: BotDeliverResult = canceled
+          ? { ok: false, error: 'canceled' }
+          : this.budgetExceeded(next.botId, next.chatId || null, next.conversationId)
+            ? { ok: false, error: BOT_BUDGET_ERROR }
+            : await this.start(next);
         if (!started.ok) {
+          if (this.stopping.has(next.conversationId)) return;
           this.finish(
             next.conversationId,
             undefined,
@@ -1326,6 +1452,7 @@ export class BotSessionHost {
             '',
             next.deliveryId ?? null
           );
+          this.turnKeys.delete(next.conversationId);
           this.pump();
         }
       });
@@ -1336,9 +1463,108 @@ export class BotSessionHost {
 
   /** 活轮里可 steer 的插话（重试倒计时中改排下一轮），或可开的新轮 */
   private dequeueable(item: Delivery): boolean {
-    if (!this.turnActive(item.conversationId)) return true;
+    if (this.stopping.has(item.conversationId)) return false;
+    if (!this.turnActive(item.conversationId)) {
+      if (this.hasEarlierTask(item)) return false;
+      if (this.runningCount() >= this.maxRunning) return false;
+      return this.admitMember(item);
+    }
     if (this.retrying.has(item.conversationId)) item.queueIfBusy = true;
     return !item.queueIfBusy;
+  }
+
+  private enqueue(item: Delivery): void {
+    item.order ??= this.nextOrder++;
+    // Preserve source priority across members, but never overtake this member's older work.
+    const last = this.queue.findLastIndex((other) => other.botId === item.botId);
+    this.queue = [
+      ...this.queue.slice(0, last + 1),
+      ...enqueueByLane(this.queue.slice(last + 1), item),
+    ];
+    this.deps.emit({ kind: 'queue', chatId: item.chatId });
+    this.pump();
+  }
+
+  private hasEarlierTask(item: Delivery): boolean {
+    return [...this.queue, ...this.preparing].some(
+      (other) =>
+        other !== item && other.botId === item.botId && (other.order ?? 0) < (item.order ?? 0)
+    );
+  }
+
+  private memberActive(item: Delivery): string[] {
+    return [...new Set([...this.slots.keys(), ...this.running, ...this.stopping.keys()])]
+      .filter(
+        (id) =>
+          id !== item.conversationId &&
+          (this.stopping.get(id) ?? this.binding(id)?.botId) === item.botId
+      )
+      .sort();
+  }
+
+  private admitMember(item: Delivery): boolean {
+    const active = this.memberActive(item);
+    if (!active.length) return true;
+    if (active.some((id) => this.stopping.has(id))) return false;
+    const key = JSON.stringify(active.map((id) => [id, this.turnKeys.get(id), this.tasks.get(id)]));
+    if (item.admission?.key === key) return item.admission.verdict === 'parallel';
+    item.admission?.controller.abort();
+    const admission: NonNullable<Delivery['admission']> = {
+      key,
+      controller: new AbortController(),
+    };
+    item.admission = admission;
+    // Unknown or oversized snapshots cannot establish independence safely.
+    if (
+      !this.deps.classifyMemberTask ||
+      !item.text ||
+      item.text.length > 2000 ||
+      active.length > 16 ||
+      active.some((id) => !this.tasks.get(id))
+    ) {
+      admission.verdict = 'serial';
+      return false;
+    }
+    const input = {
+      task: item.text,
+      active: active.map((id) => ({ task: this.tasks.get(id)!, state: 'running' as const })),
+    };
+    void Promise.resolve()
+      .then(() => this.deps.classifyMemberTask!(input, admission.controller.signal))
+      .catch(() => 'serial' as const)
+      .then((verdict) => {
+        if (
+          this.disposed ||
+          admission.controller.signal.aborted ||
+          item.admission !== admission ||
+          !this.queue.includes(item)
+        )
+          return;
+        admission.verdict = verdict === 'parallel' ? 'parallel' : 'serial';
+        // pump recomputes the snapshot and reserves synchronously before any spawn/prepare await.
+        this.pump();
+      });
+    return false;
+  }
+
+  private markStopping(id: string): void {
+    this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1);
+    const botId = this.binding(id)?.botId;
+    if (botId && (this.turnActive(id) || this.live.has(id))) this.stopping.set(id, botId);
+  }
+
+  /** A release timeout is not a release; only runtime acknowledgement or actual worker death can unblock. */
+  private confirmRelease(id: string): void {
+    const epoch = this.epochs.get(id);
+    void this.withLock(id, async () => {
+      if (!this.stopping.has(id) || this.epochs.get(id) !== epoch) return;
+      this.cancelActive(id);
+      this.live.delete(id);
+      this.running.delete(id);
+      this.slots.delete(id);
+      this.stopping.delete(id);
+      this.pump();
+    });
   }
 
   /** 委派链上的祖先会话：worker 写协调里子委派与祖先互不阻塞，父轮等子结果时不会死锁 */
@@ -1397,10 +1623,15 @@ export class BotSessionHost {
 
   /** 结束会话（只读保留）并释放 worker 里的实例；丢弃它的排队投递 */
   retireSession(conversationId: string): void {
+    this.markStopping(conversationId);
     this.cancelQueued((item) => item.conversationId === conversationId);
     this.cancelActive(conversationId);
-    if (this.live.has(conversationId) || this.slots.has(conversationId)) {
-      void this.deps.runtime.release(conversationId).catch(() => {});
+    if (this.stopping.has(conversationId)) {
+      void this.withLock(conversationId, async () => {
+        await this.deps.runtime.release(conversationId);
+        this.stopping.delete(conversationId);
+        this.pump();
+      }).catch(() => {});
     }
     this.live.delete(conversationId);
     this.clearSession(conversationId);
@@ -1438,6 +1669,7 @@ export class BotSessionHost {
     const canceled = this.queue.filter(predicate);
     this.queue = this.queue.filter((item) => !predicate(item));
     for (const item of canceled) {
+      item.admission?.controller.abort();
       this.finish(item.conversationId, undefined, false, reason, '', item.deliveryId ?? null);
       this.deps.emit({ kind: 'queue', chatId: item.chatId });
     }
@@ -1446,7 +1678,7 @@ export class BotSessionHost {
   private cancelActive(id: string, reason = 'canceled', estimated = false): void {
     this.cancelSettle(id);
     this.retrying.delete(id);
-    if (this.turnActive(id))
+    if (this.turnKeys.has(id) || this.running.has(id))
       this.finish(
         id,
         undefined,
@@ -1458,18 +1690,22 @@ export class BotSessionHost {
         estimated
       );
     this.running.delete(id);
-    this.slots.delete(id);
+    if (!this.stopping.has(id)) this.slots.delete(id);
+    this.turnKeys.delete(id);
     this.lastAssistant.delete(id);
     this.quiet(id);
   }
 
   private clearSession(id: string): void {
+    this.tasks.delete(id);
+    this.retryTasks.delete(id);
     this.cancelSettle(id);
     this.retrying.delete(id);
     this.turnUsage.delete(id);
     this.contextTokens.delete(id);
     this.running.delete(id);
     this.slots.delete(id);
+    this.turnKeys.delete(id);
     this.lastAssistant.delete(id);
     this.quiet(id);
     this.activeDeliveries.delete(id);

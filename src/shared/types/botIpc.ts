@@ -257,7 +257,13 @@ export interface BotQueueItem {
 }
 
 /** turn：同会话上一轮未结束；capacity：并发名额已满（同工作区写冲突在工具调用内等待） */
-export type BotQueueReason = 'turn' | 'capacity';
+export type BotQueueReason =
+  | 'turn'
+  | 'capacity'
+  | 'member-check'
+  | 'member-serial'
+  | 'member-fifo'
+  | 'member-stopping';
 
 export interface BotSessionRecord {
   conversationId: string;

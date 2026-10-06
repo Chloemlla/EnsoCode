@@ -64,6 +64,14 @@ function waitText(info: PresenceInfo, t: TFunction): string | undefined {
       return t('A free slot (concurrency limit, not a person)');
     case 'turn':
       return t('Its previous turn to finish');
+    case 'member-check':
+      return t('Queued · checking whether tasks can run in parallel');
+    case 'member-serial':
+      return t("Queued · waiting for the member's current task to finish");
+    case 'member-fifo':
+      return t("Queued · waiting for the member's earlier tasks");
+    case 'member-stopping':
+      return t('Queued · waiting for the member to stop');
     default:
       return undefined;
   }
