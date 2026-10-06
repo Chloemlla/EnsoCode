@@ -56,11 +56,18 @@ interface Round {
   options?: BotDeliverOptions;
   generation: number;
   deliveryId?: string;
-  /** 人类追加 @ 的独立投递，不属于 current 的接力代际 */
-  parallel: Map<string, { botId: BotId; conversationId: string }>;
+  /** 人类追加消息的独立投递，不属于 current 的接力代际 */
+  parallel: Map<
+    string,
+    {
+      botId: BotId;
+      conversationId: string;
+      routedBy?: Extract<GroupEntry, { kind: 'bot' }>['routedBy'];
+    }
+  >;
   stopping?: BotId[];
   /** 进行中的智能选人；abort 同时充当本次结果的身份 */
-  routing?: { entry: HumanEntry; abort: AbortController };
+  routing?: { entry: HumanEntry; abort: AbortController; parallelOptions?: BotDeliverOptions };
   /** 本轮由智能选人选出、尚未发言的成员；其发言标 routedBy */
   smartPicked?: string[];
   /** 本批（一条人类消息 / 例行任务引发的整串接力）已结束的发言，批次结束时合并通知 */
@@ -342,36 +349,26 @@ export class GroupChatService {
       if (round.routing) {
         // 选人期间又来人类消息：放弃本次结果，对合并后的消息重新判定
         const merged = mergePending([round.routing.entry, entry]) ?? entry;
+        const parallel = round.routing.parallelOptions !== undefined;
         this.cancelRouting(round);
-        round.options = options;
-        await this.begin(chat, merged);
+        if (parallel) await this.routeParallel(chat, merged, options);
+        else {
+          round.options = options;
+          await this.begin(chat, merged);
+        }
         this.persist(chatId);
         return { ok: true };
       }
       const decision = onHumanMessage(round.state, chat, members, entry);
       if (decision.action === 'steer') {
-        const sent = await this.deliver(chat, round.state.current!, options);
-        if (!sent.ok) this.system(chatId, `插话投递失败：${sent.error}`);
+        await this.steer(chat, round.state.current!, options);
       } else if (decision.action === 'parallel') {
-        for (const botId of decision.targets) {
-          const deliveryId = randomUUID();
-          const sent = await this.deliver(chat, botId, {
-            ...options,
-            deliveryId,
-            queueIfBusy: true,
-          });
-          const name = this.deps.bots.get(botId)?.name ?? botId;
-          if (sent.ok && !sent.duplicate) {
-            round.parallel.set(deliveryId, { botId, conversationId: sent.conversationId });
-            if (sent.queued) this.system(chatId, `${name} 正在排队，等待可用会话`);
-          } else {
-            this.system(
-              chatId,
-              sent.ok ? `${name} 的投递已处理过，本次未发出` : `${name} 投递失败：${sent.error}`,
-              sent.ok ? undefined : { botId, mode: 'deliver' }
-            );
-          }
-        }
+        await this.deliverParallel(chat, decision.targets, options);
+      } else if (
+        decision.action === 'route-parallel' ||
+        (decision.action === 'start' && round.parallel.size > 0)
+      ) {
+        await this.routeParallel(chat, entry, options);
       } else if (decision.action === 'restart-after-current') {
         round.pending.push(entry);
         round.options = options;
@@ -505,11 +502,13 @@ export class GroupChatService {
         ...(event.model ? { model: event.model } : {}),
         ...(summarized
           ? { routedBy: 'summary' as const }
-          : smart
-            ? {
-                routedBy: round.smartIntent ? (`smart:${round.smartIntent}` as const) : 'smart',
-              }
-            : {}),
+          : parallel?.routedBy
+            ? { routedBy: parallel.routedBy }
+            : smart
+              ? {
+                  routedBy: round.smartIntent ? (`smart:${round.smartIntent}` as const) : 'smart',
+                }
+              : {}),
         id: randomUUID(),
         at: Date.now(),
       })?.seq;
@@ -590,22 +589,120 @@ export class GroupChatService {
     const responder = this.deps.responder;
     if (responder && needsSmartRoute(chat, members, entry)) {
       round.state = empty();
-      const abort = new AbortController();
-      round.routing = { entry, abort };
-      const input = buildSmartRouteInput(
-        chat,
-        members,
-        this.deps.chats
-          .readEntries(chat.id, { beforeSeq: entry.seq, limit: SMART_ROUTE_HISTORY_SCAN })
-          .filter((item) => item.seq > (chat.epochSeq ?? 0)),
-        entry
-      );
-      void this.smartRoute(chat.id, responder, input, abort);
+      this.selectResponders(chat, entry, responder);
       return;
     }
     round.state = startRound(chat, members, entry);
     if (!round.state.current) this.system(chat.id, '请先指定群主');
     await this.dispatch(chat.id);
+  }
+
+  private selectResponders(
+    chat: BotChat,
+    entry: HumanEntry,
+    responder: GroupResponderSelector,
+    parallelOptions?: BotDeliverOptions
+  ): void {
+    const abort = new AbortController();
+    this.round(chat.id).routing = { entry, abort, parallelOptions };
+    const input = buildSmartRouteInput(
+      chat,
+      this.members(chat),
+      this.deps.chats
+        .readEntries(chat.id, { beforeSeq: entry.seq, limit: SMART_ROUTE_HISTORY_SCAN })
+        .filter((item) => item.seq > (chat.epochSeq ?? 0)),
+      entry
+    );
+    void this.smartRoute(chat.id, responder, input, abort);
+  }
+
+  private async routeParallel(
+    chat: BotChat,
+    entry: HumanEntry,
+    options: BotDeliverOptions
+  ): Promise<void> {
+    const responder = this.deps.responder;
+    if (responder && needsSmartRoute(chat, this.members(chat), entry)) {
+      this.selectResponders(chat, entry, responder, options);
+      return;
+    }
+    await this.deliverPicked(chat, entry, options, { ids: [] });
+  }
+
+  private async deliverPicked(
+    chat: BotChat,
+    entry: HumanEntry,
+    options: BotDeliverOptions,
+    decision: SmartRouteDecision
+  ): Promise<void> {
+    // 仅用临时状态筛选名单与群主兜底，绝不替换主轮。
+    const picked = startRound(chat, this.members(chat), entry, decision.ids);
+    if (!picked.current) {
+      this.system(chat.id, '请先指定群主');
+      return;
+    }
+    const targets = [picked.current, ...picked.queue];
+    if (decision.noWriter) this.system(chat.id, '没有能改代码或执行命令的成员，交给群主处理');
+    if (targets.length === 1 && targets[0] === this.round(chat.id).state.current) {
+      await this.steer(chat, targets[0], options);
+      return;
+    }
+    await this.deliverParallel(chat, targets, options, decision);
+  }
+
+  private async steer(chat: BotChat, botId: BotId, options: BotDeliverOptions): Promise<void> {
+    const deliveryId = options.deliveryId ?? randomUUID();
+    const sent = await this.deliver(chat, botId, { ...options, deliveryId });
+    if (!sent.ok) this.system(chat.id, `插话投递失败：${sent.error}`);
+    else if (sent.queued && !sent.duplicate) {
+      // 重试或主投递尚在排队时，宿主无法 steer；记录独立结束事件。
+      this.round(chat.id).parallel.set(deliveryId, { botId, conversationId: sent.conversationId });
+      this.system(chat.id, `${this.deps.bots.get(botId)?.name ?? botId} 正在排队，等待可用会话`);
+    }
+  }
+
+  private async deliverParallel(
+    chat: BotChat,
+    targets: BotId[],
+    options: BotDeliverOptions,
+    decision?: SmartRouteDecision
+  ): Promise<void> {
+    const round = this.round(chat.id);
+    const smart = targets.filter((botId) => decision?.ids.includes(botId));
+    const markSmart = smart.length > 1 || (smart.length === 1 && smart[0] !== chat.bossBotId);
+    for (const botId of targets) {
+      if (botId === round.state.current) continue;
+      const deliveryId = randomUUID();
+      const sent = await this.deliver(
+        chat,
+        botId,
+        { ...options, deliveryId, queueIfBusy: true },
+        decision?.intent === 'build' && decision.ids.length === 1 && decision.ids[0] === botId
+          ? SMART_ROUTE_BUILD_NOTE
+          : undefined
+      );
+      const name = this.deps.bots.get(botId)?.name ?? botId;
+      if (sent.ok && !sent.duplicate) {
+        round.parallel.set(deliveryId, {
+          botId,
+          conversationId: sent.conversationId,
+          ...(markSmart && smart.includes(botId)
+            ? {
+                routedBy: decision?.intent
+                  ? (`smart:${decision.intent}` as const)
+                  : ('smart' as const),
+              }
+            : {}),
+        });
+        if (sent.queued) this.system(chat.id, `${name} 正在排队，等待可用会话`);
+      } else {
+        this.system(
+          chat.id,
+          sent.ok ? `${name} 的投递已处理过，本次未发出` : `${name} 投递失败：${sent.error}`,
+          sent.ok ? undefined : { botId, mode: 'deliver' }
+        );
+      }
+    }
   }
 
   private async smartRoute(
@@ -645,6 +742,12 @@ export class GroupChatService {
       const chat = this.deps.chats.get(chatId);
       if (chat?.kind !== 'group' || chat.archivedAt !== undefined) {
         this.persist(chatId);
+        return;
+      }
+      if (routing.parallelOptions !== undefined) {
+        await this.deliverPicked(chat, routing.entry, routing.parallelOptions, decision);
+        this.persist(chatId);
+        this.settleBatch(chatId);
         return;
       }
       const picked = decision.ids;
@@ -730,7 +833,7 @@ export class GroupChatService {
 
   private async dispatch(chatId: string): Promise<void> {
     const round = this.round(chatId);
-    if (this.disposed || round.routing) return;
+    if (this.disposed || (round.routing && round.routing.parallelOptions === undefined)) return;
     if (!round.state.current) {
       const job = this.autonomous.get(chatId)?.shift();
       if (job) {

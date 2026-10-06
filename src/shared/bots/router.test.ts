@@ -482,10 +482,11 @@ describe('onHumanMessage', () => {
     });
   });
 
-  it('没有 @ 时仍等当前说完后重开', () => {
-    expect(onHumanMessage(busy(), chat(), members, human('换个话题')).action).toBe(
-      'restart-after-current'
-    );
+  it('没有 @ 时立即旁路选人，不改当前回复人和队列', () => {
+    const state = busy();
+    const before = structuredClone(state);
+    expect(onHumanMessage(state, chat(), members, human('换个话题')).action).toBe('route-parallel');
+    expect(state).toEqual(before);
   });
 });
 

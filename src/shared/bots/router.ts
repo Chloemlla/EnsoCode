@@ -42,6 +42,7 @@ export type HumanDecision =
   | { action: 'start'; state: RouterState }
   | { action: 'steer' }
   | { action: 'parallel'; targets: BotId[] }
+  | { action: 'route-parallel' }
   | { action: 'restart-after-current' };
 
 /** 群内且未归档的成员，按群成员顺序；speaking 时再去掉静音成员 */
@@ -280,7 +281,7 @@ export function buildSummaryNote(
 
 /**
  * 只 @ 当前回复人 → steer；@ 其他成员 → 独立投递，不改原接力；
- * 无 @ 时等当前说完，用 mergePending 重新 startRound。
+ * 无 @ 时独立选人，不替换当前轮次。
  */
 export function onHumanMessage(
   state: RouterState,
@@ -290,6 +291,9 @@ export function onHumanMessage(
 ): HumanDecision {
   if (state.current === null)
     return { action: 'start', state: startRound(chat, members, humanEntry) };
+  const parsed = parseMentions(humanEntry.text, inChatMembers(chat, members));
+  if (!humanEntry.mentions?.length && !parsed.all && !parsed.ids.length)
+    return { action: 'route-parallel' };
   const targets = humanTargets(chat, members, humanEntry);
   const others = targets.filter((id) => id !== state.current);
   if (others.length) return { action: 'parallel', targets: others };
