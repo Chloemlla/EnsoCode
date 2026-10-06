@@ -954,7 +954,7 @@ export function App() {
   };
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="phone-app-root flex h-full min-h-0">
       <SessionDrawer
         open={docked || drawerOpen}
         docked={docked}

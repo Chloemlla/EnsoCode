@@ -185,9 +185,9 @@
   }
 }
 
-/* iOS 独立 PWA 从顶部固定实色层取状态栏背景，避免模糊覆盖标题。 */
+/* 固定整个应用来提供 iOS 状态栏底色；不能固定聊天列，否则会覆盖常驻侧栏。 */
 @media (display-mode: standalone) {
-  .phone-chat-root {
+  .phone-app-root {
     position: fixed;
     inset: 0;
     background-color: var(--background);

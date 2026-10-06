@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -9,7 +10,7 @@ vi.mock('./ChatScreen', () => ({
 }));
 vi.mock('./client', () => ({ PairClient: class {} }));
 vi.mock('./GroupChatScreen', () => ({ GroupChatScreen: () => 'GROUP_VIEW' }));
-vi.mock('./SessionDrawer', () => ({ SessionDrawer: () => null }));
+vi.mock('./SessionDrawer', () => ({ SessionDrawer: () => createElement('aside') }));
 vi.mock('./BotDrawerPanel', () => ({ BotDrawerPanel: () => null }));
 vi.mock('./PairScreen', () => ({ PairScreen: () => null }));
 vi.mock('./NewSessionSheet', () => ({ NewSessionSheet: () => null }));
@@ -55,3 +56,22 @@ it('lets an explicit launch session override the restored Bot chat', () => {
   window.location.search = '?session=notification';
   expect(renderToStaticMarkup(createElement(App))).toContain('CODE_VIEW:notification');
 });
+
+it.each(['', '?session=notification'])(
+  'fixes the whole sidebar-and-content shell, not the conversation alone, in standalone (%s)',
+  (search) => {
+    window.location.search = search;
+    const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+    const rule = css.match(
+      /@media\s*\(display-mode:\s*standalone\)\s*\{\s*\.([\w-]+)\s*\{([^}]+)\}/
+    );
+    expect(rule).not.toBeNull();
+    expect(rule?.[2]).toMatch(/position:\s*fixed/);
+    expect(rule?.[2]).toMatch(/inset:\s*0/);
+    const html = renderToStaticMarkup(createElement(App));
+    const rootClasses = html.match(/^<div class="([^"]+)"/)?.[1].split(' ');
+    expect(rootClasses).toContain(rule?.[1]);
+    expect(html).toContain('<aside>');
+    expect(html).toContain(search ? 'CODE_VIEW:notification' : '恢复 Bot 聊天');
+  }
+);
