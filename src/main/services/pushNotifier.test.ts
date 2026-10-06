@@ -32,6 +32,28 @@ describe('buildPushPayload', () => {
     });
   });
 
+  it('代审中（phase: reviewing）的审批不推送——代审模型可能放行', () => {
+    const reviewing = {
+      type: 'approval-request',
+      identity,
+      request: {
+        requestId: 'apr-1',
+        tool: 'bash',
+        kind: 'command' as const,
+        summary: 'ls',
+        phase: 'reviewing' as const,
+      },
+    };
+    expect(buildPushPayload(reviewing, '修复登录')).toBeNull();
+    // 评审升级/直接进入真人阶段（无 phase）仍推送
+    const waiting = {
+      type: 'approval-request',
+      identity,
+      request: { requestId: 'apr-2', tool: 'bash', kind: 'command' as const, summary: 'ls' },
+    };
+    expect(buildPushPayload(waiting, '修复登录')?.title).toBe('需要审批');
+  });
+
   it('默认静音 coworker 完成/失败，提问仍推送', () => {
     const coworker = { sessionId: 's1::cw-bob', generation: 'g1' };
     expect(buildPushPayload({ type: 'turn-completed', identity: coworker }, '修复登录')).toBeNull();
