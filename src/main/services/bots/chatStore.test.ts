@@ -83,6 +83,89 @@ describe('BotChatStore chats', () => {
   });
 });
 
+describe('BotChatStore threads', () => {
+  it('建话题：复制根群配置、独立时间线与会话，只能挂在根群下', () => {
+    const parent = group();
+    store.update(parent.id, (draft) => {
+      draft.sessions[BOT_A] = { conversationId: 'c1', cursor: 1 };
+      return draft;
+    });
+    store.appendEntry(parent.id, { id: 'r1', at: 1, kind: 'system', text: 'root' });
+    const thread = store.createThread(parent.id, '  发布清单 ');
+    expect(thread).toMatchObject({
+      kind: 'group',
+      parentId: parent.id,
+      threadTitle: '发布清单',
+      title: parent.title,
+      members: parent.members,
+      bossBotId: parent.bossBotId,
+      workspace: parent.workspace,
+      routing: parent.routing,
+      sessions: {},
+    });
+    expect(thread!.id).not.toBe(parent.id);
+    expect(store.appendEntry(thread!.id, { id: 't1', at: 1, kind: 'system', text: 'x' })?.seq).toBe(
+      1
+    );
+    expect(store.readEntries(parent.id).map((e) => e.id)).toEqual(['r1']);
+    expect(store.createThread(thread!.id)).toBeUndefined();
+    const direct = store.create({
+      kind: 'direct',
+      title: 'd',
+      members: [BOT_A],
+      bossBotId: null,
+      workspace: { kind: 'member-home' },
+    })!;
+    expect(store.createThread(direct.id)).toBeUndefined();
+    expect(store.createThread('nope')).toBeUndefined();
+  });
+
+  it('根群改配置级联到话题；话题自身改不动群配置', () => {
+    const parent = group();
+    const thread = store.createThread(parent.id)!;
+    store.update(thread.id, (draft) => {
+      draft.sessions[BOT_B] = { conversationId: 'c2', cursor: 0 };
+      return draft;
+    });
+    store.update(parent.id, (draft) => ({
+      ...draft,
+      title: '新名字',
+      bossBotId: BOT_B,
+      routing: { ...draft.routing, mode: 'boss' },
+      workspace: { kind: 'project', projectId: 'p2' },
+    }));
+    expect(store.get(thread.id)).toMatchObject({
+      title: '新名字',
+      bossBotId: BOT_B,
+      routing: { mode: 'boss' },
+      workspace: { kind: 'project', projectId: 'p2' },
+      sessions: { [BOT_B]: { conversationId: 'c2', cursor: 0 } },
+    });
+    store.update(thread.id, (draft) => ({ ...draft, title: 'x', bossBotId: BOT_A }));
+    expect(store.get(thread.id)).toMatchObject({ title: '新名字', bossBotId: BOT_B });
+    expect(new BotChatStore(root, now).get(thread.id)).toMatchObject({ title: '新名字' });
+  });
+
+  it('话题列表、根群与当前话题；孤儿话题重启后不加载', () => {
+    const parent = group();
+    const first = store.createThread(parent.id)!;
+    const second = store.createThread(parent.id)!;
+    expect(store.threadsOf(parent.id).map((c) => c.id)).toEqual([parent.id, first.id, second.id]);
+    expect(store.threadsOf(first.id)).toEqual([]);
+    expect(store.rootOf(second.id)?.id).toBe(parent.id);
+    expect(store.rootOf(parent.id)?.id).toBe(parent.id);
+    expect(store.activeThread(parent.id)?.id).toBe(parent.id);
+    store.update(parent.id, (draft) => ({ ...draft, activeThreadId: second.id }));
+    expect(store.activeThread(parent.id)?.id).toBe(second.id);
+    store.remove(second.id);
+    expect(store.activeThread(parent.id)?.id).toBe(parent.id);
+
+    store.remove(parent.id);
+    const reloaded = new BotChatStore(root, now);
+    expect(reloaded.get(first.id)).toBeUndefined();
+  });
+});
+
 describe('BotChatStore timeline', () => {
   it('assigns increasing seq that survives restart', () => {
     const chat = group();

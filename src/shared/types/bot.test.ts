@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOT_ROUTING_DEFAULTS,
+  BOT_THREAD_TITLE_MAX,
   checkBotName,
   parseBotBudget,
   parseBotChat,
@@ -269,6 +270,36 @@ describe('parseBotChat', () => {
         ...(distilledTo === 'entry-7' ? { distilledTo } : {}),
       });
     }
+  });
+
+  it('话题字段：parentId 只在群上且不指向自身，activeThreadId 只在根群上，标题裁剪', () => {
+    const parent = '55555555-5555-4555-8555-555555555555';
+    expect(parseBotChat({ ...group, parentId: parent, threadTitle: '  发布  ' })).toMatchObject({
+      parentId: parent,
+      threadTitle: '发布',
+    });
+    expect(parseBotChat({ ...group, parentId: CHAT })?.parentId).toBeUndefined();
+    expect(parseBotChat({ ...group, parentId: 'x' })?.parentId).toBeUndefined();
+    expect(parseBotChat({ ...group, threadTitle: '   ' })).not.toHaveProperty('threadTitle');
+    expect(parseBotChat({ ...group, threadTitle: 'a'.repeat(200) })?.threadTitle).toHaveLength(
+      BOT_THREAD_TITLE_MAX
+    );
+    expect(parseBotChat({ ...group, activeThreadId: parent })?.activeThreadId).toBe(parent);
+    expect(parseBotChat({ ...group, parentId: parent, activeThreadId: parent })).not.toHaveProperty(
+      'activeThreadId'
+    );
+    const direct = {
+      ...group,
+      kind: 'direct',
+      members: [BOT_A],
+      bossBotId: null,
+      workspace: { kind: 'member-home' },
+      sessions: {},
+    };
+    expect(parseBotChat({ ...direct, parentId: parent })).not.toHaveProperty('parentId');
+    expect(parseBotChat({ ...direct, activeThreadId: parent })).not.toHaveProperty(
+      'activeThreadId'
+    );
   });
 });
 
