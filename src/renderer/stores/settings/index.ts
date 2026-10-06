@@ -1,4 +1,8 @@
 import { type AccentColor, DEFAULT_ACCENT_COLOR, resolveAccentColor } from '@shared/accentColor';
+import {
+  DEFAULT_BOT_MAX_RUNNING_TURNS,
+  normalizeBotMaxRunningTurns,
+} from '@shared/bots/concurrency';
 import { sanitizeDefaultModel } from '@shared/defaultModel';
 import type { Locale } from '@shared/i18n';
 import { normalizeLocale } from '@shared/i18n';
@@ -26,7 +30,12 @@ import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types';
 import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
 import { DEFAULT_SPEECH_MODEL_ID, SYSTEM_MICROPHONE } from '@shared/types/speech';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
-import { parseVirtualModels, type VirtualModelEntry } from '@shared/virtualModels';
+import {
+  parseVirtualClassifier,
+  parseVirtualModels,
+  type VirtualClassifierConfig,
+  type VirtualModelEntry,
+} from '@shared/virtualModels';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
@@ -131,6 +140,7 @@ const initialState = {
   windowsLocalShell: 'auto' as const,
   exploreFoldEnabled: false,
   rtkEnabled: true,
+  protectedActionsInCode: false,
   editMode: 'apply_patch' as import('@shared/types').EditMode,
   compactStrategy: 'standard' as import('@shared/compactStrategy').CompactStrategy,
   smartCompactEnabled: false,
@@ -143,6 +153,10 @@ const initialState = {
   memoryDistillEnabled: false,
   memoryKgEnabled: false,
   voiceInputEnabled: false,
+  botModeEnabled: false,
+  botRouteClassifier: null as VirtualClassifierConfig | null,
+  botAssistantModel: null as import('@shared/defaultModel').DefaultModelRef | null,
+  botMaxRunningTurns: DEFAULT_BOT_MAX_RUNNING_TURNS,
   voiceInputDevice: SYSTEM_MICROPHONE,
   voiceModel: DEFAULT_SPEECH_MODEL_ID,
   voiceCorrectionEnabled: false,
@@ -291,6 +305,7 @@ export const useSettingsStore = create<SettingsState>()(
         set({ windowsLocalShell: parseWindowsLocalShell(windowsLocalShell) }),
       setExploreFoldEnabled: (exploreFoldEnabled) => set({ exploreFoldEnabled }),
       setRtkEnabled: (rtkEnabled) => set({ rtkEnabled }),
+      setProtectedActionsInCode: (protectedActionsInCode) => set({ protectedActionsInCode }),
       setMemoryEmbeddingModel: (memoryEmbeddingModel) => set({ memoryEmbeddingModel }),
       setMemoryEmbeddingAutoDownload: (memoryEmbeddingAutoDownload) =>
         set({ memoryEmbeddingAutoDownload }),
@@ -301,6 +316,11 @@ export const useSettingsStore = create<SettingsState>()(
       setMemoryDistillEnabled: (memoryDistillEnabled) => set({ memoryDistillEnabled }),
       setMemoryKgEnabled: (memoryKgEnabled) => set({ memoryKgEnabled }),
       setVoiceInputEnabled: (voiceInputEnabled) => set({ voiceInputEnabled }),
+      setBotModeEnabled: (botModeEnabled) => set({ botModeEnabled }),
+      setBotRouteClassifier: (botRouteClassifier) => set({ botRouteClassifier }),
+      setBotAssistantModel: (botAssistantModel) => set({ botAssistantModel }),
+      setBotMaxRunningTurns: (value) =>
+        set({ botMaxRunningTurns: normalizeBotMaxRunningTurns(value) }),
       setVoiceInputDevice: (voiceInputDevice) => set({ voiceInputDevice }),
       setVoiceModel: (voiceModel) => set({ voiceModel }),
       setVoiceCorrectionEnabled: (voiceCorrectionEnabled) => set({ voiceCorrectionEnabled }),
@@ -1004,6 +1024,10 @@ export const useSettingsStore = create<SettingsState>()(
         if (JSON.stringify(virtualModels) !== JSON.stringify(s.virtualModels)) {
           useSettingsStore.setState({ virtualModels });
         }
+        const botRouteClassifier = parseVirtualClassifier(s.botRouteClassifier) ?? null;
+        if (JSON.stringify(botRouteClassifier) !== JSON.stringify(s.botRouteClassifier ?? null)) {
+          useSettingsStore.setState({ botRouteClassifier });
+        }
         const smartCompactMode = parseSmartCompactMode(s.smartCompactMode) ?? 'auto';
         if (smartCompactMode !== s.smartCompactMode) {
           useSettingsStore.setState({ smartCompactMode });
@@ -1026,6 +1050,10 @@ export const useSettingsStore = create<SettingsState>()(
         const maxActiveCoworkers = normalizeMaxActiveCoworkers(s.maxActiveCoworkers);
         if (maxActiveCoworkers !== s.maxActiveCoworkers) {
           useSettingsStore.setState({ maxActiveCoworkers });
+        }
+        const botMaxRunningTurns = normalizeBotMaxRunningTurns(s.botMaxRunningTurns);
+        if (botMaxRunningTurns !== s.botMaxRunningTurns) {
+          useSettingsStore.setState({ botMaxRunningTurns });
         }
         const sshTimeoutSeconds = normalizeSshTimeoutSeconds(s.sshTimeoutSeconds);
         if (sshTimeoutSeconds !== s.sshTimeoutSeconds) {

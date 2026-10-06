@@ -1,5 +1,6 @@
 import type { RendererAgentEvent } from '@shared/types/agent';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApprovalGate } from '../../agent/approval';
 
 const { notifications, windows, execFileCalls, appState, settingsState } = vi.hoisted(() => ({
   notifications: [] as { title: string; body: string }[],
@@ -40,8 +41,12 @@ vi.mock('electron', () => {
 });
 
 vi.mock('../ipc/settings', () => ({ readSettings: () => settingsState.current }));
+vi.mock('../windows/MainWindow', () => ({
+  getMainWindow: () => windows[0],
+  focusMainWindow: vi.fn(),
+}));
 
-import { maybeNotify, setViewedSession } from './notifications';
+import { maybeNotify, maybeNotifyBot, setViewedSession } from './notifications';
 
 const identity = { sessionId: 'conversation-1', generation: 'g' } as const;
 
@@ -61,6 +66,7 @@ describe('maybeNotify', () => {
     appState.isPackaged = true;
     settingsState.current = undefined;
     setViewedSession(null);
+    maybeNotify({ type: 'worker-exited' });
   });
 
   it('ask-request 在窗口未聚焦时弹通知,正文取问题前 100 字', () => {
@@ -184,4 +190,120 @@ describe('maybeNotify', () => {
     } as unknown as RendererAgentEvent);
     expect(notifications).toHaveLength(0);
   });
+});
+
+describe.each(['session', 'bot'] as const)('%s approval notifications', (surface) => {
+  const bot = { enabled: true, chatId: 'chat', name: 'Alice', conversationId: 'conversation-1' };
+  const emit = (event: RendererAgentEvent) =>
+    surface === 'bot' ? maybeNotifyBot(event, bot) : Promise.resolve(maybeNotify(event));
+  const request = (phase?: 'reviewing', seq = 1): RendererAgentEvent => ({
+    type: 'approval-request',
+    identity,
+    seq,
+    request: {
+      requestId: 'apr',
+      tool: 'bash',
+      kind: 'command',
+      summary: 'ls',
+      ...(phase ? { phase } : {}),
+    },
+  });
+
+  beforeEach(async () => {
+    notifications.length = 0;
+    windows.length = 0;
+    appState.isPackaged = true;
+    setViewedSession(null);
+    await emit({ type: 'worker-exited' });
+  });
+
+  it('代审请求和重复事件不通知，同 ID 转人工只通知一次', async () => {
+    await emit(request('reviewing'));
+    await emit(request('reviewing', 2));
+    expect(notifications).toHaveLength(0);
+    await emit(request(undefined, 3));
+    await emit(request(undefined, 4));
+    expect(notifications).toHaveLength(1);
+  });
+
+  it.each(['auto_allow', 'block'] as const)(
+    '真实 gate %s 自动结束不发人工通知',
+    async (decision) => {
+      let seq = 0;
+      const pending: Promise<void>[] = [];
+      const gate = new ApprovalGate(
+        'assistant',
+        (info) =>
+          pending.push(emit({ type: 'approval-request', identity, seq: ++seq, request: info })),
+        (requestId) =>
+          pending.push(emit({ type: 'approval-resolved', identity, seq: ++seq, requestId })),
+        { review: async () => ({ decision }) }
+      );
+      await gate.ask('bash', 'command', 'ls', undefined);
+      await Promise.all(pending);
+      expect(notifications).toHaveLength(0);
+    }
+  );
+
+  it('普通人工审批与提问仍各通知一次', async () => {
+    await emit(request());
+    await emit(askEvent('选择哪个？'));
+    expect(notifications).toHaveLength(2);
+  });
+
+  it('重复人工状态事件只提醒一次', async () => {
+    await emit(request());
+    await emit(request(undefined, 2));
+    expect(notifications).toHaveLength(1);
+  });
+
+  it('已解决后乱序到达的旧审批事件不补发通知', async () => {
+    await emit(request('reviewing'));
+    await emit({ type: 'approval-resolved', identity, seq: 3, requestId: 'apr' });
+    await emit(request(undefined, 2));
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('不同会话或 generation 的相同审批 ID 不互相吞通知', async () => {
+    await emit(request());
+    await emit({
+      ...request(),
+      identity: { ...identity, sessionId: 'another-session' },
+    } as RendererAgentEvent);
+    await emit({
+      ...request(),
+      identity: { ...identity, generation: 'next' },
+    } as RendererAgentEvent);
+    expect(notifications).toHaveLength(3);
+  });
+
+  if (surface === 'bot') {
+    it.each(['parent-ended', 'child-ended', 'worker-exited'] as const)(
+      '%s 取消尚未发出的审批通知',
+      async (type) => {
+        const notification = emit(request());
+        await emit({
+          type,
+          identity: {
+            ...identity,
+            parent: identity,
+            instanceId: 'child',
+            instanceName: 'child',
+            typeKey: 'agent:enso',
+          },
+          seq: 2,
+          reason: 'ended',
+        } as RendererAgentEvent);
+        await notification;
+        expect(notifications).toHaveLength(0);
+      }
+    );
+
+    it('等待加载窗口模块时审批已解决，不迟发人工提醒', async () => {
+      const notification = emit(request());
+      await emit({ type: 'approval-resolved', identity, seq: 2, requestId: 'apr' });
+      await notification;
+      expect(notifications).toHaveLength(0);
+    });
+  }
 });

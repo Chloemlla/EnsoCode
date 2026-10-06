@@ -5,6 +5,9 @@ import type { RendererAgentEvent } from '@shared/types/agent';
 import { app, BrowserWindow, Notification } from 'electron';
 import { readSettings } from '../ipc/settings';
 import { sendToWindow } from '../windows/createAppWindow';
+import { ApprovalNotificationGate } from './approvalNotificationGate';
+
+const approvalNotifications = new ApprovalNotificationGate();
 
 // 文案本地内联：main 段引入 @shared/i18n 会触发 rollup 多入口 chunk 异常
 // （index.js 被打成 0 字节空产物），故不走共享 i18n
@@ -62,7 +65,12 @@ function focusSession(sessionId: string): void {
   sendToWindow(win, IPC_CHANNELS.NOTIFICATION_FOCUS_SESSION, sessionId);
 }
 
-function notify(sessionId: string, title: string, body: string): void {
+function notify(
+  sessionId: string,
+  title: string,
+  body: string,
+  onClick = () => focusSession(sessionId)
+): void {
   // macOS 未打包（未签名）app 的原生通知会被 UNUserNotificationCenter 静默丢弃，
   // 且 Electron 的 'failed' 事件是 Windows-only 兜不住——直接走 osascript
   // （无点击跳转，但至少可见；打包签名后走原生路径）
@@ -74,8 +82,47 @@ function notify(sessionId: string, title: string, body: string): void {
   }
   if (!Notification.isSupported()) return;
   const notification = new Notification({ title, body, silent: false });
-  notification.on('click', () => focusSession(sessionId));
+  notification.on('click', onClick);
   notification.show();
+}
+
+export async function maybeNotifyBot(
+  event: RendererAgentEvent,
+  bot: { enabled: boolean; chatId: string | null; name: string; conversationId: string }
+): Promise<void> {
+  const isCurrent = approvalNotifications.observe(event);
+  if (!isCurrent) return;
+  if (!bot.enabled) return;
+  if (event.type !== 'approval-request' && event.type !== 'ask-request') return;
+  const { focusMainWindow, getMainWindow } = await import('../windows/MainWindow');
+  if (!isCurrent()) return;
+  if (getMainWindow()?.isFocused()) return;
+  const title = `${bot.name} · ${event.type === 'ask-request' ? texts().ask : texts().approval}`;
+  const body =
+    event.type === 'ask-request'
+      ? event.ask.question
+      : `${event.request.tool} · ${event.request.summary}`;
+  notify(event.identity.sessionId, title, body.slice(0, 100), () => {
+    const win = focusMainWindow();
+    sendToWindow(win, IPC_CHANNELS.BOT_EVENT, {
+      kind: 'open',
+      ...(bot.chatId ? { chatId: bot.chatId } : {}),
+      conversationId: bot.conversationId,
+    });
+  });
+}
+
+/** Bot 聊天的回合 / 接力批次 / 稍后提醒通知：主窗口聚焦时不弹，点击切到 Bot 模式打开该聊天 */
+export async function notifyBotChat(
+  chatId: string,
+  build: (lang: 'zh' | 'en') => { title: string; body: string }
+): Promise<void> {
+  const { focusMainWindow, getMainWindow } = await import('../windows/MainWindow');
+  if (getMainWindow()?.isFocused()) return;
+  const { title, body } = build(texts() === TEXTS.zh ? 'zh' : 'en');
+  notify(`bot-chat:${chatId}`, title, body, () => {
+    sendToWindow(focusMainWindow(), IPC_CHANNELS.BOT_EVENT, { kind: 'open', chatId });
+  });
 }
 
 /**
@@ -84,6 +131,7 @@ function notify(sessionId: string, title: string, body: string): void {
  * 挂在 main 的 agent 事件广播流上,与 renderer 转发互不影响。
  */
 export function maybeNotify(event: RendererAgentEvent): void {
+  if (!approvalNotifications.observe(event)) return;
   const sessionId = (event as { identity?: { sessionId?: string } }).identity?.sessionId;
   if (mainWindowFocused() && sessionId !== undefined && sessionId === viewedSessionId) return;
   if (shouldMuteCoworkerCompletionNotification(event, readNotifyMainAgentOnly())) return;

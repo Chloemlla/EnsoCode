@@ -2,6 +2,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { PushSubscriptionJson } from '@enso/pair';
 import { shouldMuteCoworkerCompletionNotification } from '@shared/coworkerNotification';
+import type { ApprovalRequestInfo } from '@shared/types/agent';
 import { app, safeStorage } from 'electron';
 import webPush from 'web-push';
 import { isSecureStorageAvailable } from './pairStore';
@@ -30,11 +31,19 @@ const PUSH_TITLES: Record<string, string> = {
  * body 用会话标题（不含消息正文），缺标题时退化为「会话」。
  */
 export function buildPushPayload(
-  event: { type: string; sessionId?: string; identity?: { sessionId?: string } },
+  event: {
+    type: string;
+    sessionId?: string;
+    identity?: { sessionId?: string };
+    request?: Partial<ApprovalRequestInfo>;
+  },
   sessionTitle: string | undefined,
   notifyMainAgentOnly = true
 ): PushPayload | null {
   if (shouldMuteCoworkerCompletionNotification(event, notifyMainAgentOnly)) return null;
+  // 代审中（reviewing）的审批可能由代审模型直接放行，不打扰真人；
+  // 升级为等人决策时会以无 phase 的 approval-request 再发一次
+  if (event.type === 'approval-request' && event.request?.phase === 'reviewing') return null;
   const title = PUSH_TITLES[event.type];
   if (!title) return null;
   const sessionId = event.identity?.sessionId ?? event.sessionId;

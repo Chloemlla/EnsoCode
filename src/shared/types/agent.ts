@@ -22,6 +22,12 @@ import { type CompactStrategy, parseCompactStrategy } from '../compactStrategy';
 import type { DefaultModelRef } from '../defaultModel';
 import { parseMaxActiveCoworkers } from '../maxActiveCoworkers';
 import {
+  isCodexAccountKey,
+  type OauthPoolFailure,
+  parseOauthAccountPool,
+  parseOauthPoolFailure,
+} from '../oauthAccountPool';
+import {
   PLAN_FEEDBACK_MAX,
   PLAN_RESPOND_ACTIONS,
   type PlanRespondAction,
@@ -112,6 +118,19 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
    * 只作占位；worker 必须先看这里，按成员逐个解析后注册 pi 虚拟模型。
    */
   virtual?: VirtualSpawnConfig;
+  /**
+   * Main 校验后下发的顺序池配置；仅用于路由身份，实时成员和游标仍以 Main 为权威。
+   *
+   * Validated sequential pool configuration; identifies the route, while Main remains authoritative for live membership and cursors.
+   */
+  oauthAccountPool?: { accountKeys: string[] };
+}
+
+/** pi catalog 里的分类器 provider/model 与凭证 */
+export interface VirtualClassifierCredentials {
+  provider: string;
+  modelId: string;
+  apiKey?: string;
 }
 
 export interface VirtualSpawnClassifier {
@@ -120,7 +139,7 @@ export interface VirtualSpawnClassifier {
   /** judge：裁判聊天模型 */
   model?: SpawnModelConfig;
   /** pi-classifier：pi catalog 里的分类器 provider/model 与凭证 */
-  classifier?: { provider: string; modelId: string; apiKey?: string };
+  classifier?: VirtualClassifierCredentials;
 }
 
 export interface VirtualSpawnConfig {
@@ -141,6 +160,16 @@ export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 
 /** 审批请求的操作类别 */
 export type ApprovalKind = 'command' | 'file-edit' | 'file-write' | 'mcp';
+
+/** 受保护动作类别：底线开启时无视审批档位强制真人确认 */
+export const PROTECTED_ACTION_CATEGORIES = [
+  'external-send',
+  'delete',
+  'payment',
+  'deploy',
+  'secret',
+] as const;
+export type ProtectedActionCategory = (typeof PROTECTED_ACTION_CATEGORIES)[number];
 
 /** 内嵌浏览器操作闭集：worker 只能发这些，raw CDP 永不进协议。 */
 export const BROWSER_OPS = [
@@ -185,6 +214,10 @@ export interface ApprovalRequestInfo {
   toolCallId?: string;
   /** reviewing = 代审模型评审中（不弹真人按钮）；缺省 = 等人决策 */
   phase?: 'reviewing';
+  /** 命中受保护动作底线的类别；此类审批只能单次放行 */
+  protected?: ProtectedActionCategory;
+  /** 等人处理的截止时间（ms）；到期由 Main 按超时拒绝 */
+  expiresAt?: number;
 }
 
 /** agent 向用户的提问（ask_user 工具,阻塞等答复） */
@@ -193,6 +226,8 @@ export interface AskRequestInfo {
   question: string;
   /** 可选快捷选项（用户也可自由输入） */
   options?: string[];
+  /** 等人回答的截止时间（ms）；到期由 Main 按未回答处理 */
+  expiresAt?: number;
 }
 
 /** 审批决策 */
@@ -686,7 +721,8 @@ export interface ModelRef {
   modelId: string;
 }
 
-export type ProjectKind = 'local' | 'ssh';
+/** bot-home：Bot 成员 / 群独立工作区的隐藏项目，只由 Main 创建，不投影给 renderer */
+export type ProjectKind = 'local' | 'ssh' | 'bot-home';
 
 export interface ProjectAuthority {
   projectId: string;
@@ -746,6 +782,13 @@ export interface ConversationForkOrigin {
   entryId: string;
 }
 
+/** Bot 会话归属：只由 Main 写入；chatId 为 null 表示委派会话 */
+export interface ConversationBotBinding {
+  botId: string;
+  chatId: string | null;
+  delegationId?: string;
+}
+
 export interface ConversationAuthority {
   conversationId: string;
   projectId: string;
@@ -755,6 +798,7 @@ export interface ConversationAuthority {
   sessionFile?: string;
   selection?: DefaultModelRef & { revision: number };
   forkedFrom?: ConversationForkOrigin;
+  bot?: ConversationBotBinding;
 }
 
 export type ConversationAuthorityProjection = ConversationAuthority;
@@ -861,6 +905,17 @@ export interface SafeChildRef {
 }
 
 export type AgentSessionCustomEntry =
+  | {
+      kind: 'oauth-account-selected';
+      accountKey: string;
+      previousAccountKey?: string;
+      /** 真实请求的池路由身份；旧历史缺省时不能用于额度展示。
+       *
+       * Pool route identity of the actual request; legacy entries without it cannot display usage. */
+      settingsProviderId?: string;
+      modelId?: string;
+      at: number;
+    }
   | { kind: 'agent-dispatch'; child: SafeChildRef; at: number }
   | {
       kind: 'agent-completed';
@@ -953,6 +1008,13 @@ export type DispatchMainEvent =
 
 /** Main → worker。所有 session 控制均携 exact generation。 */
 export type AgentCommand =
+  | {
+      type: 'oauth-pool-result';
+      requestId: string;
+      accountKey?: string;
+      selectionReceipt?: string;
+      error?: string;
+    }
   | { type: 'lock-workspace'; requestId: string; conversationIds: string[] }
   | { type: 'unlock-workspace'; requestId: string; conversationIds: string[]; branch?: string }
   | {
@@ -1007,6 +1069,15 @@ export type AgentCommand =
       rolePrompt?: string;
       /** 仅普通 parent：替换 pi 默认提示词开头的角色段落，其余运行时内容保留 */
       systemPrompt?: string;
+      botMode?: boolean;
+      /** Bot 群聊成员会话：挂 group_tasks / group_history 工具（私聊 / 委派子会话不挂） */
+      botGroupTasks?: boolean;
+      /** Bot 私聊 / 群聊成员会话（非委派）：挂 routine_propose / send_image 工具 */
+      botRoutines?: boolean;
+      /** Bot 写成员：同工作区按文件占用、全局命令短独占；祖先会话（委派链）互不阻塞 */
+      botWriteLock?: { label: string; ancestors: string[] };
+      /** 受保护动作底线（Bot 会话恒开；Code 会话由设置项决定） */
+      protectedActions?: boolean;
       /** 期望的 Plan 模式；与会话 jsonl 折叠结果不同时由 worker 追加切换条目 */
       planMode?: boolean;
     }
@@ -1060,6 +1131,8 @@ export type AgentCommand =
       images?: AttachedImage[];
       /** renderer 乐观回显的投递标识；worker 在对应 user 消息上屏后以 delivery-settled 回执 */
       deliveryId?: string;
+      /** Bot 插话仅允许进入活轮；不再忙时交回 Main 重新准入。 */
+      activeOnly?: true;
     }
   | { type: 'set-model'; identity: SessionIdentity; model: SpawnModelConfig }
   | { type: 'set-thinking'; identity: SessionIdentity; level: ThinkingLevel }
@@ -1074,6 +1147,12 @@ export type AgentCommand =
       identity: SessionIdentity;
       requestId: string;
       decision: ApprovalDecision;
+    }
+  | {
+      type: 'request-timeout';
+      identity: SessionIdentity;
+      kind: 'approval' | 'ask';
+      requestId: string;
     }
   | { type: 'set-approval-mode'; identity: SessionIdentity; mode: ApprovalMode }
   | { type: 'set-plan-mode'; identity: SessionIdentity; active: boolean }
@@ -1106,7 +1185,7 @@ export type AgentCommand =
       error?: string;
     }
   | {
-      type: 'memory-result';
+      type: 'memory-result' | 'delegation-result';
       identity: SessionIdentity | ChildSessionIdentity;
       requestId: string;
       ok: boolean;
@@ -1169,6 +1248,17 @@ export type AgentCommand =
       type: 'abort-complete-text';
       requestId: string;
     }
+  | {
+      /** 一次性 pi 分类器 choice 问题（群聊智能选人）；结果经 choice-classified / choice-failed 按 requestId 回流 */
+      type: 'classify-choice';
+      requestId: string;
+      classifier: VirtualClassifierCredentials;
+      state: Record<string, unknown>;
+      instructions: string;
+      criteria: Record<string, string>;
+      timeoutMs: number;
+    }
+  | { type: 'abort-classify-choice'; requestId: string }
   | { type: 'abort-retry'; identity: SessionIdentity }
   | { type: 'retry'; identity: SessionIdentity }
   /** 释放父会话：中断并销毁 worker 侧会话（含全部 coworker/child），jsonl 留盘可 resume。
@@ -1430,6 +1520,7 @@ export type RendererAgentEvent =
       | ChildLifecycleEvent
       | McpWorkerEvent
       | WorkspaceLockEvent
+      | { type: 'oauth-pool-select' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -1454,6 +1545,14 @@ export type WorkspaceLockEvent =
   | { type: 'workspace-unlock-result'; requestId: string; ok: boolean; error?: string };
 
 export type AgentWorkerEvent =
+  | {
+      type: 'oauth-pool-select';
+      requestId: string;
+      settingsProviderId: string;
+      modelId: string;
+      failed?: OauthPoolFailure;
+      excludedAccountKeys?: string[];
+    }
   | WorkspaceLockEvent
   | ParentLifecycleEvent
   | ChildLifecycleEvent
@@ -1465,6 +1564,7 @@ export type AgentWorkerEvent =
     }
   | { type: 'delivery-settled'; identity: SessionIdentity; seq: number; deliveryId: string }
   | { type: 'delivery-rejected'; identity: SessionIdentity; seq: number; deliveryId: string }
+  | { type: 'delivery-deferred'; identity: SessionIdentity; seq: number; deliveryId: string }
   | { type: 'status'; identity: SessionIdentity; seq: number; status: NodeStatus; error?: string }
   | {
       type: 'message-upsert';
@@ -1600,6 +1700,20 @@ export type AgentWorkerEvent =
       params: unknown;
     }
   | {
+      type: 'delegation-invoke';
+      identity: SessionIdentity;
+      seq: number;
+      requestId: string;
+      op:
+        | 'delegate'
+        | 'check_delegation'
+        | 'group_tasks'
+        | 'group_history'
+        | 'routine_propose'
+        | 'send_image';
+      params: unknown;
+    }
+  | {
       type: 'agent-control-invoke';
       identity: SessionIdentity | ChildSessionIdentity;
       seq: number;
@@ -1655,6 +1769,8 @@ export type AgentWorkerEvent =
     }
   | { type: 'text-completed'; requestId: string; text: string }
   | { type: 'text-failed'; requestId: string; error: string }
+  | { type: 'choice-classified'; requestId: string; probabilities: Record<string, number> }
+  | { type: 'choice-failed'; requestId: string; error: string }
   | { type: 'text-delta'; requestId: string; text: string; thinking?: string }
   | {
       type: 'task-output';
@@ -1997,13 +2113,16 @@ function parseVirtualSpawnClassifier(value: unknown): boolean {
     return value.classifier === undefined && parsePhysicalSpawnModelConfig(value.model) !== null;
   }
   if (value.source !== 'pi-classifier' || value.model !== undefined) return false;
-  const classifier = value.classifier;
+  return parseClassifierCredentials(value.classifier);
+}
+
+function parseClassifierCredentials(value: unknown): value is VirtualClassifierCredentials {
   return (
-    isRecord(classifier) &&
-    hasOnlyKeys(classifier, ['provider', 'modelId', 'apiKey']) &&
-    isNonEmptyString(classifier.provider) &&
-    isNonEmptyString(classifier.modelId) &&
-    (classifier.apiKey === undefined || typeof classifier.apiKey === 'string')
+    isRecord(value) &&
+    hasOnlyKeys(value, ['provider', 'modelId', 'apiKey']) &&
+    isNonEmptyString(value.provider) &&
+    isNonEmptyString(value.modelId) &&
+    (value.apiKey === undefined || typeof value.apiKey === 'string')
   );
 }
 
@@ -2046,6 +2165,7 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
       'modelId',
       'settingsProviderId',
       'oauthAccountKey',
+      'oauthAccountPool',
       'reasoning',
       'thinkingLevel',
       'contextWindow',
@@ -2056,7 +2176,11 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
     typeof value.apiKey !== 'string' ||
     !isNonEmptyString(value.modelId) ||
     !isNonEmptyString(value.settingsProviderId) ||
-    (value.oauthAccountKey !== undefined && !isNonEmptyString(value.oauthAccountKey))
+    (value.oauthAccountKey !== undefined && !isNonEmptyString(value.oauthAccountKey)) ||
+    (value.oauthAccountPool !== undefined &&
+      (!parseOauthAccountPool(value.oauthAccountPool) ||
+        !isCodexAccountKey(value.oauthAccountKey) ||
+        value.apiKey !== ''))
   ) {
     return null;
   }
@@ -2089,6 +2213,9 @@ function isValidProjectRemoteFields(value: Record<string, unknown>): boolean {
     return isNonEmptyString(value.sshHost) && isUuid(value.sshConnectionId);
   }
   if (value.kind === 'local' || value.kind === undefined) {
+    return value.sshHost === undefined && value.sshConnectionId === undefined;
+  }
+  if (value.kind === 'bot-home') {
     return value.sshHost === undefined && value.sshConnectionId === undefined;
   }
   return false;
@@ -2163,6 +2290,7 @@ export function parseConversationAuthority(value: unknown): ConversationAuthorit
       'sessionFile',
       'selection',
       'forkedFrom',
+      'bot',
     ]) ||
     !isUuid(value.conversationId) ||
     !isUuid(value.projectId) ||
@@ -2194,7 +2322,18 @@ export function parseConversationAuthority(value: unknown): ConversationAuthorit
       return null;
     }
   }
+  if (value.bot !== undefined && !isConversationBotBinding(value.bot)) return null;
   return value as unknown as ConversationAuthority;
+}
+
+function isConversationBotBinding(value: unknown): value is ConversationBotBinding {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['botId', 'chatId', 'delegationId']) &&
+    isUuid(value.botId) &&
+    (value.chatId === null || isUuid(value.chatId)) &&
+    (value.delegationId === undefined || isNonEmptyString(value.delegationId))
+  );
 }
 
 export function parseSourceAuthorityProjection(value: unknown): SourceAuthorityProjection | null {
@@ -2383,6 +2522,24 @@ function parseSafeChildRef(value: unknown): SafeChildRef | null {
 
 export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustomEntry | null {
   if (!isRecord(value)) return null;
+  if (value.kind === 'oauth-account-selected') {
+    return hasOnlyKeys(value, [
+      'kind',
+      'accountKey',
+      'previousAccountKey',
+      'settingsProviderId',
+      'modelId',
+      'at',
+    ]) &&
+      isCodexAccountKey(value.accountKey) &&
+      (value.previousAccountKey === undefined || isCodexAccountKey(value.previousAccountKey)) &&
+      ((value.settingsProviderId === undefined && value.modelId === undefined) ||
+        (isNonEmptyString(value.settingsProviderId) && isNonEmptyString(value.modelId))) &&
+      typeof value.at === 'number' &&
+      Number.isFinite(value.at)
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  }
   if (value.kind === 'capability-receipt') {
     if (!hasExactKeys(value, ['kind', 'receipt'])) return null;
     const receipt = parseCapabilityReceipt(value.receipt);
@@ -2672,6 +2829,18 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
 /** 收窄 Main → worker 命令。旧 global/builtin session shape 一律拒绝。 */
 export function parseAgentCommand(value: unknown): AgentCommand | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  if (value.type === 'oauth-pool-result') {
+    return hasOnlyKeys(value, ['type', 'requestId', 'accountKey', 'selectionReceipt', 'error']) &&
+      isNonEmptyString(value.requestId) &&
+      ((isCodexAccountKey(value.accountKey) &&
+        value.error === undefined &&
+        (value.selectionReceipt === undefined || isUuid(value.selectionReceipt))) ||
+        (value.accountKey === undefined &&
+          value.selectionReceipt === undefined &&
+          isNonEmptyString(value.error)))
+      ? (value as unknown as AgentCommand)
+      : null;
+  }
   switch (value.type) {
     case 'lock-workspace':
     case 'unlock-workspace':
@@ -2725,6 +2894,11 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'remote',
           'rolePrompt',
           'systemPrompt',
+          'botMode',
+          'botGroupTasks',
+          'botRoutines',
+          'botWriteLock',
+          'protectedActions',
           'planMode',
         ]) ||
         !parseSessionIdentity(value.identity) ||
@@ -2769,7 +2943,16 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.approvalReviewer !== undefined &&
           parseSpawnModelConfig(value.approvalReviewer) === null) ||
         (value.rolePrompt !== undefined && !isNonEmptyString(value.rolePrompt)) ||
-        (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt))
+        (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt)) ||
+        (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
+        (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
+        (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||
+        (value.botWriteLock !== undefined &&
+          (!isRecord(value.botWriteLock) ||
+            !isNonEmptyString(value.botWriteLock.label) ||
+            !Array.isArray(value.botWriteLock.ancestors) ||
+            !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
+        (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean')
       ) {
         return null;
       }
@@ -2875,6 +3058,32 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
         ? (value as unknown as AgentCommand)
         : null;
+    case 'classify-choice':
+      return hasExactKeys(value, [
+        'type',
+        'requestId',
+        'classifier',
+        'state',
+        'instructions',
+        'criteria',
+        'timeoutMs',
+      ]) &&
+        isNonEmptyString(value.requestId) &&
+        parseClassifierCredentials(value.classifier) &&
+        isRecord(value.state) &&
+        isNonEmptyString(value.instructions) &&
+        isRecord(value.criteria) &&
+        Object.keys(value.criteria).length > 0 &&
+        Object.values(value.criteria).every(isNonEmptyString) &&
+        typeof value.timeoutMs === 'number' &&
+        Number.isFinite(value.timeoutMs) &&
+        value.timeoutMs > 0
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'abort-classify-choice':
+      return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'summarize-title':
       return hasExactKeys(value, ['type', 'conversationId', 'input', 'candidates']) &&
         isNonEmptyString(value.conversationId) &&
@@ -2888,11 +3097,22 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
     case 'prompt':
     case 'steer': {
       const images = value.images === undefined ? [] : parseAttachedImages(value.images);
-      return hasOnlyKeys(value, ['type', 'identity', 'text', 'images', 'deliveryId']) &&
+      return hasOnlyKeys(value, [
+        'type',
+        'identity',
+        'text',
+        'images',
+        'deliveryId',
+        'activeOnly',
+      ]) &&
         parseAnySessionIdentity(value.identity) &&
         typeof value.text === 'string' &&
         images !== null &&
         (value.text.length > 0 || images.length > 0) &&
+        (value.activeOnly === undefined ||
+          (value.type === 'steer' &&
+            value.activeOnly === true &&
+            isDeliveryId(value.deliveryId))) &&
         (value.deliveryId === undefined || isDeliveryId(value.deliveryId))
         ? (value as unknown as AgentCommand)
         : null;
@@ -2923,6 +3143,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.decision === 'allow' ||
           value.decision === 'allowSession' ||
           value.decision === 'deny')
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'request-timeout':
+      return hasExactKeys(value, ['type', 'identity', 'kind', 'requestId']) &&
+        parseAnySessionIdentity(value.identity) &&
+        (value.kind === 'approval' || value.kind === 'ask') &&
+        isNonEmptyString(value.requestId)
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-approval-mode':
@@ -2979,6 +3206,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         : null;
     case 'browser-result':
     case 'memory-result':
+    case 'delegation-result':
     case 'computer-result': {
       if (
         !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
@@ -3150,8 +3378,31 @@ function parseLifecycleEvent(value: Record<string, unknown>): AgentWorkerEvent |
 }
 
 /** 收窄 worker → Main/Renderer 统一事件；缺 generation 的旧事件拒绝。 */
+const isOptionalTimestamp = (value: unknown): boolean =>
+  value === undefined || (typeof value === 'number' && Number.isFinite(value));
+
 export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  if (value.type === 'oauth-pool-select') {
+    return hasOnlyKeys(value, [
+      'type',
+      'requestId',
+      'settingsProviderId',
+      'modelId',
+      'failed',
+      'excludedAccountKeys',
+    ]) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.settingsProviderId) &&
+      isNonEmptyString(value.modelId) &&
+      (value.excludedAccountKeys === undefined ||
+        (Array.isArray(value.excludedAccountKeys) &&
+          value.excludedAccountKeys.length <= 100 &&
+          value.excludedAccountKeys.every(isCodexAccountKey))) &&
+      (value.failed === undefined || parseOauthPoolFailure(value.failed) !== null)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
   if (
     value.type === 'parent-ready' ||
     value.type === 'model-changed' ||
@@ -3270,6 +3521,21 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       ? (value as unknown as AgentWorkerEvent)
       : null;
   }
+  if (value.type === 'choice-classified') {
+    return hasExactKeys(value, ['type', 'requestId', 'probabilities']) &&
+      isNonEmptyString(value.requestId) &&
+      isRecord(value.probabilities) &&
+      Object.values(value.probabilities).every((p) => typeof p === 'number' && Number.isFinite(p))
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+  if (value.type === 'choice-failed') {
+    return hasExactKeys(value, ['type', 'requestId', 'error']) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.error)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
   const identity = parseAnySessionIdentity(value.identity);
   if (!identity || !isSequence(value.seq)) return null;
   switch (value.type) {
@@ -3302,6 +3568,18 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         MEMORY_OPS.includes(value.op as MemoryOp)
         ? (value as unknown as AgentWorkerEvent)
         : null;
+    case 'delegation-invoke':
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.requestId) &&
+        (value.op === 'delegate' ||
+          value.op === 'check_delegation' ||
+          value.op === 'group_tasks' ||
+          value.op === 'group_history' ||
+          value.op === 'routine_propose' ||
+          value.op === 'send_image')
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
     case 'computer-invoke':
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
@@ -3320,6 +3598,7 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         : null;
     case 'delivery-settled':
     case 'delivery-rejected':
+    case 'delivery-deferred':
       return hasExactKeys(value, ['type', 'identity', 'seq', 'deliveryId']) &&
         isDeliveryId(value.deliveryId)
         ? (value as unknown as AgentWorkerEvent)
@@ -3407,7 +3686,10 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         typeof value.request.summary === 'string' &&
         (value.request.filePaths === undefined ||
           (Array.isArray(value.request.filePaths) &&
-            value.request.filePaths.every(isNonEmptyString)))
+            value.request.filePaths.every(isNonEmptyString))) &&
+        (value.request.protected === undefined ||
+          (PROTECTED_ACTION_CATEGORIES as readonly unknown[]).includes(value.request.protected)) &&
+        isOptionalTimestamp(value.request.expiresAt)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'approval-resolved':
@@ -3416,7 +3698,8 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     case 'ask-request':
       return isRecord(value.ask) &&
         isNonEmptyString(value.ask.requestId) &&
-        isNonEmptyString(value.ask.question)
+        isNonEmptyString(value.ask.question) &&
+        isOptionalTimestamp(value.ask.expiresAt)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'subagent-update':

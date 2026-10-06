@@ -91,6 +91,11 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   memoryDistillEnabled: { mode: 'portable' },
   memoryKgEnabled: { mode: 'portable' },
   voiceInputEnabled: { mode: 'excluded', reason: 'speech model lives on this device' },
+  botModeEnabled: { mode: 'excluded', reason: 'bot members and chats live on this device' },
+  botMaxRunningTurns: { mode: 'excluded', reason: 'device-local Bot concurrency limit' },
+  botRouteClassifier: { mode: 'excluded', reason: 'bot members and chats live on this device' },
+  botAssistantModel: { mode: 'excluded', reason: 'bot members and chats live on this device' },
+  protectedActionsInCode: { mode: 'excluded', reason: 'device-local safety preference' },
   voiceInputDevice: { mode: 'excluded', reason: 'microphones belong to this device' },
   voiceModel: { mode: 'excluded', reason: 'speech model lives on this device' },
   voiceCorrectionEnabled: { mode: 'excluded', reason: 'voice input is configured per device' },
@@ -263,6 +268,11 @@ function portableState(state: Record<string, unknown>): Record<string, unknown> 
           ? entry.omittedFields.filter((field): field is string => typeof field === 'string')
           : [];
         entry.omittedFields = [...new Set([...omitted, 'oauthAccountKey'])];
+      }
+      if (entry.oauthAccountPool !== undefined) {
+        delete entry.oauthAccountPool;
+        const omitted = Array.isArray(entry.omittedFields) ? entry.omittedFields : [];
+        entry.omittedFields = [...new Set([...omitted, 'oauthAccountPool'])];
       }
     }
   }

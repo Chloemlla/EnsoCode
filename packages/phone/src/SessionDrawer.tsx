@@ -25,13 +25,15 @@ import {
   Laptop,
   MessageSquarePlus,
   Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Pin,
   Plus,
   Unplug,
   X,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -82,6 +84,12 @@ const PUSH_ERROR_TEXT: Record<PushFailureReason, string> = {
 
 interface Props {
   open: boolean;
+  /** 大屏横屏：左栏常驻布局，不渲染遮罩、无关闭按钮，onClose 由调用方保持空操作 */
+  docked?: boolean;
+  /** 当前窗口满足常驻条件：显示 常驻/折叠 切换入口 */
+  pinnable?: boolean;
+  /** 切换 常驻/折叠；调用方负责持久化 */
+  onTogglePinned?(): void;
   projects: ProjectEntry[];
   groups?: ProjectGroupEntry[];
   catalog: CatalogEntry[];
@@ -112,10 +120,15 @@ interface Props {
   onRenameDevice(pairId: string, label: string): void;
   /** 解绑指定那台；删到没有时回配对页 */
   onUnpairDevice(pairId: string): void;
+  /** 桌面开启 Bot 模式后才有：顶部切换「项目 | Bot」 */
+  botSegment?: { active: boolean; onChange(active: boolean): void; panel: ReactNode };
 }
 
 export function SessionDrawer({
   open,
+  docked = false,
+  pinnable = false,
+  onTogglePinned,
   projects,
   groups = [],
   catalog,
@@ -139,7 +152,9 @@ export function SessionDrawer({
   onAddDevice,
   onRenameDevice,
   onUnpairDevice,
+  botSegment,
 }: Props) {
+  const botActive = botSegment?.active === true;
   const [foldedProjects, setFoldedProjects] = useState<Record<string, boolean>>({});
   const [revealedExtras, setRevealedExtras] = useState<Record<string, number>>({});
   // 底部「已归档」栏目的折叠态（与桌面一致：缺省收起）
@@ -224,21 +239,28 @@ export function SessionDrawer({
 
   return (
     <>
-      <button
-        type="button"
-        aria-label="关闭侧栏"
-        onClick={onClose}
-        // 关闭后要 visibility:hidden 而非只透明：iOS standalone 的状态栏底色采样页面顶边，
-        // 仅改 opacity 不触发重采，会把遮罩色（黑 40% 叠白 = #999）卡在状态栏直到重开
-        className={cn(
-          'fixed inset-0 z-40 bg-black/40 transition-[opacity,visibility] duration-200',
-          open ? 'visible opacity-100' : 'invisible pointer-events-none opacity-0'
-        )}
-      />
+      {!docked && (
+        <button
+          type="button"
+          aria-label="关闭侧栏"
+          onClick={onClose}
+          // 关闭后要 visibility:hidden 而非只透明：iOS standalone 的状态栏底色采样页面顶边，
+          // 仅改 opacity 不触发重采，会把遮罩色（黑 40% 叠白 = #999）卡在状态栏直到重开
+          className={cn(
+            'fixed inset-0 z-40 bg-black/40 transition-[opacity,visibility] duration-200',
+            open ? 'visible opacity-100' : 'invisible pointer-events-none opacity-0'
+          )}
+        />
+      )}
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex w-[82vw] max-w-xs flex-col border-r bg-background transition-transform duration-200',
-          open ? 'translate-x-0' : '-translate-x-full'
+          'flex shrink-0 flex-col border-r bg-background',
+          docked
+            ? 'relative h-full w-72'
+            : cn(
+                'fixed inset-y-0 left-0 z-50 w-[82vw] max-w-xs transition-transform duration-200',
+                open ? 'translate-x-0' : '-translate-x-full'
+              )
         )}
       >
         <div
@@ -247,16 +269,64 @@ export function SessionDrawer({
             groups.length === 0 && 'border-b'
           )}
         >
-          <span className="font-medium text-sm">项目</span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          {botSegment ? (
+            <span className="flex rounded-lg bg-muted p-0.5 text-sm">
+              {(['项目', 'Bot'] as const).map((label) => {
+                const selected = (label === 'Bot') === botSegment.active;
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => botSegment.onChange(label === 'Bot')}
+                    className={cn(
+                      'rounded-md px-3 py-0.5 transition-colors',
+                      selected ? 'bg-background font-medium shadow-xs' : 'text-muted-foreground'
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </span>
+          ) : (
+            <span className="font-medium text-sm">项目</span>
+          )}
+          {docked ? (
+            pinnable && onTogglePinned ? (
+              <button
+                type="button"
+                onClick={onTogglePinned}
+                aria-label="收起侧栏"
+                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+            ) : null
+          ) : (
+            <span className="flex items-center">
+              {pinnable && onTogglePinned && (
+                <button
+                  type="button"
+                  onClick={onTogglePinned}
+                  aria-label="固定侧栏"
+                  className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <PanelLeftOpen className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="关闭侧栏"
+                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </span>
+          )}
         </div>
-        {groups.length > 0 && (
+        {!botActive && groups.length > 0 && (
           <div className="shrink-0 border-b px-3 pb-2">
             <Select
               items={[
@@ -301,146 +371,150 @@ export function SessionDrawer({
           </div>
         )}
 
-        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
-          {projects.length === 0 && (
-            <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-sm">
-              桌面端还没有项目
-            </p>
-          )}
+        {botActive ? (
+          botSegment?.panel
+        ) : (
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
+            {projects.length === 0 && (
+              <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-sm">
+                桌面端还没有项目
+              </p>
+            )}
 
-          {activeSessions.length > 0 && (
-            <div>
-              <div className="flex items-center gap-1.5 px-2 py-2">
-                <span className="font-medium text-sm">活跃中</span>
+            {activeSessions.length > 0 && (
+              <div>
+                <div className="flex items-center gap-1.5 px-2 py-2">
+                  <span className="font-medium text-sm">活跃中</span>
+                </div>
+                <div className="flex flex-col gap-y-0.5">
+                  {activeSessions.map((session) => (
+                    <SessionRow
+                      key={session.id}
+                      session={session}
+                      active={activeId === session.id}
+                      nowTick={nowTick}
+                      onSelect={onSelect}
+                    />
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-y-0.5">
-                {activeSessions.map((session) => (
-                  <SessionRow
-                    key={session.id}
-                    session={session}
-                    active={activeId === session.id}
-                    nowTick={nowTick}
-                    onSelect={onSelect}
+            )}
+
+            {pinnedSessions.length > 0 && (
+              <div>
+                <div className="flex items-center gap-1.5 px-2 py-2">
+                  <Pin className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="font-medium text-sm">置顶</span>
+                </div>
+                <div className="flex flex-col gap-y-0.5">
+                  {pinnedSessions.map((session) => (
+                    <SessionRow
+                      key={session.id}
+                      session={session}
+                      active={activeId === session.id}
+                      nowTick={nowTick}
+                      onSelect={onSelect}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {(resolvedGroupId === ALL_GROUP_ID && groups.length > 0
+              ? groupSections.flatMap((section) => {
+                  const folded = collapsedGroupIds[section.groupId] === true;
+                  return [
+                    { kind: 'header' as const, section, folded },
+                    ...(folded
+                      ? []
+                      : section.projects.map((project) => ({ kind: 'project' as const, project }))),
+                  ];
+                })
+              : activeProjects.map((project) => ({ kind: 'project' as const, project }))
+            ).map((item) =>
+              item.kind === 'header' ? (
+                <button
+                  key={`hdr-${item.section.groupId}`}
+                  type="button"
+                  onClick={() =>
+                    setCollapsedGroupIds((prev) => ({
+                      ...prev,
+                      [item.section.groupId]: !prev[item.section.groupId],
+                    }))
+                  }
+                  className="flex h-7 w-full items-center gap-1 rounded-md px-2 text-left text-xs font-medium text-muted-foreground"
+                >
+                  <ChevronRight
+                    className={cn(
+                      'h-3.5 w-3.5 shrink-0 transition-transform duration-150',
+                      !item.folded && 'rotate-90'
+                    )}
                   />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {pinnedSessions.length > 0 && (
-            <div>
-              <div className="flex items-center gap-1.5 px-2 py-2">
-                <Pin className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-medium text-sm">置顶</span>
-              </div>
-              <div className="flex flex-col gap-y-0.5">
-                {pinnedSessions.map((session) => (
-                  <SessionRow
-                    key={session.id}
-                    session={session}
-                    active={activeId === session.id}
-                    nowTick={nowTick}
-                    onSelect={onSelect}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {(resolvedGroupId === ALL_GROUP_ID && groups.length > 0
-            ? groupSections.flatMap((section) => {
-                const folded = collapsedGroupIds[section.groupId] === true;
-                return [
-                  { kind: 'header' as const, section, folded },
-                  ...(folded
-                    ? []
-                    : section.projects.map((project) => ({ kind: 'project' as const, project }))),
-                ];
-              })
-            : activeProjects.map((project) => ({ kind: 'project' as const, project }))
-          ).map((item) =>
-            item.kind === 'header' ? (
-              <button
-                key={`hdr-${item.section.groupId}`}
-                type="button"
-                onClick={() =>
-                  setCollapsedGroupIds((prev) => ({
-                    ...prev,
-                    [item.section.groupId]: !prev[item.section.groupId],
-                  }))
-                }
-                className="flex h-7 w-full items-center gap-1 rounded-md px-2 text-left text-xs font-medium text-muted-foreground"
-              >
-                <ChevronRight
-                  className={cn(
-                    'h-3.5 w-3.5 shrink-0 transition-transform duration-150',
-                    !item.folded && 'rotate-90'
+                  {item.section.group?.emoji && (
+                    <span className="shrink-0 text-sm">{item.section.group.emoji}</span>
                   )}
+                  {item.section.group?.color && (
+                    <span
+                      className="h-2 w-2 shrink-0 rounded-full"
+                      style={{ backgroundColor: item.section.group.color }}
+                    />
+                  )}
+                  <span className="min-w-0 flex-1 truncate">
+                    {item.section.group?.name ?? '未分组'}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                    {item.section.projects.length}
+                  </span>
+                </button>
+              ) : (
+                <ProjectGroup
+                  key={item.project.id}
+                  name={pairProjectDisplayName(item.project)}
+                  badge={sshProjectLabel(item.project)}
+                  sessions={orderProjectSessions(
+                    active.filter((c) => c.projectId === item.project.id)
+                  )}
+                  folded={foldedProjects[item.project.id] === true}
+                  revealedExtra={revealedExtras[item.project.id] ?? 0}
+                  activeId={activeId}
+                  nowTick={nowTick}
+                  canCreate={canCreate}
+                  onToggleFold={() =>
+                    setFoldedProjects((prev) => ({
+                      ...prev,
+                      [item.project.id]: !prev[item.project.id],
+                    }))
+                  }
+                  onRevealMore={(next) =>
+                    setRevealedExtras((prev) => ({ ...prev, [item.project.id]: next }))
+                  }
+                  onSelect={onSelect}
+                  onNew={() => onNewConversation(item.project.id)}
                 />
-                {item.section.group?.emoji && (
-                  <span className="shrink-0 text-sm">{item.section.group.emoji}</span>
-                )}
-                {item.section.group?.color && (
-                  <span
-                    className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ backgroundColor: item.section.group.color }}
-                  />
-                )}
-                <span className="min-w-0 flex-1 truncate">
-                  {item.section.group?.name ?? '未分组'}
-                </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground/70">
-                  {item.section.projects.length}
-                </span>
-              </button>
-            ) : (
+              )
+            )}
+
+            {orphans.length > 0 && (
               <ProjectGroup
-                key={item.project.id}
-                name={pairProjectDisplayName(item.project)}
-                badge={sshProjectLabel(item.project)}
-                sessions={orderProjectSessions(
-                  active.filter((c) => c.projectId === item.project.id)
-                )}
-                folded={foldedProjects[item.project.id] === true}
-                revealedExtra={revealedExtras[item.project.id] ?? 0}
+                name="其他"
+                sessions={orphans}
+                folded={foldedProjects.__orphan === true}
+                revealedExtra={revealedExtras.__orphan ?? 0}
                 activeId={activeId}
                 nowTick={nowTick}
-                canCreate={canCreate}
+                canCreate={false}
                 onToggleFold={() =>
-                  setFoldedProjects((prev) => ({
-                    ...prev,
-                    [item.project.id]: !prev[item.project.id],
-                  }))
+                  setFoldedProjects((prev) => ({ ...prev, __orphan: !prev.__orphan }))
                 }
-                onRevealMore={(next) =>
-                  setRevealedExtras((prev) => ({ ...prev, [item.project.id]: next }))
-                }
+                onRevealMore={(next) => setRevealedExtras((prev) => ({ ...prev, __orphan: next }))}
                 onSelect={onSelect}
-                onNew={() => onNewConversation(item.project.id)}
               />
-            )
-          )}
-
-          {orphans.length > 0 && (
-            <ProjectGroup
-              name="其他"
-              sessions={orphans}
-              folded={foldedProjects.__orphan === true}
-              revealedExtra={revealedExtras.__orphan ?? 0}
-              activeId={activeId}
-              nowTick={nowTick}
-              canCreate={false}
-              onToggleFold={() =>
-                setFoldedProjects((prev) => ({ ...prev, __orphan: !prev.__orphan }))
-              }
-              onRevealMore={(next) => setRevealedExtras((prev) => ({ ...prev, __orphan: next }))}
-              onSelect={onSelect}
-            />
-          )}
-        </div>
+            )}
+          </div>
+        )}
 
         {/* 与桌面一致：归档栏固定底部（滚动区外），列表在折叠头上方向上展开 */}
-        {archivedSessions.length > 0 && (
+        {!botActive && archivedSessions.length > 0 && (
           <div className="shrink-0 border-t p-2">
             {archivedOpen && (
               <div className="mb-0.5 flex max-h-64 flex-col gap-y-0.5 overflow-y-auto">

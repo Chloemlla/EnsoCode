@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { AgentWorkerEvent } from '@shared/types/agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SilentTurnKind } from './silentTurn';
@@ -74,6 +75,10 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
     getModels() {
       return [...this.models.values()];
     },
+    resolveModel: vi
+      .fn<ModelRuntime['resolveModel']>()
+      .mockRejectedValue(new Error('Unexpected virtual model routing in ordinary-runtime fixture')),
+    getAuth: vi.fn<ModelRuntime['getAuth']>().mockResolvedValue(undefined),
     getProvider(providerId: string) {
       if (![...this.models.keys()].some((key) => key.startsWith(`${providerId}/`)))
         return undefined;
@@ -158,6 +163,7 @@ function session(options: Record<string, unknown>) {
     setThinkingLevel: vi.fn(),
     navigateTree: vi.fn(async () => ({ cancelled: false })),
     isStreaming: false,
+    isIdle: true,
     isRetrying: false,
   };
   mocks.sessions.push(value);
@@ -235,24 +241,84 @@ describe('SessionSupervisor terminal turn handling', () => {
     await supervisor.shutdown();
   });
 
-  it('手动重试走 agent.continue（pi 不发 agent_settled）：结束后仍收口为 idle', async () => {
+  it('手动重试由SDK结算：agent_end不人工收口，唯一agent_settled后idle', async () => {
     const { events, supervisor, parentSession } = await spawn();
     Object.assign(mocks.managers[0]!, {
       buildSessionProjection: vi.fn(() => ({ entries: [] })),
     });
     parentSession.messages.push({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
-    parentSession.agent.continue.mockImplementationOnce(async () => {
+    const finish = Promise.withResolvers<void>();
+    const run = vi.fn(async (messages: unknown[]) => {
+      expect(messages).toEqual([]);
       parentSession.emit({ type: 'agent_start' });
       parentSession.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'ok' }] });
       parentSession.emit({ type: 'agent_end', willRetry: false });
+      await finish.promise;
+      parentSession.emit({ type: 'agent_settled' });
     });
+    Object.assign(parentSession, { _runAgentPrompt: run });
 
     supervisor.handleCommand({ type: 'retry', identity: parent });
+    await settle();
+    expect(events.filter((event) => event.type === 'turn-completed')).toHaveLength(0);
+    finish.resolve();
     await waitFor(events, 'turn-completed');
-    expect(parentSession.agent.continue).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(parentSession.agent.continue).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'turn-completed')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'status').at(-1)).toMatchObject({
       status: 'idle',
     });
+
+    await supervisor.shutdown();
+  });
+
+  it('compaction/branch summary等非idle状态拒绝retry，不编辑上下文', async () => {
+    const { supervisor, parentSession } = await spawn();
+    const projection = vi.fn(() => ({ entries: [] }));
+    Object.assign(mocks.managers[0]!, { buildSessionProjection: projection });
+    parentSession.isIdle = false;
+    supervisor.handleCommand({ type: 'retry', identity: parent });
+    await settle();
+    expect(projection).not.toHaveBeenCalled();
+    expect(parentSession.agent.continue).not.toHaveBeenCalled();
+    await supervisor.shutdown();
+  });
+
+  it('手动重试再遇限流：由 SDK 重试并在最终失败时收口', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    Object.assign(mocks.managers[0]!, {
+      buildSessionProjection: vi.fn(() => ({
+        entries: parentSession.messages.map((message, index) => ({
+          sourceEntry: { type: 'message', id: `m${index}`, message },
+          messages: [message],
+        })),
+      })),
+    });
+    parentSession.messages.push({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
+    Object.assign(parentSession, {
+      _runAgentPrompt: vi.fn(async () => {
+        parentSession.emit({ type: 'agent_start' });
+        parentSession.messages.push({
+          role: 'assistant',
+          content: [],
+          stopReason: 'error',
+          errorMessage: '429 rate limited',
+        });
+        parentSession.emit({ type: 'agent_end', willRetry: false });
+        parentSession.emit({ type: 'agent_settled' });
+      }),
+    });
+
+    supervisor.handleCommand({ type: 'retry', identity: parent });
+    await waitFor(events, 'turn-failed');
+    expect(events.find((event) => event.type === 'turn-failed')).toMatchObject({
+      error: '429 rate limited',
+    });
+    expect(events.filter((event) => event.type === 'status').at(-1)).toMatchObject({
+      status: 'failed',
+    });
+    expect(events.some((event) => event.type === 'messages-truncated')).toBe(false);
 
     await supervisor.shutdown();
   });

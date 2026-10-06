@@ -9,6 +9,14 @@ interface TitleBarProps {
   className?: string;
   /** Optional no-drag actions; omitted props preserve the existing title bar layout. */
   actions?: React.ReactNode;
+  /** Optional no-drag content shown in place of the title. */
+  leading?: React.ReactNode;
+  /**
+   * Optional no-drag content centered on the whole window (absolute overlay).
+   * Unlike `leading` it does not replace the title; on macOS the title stays
+   * hidden so it does not crowd the traffic lights.
+   */
+  centered?: React.ReactNode;
 }
 
 export function SummonEnsoButton({ label = true }: { label?: boolean }) {
@@ -33,7 +41,7 @@ export function SummonEnsoButton({ label = true }: { label?: boolean }) {
  * - macOS: 仅作为拖拽区域（traffic lights 由系统渲染，左侧预留空间）
  * - Windows/Linux: 自绘最小化/最大化/关闭按钮
  */
-export function TitleBar({ title, className, actions }: TitleBarProps) {
+export function TitleBar({ title, className, actions, leading, centered }: TitleBarProps) {
   const { t } = useI18n();
   const isMac = window.electronAPI.env.platform === 'darwin';
   const maximized = useWindowMaximized();
@@ -42,12 +50,22 @@ export function TitleBar({ title, className, actions }: TitleBarProps) {
     <header
       className={cn(
         // 固定像素高度：红绿灯位置 (y:16) 按 44px 高度对齐，不随 rem 缩放
-        'drag-region flex h-[44px] shrink-0 items-center border-b bg-background',
+        'drag-region relative flex h-[44px] shrink-0 items-center border-b bg-background',
         isMac ? 'pl-[84px] pr-3' : 'pl-3',
         className
       )}
     >
-      <span className="text-sm font-medium text-muted-foreground">{title}</span>
+      {leading ? (
+        <div className="no-drag flex items-center">{leading}</div>
+      ) : !centered || !isMac ? (
+        <span className="text-sm font-medium text-muted-foreground">{title}</span>
+      ) : null}
+
+      {centered && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="no-drag pointer-events-auto">{centered}</div>
+        </div>
+      )}
 
       {actions && <div className="no-drag ml-auto flex items-center gap-1">{actions}</div>}
 

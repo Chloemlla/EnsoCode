@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import type { ModelRuntime, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { childProfileShell, childProfileToolIds } from '@shared/childProfileTools';
 import { DEFAULT_PERSONA_PROMPT } from '@shared/systemPrompt';
 import type { AgentCommand, AgentWorkerEvent } from '@shared/types/agent';
@@ -71,6 +71,10 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
     getModels() {
       return [...this.models.values()];
     },
+    resolveModel: vi
+      .fn<ModelRuntime['resolveModel']>()
+      .mockRejectedValue(new Error('Unexpected virtual model routing in ordinary-runtime fixture')),
+    getAuth: vi.fn<ModelRuntime['getAuth']>().mockResolvedValue(undefined),
     getProvider(providerId: string) {
       if (![...this.models.keys()].some((key) => key.startsWith(`${providerId}/`)))
         return undefined;
@@ -115,6 +119,7 @@ const model = {
 
 function session(options: Record<string, unknown>) {
   const listeners = new Set<(event: { type: string; [key: string]: unknown }) => void>();
+  const labels: string[] = [];
   const value = {
     model: options.model,
     resourceLoader: options.resourceLoader,
@@ -126,6 +131,10 @@ function session(options: Record<string, unknown>) {
       return () => listeners.delete(listener);
     }),
     emit(event: { type: string; [key: string]: unknown }) {
+      if (event.type === 'message_start' && (event.message as { role?: string })?.role === 'user') {
+        value.agent.steeringQueue.messages.shift();
+        labels.shift();
+      }
       for (const listener of listeners) listener(event);
     },
     prompt: vi.fn(
@@ -134,7 +143,20 @@ function session(options: Record<string, unknown>) {
         _options?: { preflightResult?: (disposition: 'handled' | 'queued' | 'started') => void }
       ) => undefined
     ),
-    steer: vi.fn(async (): Promise<'queued' | 'handled'> => 'queued'),
+    agent: { steeringQueue: { messages: [] as unknown[] } },
+    getSteeringMessages: () => labels,
+    _emitQueueUpdate: vi.fn(),
+    _queueSteer: async (text: string) => {
+      labels.push(text);
+      value.agent.steeringQueue.messages.push({ role: 'user', content: text });
+    },
+    steer: vi.fn(async function (
+      this: { _queueSteer(text: string): Promise<void> },
+      text: string
+    ): Promise<'queued' | 'handled'> {
+      await this._queueSteer(text);
+      return 'queued';
+    }),
     abort: vi.fn(async () => undefined),
     waitForIdle: vi.fn(async () => undefined),
     dispose: vi.fn(),
@@ -702,6 +724,14 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         isolatedSandbox: false,
         tools: 'readonly' as const,
       },
+      {
+        label: '父会话 readonly + all child',
+        editMode: 'replace' as const,
+        exploreFold: false,
+        isolatedSandbox: false,
+        workspaceWrite: false,
+        tools: 'all' as const,
+      },
     ].flatMap((spec) => [false, true].map((boundMcp) => ({ ...spec, boundMcp })))
   )('$label / boundMcp=$boundMcp 的 child proof 工具与共享推导一致', async (spec) => {
     const events: AgentWorkerEvent[] = [];
@@ -717,7 +747,10 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       model,
       editMode: spec.editMode,
       ...(spec.exploreFold ? { exploreFoldEnabled: true } : {}),
-      ...(spec.isolatedSandbox ? {} : { disabledTools: ['isolated_sandbox'] }),
+      disabledTools: [
+        ...(spec.isolatedSandbox ? [] : ['isolated_sandbox']),
+        ...('workspaceWrite' in spec && spec.workspaceWrite === false ? ['workspace_write'] : []),
+      ],
     });
     await waitFor(events, 'parent-ready');
     const typeKey =
@@ -768,6 +801,11 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     );
     expect(ready?.type).toBe('child-ready');
     if (ready?.type !== 'child-ready') return;
+    if ('workspaceWrite' in spec && spec.workspaceWrite === false) {
+      expect(ready.proof.toolIds).not.toEqual(expect.arrayContaining(['edit', 'write']));
+      expect(ready.proof.toolIds).not.toContain('bash');
+      expect(ready.proof.toolIds).not.toContain('powershell');
+    }
     expect(ready.proof.loadedMcpBindingIds).toEqual(mcpBindingIds);
     const options = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
       customTools: ToolDefinition[];
@@ -785,6 +823,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
           shell: childProfileShell({ platform: process.platform }),
           exploreFold: spec.exploreFold,
           isolatedSandbox: spec.isolatedSandbox,
+          workspaceWrite: !('workspaceWrite' in spec && spec.workspaceWrite === false),
         }),
       ].sort()
     );
@@ -978,6 +1017,79 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         events.flatMap((event) => (event.type === 'delivery-settled' ? [event.deliveryId] : []));
       return { events, supervisor, piSession, userMessage, settled };
     }
+
+    it('Bot 插话到达时 worker 已空闲，回退 Main 排队而不滞留 pi', async () => {
+      const { events, supervisor, piSession } = await spawned();
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'late',
+        deliveryId: 's',
+        activeOnly: true,
+      } as AgentCommand);
+      await settle();
+      expect(piSession.steer).not.toHaveBeenCalled();
+      expect(piSession.prompt).not.toHaveBeenCalled();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: 'delivery-deferred', deliveryId: 's' })
+      );
+      await supervisor.shutdown();
+    });
+
+    it('Bot 插话在异步 input hook 后转空闲，不偷开新轮且拒收标记不串号', async () => {
+      const { events, supervisor, piSession, userMessage, settled } = await spawned();
+      piSession.isStreaming = true;
+      const gate = Promise.withResolvers<void>();
+      piSession.steer.mockImplementationOnce(async function (this: typeof piSession, text) {
+        await gate.promise;
+        await this._queueSteer(text);
+        return 'queued';
+      });
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'late',
+        deliveryId: 's',
+        activeOnly: true,
+      } as AgentCommand);
+      await settle();
+      piSession.isStreaming = false;
+      gate.resolve();
+      await settle();
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: 'delivery-deferred', deliveryId: 's' })
+      );
+      expect(settled()).toEqual([]);
+      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'next', deliveryId: 'p' });
+      await settle();
+      userMessage('next');
+      expect(settled()).toEqual(['p']);
+      await supervisor.shutdown();
+    });
+
+    it('Bot 已入队但结算前未消费时只移除本条，并交回 Main', async () => {
+      const { events, supervisor, piSession } = await spawned();
+      piSession.isStreaming = true;
+      await piSession.steer('ordinary');
+      supervisor.handleCommand({
+        type: 'steer',
+        identity: parent,
+        text: 'guarded',
+        deliveryId: 's',
+        activeOnly: true,
+      });
+      await settle();
+      expect(piSession.getSteeringMessages()).toEqual(['ordinary', 'guarded']);
+      piSession.isStreaming = false;
+      piSession.emit({ type: 'agent_settled' });
+      expect(events.filter((event) => event.type === 'delivery-deferred')).toEqual([
+        expect.objectContaining({ deliveryId: 's' }),
+      ]);
+      expect(piSession.getSteeringMessages()).toEqual(['ordinary']);
+      piSession.emit({ type: 'agent_settled' });
+      expect(events.filter((event) => event.type === 'delivery-deferred')).toHaveLength(1);
+      await supervisor.shutdown();
+    });
 
     it.each(['started', 'queued', 'handled', undefined] as const)(
       'prompt 抛错时，仅 preflightResult 从未回调才视为拒收并允许撤回（disposition=%s）',
