@@ -8,6 +8,7 @@
 - `status: idle` 不是回合终态：worker 还会发送 session-meta、turn-completed。Bot 槽位、结果归属与队列只在终态结算；但中断、命令失败等路径只有 idle/failed，宿主在宽限期后兜底结算并 pump，无宿主轮次的会话回到 idle 时也要 pump，否则排队投递与并发槽永久挂起。
 - deliveryId 是「某会话的一次投递」的身份，按会话去重：群聊一轮里人类/例行/委派结果的 deliveryId 只给首个投递，接力一律新生成；命中去重（`duplicate`）对群当前成员按失败写 system 条目并推进，不能当作已发出。
 - 委派结果使用稳定 delegationId，worker 开始处理后确认；重启通过 jsonl 用户消息去重，不以“已入队”当作已投递。
+- Bot 插话的 IPC 发送成功不等于消费成功：宿主等 `delivery-settled` 才推进群游标；`delivery-deferred` 沿用原投递顺序重新准入。相同会话的旧排队/准备中/未确认插话不能被新插话越过，但其它会话的排队任务不能阻塞当前活轮补充。停止、会话终止和 worker 退出必须显式结算未确认插话。
 - 委派按目标成员自身的工具、skill、MCP 执行，审批档取双方更严并持久化，嵌套/恢复沿用该审批档；readonly 父会话的子代理仍继承 workspace_write 禁用。
 - Bot 停用先冻结投递，再取消委派和排队项、清路由、退订并停止调度；排队取消按 deliveryId 结算，不能清掉同会话另一项的审批计时器。
 
@@ -119,7 +120,7 @@ receipt 事件同理：发的是**绑定上下文的 `context.turnId`**（= 派�
 
 ## 对 pi 私有 API 的依赖要登记
 
-目前有两处。第一处：`src/agent/supervisor.ts` 的 `materializeSessionFile()` 调用
+目前有三处。第一处：`src/agent/supervisor.ts` 的 `materializeSessionFile()` 调用
 `SessionManager._rewriteFile()`，并在成功重写后同步其私有 `flushed` 标记。
 
 **为什么需要**：pi 的 `_persist` 在会话出现第一条 assistant 消息前一个字节不写
@@ -151,6 +152,20 @@ settled 无法恢复 OAuth 池的结算前接替。空数组启动完整活动�
 补发结算或假定低层 `agent.signal` 覆盖整个活动。回归见 `oauthAccountPool.test.ts`
 （真实 SDK + supervisor retry 分支 + 假 provider：四账号顺序、活动排除复位、工具只一次、
 选号等待时取消与唯一结算）、`sessionAdapter.test.ts` 和 `supervisor.silentTurn.test.ts`。
+
+第三处：`sessionAdapter.steerActiveSession()` 针对 Bot 插话，以每次调用独立的代理拦截
+pi 1.0.0 `_queueSteer`，在异步 input hook 后、同步入队前再次检查活轮，仍沿用原生
+steer 的扩展命令拒绝与模板展开语义。不使用 `prompt(..., streamingBehavior:'steer')`
+在 `started` 回调抛错：那时已经可能做过压缩并清空 nextTurn 消息。
+已入队但到 `agent_settled` 仍未消费的消息（如 abort）按对象引用从
+`agent.steeringQueue.messages` 移除，并同步 `_steeringMessages` / `_emitQueueUpdate`，
+再回报 deferred；不能 `clearQueue()`，否则普通 steer、扩展 custom 消息和 followUp 也被清掉。
+队列 drain 会替换 messages 数组，不能缓存旧数组引用。
+
+**升级 pi 必须复检第三处**：优先采用公开的活轮限定投递/单条撤销 API；确认私有入队方法
+仍同步追加消息，队列对象和文本索引形状未变。`sessionAdapter.test.ts` 使用真实 SDK 验证
+异步 hook 跨结束、边界成功消费一次、abort 后仅移除目标且保留普通/扩展插话；
+`supervisor.agentDispatch.test.ts` 和 Bot 宿主/群联测验证消费回执与重新准入。
 
 新增此类依赖前先找公开 API；确实没有时，三件事缺一不可：
 

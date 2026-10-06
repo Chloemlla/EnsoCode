@@ -212,7 +212,25 @@ describe('agent control tool protocol', () => {
     }
   });
 
-  it.each(['delivery-settled', 'delivery-rejected'])(
+  it('activeOnly 只允许带 deliveryId 的 steer，不能用于 prompt', () => {
+    const command = {
+      type: 'steer',
+      identity: parent,
+      text: 'hi',
+      deliveryId: 's',
+      activeOnly: true,
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    for (const patch of [
+      { type: 'prompt' },
+      { deliveryId: undefined },
+      { activeOnly: false },
+      { activeOnly: 'true' },
+    ])
+      expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
+  });
+
+  it.each(['delivery-settled', 'delivery-rejected', 'delivery-deferred'])(
     '%s 只接受精确 identity、seq 与 deliveryId',
     (type) => {
       const event = { type, identity: parent, seq: 3, deliveryId: 'delivery-1' };

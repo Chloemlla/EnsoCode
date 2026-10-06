@@ -508,3 +508,86 @@ it('keeps dequeued steering in same-member FIFO until its session lock is acquir
     'other chat',
   ]);
 });
+
+function receipt(id: string, deliveryId: string, type: string) {
+  host.observe({
+    type,
+    identity: { sessionId: id, generation: 'g' },
+    seq: 2,
+    deliveryId,
+  } as AgentWorkerEvent);
+}
+
+it('不把 IPC 下发当作插话成功，worker 拒绝空闲插话后按原 ID 重投一次', async () => {
+  const a = session(member());
+  const sent = vi.fn();
+  host.onDeliverySent(sent);
+  await host.deliverConversation(a, 'first');
+  sent.mockClear();
+  expect(await host.deliverConversation(a, 'late', { deliveryId: 'late' })).toMatchObject({
+    queued: true,
+  });
+  expect(sent).not.toHaveBeenCalled();
+  done(a);
+  await flush();
+  expect(runtime.prompt).toHaveBeenCalledTimes(1);
+  receipt(a, 'late', 'delivery-deferred');
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first', 'late']);
+  expect(sent).toHaveBeenCalledWith({ conversationId: a, deliveryId: 'late' });
+  receipt(a, 'late', 'delivery-deferred');
+  done(a);
+  await flush();
+  expect(runtime.prompt).toHaveBeenCalledTimes(2);
+});
+
+it('插话消费回执才推进游标；重复回执不重复确认', async () => {
+  const a = session(member());
+  const sent = vi.fn();
+  host.onDeliverySent(sent);
+  await host.deliverConversation(a, 'first');
+  await host.deliverConversation(a, 'supplement', { deliveryId: 's' });
+  expect(sent).not.toHaveBeenCalled();
+  receipt(a, 's', 'delivery-settled');
+  receipt(a, 's', 'delivery-settled');
+  expect(sent).toHaveBeenCalledExactlyOnceWith({
+    conversationId: a,
+    deliveryId: 's',
+    steered: true,
+  });
+});
+
+it.each(['worker-exited', 'parent-ended'] as const)(
+  '未确认插话在 %s 时显式失败，不静默丢弃',
+  async (type) => {
+    const a = session(member());
+    const finished = vi.fn();
+    host.onTurnFinished(finished);
+    await host.deliverConversation(a, 'first');
+    await host.deliverConversation(a, 'pending', { deliveryId: 'pending' });
+    done(a);
+    host.observe(
+      type === 'worker-exited'
+        ? { type }
+        : { type, seq: 4, identity: { sessionId: a, generation: 'g' }, reason: 'ended' }
+    );
+    expect(finished.mock.calls.map(([event]) => event)).toContainEqual(
+      expect.objectContaining({ deliveryId: 'pending', ok: false })
+    );
+    receipt(a, 'pending', 'delivery-deferred');
+    await flush();
+    expect(runtime.prompt).toHaveBeenCalledTimes(1);
+  }
+);
+
+it('较新的 steer 不越过同会话明确排队的消息', async () => {
+  const a = session(member());
+  await host.deliverConversation(a, 'first');
+  await host.deliverConversation(a, 'older', { queueIfBusy: true });
+  await host.deliverConversation(a, 'newer');
+  expect(runtime.steer).not.toHaveBeenCalled();
+  done(a);
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first', 'older']);
+  expect(runtime.steer).toHaveBeenCalledTimes(1);
+});

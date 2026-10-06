@@ -1131,6 +1131,8 @@ export type AgentCommand =
       images?: AttachedImage[];
       /** renderer 乐观回显的投递标识；worker 在对应 user 消息上屏后以 delivery-settled 回执 */
       deliveryId?: string;
+      /** Bot 插话仅允许进入活轮；不再忙时交回 Main 重新准入。 */
+      activeOnly?: true;
     }
   | { type: 'set-model'; identity: SessionIdentity; model: SpawnModelConfig }
   | { type: 'set-thinking'; identity: SessionIdentity; level: ThinkingLevel }
@@ -1562,6 +1564,7 @@ export type AgentWorkerEvent =
     }
   | { type: 'delivery-settled'; identity: SessionIdentity; seq: number; deliveryId: string }
   | { type: 'delivery-rejected'; identity: SessionIdentity; seq: number; deliveryId: string }
+  | { type: 'delivery-deferred'; identity: SessionIdentity; seq: number; deliveryId: string }
   | { type: 'status'; identity: SessionIdentity; seq: number; status: NodeStatus; error?: string }
   | {
       type: 'message-upsert';
@@ -3094,11 +3097,22 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
     case 'prompt':
     case 'steer': {
       const images = value.images === undefined ? [] : parseAttachedImages(value.images);
-      return hasOnlyKeys(value, ['type', 'identity', 'text', 'images', 'deliveryId']) &&
+      return hasOnlyKeys(value, [
+        'type',
+        'identity',
+        'text',
+        'images',
+        'deliveryId',
+        'activeOnly',
+      ]) &&
         parseAnySessionIdentity(value.identity) &&
         typeof value.text === 'string' &&
         images !== null &&
         (value.text.length > 0 || images.length > 0) &&
+        (value.activeOnly === undefined ||
+          (value.type === 'steer' &&
+            value.activeOnly === true &&
+            isDeliveryId(value.deliveryId))) &&
         (value.deliveryId === undefined || isDeliveryId(value.deliveryId))
         ? (value as unknown as AgentCommand)
         : null;
@@ -3584,6 +3598,7 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         : null;
     case 'delivery-settled':
     case 'delivery-rejected':
+    case 'delivery-deferred':
       return hasExactKeys(value, ['type', 'identity', 'seq', 'deliveryId']) &&
         isDeliveryId(value.deliveryId)
         ? (value as unknown as AgentWorkerEvent)

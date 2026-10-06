@@ -319,10 +319,13 @@ describe('BotSessionHost.ensureSession', () => {
     if (!first.ok) throw new Error(first.error);
     expect(runtime.spawns[0].systemPrompt).toMatch(/Be kind\.\n\n<member-notes>/);
     expect(asked[0]).toEqual([alice.id, null]);
-    await host.deliver(chat.id, alice.id, 'same notes');
+    await host.deliver(chat.id, alice.id, 'same notes', { deliveryId: 'n1' });
+    host.observe(ev({ type: 'delivery-settled', deliveryId: 'n1' }, first.conversationId));
     snap = { ...snap, version: 'v2', update: '<notes-updated>v2</notes-updated>' };
-    await host.deliver(chat.id, alice.id, 'after update');
-    await host.deliver(chat.id, alice.id, 'again');
+    await host.deliver(chat.id, alice.id, 'after update', { deliveryId: 'n2' });
+    host.observe(ev({ type: 'delivery-settled', deliveryId: 'n2' }, first.conversationId));
+    await host.deliver(chat.id, alice.id, 'again', { deliveryId: 'n3' });
+    host.observe(ev({ type: 'delivery-settled', deliveryId: 'n3' }, first.conversationId));
     snap = undefined;
     await host.deliver(chat.id, alice.id, 'memory off');
     expect(runtime.steers.map((item) => item.text)).toEqual([

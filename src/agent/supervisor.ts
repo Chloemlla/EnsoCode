@@ -61,6 +61,7 @@ import type {
   AgentTypeSpawnConfig,
   AgentWorkerEvent,
   ApprovalMode,
+  AttachedImage,
   ChildConversationMetadata,
   CoworkerInfo,
   McpServerSpawnConfig,
@@ -175,6 +176,7 @@ import {
   continueSessionActivity,
   editLatestAssistantForRetry,
   silentTurnRecoveryExtension,
+  steerActiveSession,
 } from './sessionAdapter';
 import {
   EVICTION_SWEEP_INTERVAL_MS,
@@ -339,7 +341,7 @@ interface ManagedSession {
   /** 下一条 prompt 产生的 user 消息的投递回执；id 为 null 表示该投递无乐观回显 */
   promptDelivery?: { id: string | null };
   /** 已入 pi steer 队列、尚未上屏的投递回执，与 pi 队列同序 */
-  steerDeliveries?: { id: string | null }[];
+  steerDeliveries?: { id: string | null; detach?: () => boolean }[];
   pendingBranch?: string;
   pendingBranchRequestId?: string;
   pendingVerifications?: number;
@@ -1332,6 +1334,10 @@ export class SessionSupervisor {
       }
       case 'steer': {
         const managed = this.must(command.identity);
+        if (command.activeOnly && command.deliveryId) {
+          await this.steerActive(managed, command.text, command.images, command.deliveryId);
+          return;
+        }
         managed.plan?.supersede();
         const images = command.images?.map((image) => ({ type: 'image' as const, ...image }));
         // 重试倒计时期间 renderer 看到的仍是 running 会发 steer：此时没有活轮可插，
@@ -3363,6 +3369,16 @@ export class SessionSupervisor {
         return;
       }
       case 'agent_settled': {
+        for (const slot of managed.steerDeliveries ?? []) {
+          if (!slot.id || !slot.detach?.()) continue;
+          managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+          this.options.emit({
+            type: 'delivery-deferred',
+            identity: managed.identity,
+            seq: ++managed.seq,
+            deliveryId: slot.id,
+          });
+        }
         if (!managed.settlePending) return;
         managed.settlePending = false;
         this.reconcileMessages(managed, this.transcript(managed));
@@ -3698,6 +3714,44 @@ export class SessionSupervisor {
       .finally(() => {
         if (managed.promptDelivery === slot) managed.promptDelivery = undefined;
       });
+  }
+
+  private async steerActive(
+    managed: ManagedSession,
+    text: string,
+    images: AttachedImage[] | undefined,
+    deliveryId: string
+  ): Promise<void> {
+    const emit = (type: 'delivery-deferred' | 'delivery-rejected' | 'delivery-settled') =>
+      this.options.emit({ type, identity: managed.identity, seq: ++managed.seq, deliveryId });
+    if (!managed.session.isStreaming || managed.session.isRetrying) {
+      emit('delivery-deferred');
+      return;
+    }
+    managed.plan?.supersede();
+    const slot: NonNullable<ManagedSession['steerDeliveries']>[number] = { id: deliveryId };
+    managed.steerDeliveries ??= [];
+    managed.steerDeliveries.push(slot);
+    try {
+      const disposition = await steerActiveSession(
+        managed.session,
+        text,
+        images?.map((image) => ({ type: 'image' as const, ...image })),
+        (detach) => {
+          slot.detach = detach;
+        },
+        (input) => withPendingPlanNote(managed, input)
+      );
+      if (disposition === 'queued') {
+        this.bgTasks.backgroundAllForeground(managed.identity.sessionId, 'steer');
+      } else {
+        managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+        emit(disposition === 'handled' ? 'delivery-settled' : 'delivery-deferred');
+      }
+    } catch {
+      managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+      emit('delivery-rejected');
+    }
   }
 
   private steerTracked(

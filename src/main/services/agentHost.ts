@@ -1144,7 +1144,8 @@ export function steerSession(
   identity: SessionIdentity,
   text: string,
   images?: AttachedImage[],
-  deliveryId?: string
+  deliveryId?: string,
+  activeOnly?: true
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({
     type: 'steer',
@@ -1152,6 +1153,7 @@ export function steerSession(
     text,
     ...(images?.length ? { images } : {}),
     ...(deliveryId ? { deliveryId } : {}),
+    ...(activeOnly ? { activeOnly } : {}),
   });
 }
 

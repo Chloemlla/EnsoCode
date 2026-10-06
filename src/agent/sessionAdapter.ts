@@ -10,6 +10,58 @@ import { transcriptMessages } from './transcript';
 
 export const OAUTH_POOL_TERMINAL_ERROR_ENTRY = 'enso.oauth-pool-terminal-error';
 
+/** Pi 1.0：仅在本次 steer 的同步入队点检查活轮，不触碰 prompt 的压缩/nextTurn 副作用。
+ * 每次调用独立代理，不替换共享 session 方法；私有队列形状由真实 SDK 契约测试锁定。
+ */
+export async function steerActiveSession(
+  session: AgentSession,
+  text: string,
+  images: Parameters<AgentSession['steer']>[1],
+  onQueued: (detach: () => boolean) => void,
+  prepareText: (text: string) => string = (text) => text
+): Promise<'queued' | 'handled' | 'deferred'> {
+  if (!session.isStreaming || session.isRetrying) return 'deferred';
+  const adapter = session as unknown as {
+    _queueSteer: (text: string, images: Parameters<AgentSession['steer']>[1]) => Promise<void>;
+    _emitQueueUpdate: () => void;
+  };
+  const queue = (session.agent as unknown as { steeringQueue?: { messages?: unknown[] } })
+    .steeringQueue;
+  if (!Array.isArray(queue?.messages) || typeof adapter._queueSteer !== 'function')
+    throw new Error('Unsupported Pi steering adapter');
+  const pendingQueue = queue as { messages: unknown[] };
+  const deferred = new Error('active turn ended before steering');
+  const guarded = new Proxy(session, {
+    get(target, key, receiver) {
+      if (key !== '_queueSteer') return Reflect.get(target, key, receiver);
+      return (input: string, attached: Parameters<AgentSession['steer']>[1]) => {
+        if (!target.isStreaming || target.isRetrying) throw deferred;
+        const queuedText = prepareText(input);
+        const result = adapter._queueSteer(queuedText, attached);
+        const message = pendingQueue.messages.at(-1);
+        onQueued(() => {
+          const messages = pendingQueue.messages;
+          const index = messages.indexOf(message);
+          if (index < 0) return false;
+          messages.splice(index, 1);
+          const labels = session.getSteeringMessages() as string[];
+          const label = labels.indexOf(queuedText);
+          if (label >= 0) labels.splice(label, 1);
+          adapter._emitQueueUpdate();
+          return true;
+        });
+        return result;
+      };
+    },
+  });
+  try {
+    return await guarded.steer(text, images);
+  } catch (error) {
+    if (error === deferred) return 'deferred';
+    throw error;
+  }
+}
+
 /**
  * 空回复恢复：`turn_end` 用 context_edit 从模型上下文拿掉空 assistant 并 continue，
  * 恢复轮的请求经 context hook 临时追加 nudge。轮次类型看最近的 user/toolResult，跳过 system entry。

@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/e
 import {
   createAgentSession,
   DefaultResourceLoader,
+  type InlineExtension,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -19,6 +20,7 @@ import {
   continueSessionActivity,
   editLatestAssistantForRetry,
   silentTurnRecoveryExtension,
+  steerActiveSession,
 } from './sessionAdapter';
 import { POST_TOOL_EMPTY_NUDGE, SILENT_TURN_NUDGE } from './silentTurn';
 
@@ -93,7 +95,7 @@ type Harness = {
 
 async function createHarness(
   plans: Array<ReplyPlan | 'wait-for-abort'>,
-  options: { seedError?: boolean } = {}
+  options: { seedError?: boolean; extensions?: InlineExtension[] } = {}
 ): Promise<Harness> {
   const root = mkdtempSync(path.join(tmpdir(), 'enso-session-adapter-'));
   const cwd = path.join(root, 'workspace');
@@ -174,7 +176,10 @@ async function createHarness(
     noThemes: true,
     noContextFiles: true,
     systemPrompt: 'Stable adapter test system prompt.',
-    extensionFactories: [silentTurnRecoveryExtension((kind) => recoveryKinds.push(kind))],
+    extensionFactories: [
+      silentTurnRecoveryExtension((kind) => recoveryKinds.push(kind)),
+      ...(options.extensions ?? []),
+    ],
   });
   await resourceLoader.reload();
   const { session } = await createAgentSession({
@@ -213,14 +218,139 @@ afterEach(() => {
 
 async function harness(
   plans: Array<ReplyPlan | 'wait-for-abort'>,
-  options?: { seedError?: boolean }
+  options?: { seedError?: boolean; extensions?: InlineExtension[] }
 ): Promise<Harness> {
   const current = await createHarness(plans, options);
   activeHarnesses.push(current);
   return current;
 }
 
-describe('Pi 0.87.1 session adapter integration', () => {
+describe('Pi session adapter integration', () => {
+  it('guarded steer defers without starting an idle activity or persisting user input', async () => {
+    const current = await harness([]);
+    await expect(
+      steerActiveSession(current.session, 'late supplement', undefined, () => {})
+    ).resolves.toBe('deferred');
+    expect(current.requests).toEqual([]);
+    expect(current.session.getSteeringMessages()).toEqual([]);
+    expect(current.manager.getBranch().filter((entry) => entry.type === 'message')).toEqual([]);
+  });
+
+  it('guarded steer rechecks activity after an async input hook without leaving queued input', async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const current = await harness(['wait-for-abort'], {
+      extensions: [
+        {
+          name: 'delayed-input',
+          factory: (pi) => {
+            pi.on('input', async (event) => {
+              if (event.text === 'late supplement') {
+                entered.resolve();
+                await release.promise;
+              }
+              return { action: 'continue' };
+            });
+          },
+        },
+      ],
+    });
+    const original = current.session.prompt('original');
+    await current.streamStarted;
+    const supplement = steerActiveSession(current.session, 'late supplement', undefined, () => {});
+    const rejected = expect(supplement).resolves.toBe('deferred');
+    await entered.promise;
+    await current.session.abort();
+    await original;
+    release.resolve();
+    await rejected;
+    expect(current.requests).toHaveLength(1);
+    expect(current.session.getSteeringMessages()).toEqual([]);
+    expect(
+      current.manager
+        .getBranch()
+        .filter((entry) => entry.type === 'message' && entry.message.role === 'user')
+        .map((entry) => entry.type === 'message' && textOf(entry.message))
+    ).toEqual(['original']);
+  });
+
+  it('guarded queued input can be detached at settle without removing ordinary or custom steering', async () => {
+    const current = await harness(['wait-for-abort']);
+    const original = current.session.prompt('original');
+    await current.streamStarted;
+    await current.session.steer('ordinary');
+    current.session.agent.steer({
+      role: 'custom',
+      customType: 'test',
+      content: 'extension',
+      display: false,
+      timestamp: Date.now(),
+    });
+    let detach: (() => boolean) | undefined;
+    expect(
+      await steerActiveSession(current.session, 'guarded', undefined, (remove) => {
+        detach = remove;
+      })
+    ).toBe('queued');
+    const unsubscribe = current.session.subscribe((event) => {
+      if (event.type === 'agent_settled') expect(detach?.()).toBe(true);
+    });
+    await current.session.abort();
+    await original;
+    expect(current.session.getSteeringMessages()).toEqual(['ordinary']);
+    expect(detach?.()).toBe(false);
+    unsubscribe();
+    await current.session.prompt('next');
+    expect(current.requests.some((context) => contextText(context).includes('guarded'))).toBe(
+      false
+    );
+    expect(current.requests.some((context) => contextText(context).includes('ordinary'))).toBe(
+      true
+    );
+    expect(current.requests.some((context) => contextText(context).includes('extension'))).toBe(
+      true
+    );
+  });
+
+  it('guarded input in the active settlement boundary is consumed once and is no longer detachable', async () => {
+    let injected = false;
+    let detach: (() => boolean) | undefined;
+    const current = await harness(
+      [
+        { content: [{ type: 'text', text: 'first reply' }] },
+        { content: [{ type: 'text', text: 'combined reply' }] },
+      ],
+      {
+        extensions: [
+          {
+            name: 'boundary-input',
+            factory: (pi) => {
+              pi.on('agent_before_settle', async () => {
+                if (injected) return;
+                injected = true;
+                expect(
+                  await steerActiveSession(current.session, 'supplement', undefined, (remove) => {
+                    detach = remove;
+                  })
+                ).toBe('queued');
+              });
+            },
+          },
+        ],
+      }
+    );
+    await current.session.prompt('original');
+    expect(current.requests).toHaveLength(2);
+    expect(current.session.getSteeringMessages()).toEqual([]);
+    expect(detach?.()).toBe(false);
+    expect(
+      current.manager
+        .getBranch()
+        .filter((entry) => entry.type === 'message' && entry.message.role === 'user')
+        .map((entry) => entry.type === 'message' && textOf(entry.message))
+    ).toEqual(['original', 'supplement']);
+  });
+
   it('空回复走 canonical context edit + 临时 context nudge，且不改原用户历史、system 或 tools', async () => {
     const current = await harness([
       { content: [] },

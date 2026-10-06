@@ -211,6 +211,7 @@ export class GroupChatService {
           session.cursor = Math.max(session.cursor, pending.cursor);
         return chat;
       });
+      if (event.steered) this.settleBatch(pending.chatId);
     });
     this.unsubscribe = deps.host.onTurnFinished((event) => {
       if (event.deliveryId) this.cursors.delete(event.deliveryId);

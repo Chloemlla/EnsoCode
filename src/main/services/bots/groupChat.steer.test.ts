@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SmartRouteDecision } from '../../../shared/bots/smartRoute';
-import type { AgentWorkerEvent } from '../../../shared/types/agent';
+import type { AgentWorkerEvent, AttachedImage } from '../../../shared/types/agent';
 import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import { BotSessionHost } from './botSessionHost';
 import { BotStore } from './botStore';
@@ -25,13 +25,23 @@ const settled = vi.fn();
 const runtime = {
   spawn: vi.fn(async () => ({ ok: true })),
   prompt: vi.fn((_id: string, _text: string) => ({ ok: true })),
-  steer: vi.fn((_id: string, _text: string) => ({ ok: true })),
+  steer: vi.fn((_id: string, _text: string, _images?: AttachedImage[], _deliveryId?: string) => ({
+    ok: true,
+  })),
   release: vi.fn(async () => {}),
   abort: vi.fn(),
   removeSessionFiles: vi.fn(),
 };
 const session = (botId: string) => chats.get(chatId)!.sessions[botId].conversationId;
 const replies = () => chats.readEntries(chatId).filter((entry) => entry.kind === 'bot');
+function received(id: string, deliveryId: string) {
+  host.observe({
+    type: 'delivery-settled',
+    identity: { sessionId: id, generation: 'g' },
+    seq: ++turn,
+    deliveryId,
+  });
+}
 function done(botId: string, text: string) {
   const identity = { sessionId: session(botId), generation: 'g' };
   host.observe({
@@ -52,7 +62,10 @@ beforeEach(() => {
   vi.resetAllMocks();
   runtime.spawn.mockResolvedValue({ ok: true });
   runtime.prompt.mockReturnValue({ ok: true });
-  runtime.steer.mockReturnValue({ ok: true });
+  runtime.steer.mockImplementation((id, _text, _images, deliveryId) => {
+    received(id, deliveryId!);
+    return { ok: true };
+  });
   root = mkdtempSync(join(tmpdir(), 'group-steer-'));
   const bots = new BotStore(join(root, 'bots'));
   [a, b, c] = ['Alice', 'Bob', 'Carol'].map((name) => {
@@ -143,7 +156,8 @@ it.each([true, false])(
 
 it('completion immediately after steer does not create another turn or leave a pending reply', async () => {
   await group.send(chatId, '@Alice start');
-  runtime.steer.mockImplementationOnce(() => {
+  runtime.steer.mockImplementationOnce((id, _text, _images, deliveryId) => {
+    received(id, deliveryId!);
     done(a, 'combined result');
     return { ok: true };
   });
@@ -247,4 +261,50 @@ it('queues rather than steers after authoritative idle while awaiting turn-compl
   await group.settled(chatId);
   expect(replies().map((entry) => entry.text)).toEqual(['old result', 'new result']);
   expect(settled).toHaveBeenCalledTimes(1);
+});
+
+it.each([true, false])(
+  'worker idle receipt re-admits an unconsumed supplement once (completion first=%s)',
+  async (completionFirst) => {
+    await group.send(chatId, '@Alice start');
+    runtime.steer.mockReturnValueOnce({ ok: true });
+    await group.send(chatId, '@Alice supplement');
+    await group.settled(chatId);
+    const [id, , , deliveryId] = runtime.steer.mock.calls[0]!;
+    const before = chats.get(chatId)?.sessions[a]?.cursor;
+    expect(settled).not.toHaveBeenCalled();
+    if (completionFirst) done(a, 'original');
+    host.observe({
+      type: 'delivery-deferred',
+      identity: { sessionId: id, generation: 'g' },
+      seq: ++turn,
+      deliveryId: deliveryId!,
+    });
+    if (!completionFirst) {
+      expect(chats.get(chatId)?.sessions[a]?.cursor).toBe(before);
+      expect(runtime.prompt).toHaveBeenCalledTimes(1);
+      done(a, 'original');
+    }
+    await vi.waitFor(() => expect(runtime.prompt).toHaveBeenCalledTimes(2));
+    await group.settled(chatId);
+    done(a, 'supplement reply');
+    await group.settled(chatId);
+    expect(replies().map((entry) => entry.text)).toEqual(['original', 'supplement reply']);
+    expect(runtime.steer).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+  }
+);
+
+it('an input hook consumption receipt arriving after completion settles the group batch', async () => {
+  await group.send(chatId, '@Alice original');
+  runtime.steer.mockReturnValueOnce({ ok: true });
+  await group.send(chatId, '@Alice handled by input hook');
+  done(a, 'original result');
+  await group.settled(chatId);
+  expect(settled).not.toHaveBeenCalled();
+  const [id, , , deliveryId] = runtime.steer.mock.calls[0]!;
+  received(id, deliveryId!);
+  await group.settled(chatId);
+  expect(settled).toHaveBeenCalledTimes(1);
+  expect(runtime.prompt).toHaveBeenCalledTimes(1);
 });

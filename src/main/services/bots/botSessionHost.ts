@@ -235,6 +235,8 @@ export class BotSessionHost {
   /** 会话已看到的笔记版本（spawn 时进系统提示词，之后变化在投递前追加一次） */
   private readonly notesSeen = new Map<string, string>();
   private readonly deliveries = new Map<string, Map<string, 'sent' | 'started'>>();
+  /** 入 IPC 不等于已消费；保留原投递与顺序，直到 worker 回执或会话终止。 */
+  private readonly pendingSteers = new Map<Delivery, string | undefined>();
   /** jsonl 里已开始处理的委派结果：首次全量、之后只读追加部分 */
   private readonly persistedStarts = new StartedDeliveryIndex();
   private readonly startedListeners = new Set<
@@ -314,6 +316,7 @@ export class BotSessionHost {
   isBusy(conversationId: string): boolean {
     return (
       this.turnActive(conversationId) ||
+      [...this.pendingSteers.keys()].some((item) => item.conversationId === conversationId) ||
       this.queue.some((item) => item.conversationId === conversationId)
     );
   }
@@ -728,7 +731,11 @@ export class BotSessionHost {
         return { ok: false, error: 'canceled' };
       if (this.budgetExceeded(botId, binding.chatId, conversationId))
         return { ok: false, error: BOT_BUDGET_ERROR };
-      if (this.turnActive(conversationId) && !options.queueIfBusy) {
+      if (
+        this.turnActive(conversationId) &&
+        !options.queueIfBusy &&
+        !this.hasEarlierConversationDelivery(delivery)
+      ) {
         if (
           !this.retrying.has(conversationId) &&
           !this.stopping.has(conversationId) &&
@@ -827,6 +834,7 @@ export class BotSessionHost {
         this.finish(id, undefined, false, 'worker-exited', '', undefined, true);
         this.turnKeys.delete(id);
       }
+      this.failPendingSteers(() => true, 'worker-exited');
       this.pump();
       return;
     }
@@ -841,6 +849,32 @@ export class BotSessionHost {
     }
     if (!this.isBotConversation(id)) return;
     switch (event.type) {
+      case 'delivery-settled':
+      case 'delivery-deferred':
+      case 'delivery-rejected': {
+        const delivery = [...this.pendingSteers.keys()].find(
+          (item) => item.conversationId === id && item.deliveryId === event.deliveryId
+        );
+        if (!delivery) return;
+        const seen = this.pendingSteers.get(delivery);
+        this.pendingSteers.delete(delivery);
+        if (event.type === 'delivery-settled') {
+          if (seen !== undefined) this.notesSeen.set(id, seen);
+          this.deliverySent(delivery, true);
+          this.rememberDelivery(id, event.deliveryId, 'started');
+          for (const listener of this.startedListeners)
+            listener({ conversationId: id, deliveryId: event.deliveryId });
+          this.pump();
+        } else if (event.type === 'delivery-deferred') {
+          this.deliveries.get(id)?.delete(event.deliveryId);
+          delivery.queueIfBusy = true;
+          this.enqueue(delivery);
+        } else {
+          this.finish(id, undefined, false, 'steer-rejected', '', event.deliveryId);
+          this.pump();
+        }
+        return;
+      }
       case 'status': {
         const slot = this.slots.get(id);
         this.retrying.delete(id);
@@ -923,6 +957,7 @@ export class BotSessionHost {
         return;
       case 'parent-ended':
       case 'parent-rejected': {
+        this.failPendingSteers((item) => item.conversationId === id, event.reason);
         const hadSlot = this.slots.has(id);
         this.live.delete(id);
         this.running.delete(id);
@@ -1076,24 +1111,33 @@ export class BotSessionHost {
         ? wrapInterjection(delivery.text, this.deps.language?.() ?? 'zh')
         : delivery.text
     );
+    delivery.deliveryId ??= randomUUID();
+    this.pendingSteers.set(delivery, notes.seen);
+    this.rememberDelivery(delivery.conversationId, delivery.deliveryId, 'sent');
     const sent = this.deps.runtime.steer(
       delivery.conversationId,
       notes.text,
       delivery.images,
       delivery.deliveryId
     );
-    if (sent.ok && notes.seen !== undefined)
-      this.notesSeen.set(delivery.conversationId, notes.seen);
     if (sent.ok) {
       const previous = this.tasks.get(delivery.conversationId);
       const task = `${previous ?? ''}\n${delivery.text}`;
       this.tasks.set(delivery.conversationId, previous && task.length <= 2000 ? task : '');
       this.retryTasks.set(delivery.conversationId, this.tasks.get(delivery.conversationId)!);
-      this.deliverySent(delivery, true);
       this.pump();
+    } else {
+      this.pendingSteers.delete(delivery);
+      this.deliveries.get(delivery.conversationId)?.delete(delivery.deliveryId);
     }
     return sent.ok
-      ? { ok: true, conversationId: delivery.conversationId, steered: true }
+      ? {
+          ok: true,
+          conversationId: delivery.conversationId,
+          ...(this.hasStartedDelivery(delivery.conversationId, delivery.deliveryId)
+            ? { steered: true as const }
+            : { queued: true }),
+        }
       : { ok: false, error: sent.error ?? 'steer-failed' };
   }
 
@@ -1494,6 +1538,7 @@ export class BotSessionHost {
   /** 活轮里可 steer 的插话（重试倒计时中改排下一轮），或可开的新轮 */
   private dequeueable(item: Delivery): boolean {
     if (this.stopping.has(item.conversationId)) return false;
+    if (this.hasEarlierConversationDelivery(item)) return false;
     if (!this.turnActive(item.conversationId)) {
       if (this.hasEarlierTask(item)) return false;
       if (this.runningCount() >= this.maxRunning) return false;
@@ -1506,20 +1551,35 @@ export class BotSessionHost {
 
   private enqueue(item: Delivery): void {
     item.order ??= this.nextOrder++;
+    const newer = this.queue.findIndex(
+      (other) => other.botId === item.botId && (other.order ?? 0) > item.order!
+    );
     // Preserve source priority across members, but never overtake this member's older work.
-    const last = this.queue.findLastIndex((other) => other.botId === item.botId);
+    const last =
+      newer >= 0 ? newer - 1 : this.queue.findLastIndex((other) => other.botId === item.botId);
     this.queue = [
       ...this.queue.slice(0, last + 1),
-      ...enqueueByLane(this.queue.slice(last + 1), item),
+      ...(newer >= 0
+        ? [item, ...this.queue.slice(newer)]
+        : enqueueByLane(this.queue.slice(last + 1), item)),
     ];
     this.deps.emit({ kind: 'queue', chatId: item.chatId });
     this.pump();
   }
 
   private hasEarlierTask(item: Delivery): boolean {
-    return [...this.queue, ...this.preparing].some(
+    return [...this.queue, ...this.preparing, ...this.pendingSteers.keys()].some(
       (other) =>
         other !== item && other.botId === item.botId && (other.order ?? 0) < (item.order ?? 0)
+    );
+  }
+
+  private hasEarlierConversationDelivery(item: Delivery): boolean {
+    return [...this.queue, ...this.preparing, ...this.pendingSteers.keys()].some(
+      (other) =>
+        other !== item &&
+        other.conversationId === item.conversationId &&
+        (other.order ?? 0) < (item.order ?? 0)
     );
   }
 
@@ -1697,12 +1757,21 @@ export class BotSessionHost {
   }
 
   private cancelQueued(predicate: (item: Delivery) => boolean, reason = 'canceled'): void {
+    this.failPendingSteers(predicate, reason);
     const canceled = this.queue.filter(predicate);
     this.queue = this.queue.filter((item) => !predicate(item));
     for (const item of canceled) {
       item.admission?.controller.abort();
       this.finish(item.conversationId, undefined, false, reason, '', item.deliveryId ?? null);
       this.deps.emit({ kind: 'queue', chatId: item.chatId });
+    }
+  }
+
+  private failPendingSteers(predicate: (item: Delivery) => boolean, reason: string): void {
+    for (const item of this.pendingSteers.keys()) {
+      if (!predicate(item)) continue;
+      this.pendingSteers.delete(item);
+      this.finish(item.conversationId, undefined, false, reason, '', item.deliveryId ?? null);
     }
   }
 

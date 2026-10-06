@@ -91,8 +91,13 @@ async function started(name = 'Alice') {
 describe('BotSessionHost 插话', () => {
   it('人类插话进活轮时加补充说明，非人类来源原样 steer', async () => {
     const { chatId, botId, id } = await started();
-    await host.deliver(chatId, botId, 'also tests', { source: 'human' });
-    await host.deliver(chatId, botId, '<group-message>relay</group-message>', { source: 'bot' });
+    await host.deliver(chatId, botId, 'also tests', { source: 'human', deliveryId: 'human' });
+    host.observe(ev({ type: 'delivery-settled', deliveryId: 'human' }, id));
+    await host.deliver(chatId, botId, '<group-message>relay</group-message>', {
+      source: 'bot',
+      deliveryId: 'bot',
+    });
+    host.observe(ev({ type: 'delivery-settled', deliveryId: 'bot' }, id));
     await host.deliver(chatId, botId, 'routine', { source: 'background' });
     expect(runtime.steers).toEqual([
       { id, text: wrapInterjection('also tests', 'zh') },

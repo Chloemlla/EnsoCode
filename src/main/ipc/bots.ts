@@ -329,7 +329,7 @@ function createRuntime(botsRoot: string): BotRuntimePort {
     steer(conversationId, text, images, deliveryId) {
       const identity = rootIdentity(conversationId);
       return identity
-        ? steerSession(identity, text, images, deliveryId)
+        ? steerSession(identity, text, images, deliveryId, true)
         : { ok: false, error: 'stale session generation' };
     },
     async release(conversationId) {
