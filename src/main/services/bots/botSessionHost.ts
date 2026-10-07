@@ -807,7 +807,7 @@ export class BotSessionHost {
       }
       if (
         this.turnActive(conversationId) ||
-        this.queue.some((item) => item.botId === botId) ||
+        this.queue.some((item) => this.sameMemberChat(delivery, item)) ||
         this.hasEarlierTask(delivery) ||
         this.memberActive(delivery).length > 0 ||
         this.runningCount() >= this.maxRunning
@@ -1451,7 +1451,7 @@ export class BotSessionHost {
       if (
         this.memberActive(ready).length ||
         this.hasEarlierTask(ready) ||
-        this.queue.some((item) => item.botId === ready.botId) ||
+        this.queue.some((item) => this.sameMemberChat(ready, item)) ||
         this.runningCount() >= this.maxRunning
       ) {
         this.enqueue(ready);
@@ -1689,8 +1689,37 @@ export class BotSessionHost {
   private hasEarlierTask(item: Delivery): boolean {
     return [...this.queue, ...this.preparing, ...this.pendingSteers.keys()].some(
       (other) =>
-        other !== item && other.botId === item.botId && (other.order ?? 0) < (item.order ?? 0)
+        other !== item && this.sameMemberChat(item, other) && (other.order ?? 0) < (item.order ?? 0)
     );
+  }
+
+  /** 同成员准入只在同一聊天内生效 */
+  private sameMemberChat(item: Delivery, other: Delivery): boolean {
+    return (
+      other.botId === item.botId &&
+      (item.conversationId === other.conversationId ||
+        this.sameChat(item.conversationId, other.conversationId))
+    );
+  }
+
+  private sameChat(a: string, b: string): boolean {
+    const chatA = this.chatOf(a);
+    const chatB = this.chatOf(b);
+    return chatA !== undefined && chatA === chatB;
+  }
+
+  /** 会话所属聊天：委派子会话按发起它的聊天，沿委派链追到根 */
+  private chatOf(id: string): string | undefined {
+    for (const seen = new Set<string>(); !seen.has(id); ) {
+      seen.add(id);
+      const chatId = this.binding(id)?.chatId;
+      if (chatId) return chatId;
+      const origin = this.origins.get(id);
+      if (!origin) return undefined;
+      if (origin.chatId) return origin.chatId;
+      id = origin.parentConversationId;
+    }
+    return undefined;
   }
 
   private hasEarlierConversationDelivery(item: Delivery): boolean {
@@ -1707,7 +1736,8 @@ export class BotSessionHost {
       .filter(
         (id) =>
           id !== item.conversationId &&
-          (this.stopping.get(id) ?? this.binding(id)?.botId) === item.botId
+          (this.stopping.get(id) ?? this.binding(id)?.botId) === item.botId &&
+          this.sameChat(item.conversationId, id)
       )
       .sort();
   }

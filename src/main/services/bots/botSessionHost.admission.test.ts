@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,8 +27,10 @@ const runtime = {
   removeSessionFiles: vi.fn(),
 };
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const roots = new Map<string, string>();
 beforeEach(() => {
   vi.resetAllMocks();
+  roots.clear();
   classify.mockResolvedValue('serial');
   runtime.spawn.mockResolvedValue({ ok: true });
   runtime.prompt.mockReturnValue({ ok: true });
@@ -60,7 +63,15 @@ function member() {
   if (!result.ok) throw new Error(result.reason);
   return result.bot.id;
 }
+/** 同一成员再次调用时返回同一聊天发起的委派子会话：同成员准入只在同一聊天内生效 */
 function session(botId: string) {
+  const root = roots.get(botId);
+  if (root) return delegated(botId, root, registry.conversation(root)!.bot!.chatId);
+  const id = chatSession(botId);
+  roots.set(botId, id);
+  return id;
+}
+function chatSession(botId: string) {
   const chat = chats.create({
     kind: 'direct',
     title: '',
@@ -72,6 +83,18 @@ function session(botId: string) {
   const result = host.ensureSession(chat.id, botId);
   if (!result.ok) throw new Error(result.error);
   return result.conversationId;
+}
+function delegated(botId: string, parent: string, chatId: string | null) {
+  const child = registry.createBotConversation(registry.conversation(parent)!.projectId, {
+    botId,
+    chatId: null,
+    delegationId: randomUUID(),
+  })!;
+  host.registerDelegation(child.conversationId, bots.get(botId)!, {
+    parentConversationId: parent,
+    chatId,
+  });
+  return child.conversationId;
 }
 function done(id: string) {
   host.observe({
@@ -180,7 +203,10 @@ it('retry goes through the same member admission', async () => {
   await host.deliverConversation(b, 'old');
   done(b);
   await host.deliverConversation(a, 'active');
-  expect(await host.retryConversation(b)).toMatchObject({ ok: true, queued: true });
+  expect(await host.retryConversation(b, { delegation: true })).toMatchObject({
+    ok: true,
+    queued: true,
+  });
   await flush();
   expect(runtime.retry).not.toHaveBeenCalled();
   done(a);
@@ -590,4 +616,78 @@ it('较新的 steer 不越过同会话明确排队的消息', async () => {
   await flush();
   expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first', 'older']);
   expect(runtime.steer).toHaveBeenCalledTimes(1);
+});
+
+it('同一成员在不同聊天里直接并行，不调分类器也不排在别的聊天后面', async () => {
+  const bot = member();
+  const a = session(bot);
+  const queued = session(bot);
+  const other = chatSession(bot);
+  await host.deliverConversation(a, 'long task in A');
+  await host.deliverConversation(queued, 'same chat follow-up');
+  await flush();
+  classify.mockClear();
+  expect(await host.deliverConversation(other, 'task in B')).not.toHaveProperty('queued');
+  await flush();
+  expect(classify).not.toHaveBeenCalled();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['long task in A', 'task in B']);
+  expect(host.queueState()).toMatchObject([{ conversationId: queued, reason: 'member-serial' }]);
+});
+
+it('委派子会话按发起它的聊天归属，沿委派链追到根聊天', async () => {
+  const bot = member();
+  const a = session(bot);
+  await host.deliverConversation(a, 'long task in A');
+  const chatB = registry.conversation(chatSession(member()))!;
+  const fromB = delegated(bot, chatB.conversationId, chatB.bot!.chatId);
+  const nested = delegated(bot, fromB, null);
+  expect(await host.deliverConversation(fromB, 'delegated from B')).not.toHaveProperty('queued');
+  expect(await host.deliverConversation(nested, 'nested from B')).toMatchObject({ queued: true });
+  await flush();
+  expect(classify).toHaveBeenCalledOnce();
+  expect(classify.mock.calls[0]?.[0].active).toEqual([
+    { task: 'delegated from B', state: 'running' },
+  ]);
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual([
+    'long task in A',
+    'delegated from B',
+  ]);
+});
+
+it('跨聊天不排同成员队，但全局并发上限照旧按 capacity 排队', async () => {
+  host.setMaxRunningTurns(1);
+  const bot = member();
+  const a = session(bot);
+  const other = chatSession(bot);
+  await host.deliverConversation(a, 'long task in A');
+  expect(await host.deliverConversation(other, 'task in B')).toMatchObject({ queued: true });
+  await flush();
+  expect(classify).not.toHaveBeenCalled();
+  expect(host.queueState()).toMatchObject([{ conversationId: other, reason: 'capacity' }]);
+  done(a);
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['long task in A', 'task in B']);
+});
+
+it('委派归属缺失也不允许新消息越过同会话未确认的旧插话', async () => {
+  const bot = member();
+  const parent = session(bot);
+  const child = registry.createBotConversation(registry.conversation(parent)!.projectId, {
+    botId: bot,
+    chatId: null,
+    delegationId: randomUUID(),
+  })!;
+  const id = child.conversationId;
+  host.registerDelegation(id, bots.get(bot)!);
+  await host.deliverConversation(id, 'first');
+  await host.deliverConversation(id, 'older', { deliveryId: 'older' });
+  done(id);
+  await host.deliverConversation(id, 'newer', { queueIfBusy: true });
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first']);
+  receipt(id, 'older', 'delivery-deferred');
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first', 'older']);
+  done(id);
+  await flush();
+  expect(runtime.prompt.mock.calls.map((call) => call[1])).toEqual(['first', 'older', 'newer']);
 });

@@ -508,16 +508,23 @@ export class DelegationService {
       }
       if (parent.bot?.delegationId) {
         const bot = this.deps.bots.get(head.parentBotId);
-        const saved = this.deps.store.get(parent.bot.delegationId)?.effectivePermissions;
+        const record = this.deps.store.get(parent.bot.delegationId);
+        const saved = record?.effectivePermissions;
         // Interrupted delegation parents must not be restarted with their original task.
         if (
           !bot ||
-          !this.deps.host.registerDelegation(parent.conversationId, {
-            ...bot,
-            ...(saved ? { skillIds: saved.skillIds, mcpServerIds: saved.mcpServerIds } : {}),
-            tools: 'readonly',
-            approvalMode: 'supervised',
-          })
+          !this.deps.host.registerDelegation(
+            parent.conversationId,
+            {
+              ...bot,
+              ...(saved ? { skillIds: saved.skillIds, mcpServerIds: saved.mcpServerIds } : {}),
+              tools: 'readonly',
+              approvalMode: 'supervised',
+            },
+            record
+              ? { parentConversationId: record.parentConversationId, chatId: record.chatId }
+              : undefined
+          )
         )
           continue;
       }
