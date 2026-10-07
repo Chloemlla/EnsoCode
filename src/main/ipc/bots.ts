@@ -462,6 +462,21 @@ export function getBotServices(): BotServices | null {
       }
     },
   };
+  const probe = createModelProbe({
+    settings: () => readSettingsState(),
+    credentials: () => readStoredOauthCredentialKeys(),
+    resolve: (ref, keys) => {
+      const resolved = resolveModelSelection(ref.providerId, ref.modelId, keys, {
+        allowVirtual: true,
+      });
+      return resolved.ok
+        ? { ok: true, config: resolved.selection.config }
+        : { ok: false, error: resolved.error };
+    },
+    isWorkerReady: isAgentWorkerReady,
+    complete: ({ systemPrompt, userText, candidates, timeoutMs, maxTokens }) =>
+      completeText({ systemPrompt, userText, candidates, timeoutMs, maxTokens }),
+  });
   const host = new BotSessionHost({
     bots,
     chats,
@@ -472,24 +487,8 @@ export function getBotServices(): BotServices | null {
     notes,
     budget: usage,
     classifyMemberTask: createMemberTaskClassifier(routingDeps),
-    probe: (() => {
-      const probe = createModelProbe({
-        settings: () => readSettingsState(),
-        credentials: () => readStoredOauthCredentialKeys(),
-        resolve: (ref, keys) => {
-          const resolved = resolveModelSelection(ref.providerId, ref.modelId, keys, {
-            allowVirtual: true,
-          });
-          return resolved.ok
-            ? { ok: true, config: resolved.selection.config }
-            : { ok: false, error: resolved.error };
-        },
-        isWorkerReady: isAgentWorkerReady,
-        complete: ({ systemPrompt, userText, candidates, timeoutMs, maxTokens }) =>
-          completeText({ systemPrompt, userText, candidates, timeoutMs, maxTokens }),
-      });
-      return (bot) => probe(bot.engine);
-    })(),
+    probe: (bot) => probe(bot.engine),
+    invalidateProbe: (bot) => probe.invalidate(bot.engine),
     language: () => (String(readSettingsState()?.language ?? 'zh').startsWith('zh') ? 'zh' : 'en'),
   });
   const delegationStore = new DelegationStore(

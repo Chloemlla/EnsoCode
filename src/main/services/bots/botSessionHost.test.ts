@@ -33,6 +33,7 @@ let probeResult:
   | { ok: true; model?: BotEngine; fallback?: { model: BotEngine; label: string; reason: string } }
   | { ok: false; error: string };
 let probeCalls: BotProfile[] = [];
+let invalidated: Array<BotEngine | undefined> = [];
 
 class FakeRuntime implements BotRuntimePort {
   engines: Array<{ id: string; engine?: BotEngine }> = [];
@@ -80,6 +81,7 @@ beforeEach(() => {
   events = [];
   probeResult = { ok: true };
   probeCalls = [];
+  invalidated = [];
   host = new BotSessionHost({
     bots,
     chats,
@@ -90,6 +92,7 @@ beforeEach(() => {
       probeCalls.push(botProfile);
       return probeResult;
     },
+    invalidateProbe: (botProfile) => invalidated.push(botProfile.engine),
   });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -253,6 +256,61 @@ describe('BotSessionHost.ensureSession', () => {
       probeResult = { ok: true };
       await host.deliverConversation(child.conversationId, 'recovered');
       expect(runtime.engines.at(-1)?.engine).toEqual(own);
+    });
+
+    it('真实投递报模型错误时作废该成员探测缓存；取消与非模型错误不作废', async () => {
+      const alice = bot('Alice');
+      const engine = { providerId: 'p', modelId: 'member-model' };
+      bots.update(alice.id, { engine }, []);
+      const chat = direct(alice.id);
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      host.observe(ev({ type: 'status', status: 'running' }, first.conversationId));
+      host.observe(
+        ev({ type: 'turn-failed', turnId: 't1', error: 'aborted' }, first.conversationId)
+      );
+      await flush();
+      expect(invalidated).toEqual([]);
+      await host.deliver(chat.id, alice.id, 'again');
+      host.observe(ev({ type: 'status', status: 'running' }, first.conversationId));
+      host.observe(
+        ev(
+          {
+            type: 'message-upsert',
+            index: 1,
+            message: {
+              role: 'assistant',
+              content: [],
+              stopReason: 'error',
+              errorMessage: '401 Unauthorized: invalid api key',
+            },
+          },
+          first.conversationId
+        )
+      );
+      host.observe(ev({ type: 'turn-completed', turnId: 't2' }, first.conversationId));
+      await flush();
+      expect(invalidated).toEqual([engine]);
+    });
+
+    it('委派会话报模型错误时按任务自己的模型作废', async () => {
+      const alice = bot('Alice');
+      const bob = bot('Bob');
+      const own = { providerId: 'p', modelId: 'task-model' };
+      const parent = host.ensureSession(direct(alice.id).id, alice.id);
+      if (!parent.ok) throw new Error(parent.error);
+      const child = registry.createBotConversation(
+        registry.conversation(parent.conversationId)!.projectId,
+        { botId: bob.id, chatId: null, delegationId: 'd1' }
+      )!;
+      host.registerDelegation(child.conversationId, { ...bob, engine: own });
+      await host.deliverConversation(child.conversationId, 'task');
+      host.observe(ev({ type: 'status', status: 'running' }, child.conversationId));
+      host.observe(
+        ev({ type: 'turn-failed', turnId: 't1', error: 'fetch failed' }, child.conversationId)
+      );
+      await flush();
+      expect(invalidated).toEqual([own]);
     });
 
     it('实测期间停止，返回后不得spawn、换模型或投递', async () => {

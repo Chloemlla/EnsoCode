@@ -27,7 +27,7 @@ import { buildBotModeInstruction, buildBotSystemPrompt } from './botPrompt';
 import type { BotStore } from './botStore';
 import type { BotChatStore } from './chatStore';
 import type { MemberTaskClassifier } from './memberTaskClassifier';
-import type { ModelProbeResult } from './modelProbe';
+import { isModelFailure, type ModelProbeResult } from './modelProbe';
 import { StartedDeliveryIndex } from './startedDeliveries';
 import { messageTokens } from './turnTokens';
 
@@ -124,6 +124,8 @@ export interface BotSessionHostDeps {
    * 成员与默认均不可用才拒绝，error 为可读原因。
    */
   probe?: (bot: BotProfile) => Promise<ModelProbeResult>;
+  /** 真实投递报模型类错误：作废该成员的测通缓存 */
+  invalidateProbe?: (bot: BotProfile) => void;
   /** 静默看门狗阈值，缺省 BOT_SILENCE_MS */
   silenceMs?: number;
   now?: () => number;
@@ -1818,6 +1820,11 @@ export class BotSessionHost {
     };
     if (deliveryId === this.activeDeliveries.get(conversationId))
       this.activeDeliveries.delete(conversationId);
+    if (!ok && !stopped && isModelFailure(error)) {
+      const bot =
+        this.independentSpecs.get(conversationId)?.bot ?? this.deps.bots.get(binding.botId);
+      if (bot) this.deps.invalidateProbe?.(bot);
+    }
     if (deliveryId && this.deliveries.get(conversationId)?.get(deliveryId) !== 'started')
       this.deliveries.get(conversationId)?.delete(deliveryId);
     for (const listener of this.listeners) {

@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DefaultModelRef } from '../../../shared/defaultModel';
 import type { SpawnModelConfig } from '../../../shared/types/agent';
-import { briefErrorReason, createModelProbe, describeModelIssue } from './modelProbe';
+import {
+  briefErrorReason,
+  createModelProbe,
+  describeModelIssue,
+  isModelFailure,
+} from './modelProbe';
 
 const ENGINE: DefaultModelRef = { providerId: 'openai', modelId: 'gpt-5' };
 const DEFAULT: DefaultModelRef = { providerId: 'anthropic', modelId: 'claude' };
@@ -224,17 +229,64 @@ describe('createModelProbe', () => {
     expect(fx.complete).toHaveBeenCalledTimes(1);
   });
 
-  it('成功缓存也会过期，避免首选成功过一次就永久掩盖后续故障', async () => {
+  it('测通后一直有效：两次投递间隔超过 60 秒不再发第二次 ping', async () => {
     let now = 0;
     const fx = fixture({ now: () => now });
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    now = 60_000;
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    now = 24 * 3600_000;
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    expect(fx.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('同一模型引用但解析出的配置变化（换 key / baseUrl）会重测', async () => {
+    const fx = fixture({});
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    fx.resolve.mockReturnValue({ ok: true, config: config(ENGINE.modelId, { apiKey: 'k2' }) });
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    expect(fx.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('真实投递报模型错误后作废该成员缓存，下次重测', async () => {
+    const fx = fixture({});
     expect(await fx.probe(ENGINE)).toEqual({ ok: true });
     fx.complete.mockImplementation(async (r) => {
       if (r.candidates[0].modelId === ENGINE.modelId) throw new Error('401');
       return 'OK';
     });
-    now = 60_000;
+    fx.probe.invalidate(ENGINE);
     expect(await fx.probe(ENGINE)).toMatchObject({ ok: true, fallback: { model: DEFAULT } });
     expect(fx.complete).toHaveBeenCalledTimes(3);
+    expect(await fx.probe(ENGINE)).toMatchObject({ ok: true, fallback: { model: DEFAULT } });
+    expect(fx.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it('作废只影响该成员用过的模型，其他成员缓存保留', async () => {
+    const fx = fixture({});
+    const other = { providerId: 'openai', modelId: 'other' };
+    await fx.probe(ENGINE);
+    await fx.probe(other);
+    fx.probe.invalidate(other);
+    await fx.probe(ENGINE);
+    expect(fx.complete).toHaveBeenCalledTimes(2);
+    await fx.probe(other);
+    expect(fx.complete).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('isModelFailure', () => {
+  it('鉴权、模型不存在、网络、超时、限流算模型错误；取消与其他错误不算', () => {
+    for (const error of [
+      '401 Unauthorized',
+      'HTTP 404 model not found',
+      'fetch failed',
+      'request timed out',
+      '429 rate limit',
+    ])
+      expect(isModelFailure(error)).toBe(true);
+    for (const error of ['aborted', 'canceled', 'steer-rejected', 'context window exceeded', ''])
+      expect(isModelFailure(error)).toBe(false);
   });
 });
 

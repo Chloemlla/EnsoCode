@@ -12,7 +12,15 @@ import { pickBotModel } from './botPrompt';
 
 /** 实测成员模型的最短往返：worker 真实模型栈发一次性补全 */
 const PROBE_TIMEOUT_MS = 15_000;
+const PROBE_FAILURE_TTL_MS = 60_000;
 const PROBE_ERROR_MAX = 80;
+const MODEL_FAILURES = new Set([
+  '鉴权失败',
+  '请求被限流',
+  '模型不存在',
+  '网络连接失败',
+  '调用超时',
+]);
 
 export type ModelProbeResult =
   | {
@@ -23,6 +31,11 @@ export type ModelProbeResult =
   | { ok: false; error: string };
 
 type ProbeStatus = { ok: true } | { ok: false; error: string };
+
+export type ModelProbe = ((engine: BotEngine | undefined) => Promise<ModelProbeResult>) & {
+  /** 真实投递报模型错误后作废该成员用过的测通结果 */
+  invalidate(engine: BotEngine | undefined): void;
+};
 
 export interface ModelProbeDeps {
   now?: () => number;
@@ -150,15 +163,22 @@ function resolveErrorText(
   return `模型 ${modelLabel(state, ref)}：${reason}`;
 }
 
-/** 成员完整备用链实测，整链失败才尝试默认；结果缓存 60 秒，改配置立即重测。 */
-export function createModelProbe(
-  deps: ModelProbeDeps
-): (engine: BotEngine | undefined) => Promise<ModelProbeResult> {
+/** 真实投递的错误是否属于模型类（鉴权、模型不存在、网络、超时、限流） */
+export function isModelFailure(error: unknown): boolean {
+  return MODEL_FAILURES.has(briefErrorReason(error));
+}
+
+/** 成员完整备用链实测，整链失败才尝试默认；测通一直有效直到配置变化或被作废，失败缓存 60 秒。 */
+export function createModelProbe(deps: ModelProbeDeps): ModelProbe {
   const cache = new Map<string, { result: ProbeStatus; until: number }>();
   const pending = new Map<string, Promise<ProbeStatus>>();
+  const used = new Map<string, Set<string>>();
   const now = deps.now ?? Date.now;
-  const ping = (candidates: SpawnModelConfig[]): Promise<ProbeStatus> => {
+  const engineKey = (engine: BotEngine | undefined) =>
+    engine ? JSON.stringify([engine.providerId, engine.modelId]) : '';
+  const ping = (candidates: SpawnModelConfig[], touched: Set<string>): Promise<ProbeStatus> => {
     const signature = JSON.stringify(candidates);
+    touched.add(signature);
     const cached = cache.get(signature);
     if (cached && cached.until > now()) return Promise.resolve(cached.result);
     const running = pending.get(signature);
@@ -177,14 +197,17 @@ export function createModelProbe(
       } catch (error) {
         result = { ok: false, error: briefErrorReason(error) };
       }
-      cache.set(signature, { result, until: now() + 60_000 });
+      cache.set(signature, {
+        result,
+        until: result.ok ? Number.POSITIVE_INFINITY : now() + PROBE_FAILURE_TTL_MS,
+      });
       return result;
     })();
     pending.set(signature, request);
     void request.finally(() => pending.delete(signature));
     return request;
   };
-  return async (engine) => {
+  const probe = async (engine: BotEngine | undefined): Promise<ModelProbeResult> => {
     const state = deps.settings();
     let keys: ReadonlySet<string>;
     try {
@@ -193,6 +216,8 @@ export function createModelProbe(
       return { ok: false, error: '模型凭证读取失败' };
     }
     if (!deps.isWorkerReady()) return { ok: false, error: '会话服务未启动' };
+    const touched = new Set<string>();
+    used.set(engineKey(engine), touched);
     const check = async (ref: DefaultModelRef): Promise<ModelProbeResult> => {
       const resolved = deps.resolve(ref, keys);
       if (!resolved.ok) return { ok: false, error: resolveErrorText(state, ref, resolved.error) };
@@ -202,7 +227,7 @@ export function createModelProbe(
         : [resolved.config];
       let error = '未知错误';
       for (const [index, config] of candidates.entries()) {
-        const tested = await ping([config]);
+        const tested = await ping([config], touched);
         if (tested.ok) {
           // 401 等永久错误不会触发 worker 的自动重试，本轮必须直接用已测通的备用。
           return index === 0
@@ -235,4 +260,10 @@ export function createModelProbe(
       },
     };
   };
+  return Object.assign(probe, {
+    invalidate(engine: BotEngine | undefined) {
+      for (const signature of used.get(engineKey(engine)) ?? [])
+        if (cache.get(signature)?.result.ok) cache.delete(signature);
+    },
+  });
 }
