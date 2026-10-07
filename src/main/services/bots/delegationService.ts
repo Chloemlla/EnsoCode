@@ -258,18 +258,6 @@ export class DelegationService {
       timeoutMinutes,
     };
     this.save(record);
-    const timer = setTimeout(
-      () => {
-        const current = this.deps.store.get(id);
-        if (current && active(current)) {
-          this.finish(current, 'failed', 'timeout');
-          void this.deps.host.abortConversation(current.childConversationId).catch(console.warn);
-        }
-      },
-      timeoutMinutes * (this.deps.minuteMs ?? 60_000)
-    );
-    timer.unref?.();
-    this.timers.set(id, timer);
     const freshChild = () => {
       const fresh = this.newChild(projectId, target.id, id);
       return fresh && this.deps.host.registerDelegation(fresh.conversationId, effective, origin)
@@ -284,7 +272,7 @@ export class DelegationService {
         const current = this.deps.store.get(id);
         if (!current || !active(current)) return;
         if (!sent.ok) this.finish(current, 'failed', 'error', undefined, sent.error);
-        else if (!sent.queued) this.save({ ...current, state: 'running' });
+        else if (!sent.queued) this.started(current);
       })
       .catch((cause) => {
         const current = this.deps.store.get(id);
@@ -474,7 +462,25 @@ export class DelegationService {
     const record = this.list().find(
       (item) => item.childConversationId === conversationId && item.state === 'queued'
     );
-    if (record) this.save({ ...record, state: 'running' });
+    if (record) this.started(record);
+  }
+
+  /** queued → running 的唯一入口：期限从真正开工起算 */
+  private started(record: Delegation): void {
+    if (record.state !== 'queued' || this.disposed) return;
+    this.save({ ...record, state: 'running' });
+    const timer = setTimeout(
+      () => {
+        const current = this.deps.store.get(record.id);
+        if (current && active(current)) {
+          this.finish(current, 'failed', 'timeout');
+          void this.deps.host.abortConversation(current.childConversationId).catch(console.warn);
+        }
+      },
+      (record.timeoutMinutes ?? DELEGATION_TIMEOUT_MINUTES) * (this.deps.minuteMs ?? 60_000)
+    );
+    timer.unref?.();
+    this.timers.set(record.id, timer);
   }
 
   async deliverPending(parentConversationId?: string): Promise<void> {

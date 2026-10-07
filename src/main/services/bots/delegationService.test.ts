@@ -42,14 +42,16 @@ function fixture(
   const badSpawn = new Set<string>();
   const abort = vi.fn();
   const running = (id: string) =>
-    queueMicrotask(() =>
+    queueMicrotask(() => {
       host.observe({
         type: 'status',
         status: 'running',
         identity: { sessionId: id, generation: 'g' },
         seq: 1,
-      })
-    );
+      });
+      // 与 ipc/bots.ts 的 worker 事件分发一致
+      service.observeRunning(id);
+    });
   const host = new BotSessionHost({
     bots,
     chats,
@@ -249,17 +251,53 @@ it("caps the delegation timeout by the target's limit and lets the caller ask fo
       ok: false,
       error: 'deadlineMinutes must be a positive number.',
     });
-  await vi.advanceTimersByTimeAsync(10);
-  expect(f.store.get(short.delegationId)?.failure).toBe('timeout');
-  expect(f.store.get(capped.delegationId)?.state).toBe('running');
-  await vi.advanceTimersByTimeAsync(20);
+  // 同成员串行：每个都在开工后才按自己的期限计时
+  const state = (id: string) => f.store.get(id)?.state;
+  await vi.advanceTimersByTimeAsync(29);
+  expect([capped, short, plain].map((r) => state(r.delegationId))).toEqual([
+    'running',
+    'queued',
+    'queued',
+  ]);
+  await vi.advanceTimersByTimeAsync(1);
   expect(f.store.get(capped.delegationId)?.failure).toBe('timeout');
+  expect(state(short.delegationId)).toBe('running');
+  await vi.advanceTimersByTimeAsync(9);
+  expect(state(short.delegationId)).toBe('running');
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.store.get(short.delegationId)?.failure).toBe('timeout');
+  expect(state(plain.delegationId)).toBe('running');
+  await vi.advanceTimersByTimeAsync(29);
+  expect(state(plain.delegationId)).toBe('running');
+  await vi.advanceTimersByTimeAsync(1);
   expect(f.store.get(plain.delegationId)?.failure).toBe('timeout');
   // 重试沿用原时限，并按目标当前上限再收紧
   f.deps.bots.update(f.bob, { delegationTimeoutMinutes: 5 }, []);
   const retried = await f.service.retry(short.delegationId);
   if (!retried.ok) throw new Error(retried.error);
   expect(f.store.get(retried.delegationId)?.timeoutMinutes).toBe(5);
+  f.service.dispose();
+});
+it('starts the deadline only when a delegation queued behind the same member actually starts', async () => {
+  const f = fixture();
+  const first = f.service.delegate(f.parent, { to: 'Bob', task: 'first' });
+  const second = f.service.delegate(f.parent, { to: 'Bob', task: 'second', deadlineMinutes: 90 });
+  if (!first.ok || !second.ok) throw new Error('delegate');
+  await vi.advanceTimersByTimeAsync(0);
+  const one = f.store.get(first.delegationId)!;
+  expect(one.state).toBe('running');
+  expect(f.store.get(second.delegationId)?.state).toBe('queued');
+  expect(f.host.queueState().map((item) => item.reason)).toEqual(['member-serial']);
+  // Bob 的第一个委派跑了 120 分钟，第二个一直在同成员队列里没开工
+  await vi.advanceTimersByTimeAsync(120);
+  expect(f.store.get(second.delegationId)?.state).toBe('queued');
+  f.finish(one.childConversationId);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.store.get(second.delegationId)?.state).toBe('running');
+  await vi.advanceTimersByTimeAsync(89);
+  expect(f.store.get(second.delegationId)?.state).toBe('running');
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.store.get(second.delegationId)).toMatchObject({ state: 'failed', failure: 'timeout' });
   f.service.dispose();
 });
 it('disabling cancels running delegation timers and rejects subsequent delegate calls', async () => {
