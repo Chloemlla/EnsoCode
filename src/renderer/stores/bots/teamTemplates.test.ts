@@ -3,7 +3,12 @@ import { parseTeamTemplate } from '@shared/bots/templateLibrary';
 import { BUILTIN_AGENT_TYPES } from '@shared/types/assets';
 import { parseBotChat, parseBotProfile } from '@shared/types/bot';
 import { describe, expect, it } from 'vitest';
-import { TEAM_TEMPLATES, teamTemplateData, teamTemplateSpec } from './teamTemplates';
+import {
+  TEAM_BOSS_DISPATCH_RULES,
+  TEAM_TEMPLATES,
+  teamTemplateData,
+  teamTemplateSpec,
+} from './teamTemplates';
 import { BOT_TEMPLATES } from './templates';
 
 const reserved = BUILTIN_AGENT_TYPES.map((type) => type.name);
@@ -15,6 +20,21 @@ describe('TEAM_TEMPLATES', () => {
     expect(ids.length).toBeGreaterThanOrEqual(3);
     expect(new Set(ids).size).toBe(ids.length);
   });
+
+  for (const locale of ['zh', 'en'] as const) {
+    it(`${locale}：群主共用同一段派单原则，每个成员都有岗位约定`, () => {
+      const rules = TEAM_BOSS_DISPATCH_RULES[locale];
+      const heading = locale === 'zh' ? '岗位约定：' : 'Role contract:';
+      expect(rules).toMatch(locale === 'zh' ? /^派单原则：/ : /^Dispatch rules:/);
+      for (const template of TEAM_TEMPLATES) {
+        for (const member of teamTemplateSpec(template, locale).members) {
+          const isBoss = member.key === template.bossKey;
+          expect(member.persona.includes(rules), `${template.id}/${member.key}`).toBe(isBoss);
+          expect(member.persona, `${template.id}/${member.key}`).toContain(heading);
+        }
+      }
+    });
+  }
 
   for (const template of TEAM_TEMPLATES) {
     for (const locale of ['zh', 'en'] as const) {
