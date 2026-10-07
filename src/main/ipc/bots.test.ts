@@ -91,6 +91,17 @@ vi.mock('./capabilities', () => ({
 }));
 
 const main = { sender: { id: 1 } };
+it('restricts queued interjection to the writable desktop Main renderer and validates identifiers', async () => {
+  const channel = IPC_CHANNELS.BOT_CHAT_INTERJECT_QUEUED;
+  mocks.isMain.mockReturnValue(false);
+  expect(await call(channel, { chatId: 'forged', deliveryId: 'forged', actor: 'human' })).toEqual({
+    ok: false,
+    error: 'unavailable',
+  });
+  mocks.isMain.mockReturnValue(true);
+  expect((await call(channel, { chatId: 'forged', deliveryId: 'forged' })).ok).toBe(false);
+  expect((await call(channel, null)).ok).toBe(false);
+});
 const call = async (channel: string, request?: unknown) => {
   const handler = mocks.handlers.get(channel);
   if (!handler) throw new Error(`missing ${channel}`);

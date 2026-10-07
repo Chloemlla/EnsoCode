@@ -1278,6 +1278,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.BOT_THREAD_DELETE, { chatId }),
     stopChat: (chatId: string): Promise<BotActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_STOP, { chatId }),
+    interjectQueued: (chatId: string, deliveryId: string): Promise<BotActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_INTERJECT_QUEUED, { chatId, deliveryId }),
     chatState: (chatId: string): Promise<BotChatStateResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_STATE, { chatId }),
     chatSessions: (chatId: string): Promise<BotChatSessionsResult> =>

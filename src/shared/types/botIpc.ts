@@ -252,6 +252,8 @@ export type BotNotesResult = { ok: true; notes: BotNotesInfo } | BotIpcError;
 
 export interface BotQueueItem {
   chatId: string;
+  deliveryId?: string;
+  canInterject?: boolean;
   botId: string;
   conversationId: string;
   /** 0 = 下一个补位 */

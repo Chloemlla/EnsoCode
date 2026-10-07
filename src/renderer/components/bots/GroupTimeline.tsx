@@ -44,6 +44,7 @@ import { BotLiveStatus } from './BotLiveStatus';
 import { PresenceAvatar } from './BotPresence';
 import { chatErrorText, chatTitle } from './botText';
 import { DelegationCard } from './DelegationCard';
+import { QueuedInterjections } from './QueuedInterjections';
 import { RoutineProposalCard } from './RoutineCards';
 import { SilenceNote } from './SilenceNote';
 
@@ -383,6 +384,7 @@ export function GroupTimeline({
                 {t('Choosing who replies…')}
               </div>
             )}
+            {!history && <QueuedInterjections chatId={chat.id} bots={bots} />}
             {!history && replying && (
               <button
                 type="button"

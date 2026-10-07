@@ -8,6 +8,7 @@ import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import { BotSessionHost } from './botSessionHost';
 import { BotStore } from './botStore';
 import { BotChatStore } from './chatStore';
+import { GroupChatService } from './groupChat';
 import type { MemberTaskClassifier } from './memberTaskClassifier';
 
 let root: string;
@@ -27,6 +28,7 @@ const runtime = {
   removeSessionFiles: vi.fn(),
 };
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const human = { kind: 'human' as const, readOnly: false };
 const roots = new Map<string, string>();
 beforeEach(() => {
   vi.resetAllMocks();
@@ -104,6 +106,218 @@ function done(id: string) {
     turnId: 't',
   } as AgentWorkerEvent);
 }
+async function interjectionFixture() {
+  const botId = member();
+  const chat = chats.create({
+    kind: 'group',
+    title: 'Team',
+    members: [botId, member()],
+    bossBotId: botId,
+    workspace: { kind: 'chat-home', projectId: 'home' },
+  })!;
+  const parent = host.ensureSession(chat.id, botId);
+  if (!parent.ok) throw new Error(parent.error);
+  const child = delegated(botId, parent.conversationId, chat.id);
+  await host.deliverConversation(child, 'long delegated task');
+  host.observe({
+    seq: 1,
+    identity: { sessionId: child, generation: 'g' },
+    type: 'status',
+    status: 'running',
+  });
+  const group = new GroupChatService({ bots, chats, host, emit: () => {} });
+  await group.send(chat.id, `@${bots.get(botId)!.name} use iPhone 13`, { source: 'human' });
+  await flush();
+  return { botId, chatId: chat.id, child, parent: parent.conversationId, group };
+}
+it('redirects a human queue item only after the delegated worker consumes it, without duplicate group delivery', async () => {
+  const { chatId, child, group, parent } = await interjectionFixture();
+  const queued = host.queueState()[0];
+  expect(queued).toMatchObject({ canInterject: true, deliveryId: expect.any(String) });
+  const result = host.interjectQueued(chatId, queued.deliveryId!, human);
+  await flush();
+  expect(host.queueState()).toHaveLength(1);
+  const call = runtime.steer.mock.calls[0] as unknown as [string, string, unknown, string];
+  expect(call[0]).toBe(child);
+  expect(call[1]).toContain('来自群「Team」的插话：');
+  expect(call[1]).toContain('use iPhone 13');
+  host.observe({
+    seq: 2,
+    identity: { sessionId: child, generation: 'g' },
+    type: 'delivery-settled',
+    deliveryId: call[3],
+  });
+  expect(await result).toMatchObject({ ok: true });
+  await group.settled(chatId);
+  expect(host.queueState()).toHaveLength(0);
+  expect(chats.readEntries(chatId)).toContainEqual(
+    expect.objectContaining({ kind: 'system', text: '已转给 Dev0 当前任务' })
+  );
+  expect(chats.get(chatId)!.sessions[queued.botId].cursor).toBeGreaterThan(0);
+  done(child);
+  await flush();
+  expect(runtime.prompt.mock.calls.filter((call) => call[0] === parent)).toHaveLength(0);
+  expect(group.state(chatId)).toMatchObject({ current: null });
+});
+it.each([
+  { kind: 'human' as const, readOnly: true },
+  { kind: 'bot' as const, readOnly: false },
+])('rejects untrusted interjection actor %j', async (actor) => {
+  const { chatId } = await interjectionFixture();
+  const queued = host.queueState()[0];
+  expect(await host.interjectQueued(chatId, queued.deliveryId!, actor)).toMatchObject({
+    ok: false,
+  });
+  expect(host.queueState()).toHaveLength(1);
+  expect(runtime.steer).not.toHaveBeenCalled();
+});
+it('keeps the queued item when the target turn has ended', async () => {
+  const { chatId, child } = await interjectionFixture();
+  const queued = host.queueState()[0];
+  // Prevent automatic dequeue while testing the late click.
+  await host.deliverConversation(chatSession(member()), 'occupy capacity');
+  host.setMaxRunningTurns(1);
+  done(child);
+  expect(await host.interjectQueued(chatId, queued.deliveryId!, human)).toMatchObject({
+    ok: false,
+    error: 'Dev0 当前任务已结束，消息继续排队',
+  });
+  expect(host.queueState().some((item) => item.deliveryId === queued.deliveryId)).toBe(true);
+  expect(runtime.steer).not.toHaveBeenCalled();
+});
+it('does not turn a deferred interjection into a new delegated prompt', async () => {
+  const { chatId, child } = await interjectionFixture();
+  const queued = host.queueState()[0];
+  const result = host.interjectQueued(chatId, queued.deliveryId!, human);
+  await flush();
+  const call = runtime.steer.mock.calls[0] as unknown as [string, string, unknown, string];
+  host.observe({
+    seq: 2,
+    identity: { sessionId: child, generation: 'g' },
+    type: 'delivery-deferred',
+    deliveryId: call[3],
+  });
+  expect(await result).toMatchObject({ ok: false });
+  expect(host.queueState()[0].conversationId).toBe(queued.conversationId);
+  expect(host.queueState()).toHaveLength(1);
+});
+it('rejects repeated clicks while waiting for the worker receipt', async () => {
+  const { chatId, child } = await interjectionFixture();
+  const queued = host.queueState()[0];
+  const result = host.interjectQueued(chatId, queued.deliveryId!, human);
+  await flush();
+  expect(await host.interjectQueued(chatId, queued.deliveryId!, human)).toMatchObject({
+    ok: false,
+  });
+  expect(runtime.steer).toHaveBeenCalledTimes(1);
+  expect(host.queueState()[0].canInterject).toBe(false);
+  done(child);
+  expect(await result).toMatchObject({ ok: false });
+  await flush();
+  expect(
+    runtime.prompt.mock.calls.filter((call) => call[0] === queued.conversationId)
+  ).toHaveLength(1);
+  expect(
+    chats
+      .readEntries(chatId)
+      .some((entry) => entry.kind === 'system' && entry.text.startsWith('已转给'))
+  ).toBe(false);
+});
+it('does not offer or accept transfer of a member-authored queued message', async () => {
+  const { chatId, group, parent, child } = await interjectionFixture();
+  await group.stop(chatId);
+  await host.deliverConversation(parent, 'member message', {
+    source: 'bot',
+    deliveryId: 'member-message',
+  });
+  await flush();
+  const queued = host.queueState()[0];
+  expect(queued.canInterject).toBe(false);
+  expect(await host.interjectQueued(chatId, queued.deliveryId!, human)).toMatchObject({
+    ok: false,
+  });
+  expect(runtime.steer).not.toHaveBeenCalled();
+  done(child);
+});
+it('does not offer the button while the delegated task is stopping', async () => {
+  const { chatId, child } = await interjectionFixture();
+  let released!: () => void;
+  runtime.release.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        released = resolve;
+      })
+  );
+  const stop = host.abortConversation(child);
+  await flush();
+  const queued = host.queueState()[0];
+  expect(queued.canInterject).toBe(false);
+  expect(await host.interjectQueued(chatId, queued.deliveryId!, human)).toMatchObject({
+    ok: false,
+  });
+  released();
+  await stop;
+});
+it('does not offer transfer before the delegated worker reports running', async () => {
+  const { chatId, child, parent, group } = await interjectionFixture();
+  await group.stop(chatId);
+  // Queue the next human message behind a child still waiting to spawn.
+  await host.abortConversation(child);
+  let spawned!: () => void;
+  runtime.spawn.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        spawned = () => resolve({ ok: true });
+      })
+  );
+  const delegatedStart = host.deliverConversation(child, 'next long task');
+  await flush();
+  await host.deliverConversation(parent, 'queued', {
+    source: 'human',
+    deliveryId: 'preparing-human',
+  });
+  expect(host.queueState()[0].canInterject).toBe(false);
+  spawned();
+  await delegatedStart;
+});
+it.each(['turn-retry', 'idle'] as const)('does not offer interjection during %s', async (state) => {
+  const { child } = await interjectionFixture();
+  host.observe({
+    seq: 2,
+    identity: { sessionId: child, generation: 'g' },
+    type: 'status',
+    status: 'running',
+  });
+  host.observe(
+    state === 'idle'
+      ? { seq: 3, identity: { sessionId: child, generation: 'g' }, type: 'status', status: 'idle' }
+      : {
+          seq: 3,
+          identity: { sessionId: child, generation: 'g' },
+          type: 'turn-retry',
+          attempt: 1,
+          maxAttempts: 3,
+          delayMs: 1000,
+          error: 'retry',
+        }
+  );
+  expect(host.queueState()[0].canInterject).toBeFalsy();
+});
+it('keeps direct human steer into an active group reply, without offering a transfer', async () => {
+  const botId = member();
+  const chat = chats.create({
+    kind: 'group',
+    title: 'Team',
+    members: [botId, member()],
+    bossBotId: botId,
+    workspace: { kind: 'chat-home', projectId: 'home' },
+  })!;
+  const group = new GroupChatService({ bots, chats, host, emit: () => {} });
+  await group.send(chat.id, '@Dev0 reply', { source: 'human' });
+  await group.send(chat.id, '@Dev0 use iPhone 13', { source: 'human' });
+  expect(runtime.steer).toHaveBeenCalledTimes(1);
+  expect(host.queueState()).toEqual([]);
+});
 it('does not classify idle tasks, serializes conflicts and lets other members run', async () => {
   const bot = member();
   const a = session(bot);

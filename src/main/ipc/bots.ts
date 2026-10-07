@@ -11,7 +11,7 @@ import { assignTeamNames } from '@shared/bots/team';
 import { threadTitleFrom } from '@shared/bots/threads';
 import type { SessionIdentity } from '@shared/builtinAgents';
 import { BUILTIN_AGENT_TYPES, IPC_CHANNELS } from '@shared/types';
-import type { AttachedImage } from '@shared/types/agent';
+import { type AttachedImage, isDeliveryId } from '@shared/types/agent';
 import type { SkillEntry } from '@shared/types/assets';
 import {
   type BotChat,
@@ -1921,6 +1921,16 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_CHAT_STOP, 'write', (_sender, request, { groups }) => {
     const chatId = chatIdOf(request);
     return chatId ? groups.stop(chatId) : INVALID;
+  });
+  handle(IPC_CHANNELS.BOT_CHAT_INTERJECT_QUEUED, 'write', (_sender, request, { host }) => {
+    const chatId = chatIdOf(request);
+    const deliveryId =
+      request && typeof request === 'object' && 'deliveryId' in request
+        ? request.deliveryId
+        : undefined;
+    if (!chatId || !isDeliveryId(deliveryId)) return INVALID;
+    // Only the writable desktop Main renderer reaches this handler; no worker / phone route.
+    return host.interjectQueued(chatId, deliveryId, { kind: 'human', readOnly: false });
   });
   handle(IPC_CHANNELS.BOT_CHAT_STATE, 'read', (_sender, request, { groups }) => {
     const chatId = chatIdOf(request);

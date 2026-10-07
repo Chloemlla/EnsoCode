@@ -2324,6 +2324,7 @@ export const zhTranslations: Record<string, string> = {
   "Queued · waiting for the member's current task to finish": '排队中 · 等待成员当前任务完成',
   "Queued · waiting for the member's earlier tasks": '排队中 · 等待成员前序任务',
   'Queued · waiting for the member to stop': '排队中 · 等待成员停止完成',
+  'Insert into {{name}}’s current task': '插到 {{name}} 当前任务',
   Free: '空闲',
   Planning: '思考',
   Busy: '执行',
