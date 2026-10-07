@@ -418,6 +418,7 @@ export const IPC_CHANNELS = {
   BOT_TASK_COMPLETE: 'bots:task-complete',
   BOT_TASK_CANCEL: 'bots:task-cancel',
   BOT_TASK_DELETE: 'bots:task-delete',
+  BOT_TASK_REVIEW: 'bots:task-review',
   /** 「自动设置能力」：便宜模型按成员描述推荐能力，只返回建议不落盘 */
   BOT_SUGGEST_ABILITIES: 'bots:suggest-abilities',
   BOT_SUGGEST_PERSONA: 'bots:suggest-persona',

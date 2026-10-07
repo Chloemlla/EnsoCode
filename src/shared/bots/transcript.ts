@@ -35,6 +35,7 @@ export const GROUP_STATE_LABELS = {
   taskStatus: {
     todo: '待办',
     doing: '进行中',
+    review: '待验收',
     done: '已完成',
     canceled: '已取消',
   } satisfies Record<GroupTaskStatus, string>,

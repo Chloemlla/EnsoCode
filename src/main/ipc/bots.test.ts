@@ -750,6 +750,55 @@ describe('群任务看板 IPC', () => {
     });
   });
 
+  it('人类验收 IPC：入参收窄，退回必须带原因 → todo，再次交付后通过 → done', async () => {
+    const { alice, bob, chatId } = await team();
+    const { getBotServices } = await import('./bots');
+    const services = getBotServices()!;
+    const added = services.tasks.add(chatId, alice, { title: 'Login' });
+    if (!added.ok) throw new Error(added.error);
+    const id = added.task.id;
+    const record = {
+      id: '77777777-7777-4777-8777-777777777777',
+      parentConversationId: 'p',
+      parentBotId: alice,
+      targetBotId: bob,
+      chatId,
+      task: 't',
+      context: '',
+      childConversationId: 'c',
+      state: 'running' as const,
+      depth: 1,
+      createdAt: 1,
+      taskId: id,
+    };
+    services.tasks.sync(record);
+    services.tasks.sync({ ...record, state: 'completed', result: 'ok' });
+    for (const bad of [
+      { chatId, id },
+      { chatId, id, accept: 'yes' },
+      { chatId, id, accept: false },
+      { chatId, id, accept: false, reason: 'x'.repeat(4001) },
+    ])
+      expect(await call(IPC_CHANNELS.BOT_TASK_REVIEW, bad)).toEqual({
+        ok: false,
+        error: 'invalid',
+      });
+    expect(
+      await call(IPC_CHANNELS.BOT_TASK_REVIEW, { chatId, id, accept: false, reason: 'redo' })
+    ).toMatchObject({ ok: true, task: { status: 'todo', returnReason: 'redo' } });
+    services.tasks.sync({ ...record, id: '88888888-8888-4888-8888-888888888888' });
+    services.tasks.sync({
+      ...record,
+      id: '88888888-8888-4888-8888-888888888888',
+      state: 'completed',
+      result: 'ok2',
+    });
+    expect(await call(IPC_CHANNELS.BOT_TASK_REVIEW, { chatId, id, accept: true })).toMatchObject({
+      ok: true,
+      task: { status: 'done', result: 'ok2' },
+    });
+  });
+
   it('移出成员时其认领中的任务退回 todo；开关关闭时列表为空、写返回 disabled', async () => {
     const { alice, bob, carol, chatId, version } = await team();
     const { getBotServices } = await import('./bots');
@@ -1570,6 +1619,25 @@ describe('群话题', () => {
       .soft(services.host.discardBot(alice))
       .toMatchObject({ reason: 'boss', chatIds: [chatId] });
     services.tasks.add(chatId, 'human', { title: 'Shared pending task' });
+    const review = services.tasks.add(chatId, 'human', { title: 'Delivered awaiting review' });
+    if (!review.ok) throw new Error(review.error);
+    const record = {
+      id: '77777777-7777-4777-8777-777777777777',
+      parentConversationId: 'p',
+      parentBotId: bob,
+      targetBotId: alice,
+      chatId,
+      task: 't',
+      context: '',
+      childConversationId: 'c',
+      state: 'running' as const,
+      depth: 1,
+      createdAt: 1,
+      taskId: review.task.id,
+    };
+    services.tasks.sync(record);
+    services.tasks.sync({ ...record, state: 'completed', result: 'ok' });
+    expect(services.tasks.list(chatId)[1]).toMatchObject({ status: 'review' });
     const session = services.host.ensureSession(thread.id, bob);
     if (!session.ok) throw new Error(session.error);
     services.groups.markCompacted(thread.id, bob, session.conversationId);
@@ -1584,6 +1652,7 @@ describe('群话题', () => {
     const prompts = mocks.promptSession.mock.calls.map((args) => String(args[1])).join('\n');
     expect(prompts).toContain('<group-state>');
     expect(prompts).toContain('Shared pending task');
+    expect(prompts).toContain('#2 Delivered awaiting review（待验收');
   });
 
   it('话题 IPC：新建并切换、空话题复用、首条消息定标题、改名、切换校验、删除回到根群', async () => {

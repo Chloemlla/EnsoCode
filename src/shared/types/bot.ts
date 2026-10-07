@@ -779,7 +779,8 @@ export function parseBotRoutineRun(value: unknown): BotRoutineRun | undefined {
   return run;
 }
 
-export const GROUP_TASK_STATUSES = ['todo', 'doing', 'done', 'canceled'] as const;
+/** review：委派交付、执行人不是创建人时待创建人或人类验收 */
+export const GROUP_TASK_STATUSES = ['todo', 'doing', 'review', 'done', 'canceled'] as const;
 export type GroupTaskStatus = (typeof GROUP_TASK_STATUSES)[number];
 export const GROUP_TASK_TITLE_MAX = 200;
 export const GROUP_TASK_TEXT_MAX = 4000;
@@ -796,6 +797,8 @@ export interface GroupTask {
   delegationId?: string;
   /** 完成说明 */
   result?: string;
+  /** 最近一次验收退回的原因；验收通过时清除 */
+  returnReason?: string;
   /** 验收条件；passed 为最近一次校验结果 */
   check?: TaskCheck;
   /** 成员认领 / 被指派的时间：complete 验收只看此后的工具结果 */
@@ -852,6 +855,8 @@ export function parseGroupTask(value: unknown): GroupTask | undefined {
   if (isBotId(value.assigneeBotId)) task.assigneeBotId = value.assigneeBotId;
   if (isBotId(value.delegationId)) task.delegationId = value.delegationId;
   if (isText(value.result)) task.result = value.result.slice(0, GROUP_TASK_TEXT_MAX);
+  if (isText(value.returnReason))
+    task.returnReason = value.returnReason.slice(0, GROUP_TASK_TEXT_MAX);
   const check = parseTaskCheck(value.check);
   if (check) task.check = check;
   if (isTime(value.claimedAt)) task.claimedAt = value.claimedAt;

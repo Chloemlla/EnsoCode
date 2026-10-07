@@ -1,17 +1,19 @@
 import type { BotRoutine, Delegation, GroupTask, GroupTaskStatus } from '@shared/types/bot';
 import { isActiveDelegation } from './delegations';
 
-/** 看板分栏：待办 / 进行中按编号，已完成 / 已取消新的在前 */
+/** 看板分栏：待办 / 进行中 / 待验收按编号，已完成 / 已取消新的在前 */
 export function taskColumns(tasks: readonly GroupTask[]): Record<GroupTaskStatus, GroupTask[]> {
   const columns: Record<GroupTaskStatus, GroupTask[]> = {
     todo: [],
     doing: [],
+    review: [],
     done: [],
     canceled: [],
   };
   for (const task of tasks) columns[task.status].push(task);
   columns.todo.sort((a, b) => a.seq - b.seq);
   columns.doing.sort((a, b) => a.seq - b.seq);
+  columns.review.sort((a, b) => a.seq - b.seq);
   columns.done.sort((a, b) => b.updatedAt - a.updatedAt);
   columns.canceled.sort((a, b) => b.updatedAt - a.updatedAt);
   return columns;

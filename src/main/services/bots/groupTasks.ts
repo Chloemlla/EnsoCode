@@ -37,7 +37,16 @@ interface Deps {
   now?: () => number;
 }
 
-export const GROUP_TASK_ACTIONS = ['list', 'add', 'claim', 'update', 'complete', 'cancel'] as const;
+export const GROUP_TASK_ACTIONS = [
+  'list',
+  'add',
+  'claim',
+  'update',
+  'complete',
+  'cancel',
+  'accept',
+  'reject',
+] as const;
 
 const short = (text: string, max = 80) => {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -46,12 +55,15 @@ const short = (text: string, max = 80) => {
 const label = (task: GroupTask) => `#${task.seq} ${task.title}`;
 const pending = (check: TaskCheck | undefined) =>
   check ? { check: { kind: check.kind, text: check.text } } : {};
+/** 进入 done 时清掉上次退回原因 */
+const settled = ({ returnReason: _reason, ...task }: GroupTask): GroupTask => task;
 const CHECK_INVALID = 'check must be { kind: "output-contains", text } with 1-200 characters.';
 
 /**
  * 委派 → 任务状态机（纯函数）。返回 undefined 表示不变。
  * 创建：todo，或发起人自己认领中且无委派的任务 → doing / 负责人 = 目标 / 记 delegationId；
- * 终态：仅当任务仍由这条委派负责（doing + 同 delegationId）——完成 → done 带结果摘要，其余 → 退回 todo。
+ * 终态：仅当任务仍由这条委派负责（doing + 同 delegationId）——完成 → 带结果摘要，
+ * 执行人即创建人直接 done，否则 review 待验收；其余 → 退回 todo。
  */
 export function taskAfterDelegation(
   task: GroupTask,
@@ -81,7 +93,10 @@ export function taskAfterDelegation(
       : {};
   if (record.state === 'completed') {
     const result = delegationResultBody(record).trim().slice(0, GROUP_TASK_TEXT_MAX);
-    return { ...task, ...verdict, status: 'done', ...(result ? { result } : {}), updatedAt: now };
+    const next = { ...task, ...verdict, ...(result ? { result } : {}), updatedAt: now };
+    return record.targetBotId === task.createdBy
+      ? { ...settled(next), status: 'done' }
+      : { ...next, status: 'review' };
   }
   const { assigneeBotId: _assignee, delegationId: _delegation, ...rest } = task;
   return {
@@ -197,6 +212,11 @@ export class GroupTaskService {
     const task = found.task;
     if (task.status === 'done' || task.status === 'canceled')
       return { ok: false, error: busy(task, this) };
+    if (task.status === 'review' && actor !== 'human')
+      return {
+        ok: false,
+        error: `Task #${task.seq} is awaiting review; only ${this.name(task.createdBy)} or a human can accept or reject it.`,
+      };
     const text = result?.trim().slice(0, GROUP_TASK_TEXT_MAX);
     if (actor !== 'human') {
       if (task.delegationId)
@@ -225,7 +245,7 @@ export class GroupTaskService {
       this.write(
         chatId,
         {
-          ...task,
+          ...settled(task),
           ...passed,
           status: 'done',
           ...(text ? { result: text } : {}),
@@ -259,7 +279,12 @@ export class GroupTaskService {
     const task = found.task;
     if (task.status === 'done' || task.status === 'canceled')
       return { ok: false, error: busy(task, this) };
-    if (actor !== 'human' && task.delegationId)
+    if (task.status === 'review' && actor !== 'human' && !this.reviewer(task, actor))
+      return {
+        ok: false,
+        error: `Only the task creator (${this.name(task.createdBy)}) or a human can cancel task #${task.seq} while it awaits review.`,
+      };
+    if (actor !== 'human' && task.delegationId && task.status === 'doing')
       return {
         ok: false,
         error: `Task #${task.seq} is being handled by a delegation; the delegator can cancel it with check_delegation.`,
@@ -278,6 +303,58 @@ export class GroupTaskService {
         actor
       )
     );
+  }
+
+  /** 验收通过：review → done */
+  accept(chatId: string, actor: TaskActor, ref: string): TaskResult {
+    const found = this.reviewing(chatId, actor, ref);
+    if (!found.ok) return found;
+    const task = found.task;
+    return this.write(
+      chatId,
+      { ...settled(task), status: 'done', updatedAt: this.now() },
+      `${this.name(actor)} 验收通过了 ${label(task)}`,
+      actor
+    );
+  }
+
+  /** 验收退回：review → todo，清负责人与委派、记原因，可再认领 / 指派 / 委派 */
+  reject(chatId: string, actor: TaskActor, ref: string, reason: string): TaskResult {
+    const found = this.reviewing(chatId, actor, ref);
+    if (!found.ok) return found;
+    const text = reason.trim().slice(0, GROUP_TASK_TEXT_MAX);
+    if (!text) return { ok: false, error: 'Give a reason when rejecting a task.' };
+    const {
+      assigneeBotId: _assignee,
+      delegationId: _delegation,
+      claimedAt: _claimed,
+      ...rest
+    } = found.task;
+    return this.write(
+      chatId,
+      { ...rest, status: 'todo', returnReason: text, updatedAt: this.now() },
+      `${this.name(actor)} 退回了 ${label(found.task)}：${short(text)}`,
+      actor
+    );
+  }
+
+  /** 验收人：人类或任务创建人（执行人除外） */
+  private reviewer(task: GroupTask, actor: TaskActor): boolean {
+    return actor === 'human' || (task.createdBy === actor && task.assigneeBotId !== actor);
+  }
+
+  private reviewing(chatId: string, actor: TaskActor, ref: string): TaskResult {
+    const found = this.resolve(chatId, actor, ref);
+    if (!found.ok) return found;
+    const task = found.task;
+    if (task.status !== 'review')
+      return { ok: false, error: `Task #${task.seq} is not awaiting review.` };
+    if (!this.reviewer(task, actor))
+      return {
+        ok: false,
+        error: `Only the task creator (${this.name(task.createdBy)}) or a human can review task #${task.seq}.`,
+      };
+    return found;
   }
 
   /** 人类指派：置 doing / 负责人，再以人类身份 @ 成员；投递失败回滚 */
@@ -348,11 +425,15 @@ export class GroupTaskService {
     const task = this.deps.store.find(this.board(record.chatId), record.taskId);
     const next = task && taskAfterDelegation(task, record, this.now());
     if (!task || !next) return;
+    const summary = next.result ? `：${short(next.result)}` : '';
+    const target = this.name(record.targetBotId);
     const text = isActiveDelegation(record)
-      ? `${this.name(record.parentBotId)} 把 ${label(task)} 委派给 ${this.name(record.targetBotId)}`
-      : next.status === 'done'
-        ? `${this.name(record.targetBotId)} 完成了 ${label(task)}${next.result ? `：${short(next.result)}` : ''}`
-        : `${label(task)} 的委派未完成，已退回待办`;
+      ? `${this.name(record.parentBotId)} 把 ${label(task)} 委派给 ${target}`
+      : next.status === 'todo'
+        ? `${label(task)} 的委派未完成，已退回待办`
+        : next.status === 'review'
+          ? `${target} 交付了 ${label(task)}，待${this.name(task.createdBy)}验收${summary}`
+          : `${target} 完成了 ${label(task)}${summary}`;
     this.write(record.chatId, next, text, record.parentBotId);
   }
 
@@ -442,6 +523,10 @@ export class GroupTaskService {
       }
       case 'cancel':
         return needId((ref) => this.cancel(chatId, botId, ref));
+      case 'accept':
+        return needId((ref) => this.accept(chatId, botId, ref));
+      case 'reject':
+        return needId((ref) => this.reject(chatId, botId, ref, text('reason') ?? ''));
       default:
         return {
           ok: false,
@@ -464,6 +549,7 @@ export class GroupTaskService {
       ...(task.assigneeBotId ? { assignee: this.name(task.assigneeBotId) } : {}),
       createdBy: this.name(task.createdBy),
       ...(task.result ? { result: task.result } : {}),
+      ...(task.returnReason ? { returnReason: task.returnReason } : {}),
       ...(task.check ? { check: task.check.text } : {}),
       ...(task.check?.passed !== undefined ? { checkPassed: task.check.passed } : {}),
     };
@@ -559,6 +645,8 @@ export class GroupTaskService {
 function busy(task: GroupTask, service: GroupTaskService): string {
   if (task.status === 'done') return `Task #${task.seq} is already done.`;
   if (task.status === 'canceled') return `Task #${task.seq} was canceled.`;
+  if (task.status === 'review')
+    return `Task #${task.seq} is awaiting review by ${service.name(task.createdBy)}.`;
   if (task.delegationId)
     return `Task #${task.seq} is already delegated to ${service.name(task.assigneeBotId ?? '')}.`;
   return `Task #${task.seq} is already claimed by ${service.name(task.assigneeBotId ?? '')}.`;

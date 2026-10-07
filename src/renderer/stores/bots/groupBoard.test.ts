@@ -13,17 +13,20 @@ const task = (seq: number, status: GroupTask['status'], updatedAt = seq): GroupT
 });
 
 describe('taskColumns', () => {
-  it('按状态分组：待办 / 进行中按编号，已完成 / 已取消新的在前', () => {
+  it('按状态分组：待办 / 进行中 / 待验收按编号，已完成 / 已取消新的在前', () => {
     const columns = taskColumns([
       task(3, 'todo'),
       task(1, 'todo'),
       task(2, 'doing'),
+      task(8, 'review'),
+      task(7, 'review', 30),
       task(4, 'done', 10),
       task(5, 'done', 20),
       task(6, 'canceled'),
     ]);
     expect(columns.todo.map((t) => t.seq)).toEqual([1, 3]);
     expect(columns.doing.map((t) => t.seq)).toEqual([2]);
+    expect(columns.review.map((t) => t.seq)).toEqual([7, 8]);
     expect(columns.done.map((t) => t.seq)).toEqual([5, 4]);
     expect(columns.canceled.map((t) => t.seq)).toEqual([6]);
   });

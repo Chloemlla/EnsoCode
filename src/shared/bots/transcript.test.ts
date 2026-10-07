@@ -192,6 +192,7 @@ describe('buildGroupStateBlock（压缩后补群状态）', () => {
     tasks: [
       { seq: 3, title: '登录页', status: 'doing' as const, assigneeBotId: 'fe' },
       { seq: 4, title: '部署', status: 'todo' as const },
+      { seq: 5, title: '接口', status: 'review' as const, assigneeBotId: 'fe' },
     ],
     lastSeq: 42,
   };
@@ -208,6 +209,7 @@ describe('buildGroupStateBlock（压缩后补群状态）', () => {
     expect(text).toContain('做登录页');
     expect(text).toContain('#3 登录页');
     expect(text).toContain('#4 部署');
+    expect(text).toContain('#5 接口（待验收，Fe）');
     expect(text).toContain('42');
     expect(text).toContain('group_history');
     expect(buildGroupStateBlock(state)).toBe(text);

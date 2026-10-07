@@ -488,7 +488,7 @@ export function getBotServices(): BotServices | null {
         })),
       tasks: taskStore
         .list(chats.rootOf(chatId)?.id ?? chatId)
-        .filter((task) => task.status === 'todo' || task.status === 'doing'),
+        .filter((task) => task.status !== 'done' && task.status !== 'canceled'),
     }),
     responder: createSmartRouter(routingDeps),
   });
@@ -1396,6 +1396,15 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_TASK_DELETE, 'write', (_sender, request, services) => {
     const target = taskTarget(services, request);
     return target ? services.tasks.remove(target.chatId, target.id) : INVALID;
+  });
+  handle(IPC_CHANNELS.BOT_TASK_REVIEW, 'write', (_sender, request, services) => {
+    const target = taskTarget(services, request);
+    if (!target || typeof target.input.accept !== 'boolean') return INVALID;
+    if (target.input.accept) return services.tasks.accept(target.chatId, 'human', target.id);
+    const reason = target.input.reason;
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > GROUP_TASK_TEXT_MAX)
+      return INVALID;
+    return services.tasks.reject(target.chatId, 'human', target.id, reason);
   });
   handle(
     IPC_CHANNELS.BOTS_LIST,

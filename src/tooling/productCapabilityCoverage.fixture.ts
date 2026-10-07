@@ -778,6 +778,7 @@ export const IPC_PRODUCT_COVERAGE = {
   BOT_TASK_COMPLETE: excluded('Bot mode group task board UI.'),
   BOT_TASK_CANCEL: excluded('Bot mode group task board UI.'),
   BOT_TASK_DELETE: excluded('Bot mode group task board UI.'),
+  BOT_TASK_REVIEW: excluded('Bot mode group task board UI.'),
   BOT_SUGGEST_ABILITIES: excluded('Bot mode member editor helper; returns suggestions only.'),
   BOT_SUGGEST_PERSONA: excluded('Bot mode member editor helper; returns suggestions only.'),
   BOT_SUGGEST_GOAL: excluded('Bot mode goal onboarding helper; returns suggestions only.'),
