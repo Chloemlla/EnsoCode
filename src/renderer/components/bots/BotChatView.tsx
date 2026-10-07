@@ -248,7 +248,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-        <header className="flex h-[52px] shrink-0 items-center gap-2.5 border-b px-4">
+        <header className="@container flex h-[52px] shrink-0 items-center gap-2.5 border-b px-4">
           {direct ? (
             <BotAvatar bot={direct} busy={summary.running} />
           ) : (
@@ -292,10 +292,12 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
                     else void useBotsStore.getState().refreshChats();
                   })
                 }
-                className="flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                className="flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                title={t('New conversation')}
+                aria-label={t('New conversation')}
               >
-                <MessageSquarePlus className="h-3.5 w-3.5" />
-                {t('New conversation')}
+                <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" />
+                <span className="@min-[28rem]:inline hidden">{t('New conversation')}</span>
               </button>
             </>
           ) : (

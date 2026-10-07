@@ -34,7 +34,7 @@ import { isUnread } from '@/stores/bots/unread';
 import { chatErrorText } from './botText';
 
 export const SWITCHER_BUTTON =
-  'flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50';
+  'flex h-7 items-center gap-1 whitespace-nowrap rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50';
 
 export interface SwitcherEntry {
   id: string;
@@ -93,7 +93,9 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
   return (
     <>
       <Menu>
-        <MenuTrigger className={cn(SWITCHER_BUTTON, 'max-w-56')}>
+        <MenuTrigger
+          className={cn(SWITCHER_BUTTON, 'max-w-56 @max-[28rem]:max-w-32 @max-[21rem]:max-w-24')}
+        >
           <span className="truncate">{label(thread)}</span>
           {entries.some((entry) => entry.unread) && (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-info" />
@@ -141,10 +143,12 @@ export function ThreadSwitcher({ group, thread }: { group: BotChat; thread: BotC
         type="button"
         disabled={archived}
         onClick={() => void create()}
-        className={SWITCHER_BUTTON}
+        className={cn(SWITCHER_BUTTON, 'shrink-0')}
+        title={t('New topic')}
+        aria-label={t('New topic')}
       >
-        <MessageSquarePlus className="h-3.5 w-3.5" />
-        {t('New topic')}
+        <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" />
+        <span className="@min-[28rem]:inline hidden">{t('New topic')}</span>
       </button>
       {listOpen && (
         <ThreadsDialog
