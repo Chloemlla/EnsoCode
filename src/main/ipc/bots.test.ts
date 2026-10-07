@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   spawnSession: vi.fn((..._args: unknown[]) => ({ ok: true })),
   promptSession: vi.fn((..._args: unknown[]) => ({ ok: true })),
   steerSession: vi.fn((..._args: unknown[]) => ({ ok: true })),
+  completeText: vi.fn(async (..._args: unknown[]) => 'OK'),
+  workerReady: true,
   setSessionModel: vi.fn((..._args: unknown[]) => ({ ok: true })),
   setSessionReasoning: vi.fn((..._args: unknown[]) => ({ ok: true })),
   setSessionThinking: vi.fn((..._args: unknown[]) => ({ ok: true })),
@@ -50,8 +52,21 @@ vi.mock('../services/sessionFileCleanup', () => ({ removeConversationSessionFile
 vi.mock('../services/agentHost', () => ({
   agentTypeRegistrySnapshot: () => ({ revision: 0, candidates: [{ displayName: 'Reviewer' }] }),
   readSettingsState: () => mocks.settings,
-  isAgentWorkerReady: () => false,
-  resolveModelSelection: () => ({ ok: true }),
+  isAgentWorkerReady: () => mocks.workerReady,
+  resolveModelSelection: () => ({
+    ok: true,
+    selection: {
+      config: {
+        api: 'openai-completions',
+        baseUrl: 'https://x.test',
+        apiKey: 'k',
+        modelId: 'm',
+        settingsProviderId: 'p',
+      },
+    },
+  }),
+  resolveVirtualClassifier: () => undefined,
+  completeText: mocks.completeText,
   spawnSession: mocks.spawnSession,
   promptSession: mocks.promptSession,
   steerSession: mocks.steerSession,
@@ -97,6 +112,7 @@ beforeEach(async () => {
   mocks.setSessionReasoning.mockClear();
   mocks.setSessionThinking.mockClear();
   mocks.isMain.mockReturnValue(true);
+  mocks.workerReady = true;
   vi.resetModules();
   const { registerBotHandlers } = await import('./bots');
   registerBotHandlers();
@@ -165,6 +181,7 @@ describe('bots IPC', () => {
     expect(mocks.spawnSession).toHaveBeenCalledTimes(1);
   });
   it('自动设置能力：入参收窄；worker 未就绪时报 no-model；开关关闭报 disabled', async () => {
+    mocks.workerReady = false;
     expect(await call(IPC_CHANNELS.BOT_SUGGEST_ABILITIES, { name: 'x', path: '/etc' })).toEqual({
       ok: false,
       error: 'invalid',

@@ -118,6 +118,11 @@ export interface BotSessionHostDeps {
   };
   /** 核心笔记：成员 memory 关闭时返回 undefined */
   notes?: { snapshot(botId: string, chatId: string | null): BotNotesSnapshot | undefined };
+  /**
+   * 投递前实测成员当前模型（首次或改配后走一次真实请求，成功按配置缓存）。
+   * 返回 ok:false 时拒绝投递，error 为「模型 X：原因」的可读文案。
+   */
+  probe?: (bot: BotProfile) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** 静默看门狗阈值，缺省 BOT_SILENCE_MS */
   silenceMs?: number;
   now?: () => number;
@@ -1217,6 +1222,12 @@ export class BotSessionHost {
       this.quiet(conversationId);
       return { ok: false, error };
     };
+    if (this.deps.probe) {
+      const probed = await this.deps
+        .probe(bot)
+        .catch((): { ok: false; error: string } => ({ ok: false, error: '模型检测失败' }));
+      if (!probed.ok) return fail(probed.error);
+    }
     let notes: { text: string; seen?: string } = { text: delivery.text };
     if (!this.live.has(conversationId)) {
       const spawned = await this.spawnLive(delivery, bot);

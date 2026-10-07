@@ -46,6 +46,7 @@ import type {
 import type { BotStore } from './botStore';
 import type { BotChatStore } from './chatStore';
 import { readJson, writeJsonAtomic } from './files';
+import { briefErrorReason } from './modelProbe';
 
 interface Round {
   retrying?: boolean;
@@ -718,13 +719,18 @@ export class GroupChatService {
       const selecting = Promise.resolve()
         .then(() => responder.select(input, signal))
         .catch((error): SmartRouteDecision => {
-          if (!signal.aborted) console.warn('[bots] smart routing failed', error);
+          if (!signal.aborted) {
+            console.warn('[bots] smart routing failed', error);
+            return { ids: [], failure: briefErrorReason(error) };
+          }
           return { ids: [] };
         });
       const result = await Promise.race([selecting, cut]);
       if (isDecision(result)) decision = result;
-      if (timeout.signal.aborted && !abort.signal.aborted)
+      if (timeout.signal.aborted && !abort.signal.aborted && decision.ids.length === 0) {
         console.warn('[bots] smart routing timed out');
+        decision = { ids: [], failure: '选人超时' };
+      }
     } finally {
       clearTimeout(timer);
     }
@@ -739,6 +745,8 @@ export class GroupChatService {
         this.persist(chatId);
         return;
       }
+      if (decision.failure)
+        this.system(chatId, `智能选人不可用（${decision.failure}），已交给群主`);
       if (routing.parallelOptions !== undefined) {
         await this.deliverPicked(chat, routing.entry, routing.parallelOptions, decision);
         this.persist(chatId);
@@ -912,7 +920,9 @@ export class GroupChatService {
           ? `${bot.name} 的投递已处理过，本次未发出`
           : sent.error === BOT_BUDGET_ERROR
             ? budgetNotice(bot.name)
-            : `${bot.name} 暂时无法回复`,
+            : `${bot.name} 暂时无法回复${
+                sent.error && !/^[a-z0-9-]+$/.test(sent.error) ? `（${sent.error}）` : ''
+              }`,
         sent.ok ? undefined : { botId, mode: 'deliver' }
       );
       this.advance(chat, '');

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentWorkerEvent } from '../../../shared/types/agent';
-import type { BotChat, BotEngine } from '../../../shared/types/bot';
+import type { BotChat, BotEngine, BotProfile } from '../../../shared/types/bot';
 import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import {
   type BotRuntimePort,
@@ -29,6 +29,8 @@ let chats: BotChatStore;
 let runtime: FakeRuntime;
 let events: Array<{ kind: string; chatId?: string }>;
 let host: BotSessionHost;
+let probeResult: { ok: true } | { ok: false; error: string };
+let probeCalls: BotProfile[] = [];
 
 class FakeRuntime implements BotRuntimePort {
   engines: Array<{ id: string; engine?: BotEngine }> = [];
@@ -74,12 +76,18 @@ beforeEach(() => {
   chats = new BotChatStore(join(root, 'bot-chats'));
   runtime = new FakeRuntime();
   events = [];
+  probeResult = { ok: true };
+  probeCalls = [];
   host = new BotSessionHost({
     bots,
     chats,
     authority: registry,
     runtime,
     emit: (event) => events.push(event),
+    probe: async (botProfile) => {
+      probeCalls.push(botProfile);
+      return probeResult;
+    },
   });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -210,6 +218,39 @@ describe('BotSessionHost.ensureSession', () => {
     });
     expect(runtime.prompts).toHaveLength(1);
     expect(host.effectiveBot(first.conversationId)?.engine).toBeUndefined();
+  });
+
+  describe('model probe', () => {
+    it('实测失败时拒绝投递并透出模型原因，不拉起会话', async () => {
+      const alice = bot('Alice');
+      const chat = direct(alice.id);
+      probeResult = { ok: false, error: '模型 gpt-5：鉴权失败' };
+      expect(await host.deliver(chat.id, alice.id, 'hi')).toEqual({
+        ok: false,
+        error: '模型 gpt-5：鉴权失败',
+      });
+      expect(runtime.spawns).toHaveLength(0);
+      expect(runtime.prompts).toHaveLength(0);
+    });
+
+    it('改配后实测失败同样拒绝；实测通过才投递', async () => {
+      const alice = bot('Alice');
+      const chat = direct(alice.id);
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+      await flush();
+      bots.update(alice.id, { engine: { providerId: 'next', modelId: 'new' } }, []);
+      probeResult = { ok: false, error: '模型 new：网络连接失败' };
+      expect(await host.deliver(chat.id, alice.id, 'next')).toEqual({
+        ok: false,
+        error: '模型 new：网络连接失败',
+      });
+      expect(runtime.prompts).toHaveLength(1);
+      probeResult = { ok: true };
+      expect((await host.deliver(chat.id, alice.id, 'again')).ok).toBe(true);
+      expect(probeCalls).toHaveLength(3);
+    });
   });
 
   it('catches up with a second save while a model update is in flight', async () => {

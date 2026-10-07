@@ -812,7 +812,7 @@ describe('smart routing', () => {
     expect(entries().at(-1)).not.toHaveProperty('routedBy');
   });
 
-  it('分类期间 chatState 暴露 routing，超时兜底群主且不写报错条目', async () => {
+  it('分类期间 chatState 暴露 routing，超时兜底群主并提示选人不可用', async () => {
     timeoutMs = 20;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     select.mockImplementationOnce(() => new Promise(() => {}));
@@ -822,7 +822,13 @@ describe('smart routing', () => {
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
     expect(deliver.mock.calls[0][1]).toBe(a);
     expect(group.state(id)).toMatchObject({ routing: false, current: a });
-    expect(entries().some((e) => e.kind === 'system')).toBe(false);
+    expect(
+      entries()
+        .filter((e) => e.kind === 'system')
+        .at(-1)
+    ).toMatchObject({
+      text: '智能选人不可用（选人超时），已交给群主',
+    });
     await done(a, 'hi');
     expect(entries().at(-1)).toMatchObject({ kind: 'bot', botId: a });
     expect(entries().at(-1)).not.toHaveProperty('routedBy');
@@ -831,16 +837,38 @@ describe('smart routing', () => {
 
   it('出错或选中不在群成员时兜底群主', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    select.mockRejectedValueOnce(new Error('boom'));
+    select.mockRejectedValueOnce(new Error('模型 gpt-5：鉴权失败'));
     await group.send(id, 'one');
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
     expect(deliver.mock.calls[0][1]).toBe(a);
+    expect(
+      entries()
+        .filter((e) => e.kind === 'system')
+        .at(-1)
+    ).toMatchObject({
+      text: '智能选人不可用（模型 gpt-5：鉴权失败），已交给群主',
+    });
     await done(a, 'ok');
     select.mockResolvedValueOnce({ ids: ['ghost'] });
     await group.send(id, 'two');
     await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(2));
     expect(deliver.mock.calls[1][1]).toBe(a);
     warn.mockRestore();
+  });
+
+  it('选人模型实测失败时提示原因并兜底群主', async () => {
+    select.mockResolvedValueOnce({ ids: [], failure: '模型 gpt-5：调用超时' });
+    await group.send(id, 'hello');
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1));
+    expect(deliver.mock.calls[0][1]).toBe(a);
+    expect(
+      entries()
+        .filter((e) => e.kind === 'system')
+        .at(-1)
+    ).toMatchObject({
+      text: '智能选人不可用（模型 gpt-5：调用超时），已交给群主',
+    });
+    await done(a, 'ok');
   });
 
   it('分类期间来新消息：放弃本次结果，按合并后的消息重新判定', async () => {

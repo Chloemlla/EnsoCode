@@ -16,6 +16,7 @@ import type { SkillEntry } from '@shared/types/assets';
 import {
   type BotChat,
   type BotChatWorkspace,
+  type BotEngine,
   GROUP_TASK_TEXT_MAX,
   GROUP_TASK_TITLE_MAX,
   type HumanEntryRefs,
@@ -103,6 +104,12 @@ import { mediaFile, ScreenshotCache, sendImage, storeMedia } from '../services/b
 import { compressImage } from '../services/bots/mediaImage';
 import { createMemberTaskClassifier } from '../services/bots/memberTaskClassifier';
 import { removeBotMemorySpace } from '../services/bots/memoryCleanup';
+import {
+  briefErrorReason,
+  createModelProbe,
+  describeModelIssue,
+  modelLabel,
+} from '../services/bots/modelProbe';
 import { proposeRoutine } from '../services/bots/routineProposal';
 import { RoutineRunner } from '../services/bots/routineRunner';
 import { BotRoutineRunLog } from '../services/bots/routineRuns';
@@ -123,9 +130,9 @@ import { setBotAvatarResolver } from '../services/localImageProtocol';
 import { listMemories } from '../services/memory/store';
 import { notifyBotChat } from '../services/notifications';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
-import { remoteCandidates, resolveRemoteModels } from '../services/remoteModels';
+import { resolveRemoteModels } from '../services/remoteModels';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
-import { botAssistantModelCandidates } from '../services/titleSummary';
+import { botAssistantModelCandidates, titleModelCandidates } from '../services/titleSummary';
 import { getUsagePricing, loadUsageSession } from '../services/usage/usageService';
 import { sendToAllWindows } from '../windows/createAppWindow';
 import { isMainWebContents } from '../windows/MainWindow';
@@ -251,6 +258,20 @@ function rootIdentity(conversationId: string): SessionIdentity | undefined {
   return identity && !('parent' in identity) ? identity : undefined;
 }
 
+/** 成员模型解析失败时的可读提示：所选引擎不可用报所选；无引擎/默认也不可用报默认或「未配置可用模型」 */
+function botModelIssue(engine: BotEngine | undefined, keys: ReadonlySet<string>): string {
+  const state = readSettingsState();
+  if (engine) return describeModelIssue(state, engine, keys);
+  const fallback = readSettingsState()?.defaultModel;
+  const ref =
+    fallback && typeof fallback === 'object'
+      ? (fallback as { providerId?: unknown; modelId?: unknown })
+      : null;
+  return ref && typeof ref.providerId === 'string' && typeof ref.modelId === 'string'
+    ? describeModelIssue(state, { providerId: ref.providerId, modelId: ref.modelId }, keys)
+    : '未配置可用模型';
+}
+
 function createRuntime(botsRoot: string): BotRuntimePort {
   return {
     async updateEngine(conversationId, engine) {
@@ -267,7 +288,7 @@ function createRuntime(botsRoot: string): BotRuntimePort {
         readSettingsState() ?? {},
         (ref) => resolveModelSelection(ref.providerId, ref.modelId, keys, { allowVirtual: true }).ok
       );
-      if (!model) return { ok: false, error: 'no-usable-model' };
+      if (!model) return { ok: false, error: botModelIssue(engine, keys) };
       if (rootIdentity(conversationId)?.generation !== identity.generation)
         return { ok: false, error: 'stale session generation' };
       // worker 按会话串行执行命令，模型与推理档先于随后投递的 prompt 生效。
@@ -293,7 +314,7 @@ function createRuntime(botsRoot: string): BotRuntimePort {
         readSettingsState() ?? {},
         (ref) => resolveModelSelection(ref.providerId, ref.modelId, keys, { allowVirtual: true }).ok
       );
-      if (!model) return { ok: false, error: 'no-usable-model' };
+      if (!model) return { ok: false, error: botModelIssue(spec.bot.engine, keys) };
       return spawnSession(
         identity,
         {
@@ -397,25 +418,48 @@ export function getBotServices(): BotServices | null {
     settings: () => readSettingsState(),
     judge: async ({ preferred, ...request }, signal) => {
       const state = readSettingsState();
-      if (!state || !isAgentWorkerReady()) return null;
-      const candidates = await remoteCandidates(state, preferred);
-      if (candidates.length === 0 || signal.aborted) return null;
+      if (!state) throw new Error('设置不可用');
+      if (!isAgentWorkerReady()) throw new Error('会话服务未启动');
+      const chain = [...(preferred ? [preferred] : []), ...titleModelCandidates(state)];
+      const keys = await readStoredOauthCredentialKeys();
+      const candidates = await resolveRemoteModels(chain);
+      if (candidates.length === 0) {
+        if (signal.aborted) return null;
+        const first = chain[0];
+        throw new Error(first ? describeModelIssue(state, first, keys) : '未配置可用模型');
+      }
+      if (signal.aborted) return null;
       const requestId = randomUUID();
       const abort = () => abortCompleteText(requestId);
       signal.addEventListener('abort', abort, { once: true });
       try {
         return await completeText({ requestId, ...request, candidates, maxTokens: 1024 });
+      } catch (error) {
+        if (signal.aborted) return null;
+        const ref = preferred ?? chain[0];
+        throw new Error(
+          ref ? `模型 ${modelLabel(state, ref)}：${briefErrorReason(error)}` : '选人模型不可用'
+        );
       } finally {
         signal.removeEventListener('abort', abort);
       }
     },
     classify: async (config, question, signal) => {
-      const resolved = resolveVirtualClassifier(config, await readStoredOauthCredentialKeys());
-      if (!resolved?.classifier || !isAgentWorkerReady()) return null;
-      return classifyChoice(
-        { classifier: resolved.classifier, ...question, timeoutMs: config.timeoutMs },
-        signal
-      );
+      const state = readSettingsState();
+      if (!state) throw new Error('设置不可用');
+      const keys = await readStoredOauthCredentialKeys();
+      const resolved = resolveVirtualClassifier(config, keys);
+      if (!resolved?.classifier) throw new Error(describeModelIssue(state, config.model, keys));
+      if (!isAgentWorkerReady()) throw new Error('会话服务未启动');
+      try {
+        return await classifyChoice(
+          { classifier: resolved.classifier, ...question, timeoutMs: config.timeoutMs },
+          signal
+        );
+      } catch (error) {
+        if (signal.aborted) return null;
+        throw new Error(`模型 ${modelLabel(state, config.model)}：${briefErrorReason(error)}`);
+      }
     },
   };
   const host = new BotSessionHost({
@@ -428,6 +472,22 @@ export function getBotServices(): BotServices | null {
     notes,
     budget: usage,
     classifyMemberTask: createMemberTaskClassifier(routingDeps),
+    probe: (() => {
+      const probe = createModelProbe({
+        settings: () => readSettingsState(),
+        credentials: () => readStoredOauthCredentialKeys(),
+        resolve: (ref, keys) => {
+          const resolved = resolveModelSelection(ref.providerId, ref.modelId, keys);
+          return resolved.ok
+            ? { ok: true, config: resolved.selection.config }
+            : { ok: false, error: resolved.error };
+        },
+        isWorkerReady: isAgentWorkerReady,
+        complete: ({ systemPrompt, userText, candidates, timeoutMs, maxTokens }) =>
+          completeText({ systemPrompt, userText, candidates, timeoutMs, maxTokens }),
+      });
+      return (bot) => probe(bot.engine);
+    })(),
     language: () => (String(readSettingsState()?.language ?? 'zh').startsWith('zh') ? 'zh' : 'en'),
   });
   const delegationStore = new DelegationStore(

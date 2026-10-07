@@ -83,11 +83,19 @@ describe('createSmartRouter', () => {
     });
   });
 
-  it('judge 回复不认识或没有可用模型时返回空名单', async () => {
+  it('judge 回复不认识时返回空名单；没有可用模型时带失败原因', async () => {
     judge.mockResolvedValueOnce('maybe Dave');
     expect((await router().select(input, signal)).ids).toEqual([]);
     judge.mockResolvedValueOnce(null);
-    expect(await router().select(input, signal)).toEqual({ ids: [] });
+    const failed = await router().select(input, signal);
+    expect(failed.ids).toEqual([]);
+    expect(failed.failure).toBeTruthy();
+  });
+
+  it('judge 抛错时透出归类原因', async () => {
+    judge.mockRejectedValueOnce(new Error('模型 gpt-5：鉴权失败'));
+    const failed = await router().select(input, signal);
+    expect(failed).toEqual({ ids: [], failure: '模型 gpt-5：鉴权失败' });
   });
 
   it('pi-classifier 取达到 0.4 的候选（降序），都不达标或不可用时返回空名单', async () => {
@@ -108,8 +116,21 @@ describe('createSmartRouter', () => {
     classify.mockResolvedValueOnce({ a: 0.35, b: 0.3, c: 0.35 }).mockResolvedValueOnce(null);
     expect((await router().select(input, signal)).ids).toEqual([]);
     classify.mockResolvedValueOnce(null);
-    expect(await router().select(input, signal)).toEqual({ ids: [] });
+    expect((await router().select(input, signal)).failure).toBeTruthy();
     expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('pi-classifier 抛错时透出原因给群里', async () => {
+    settings = {
+      botRouteClassifier: {
+        source: 'pi-classifier',
+        model: { providerId: 'or', modelId: 'cls' },
+        timeoutMs: 3000,
+      },
+    };
+    classify.mockRejectedValueOnce(new Error('模型 cls：网络连接失败')).mockResolvedValueOnce(null);
+    const failed = await router().select(input, signal);
+    expect(failed).toEqual({ ids: [], failure: '模型 cls：网络连接失败' });
   });
 
   it('pi-classifier 另问意图；build 按概率取第一位能动手的成员，意图不确定时用关键词', async () => {

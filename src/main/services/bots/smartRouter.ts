@@ -19,6 +19,7 @@ import {
   type VirtualClassifierConfig,
 } from '../../../shared/virtualModels';
 import type { GroupResponderSelector } from './groupChat';
+import { briefErrorReason } from './modelProbe';
 
 export interface SmartRouterDeps {
   settings: () => Record<string, unknown> | undefined;
@@ -52,45 +53,45 @@ export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector
       // 点名全员时规则直出，不受模型挑人上限与置信度影响
       if (addressesEveryone(input.message))
         return { ids: input.candidates.map((candidate) => candidate.id) };
-      const current = config();
-      if (current?.source === 'pi-classifier') {
-        const [probabilities, intents] = await Promise.all([
-          deps.classify(current, smartRouteQuestion(input), signal),
-          Promise.resolve()
-            .then(() => deps.classify(current, smartRouteIntentQuestion(input), signal))
-            .catch(() => null),
-        ]);
-        if (!probabilities) {
-          console.warn('[bots] smart routing: classifier unavailable');
-          return { ids: [] };
+      try {
+        const current = config();
+        if (current?.source === 'pi-classifier') {
+          const [probabilities, intents] = await Promise.all([
+            deps.classify(current, smartRouteQuestion(input), signal),
+            Promise.resolve()
+              .then(() => deps.classify(current, smartRouteIntentQuestion(input), signal))
+              .catch(() => null),
+          ]);
+          if (!probabilities) return { ids: [], failure: '选人模型不可用' };
+          return decideSmartRoute(
+            input,
+            pickSmartRouteIntent(intents) ?? guessSmartRouteIntent(input.message),
+            pickSmartRouteChoice(probabilities, input),
+            rankSmartRouteChoice(probabilities, input)
+          );
         }
+        const text = await deps.judge(
+          {
+            ...smartRouteJudgePrompt(input),
+            preferred: current?.model,
+            timeoutMs: current?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+          },
+          signal
+        );
+        if (text === null) return { ids: [], failure: '选人模型不可用' };
+        const picked = parseSmartRouteReply(text, input);
+        if (picked.length === 0)
+          console.warn('[bots] smart routing reply not understood:', text.slice(0, 80));
         return decideSmartRoute(
           input,
-          pickSmartRouteIntent(intents) ?? guessSmartRouteIntent(input.message),
-          pickSmartRouteChoice(probabilities, input),
-          rankSmartRouteChoice(probabilities, input)
+          parseSmartRouteIntent(text) ?? guessSmartRouteIntent(input.message),
+          picked
         );
+      } catch (error) {
+        if (signal.aborted) return { ids: [] };
+        console.warn('[bots] smart routing failed', error);
+        return { ids: [], failure: briefErrorReason(error) };
       }
-      const text = await deps.judge(
-        {
-          ...smartRouteJudgePrompt(input),
-          preferred: current?.model,
-          timeoutMs: current?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
-        },
-        signal
-      );
-      if (text === null) {
-        console.warn('[bots] smart routing: no model available');
-        return { ids: [] };
-      }
-      const picked = parseSmartRouteReply(text, input);
-      if (picked.length === 0)
-        console.warn('[bots] smart routing reply not understood:', text.slice(0, 80));
-      return decideSmartRoute(
-        input,
-        parseSmartRouteIntent(text) ?? guessSmartRouteIntent(input.message),
-        picked
-      );
     },
   };
 }
