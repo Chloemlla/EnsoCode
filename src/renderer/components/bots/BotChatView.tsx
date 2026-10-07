@@ -15,7 +15,7 @@ import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { startDesktopVoiceSession } from '@/lib/voiceSession';
 import { useBotsStore } from '@/stores/bots';
-import { activeDelegations, pendingOwners } from '@/stores/bots/delegations';
+import { activeDelegations, delegationLiveTarget, pendingOwners } from '@/stores/bots/delegations';
 import { chatSummary, type PendingItem, pendingItems } from '@/stores/bots/selectors';
 import { groupReadMark } from '@/stores/bots/unread';
 import { useSettingsStore } from '@/stores/settings';
@@ -103,7 +103,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
   }, []);
   const [history, setHistory] = useState<{ id: string; title: string } | null>(null);
   const [historyFocus, setHistoryFocus] = useState<MessageFocus | undefined>();
-  const [live, setLive] = useState<{ id: string; botId: string } | null>(null);
+  const [live, setLive] = useState<{ id: string; botId: string; title: string } | null>(null);
   const focus = useBotsStore((s) => (s.focus?.chatId === chat.id ? s.focus : null));
   const clearFocus = useBotsStore((s) => s.clearFocus);
 
@@ -161,6 +161,24 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
   const historySpeaker = history ? speakerOf(history.id) : undefined;
   const liveBot = live ? byId.get(live.botId) : undefined;
   const livePending = live ? pending.filter((item) => item.conversationId === live.id) : [];
+  const liveTitle = live?.title ?? liveBot?.name ?? t('Deleted member');
+  const liveQueued =
+    live && delegations.find((item) => item.childConversationId === live.id)?.state === 'queued';
+
+  /**
+   * 委派「查看过程」与成员回复共用此回调：排队/进行中的委派子会话看实时投影
+   * （排队时尚未落盘，历史是空的），其余走历史快照。
+   */
+  const openConversation = useCallback((conversationId: string, title: string) => {
+    const target = delegationLiveTarget(useBotsStore.getState().delegations, conversationId);
+    if (target) {
+      if (!useBotsStore.getState().sessions[conversationId])
+        void useBotsStore.getState().trackSession(conversationId);
+      setLive({ id: conversationId, botId: target.botId, title });
+    } else {
+      setHistory({ id: conversationId, title });
+    }
+  }, []);
 
   useEffect(() => {
     markRead(summary.key, readMark);
@@ -310,7 +328,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
             <ActiveDelegations
               items={activeDelegations(chatDelegations, chat.id)}
               bots={byId}
-              onOpenConversation={(id, title) => setHistory({ id, title })}
+              onOpenConversation={openConversation}
             />
             <DirectTimeline chat={chat} bot={direct} focus={directFocus} onFocusDone={clearFocus} />
           </>
@@ -327,8 +345,10 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
             onLoadNewer={() => void useBotsStore.getState().loadNewer(chat.id)}
             onLoadAround={(seq) => useBotsStore.getState().loadAround(chat.id, seq)}
             onJumpLatest={() => void useBotsStore.getState().jumpLatest(chat.id)}
-            onOpenConversation={(id, title) => setHistory({ id, title })}
-            onOpenLive={(id, botId) => setLive({ id, botId })}
+            onOpenConversation={openConversation}
+            onOpenLive={(id, botId) =>
+              setLive({ id, botId, title: byId.get(botId)?.name ?? t('Deleted member') })
+            }
           />
         )}
 
@@ -346,7 +366,9 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
                 chatId={chat.id}
                 memberIds={chat.members}
                 bots={byId}
-                onOpenLive={(id, botId) => setLive({ id, botId })}
+                onOpenLive={(id, botId) =>
+                  setLive({ id, botId, title: byId.get(botId)?.name ?? t('Deleted member') })
+                }
               />
             )}
             <BotComposer
@@ -415,17 +437,9 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
           {panelTab === 'browser' ? (
             <BotBrowserPanel chatId={group.id} visible={panelOpen} />
           ) : direct ? (
-            <BotProfilePanel
-              botId={direct.id}
-              chat={chat}
-              onOpenHistory={(id, title) => setHistory({ id, title })}
-            />
+            <BotProfilePanel botId={direct.id} chat={chat} onOpenHistory={openConversation} />
           ) : (
-            <GroupInfoPanel
-              chat={group}
-              thread={chat}
-              onOpenConversation={(id, title) => setHistory({ id, title })}
-            />
+            <GroupInfoPanel chat={group} thread={chat} onOpenConversation={openConversation} />
           )}
         </div>
       </motion.aside>
@@ -451,12 +465,14 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
       />
       <LiveSessionDialog
         conversationId={live?.id ?? null}
-        title={liveBot?.name ?? t('Deleted member')}
+        title={liveTitle}
         speaker={{
-          name: liveBot?.name ?? t('Deleted member'),
+          name: liveBot?.name ?? liveTitle,
           color: liveBot?.avatar.color ?? '#64748b',
           image: liveBot ? botAvatarSrc(liveBot) : undefined,
         }}
+        emptyTitle={liveQueued ? t('Queued and has not started yet') : undefined}
+        emptyDescription={liveQueued ? '' : undefined}
         footer={
           liveBot && livePending.length > 0 ? (
             <PendingBars items={livePending} bots={byId} showNames={false} />

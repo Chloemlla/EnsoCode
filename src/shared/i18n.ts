@@ -2147,6 +2147,7 @@ export const zhTranslations: Record<string, string> = {
   '{{name}} is replying; new messages are routed after they finish':
     '{{name}}回复中，新消息会在他说完后重新分配',
   'Queued until a session slot frees up': '排队中，等有空闲会话名额后开始',
+  'Queued and has not started yet': '排队中，还没开始',
   '{{name}} is working; your message joins the current turn':
     '{{name}}正在工作，新消息会插入当前这一轮',
   'Message not sent': '消息未发送',
