@@ -14,9 +14,18 @@ import { pickBotModel } from './botPrompt';
 const PROBE_TIMEOUT_MS = 15_000;
 const PROBE_ERROR_MAX = 80;
 
-export type ModelProbeResult = { ok: true } | { ok: false; error: string };
+export type ModelProbeResult =
+  | {
+      ok: true;
+      model?: DefaultModelRef;
+      fallback?: { model: DefaultModelRef; label: string; reason: string };
+    }
+  | { ok: false; error: string };
+
+type ProbeStatus = { ok: true } | { ok: false; error: string };
 
 export interface ModelProbeDeps {
+  now?: () => number;
   settings(): Record<string, unknown> | undefined;
   credentials(): Promise<ReadonlySet<string>>;
   resolve(
@@ -141,14 +150,40 @@ function resolveErrorText(
   return `模型 ${modelLabel(state, ref)}：${reason}`;
 }
 
-/**
- * 成员模型实测：解析配置（成员模型优先，失败不回落默认）→ 真发一次 ping。
- * 同一模型配置通过后缓存；失败不缓存，下次投递重新实测。
- */
+/** 成员完整备用链实测，整链失败才尝试默认；结果缓存 60 秒，改配置立即重测。 */
 export function createModelProbe(
   deps: ModelProbeDeps
 ): (engine: BotEngine | undefined) => Promise<ModelProbeResult> {
-  const passed = new Set<string>();
+  const cache = new Map<string, { result: ProbeStatus; until: number }>();
+  const pending = new Map<string, Promise<ProbeStatus>>();
+  const now = deps.now ?? Date.now;
+  const ping = (candidates: SpawnModelConfig[]): Promise<ProbeStatus> => {
+    const signature = JSON.stringify(candidates);
+    const cached = cache.get(signature);
+    if (cached && cached.until > now()) return Promise.resolve(cached.result);
+    const running = pending.get(signature);
+    if (running) return running;
+    const request = (async (): Promise<ProbeStatus> => {
+      let result: ProbeStatus;
+      try {
+        await deps.complete({
+          systemPrompt: 'You are a connectivity check. Reply with OK.',
+          userText: 'ping',
+          candidates,
+          timeoutMs: PROBE_TIMEOUT_MS,
+          maxTokens: 16,
+        });
+        result = { ok: true };
+      } catch (error) {
+        result = { ok: false, error: briefErrorReason(error) };
+      }
+      cache.set(signature, { result, until: now() + 60_000 });
+      return result;
+    })();
+    pending.set(signature, request);
+    void request.finally(() => pending.delete(signature));
+    return request;
+  };
   return async (engine) => {
     const state = deps.settings();
     let keys: ReadonlySet<string>;
@@ -157,37 +192,47 @@ export function createModelProbe(
     } catch {
       return { ok: false, error: '模型凭证读取失败' };
     }
-    const picked = pickBotModel(engine, state ?? {}, () => true);
-    if (!picked) return { ok: false, error: '未配置可用模型' };
-    const resolved = deps.resolve({ providerId: picked.providerId, modelId: picked.modelId }, keys);
-    if (!resolved.ok) {
-      return {
-        ok: false,
-        error: resolveErrorText(
-          state,
-          { providerId: picked.providerId, modelId: picked.modelId },
-          resolved.error
-        ),
-      };
-    }
-    const signature = JSON.stringify(resolved.config);
-    if (passed.has(signature)) return { ok: true };
     if (!deps.isWorkerReady()) return { ok: false, error: '会话服务未启动' };
-    try {
-      await deps.complete({
-        systemPrompt: 'You are a connectivity check. Reply with OK.',
-        userText: 'ping',
-        candidates: [resolved.config],
-        timeoutMs: PROBE_TIMEOUT_MS,
-        maxTokens: 16,
-      });
-      passed.add(signature);
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: `模型 ${modelLabel(state, { providerId: picked.providerId, modelId: picked.modelId })}：${briefErrorReason(error)}`,
-      };
-    }
+    const check = async (ref: DefaultModelRef): Promise<ModelProbeResult> => {
+      const resolved = deps.resolve(ref, keys);
+      if (!resolved.ok) return { ok: false, error: resolveErrorText(state, ref, resolved.error) };
+      const virtual = resolved.config.virtual;
+      const candidates = virtual
+        ? [virtual.primary, ...virtual.fallbacks, ...(virtual.fast ? [virtual.fast] : [])]
+        : [resolved.config];
+      let error = '未知错误';
+      for (const [index, config] of candidates.entries()) {
+        const tested = await ping([config]);
+        if (tested.ok) {
+          // 401 等永久错误不会触发 worker 的自动重试，本轮必须直接用已测通的备用。
+          return index === 0
+            ? { ok: true }
+            : {
+                ok: true,
+                model: { providerId: config.settingsProviderId, modelId: config.modelId },
+              };
+        }
+        error = tested.error;
+      }
+      return { ok: false, error: `模型 ${modelLabel(state, ref)}：${error}` };
+    };
+    const fallback = pickBotModel(undefined, state ?? {}, () => true);
+    if (!engine) return fallback ? check(fallback) : { ok: false, error: '未配置可用模型' };
+    const member = await check(engine);
+    if (member.ok) return member;
+    if (fallback?.providerId === engine.providerId && fallback.modelId === engine.modelId)
+      return { ok: false, error: `成员${member.error}；默认${member.error}` };
+    const result = fallback
+      ? await check(fallback)
+      : { ok: false as const, error: '未配置可用模型' };
+    if (!result.ok) return { ok: false, error: `成员${member.error}；默认${result.error}` };
+    return {
+      ok: true,
+      fallback: {
+        model: result.model ?? { providerId: fallback!.providerId, modelId: fallback!.modelId },
+        label: modelLabel(state, fallback!),
+        reason: member.error,
+      },
+    };
   };
 }

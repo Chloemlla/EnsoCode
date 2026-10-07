@@ -21,6 +21,7 @@ import type {
 import type { BrowserTabHolder } from '@shared/types/browser';
 import { create } from 'zustand';
 import { draftFromSentText, seedBotDraft } from '@/components/bots/botDraft';
+import { addToast } from '@/components/ui/toast';
 import { usePendingMemoryWrites } from '@/stores/memoryReview';
 import { applyHistoryPage, emptyProjection } from '@/stores/sessions/reducer';
 import { resizeSidePanelWidth, SIDE_PANEL_DEFAULT_WIDTH } from '@/stores/sidePanel/width';
@@ -306,6 +307,9 @@ export const useBotsStore = create<BotsState>()((set, get) => {
 
   const onBotEvent = (event: BotEvent) => {
     switch (event.kind) {
+      case 'model-notice':
+        if (event.text) addToast({ type: 'info', title: event.text });
+        break;
       case 'catalog':
         void get().refreshCatalog();
         void get().refreshUsage();

@@ -286,7 +286,14 @@ describe('resolveModelSelection 虚拟模型', () => {
     expect(noFast.ok && noFast.selection.config.virtual?.classifier).toBeUndefined();
   });
 
-  it('条目缺失、停用或主模型不可用时拒绝', () => {
+  it('主模型配置不可用仍下发完整可用备用链', () => {
+    setSettings([{ ...auto, primary: { providerId: 'gone', modelId: 'x' } }]);
+    const result = resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.selection.config.virtual?.primary.modelId).toBe('other');
+  });
+
+  it('条目缺失、停用或整链不可用时拒绝', () => {
     setSettings([]);
     expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
       false
@@ -295,10 +302,18 @@ describe('resolveModelSelection 虚拟模型', () => {
     expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
       false
     );
-    setSettings([{ ...auto, primary: { providerId: 'cur', modelId: 'composer' } }]);
-    expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true }).ok).toBe(
-      false
-    );
+    setSettings([
+      {
+        ...auto,
+        primary: { providerId: 'cur', modelId: 'composer' },
+        fallbacks: [],
+        fast: undefined,
+      },
+    ]);
+    expect(resolveModelSelection('enso-virtual', 'auto', keys, { allowVirtual: true })).toEqual({
+      ok: false,
+      error: '虚拟模型没有可用成员',
+    });
   });
 });
 

@@ -3,8 +3,11 @@ import type { BotChat, GroupEntry } from '@shared/types/bot';
 import type { BotEvent } from '@shared/types/botIpc';
 import type { BrowserTabState } from '@shared/types/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addToast } from '@/components/ui/toast';
 import { chatSummary } from './selectors';
 import { groupReadMark, isUnread } from './unread';
+
+vi.mock('@/components/ui/toast', () => ({ addToast: vi.fn() }));
 
 const message = (text: string): ProjectedMessage => ({
   role: 'assistant',
@@ -126,6 +129,13 @@ afterEach(() => {
 });
 
 describe('Bot mode subscription lifecycle', () => {
+  it('私聊模型回退事件显示现有 info toast', async () => {
+    const f = await fixture();
+    const text = 'Alice 的模型不可用，本次改用默认模型 Claude（鉴权失败）';
+    f.bot({ kind: 'model-notice', chatId: 'c', text });
+    expect(addToast).toHaveBeenCalledWith({ type: 'info', title: text });
+    f.off();
+  });
   it('成员浏览器工具打开共享 tab：记下 tab，正看该聊天时切到浏览器面板；关闭后回落默认', async () => {
     const f = await fixture();
     f.store.setState({ view: { kind: 'chat', chatId: 'c' }, panelOpen: false, panelTab: 'info' });

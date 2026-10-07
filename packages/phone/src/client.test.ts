@@ -963,6 +963,14 @@ describe('PairClient Bot 帧', () => {
     expect(offset).toBeGreaterThanOrEqual(5000);
     expect(events.onGroupTimeline).toHaveBeenCalledWith(timeline);
     expect(events.onBotEvent).toHaveBeenCalledWith({ kind: 'timeline', chatId: 'c', seq: 3 });
+    const notice = {
+      kind: 'model-notice' as const,
+      chatId: 'c',
+      text: 'Alice 的模型不可用，本次改用默认模型 Claude（鉴权失败）',
+    };
+    socket.receive({ type: 'bot-event', event: notice });
+    await settle();
+    expect(events.onBotEvent).toHaveBeenCalledWith(notice);
     expect(events.onBotChatState).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'c' }));
     expect(events.onBotSendResult).toHaveBeenCalledWith(
       expect.objectContaining({ deliveryId: 'd', ok: false })

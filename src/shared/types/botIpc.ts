@@ -116,6 +116,7 @@ export interface BotChatUpdateInput {
 }
 
 export type BotEventKind =
+  | 'model-notice'
   | 'catalog'
   | 'chat'
   | 'timeline'
@@ -139,6 +140,8 @@ export type BotEventKind =
 
 /** main → renderer：Bot 数据变化提示，renderer 按 kind/chatId 重新拉取 */
 export interface BotEvent {
+  /** 私聊本次模型回退提示；仅文本，不含配置或凭证。 */
+  text?: string;
   kind: BotEventKind;
   chatId?: string;
   /** kind 为 'open' 时：触发通知的成员会话 */

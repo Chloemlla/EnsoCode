@@ -22,6 +22,7 @@ function fixture(overrides: {
   resolveError?: string;
   workerReady?: boolean;
   completeError?: string;
+  now?: () => number;
 }) {
   const state = overrides.state ?? { defaultModel: DEFAULT };
   const resolve = vi.fn((ref: DefaultModelRef) =>
@@ -48,6 +49,7 @@ function fixture(overrides: {
     resolve,
     isWorkerReady: () => overrides.workerReady ?? true,
     complete,
+    now: overrides.now,
   });
   return { probe, resolve, complete };
 }
@@ -79,20 +81,32 @@ describe('createModelProbe', () => {
   it('模型配置存在但实测失败时报告模型与归类原因（鉴权）', async () => {
     const { probe } = fixture({ completeError: '401 Unauthorized: invalid api key' });
     const result = await probe(ENGINE);
-    expect(result).toEqual({ ok: false, error: '模型 gpt-5：鉴权失败' });
+    expect(result).toEqual({
+      ok: false,
+      error: '成员模型 gpt-5：鉴权失败；默认模型 claude：鉴权失败',
+    });
   });
 
   it('实测失败：网络错误归类', async () => {
     const { probe } = fixture({ completeError: 'fetch failed: connect ECONNREFUSED 127.0.0.1' });
     const result = await probe(ENGINE);
-    expect(result).toEqual({ ok: false, error: '模型 gpt-5：网络连接失败' });
+    expect(result).toEqual({
+      ok: false,
+      error: '成员模型 gpt-5：网络连接失败；默认模型 claude：网络连接失败',
+    });
   });
 
   it('实测失败：超时与限流归类', async () => {
     const { probe } = fixture({ completeError: 'completion timed out' });
-    expect(await probe(ENGINE)).toEqual({ ok: false, error: '模型 gpt-5：调用超时' });
+    expect(await probe(ENGINE)).toEqual({
+      ok: false,
+      error: '成员模型 gpt-5：调用超时；默认模型 claude：调用超时',
+    });
     const rate = fixture({ completeError: 'HTTP 429 too many requests' });
-    expect(await rate.probe(ENGINE)).toEqual({ ok: false, error: '模型 gpt-5：请求被限流' });
+    expect(await rate.probe(ENGINE)).toEqual({
+      ok: false,
+      error: '成员模型 gpt-5：请求被限流；默认模型 claude：请求被限流',
+    });
   });
 
   it('worker 未就绪时会话服务未启动', async () => {
@@ -116,12 +130,111 @@ describe('createModelProbe', () => {
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
-  it('失败不缓存：修复后下次投递重新实测', async () => {
-    const fx = fixture({ completeError: '401 Unauthorized' });
+  it('失败缓存 60 秒，过期后重新实测并恢复成员模型', async () => {
+    let now = 0;
+    const fx = fixture({ completeError: '401 Unauthorized', now: () => now });
     expect((await fx.probe(ENGINE)).ok).toBe(false);
     fx.complete.mockResolvedValue('OK');
-    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    now = 59_999;
+    expect((await fx.probe(ENGINE)).ok).toBe(false);
     expect(fx.complete).toHaveBeenCalledTimes(2);
+    now = 60_000;
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    expect(fx.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it('成员模型调用失败但默认模型可用，返回本次回退配置和原因', async () => {
+    const fx = fixture({});
+    fx.complete.mockImplementation(async (request) => {
+      if (request.candidates[0].modelId === ENGINE.modelId) throw new Error('401 Unauthorized');
+      return 'OK';
+    });
+    expect(await fx.probe(ENGINE)).toEqual({
+      ok: true,
+      fallback: { model: DEFAULT, label: 'claude', reason: '模型 gpt-5：鉴权失败' },
+    });
+    await fx.probe(ENGINE);
+    expect(fx.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('成员配置缺失时仍实测默认模型', async () => {
+    const fx = fixture({});
+    fx.resolve.mockImplementation((ref) =>
+      ref.modelId === ENGINE.modelId
+        ? { ok: false, error: 'Model is unavailable: model-missing' }
+        : { ok: true, config: config(ref.modelId) }
+    );
+    expect(await fx.probe(ENGINE)).toMatchObject({ ok: true, fallback: { model: DEFAULT } });
+    expect(fx.complete.mock.calls[0][0].candidates.map((c) => c.modelId)).toEqual(['claude']);
+  });
+
+  it('虚拟主模型401仍使用实测通过的备用，不依赖worker自动重试、不回退默认', async () => {
+    const fx = fixture({});
+    const primary = config('broken');
+    const backup = config('healthy');
+    fx.resolve.mockReturnValue({
+      ok: true,
+      config: config('virtual', {
+        virtual: { name: 'Virtual', primary, fallbacks: [backup] },
+      }),
+    });
+    fx.complete.mockImplementation(async (request) => {
+      if (request.candidates[0].modelId !== 'healthy') throw new Error('401');
+      return 'OK';
+    });
+    expect(await fx.probe(ENGINE)).toEqual({
+      ok: true,
+      model: { providerId: 'openai', modelId: 'healthy' },
+    });
+    expect(fx.complete.mock.calls.map(([r]) => r.candidates[0])).toEqual([primary, backup]);
+  });
+
+  it('虚拟模型整条链包含快模型；主模型恢复后下轮不再pin备用', async () => {
+    let now = 0;
+    const fx = fixture({ now: () => now });
+    fx.resolve.mockReturnValue({
+      ok: true,
+      config: config('virtual', {
+        virtual: {
+          name: 'Virtual',
+          primary: config('broken'),
+          fallbacks: [config('also-broken')],
+          fast: config('fast'),
+        },
+      }),
+    });
+    fx.complete.mockImplementation(async (r) => {
+      if (r.candidates[0].modelId !== 'fast') throw new Error('401');
+      return 'OK';
+    });
+    expect(await fx.probe(ENGINE)).toEqual({
+      ok: true,
+      model: { providerId: 'openai', modelId: 'fast' },
+    });
+    expect(fx.complete).toHaveBeenCalledTimes(3);
+    fx.complete.mockResolvedValue('OK');
+    now = 60_000;
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    expect(fx.complete).toHaveBeenCalledTimes(4);
+  });
+
+  it('并发投递同配置只测一次', async () => {
+    const fx = fixture({});
+    await Promise.all([fx.probe(ENGINE), fx.probe(ENGINE)]);
+    expect(fx.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('成功缓存也会过期，避免首选成功过一次就永久掩盖后续故障', async () => {
+    let now = 0;
+    const fx = fixture({ now: () => now });
+    expect(await fx.probe(ENGINE)).toEqual({ ok: true });
+    fx.complete.mockImplementation(async (r) => {
+      if (r.candidates[0].modelId === ENGINE.modelId) throw new Error('401');
+      return 'OK';
+    });
+    now = 60_000;
+    expect(await fx.probe(ENGINE)).toMatchObject({ ok: true, fallback: { model: DEFAULT } });
+    expect(fx.complete).toHaveBeenCalledTimes(3);
   });
 });
 

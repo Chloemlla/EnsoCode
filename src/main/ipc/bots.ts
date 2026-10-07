@@ -477,7 +477,9 @@ export function getBotServices(): BotServices | null {
         settings: () => readSettingsState(),
         credentials: () => readStoredOauthCredentialKeys(),
         resolve: (ref, keys) => {
-          const resolved = resolveModelSelection(ref.providerId, ref.modelId, keys);
+          const resolved = resolveModelSelection(ref.providerId, ref.modelId, keys, {
+            allowVirtual: true,
+          });
           return resolved.ok
             ? { ok: true, config: resolved.selection.config }
             : { ok: false, error: resolved.error };

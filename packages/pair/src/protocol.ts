@@ -357,9 +357,10 @@ export type PairGroupEntry =
     });
 
 export interface PairBotEvent {
-  kind: 'catalog' | 'chat' | 'timeline' | 'queue' | 'delegation' | 'routine';
+  kind: 'catalog' | 'chat' | 'timeline' | 'queue' | 'delegation' | 'routine' | 'model-notice';
   chatId?: string;
   seq?: number;
+  text?: string;
 }
 
 export interface PairBotInboxItem {
