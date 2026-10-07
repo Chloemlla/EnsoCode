@@ -1220,6 +1220,13 @@ const electronAPI = {
         ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_CANCEL, request),
       remove: (request: { chatId: string; id: string }): Promise<BotActionResult> =>
         ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_DELETE, request),
+      /** 验收：通过 → done；退回需 reason → todo */
+      review: (
+        request: { chatId: string; id: string } & (
+          | { accept: true }
+          | { accept: false; reason: string }
+        )
+      ): Promise<BotTaskWriteResult> => ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_REVIEW, request),
     },
     list: (): Promise<BotsListResult> => ipcRenderer.invoke(IPC_CHANNELS.BOTS_LIST),
     get: (botId: string): Promise<BotGetResult> =>
@@ -1257,8 +1264,18 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_DELETE, { chatId }),
     newSession: (chatId: string): Promise<BotNewSessionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_NEW_SESSION, { chatId }),
+    switchSession: (chatId: string, conversationId: string): Promise<BotActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_SWITCH_SESSION, { chatId, conversationId }),
     cloneChat: (request: { chatId: string; title: string }): Promise<BotChatWriteResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_CLONE, request),
+    createThread: (chatId: string): Promise<BotChatWriteResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId }),
+    selectThread: (chatId: string, threadId: string): Promise<BotActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_THREAD_SELECT, { chatId, threadId }),
+    renameThread: (chatId: string, title: string): Promise<BotChatWriteResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_THREAD_UPDATE, { chatId, title }),
+    deleteThread: (chatId: string): Promise<BotActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_THREAD_DELETE, { chatId }),
     stopChat: (chatId: string): Promise<BotActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_STOP, { chatId }),
     chatState: (chatId: string): Promise<BotChatStateResult> =>

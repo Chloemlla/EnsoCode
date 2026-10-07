@@ -5,6 +5,7 @@ import { emptyProjection } from '@/stores/sessions/reducer';
 import {
   activeDelegations,
   delegationActions,
+  delegationLiveTarget,
   delegationOwners,
   formatElapsed,
   isRetried,
@@ -80,6 +81,27 @@ describe('activeDelegations', () => {
       record({ id: 'd', chatId: 'c2' }),
     ];
     expect(activeDelegations(list, 'c1').map((item) => item.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('delegationLiveTarget', () => {
+  it('排队/进行中委派的子会话返回目标成员，已结束或非委派会话返回 undefined', () => {
+    const list = [
+      record({ state: 'queued' }),
+      record({ id: 'd2', childConversationId: 'k2', targetBotId: 'boss' }),
+      record({ id: 'd3', childConversationId: 'k3', state: 'completed' }),
+      record({ id: 'd4', childConversationId: 'k4', state: 'failed' }),
+      record({ id: 'd5', childConversationId: 'k5', state: 'canceled' }),
+    ];
+    expect(delegationLiveTarget(list, 'k1')).toEqual({ botId: 'ops' });
+    expect(delegationLiveTarget(list, 'k2')).toEqual({ botId: 'boss' });
+    for (const id of ['k3', 'k4', 'k5', 'member-session']) {
+      expect(delegationLiveTarget(list, id)).toBeUndefined();
+    }
+  });
+
+  it('委派记录离开列表（如刷新间隙）后不再命中', () => {
+    expect(delegationLiveTarget([], 'k1')).toBeUndefined();
   });
 });
 

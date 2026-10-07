@@ -116,6 +116,7 @@ export interface BotChatUpdateInput {
 }
 
 export type BotEventKind =
+  | 'model-notice'
   | 'catalog'
   | 'chat'
   | 'timeline'
@@ -139,6 +140,8 @@ export type BotEventKind =
 
 /** main → renderer：Bot 数据变化提示，renderer 按 kind/chatId 重新拉取 */
 export interface BotEvent {
+  /** 私聊本次模型回退提示；仅文本，不含配置或凭证。 */
+  text?: string;
   kind: BotEventKind;
   chatId?: string;
   /** kind 为 'open' 时：触发通知的成员会话 */
@@ -271,6 +274,12 @@ export interface BotSessionRecord {
   lifecycle: ConversationAuthority['lifecycle'];
   /** 是否为 chat.sessions 里当前在用的会话；其余为只读历史 */
   current: boolean;
+  /** 私聊：可切回续聊（工作区未换）；群聊恒为 false */
+  resumable: boolean;
+  /** 首条用户消息摘出的标题；还没有消息时缺省 */
+  title?: string;
+  /** 会话文件最后修改时间（ms） */
+  activityAt?: number;
 }
 
 export type BotsListResult = { ok: true; bots: BotProfile[]; enabled: boolean } | BotIpcError;

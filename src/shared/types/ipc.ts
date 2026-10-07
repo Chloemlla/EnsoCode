@@ -382,7 +382,13 @@ export const IPC_CHANNELS = {
   BOT_CHAT_UPDATE: 'bots:chat-update',
   BOT_CHAT_DELETE: 'bots:chat-delete',
   BOT_CHAT_NEW_SESSION: 'bots:chat-new-session',
+  BOT_CHAT_SWITCH_SESSION: 'bots:chat-switch-session',
   BOT_CHAT_CLONE: 'bots:chat-clone',
+  /** 群话题：根群下新建 / 切换 / 改名 / 删除 */
+  BOT_THREAD_CREATE: 'bots:thread-create',
+  BOT_THREAD_SELECT: 'bots:thread-select',
+  BOT_THREAD_UPDATE: 'bots:thread-update',
+  BOT_THREAD_DELETE: 'bots:thread-delete',
   BOT_CHAT_STOP: 'bots:chat-stop',
   BOT_CHAT_STATE: 'bots:chat-state',
   BOT_CHAT_SESSIONS: 'bots:chat-sessions',
@@ -412,6 +418,7 @@ export const IPC_CHANNELS = {
   BOT_TASK_COMPLETE: 'bots:task-complete',
   BOT_TASK_CANCEL: 'bots:task-cancel',
   BOT_TASK_DELETE: 'bots:task-delete',
+  BOT_TASK_REVIEW: 'bots:task-review',
   /** 「自动设置能力」：便宜模型按成员描述推荐能力，只返回建议不落盘 */
   BOT_SUGGEST_ABILITIES: 'bots:suggest-abilities',
   BOT_SUGGEST_PERSONA: 'bots:suggest-persona',

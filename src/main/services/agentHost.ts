@@ -546,12 +546,12 @@ function resolveVirtualModelSelection(
     );
     return resolved.ok ? resolved.selection.config : undefined;
   };
-  const primary = member(entry.primary);
-  if (!primary) return { ok: false, error: 'Model is unavailable: virtual primary model' };
   const fast = entry.fast ? member(entry.fast) : undefined;
   const fallbacks = entry.fallbacks
     .map(member)
     .filter((config): config is SpawnModelConfig => config !== undefined);
+  const primary = member(entry.primary) ?? fallbacks.shift() ?? fast;
+  if (!primary) return { ok: false, error: '虚拟模型没有可用成员' };
   // 分类器只在有快模型可分档时下发；解析失败静默不分类（路由回到主模型）
   const classifier =
     fast && entry.classifier

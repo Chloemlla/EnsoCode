@@ -35,6 +35,20 @@ export function activeDelegations(
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/**
+ * 「查看过程」分流：排队/进行中的委派子会话看实时投影（排队时还未落盘，历史是空的），
+ * 已结束的看历史快照。返回目标成员 id，非活动委派或非委派会话返回 undefined。
+ */
+export function delegationLiveTarget(
+  delegations: readonly Delegation[],
+  conversationId: string
+): { botId: string } | undefined {
+  const item = delegations.find(
+    (record) => record.childConversationId === conversationId && isActiveDelegation(record.state)
+  );
+  return item ? { botId: item.targetBotId } : undefined;
+}
+
 /** 已有委派以 retryOf 指向它（Main 也据此拒绝再次重试） */
 export function isRetried(item: Delegation, delegations: readonly Delegation[]): boolean {
   return delegations.some((other) => other.retryOf === item.id);

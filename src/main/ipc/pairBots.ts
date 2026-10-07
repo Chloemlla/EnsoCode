@@ -120,7 +120,8 @@ function chatsFrame(services: Services): HostToPhone {
     type: 'bot-chats',
     chats: services.chats
       .list()
-      .filter((chat) => chat.archivedAt === undefined)
+      // 手机端只看群的根话题
+      .filter((chat) => chat.archivedAt === undefined && !chat.parentId)
       .map((chat) =>
         summarizeBotChat(
           chat,

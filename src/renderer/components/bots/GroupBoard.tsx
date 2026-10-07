@@ -1,6 +1,16 @@
 import type { BotChat, BotProfile, Delegation, GroupTask } from '@shared/types/bot';
 import { GROUP_TASK_TEXT_MAX, GROUP_TASK_TITLE_MAX, TASK_CHECK_TEXT_MAX } from '@shared/types/bot';
-import { Check, Loader2, MoreHorizontal, Pencil, Plus, Trash2, UserPlus, X } from 'lucide-react';
+import {
+  Check,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+  Undo2,
+  UserPlus,
+  X,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
@@ -85,13 +95,14 @@ function Group({
   );
 }
 
-/** 群任务看板：按状态分组；新建、编辑、指派（以人类身份 @ 成员）、完成、取消、删除 */
+/** 群任务看板：按状态分组；新建、编辑、指派（以人类身份 @ 成员）、完成、验收、取消、删除 */
 export function TaskBoard({ chat }: { chat: BotChat }) {
   const { t } = useI18n();
   const tasks = useBotsStore((s) => s.tasks[chat.id]);
   const bots = useBotsStore((s) => s.bots);
   const [editing, setEditing] = useState<GroupTask | 'new' | null>(null);
   const [deleting, setDeleting] = useState<GroupTask | null>(null);
+  const [returning, setReturning] = useState<GroupTask | null>(null);
   const byId = useMemo(() => new Map(bots.map((bot) => [bot.id, bot])), [bots]);
   const members = chat.members.flatMap((id) => {
     const bot = byId.get(id);
@@ -124,6 +135,10 @@ export function TaskBoard({ chat }: { chat: BotChat }) {
         void run(() => api.assign({ ...ref(task), botId }), t('Task not assigned'))
       }
       onComplete={() => void run(() => api.complete(ref(task)), t('Task not updated'))}
+      onAccept={() =>
+        void run(() => api.review({ ...ref(task), accept: true }), t('Task not updated'))
+      }
+      onReturn={() => setReturning(task)}
       onCancel={() => void run(() => api.cancel(ref(task)), t('Task not updated'))}
       onDelete={() => setDeleting(task)}
     />
@@ -149,6 +164,11 @@ export function TaskBoard({ chat }: { chat: BotChat }) {
           {() => columns.doing.map(card)}
         </Group>
       )}
+      {columns.review.length > 0 && (
+        <Group title={t('Awaiting review')} count={columns.review.length}>
+          {() => columns.review.map(card)}
+        </Group>
+      )}
       {columns.done.length > 0 && (
         <Group title={t('Completed')} count={columns.done.length} limit={RECENT}>
           {(shown) => columns.done.slice(0, shown).map(card)}
@@ -167,6 +187,21 @@ export function TaskBoard({ chat }: { chat: BotChat }) {
             setEditing(null);
             if (saved) void useBotsStore.getState().refreshTasks(chat.id);
           }}
+        />
+      )}
+      {returning && (
+        <ReturnDialog
+          task={returning}
+          onClose={() => setReturning(null)}
+          onReturn={(reason) =>
+            api.review({ ...ref(returning), accept: false, reason }).then((result) => {
+              if (result.ok) {
+                setReturning(null);
+                void useBotsStore.getState().refreshTasks(chat.id);
+              }
+              return result.ok ? null : taskErrorText(result.error, t);
+            })
+          }
         />
       )}
       <ConfirmDialog
@@ -192,6 +227,8 @@ function TaskCard({
   onEdit,
   onAssign,
   onComplete,
+  onAccept,
+  onReturn,
   onCancel,
   onDelete,
 }: {
@@ -201,17 +238,23 @@ function TaskCard({
   onEdit: () => void;
   onAssign: (botId: string) => void;
   onComplete: () => void;
+  onAccept: () => void;
+  onReturn: () => void;
   onCancel: () => void;
   onDelete: () => void;
 }) {
   const { t } = useI18n();
   const open = task.status === 'todo' || task.status === 'doing';
+  const review = task.status === 'review';
   const assignee = task.assigneeBotId ? bots.get(task.assigneeBotId) : undefined;
   const creator =
     task.createdBy === 'human' ? t('You') : (bots.get(task.createdBy)?.name ?? t('Deleted member'));
   return (
     <div
-      className={cn('group rounded-lg border bg-card px-2.5 py-2 text-xs', !open && 'opacity-75')}
+      className={cn(
+        'group rounded-lg border bg-card px-2.5 py-2 text-xs',
+        !open && !review && 'opacity-75'
+      )}
     >
       <div className="flex items-start gap-1.5">
         <span className="shrink-0 text-muted-foreground">#{task.seq}</span>
@@ -251,7 +294,7 @@ function TaskCard({
                 {t('Mark done')}
               </MenuItem>
             )}
-            {open && (
+            {(open || review) && (
               <MenuItem onClick={onCancel}>
                 <X />
                 {t('Cancel task')}
@@ -282,7 +325,26 @@ function TaskCard({
           <div className="line-clamp-3 whitespace-pre-wrap">{task.result}</div>
         </div>
       )}
+      {task.returnReason && (
+        <div className="mt-1 rounded bg-warning/10 px-1.5 py-1 text-foreground">
+          <div className="line-clamp-3 whitespace-pre-wrap">
+            {t('Returned: {{reason}}', { reason: task.returnReason })}
+          </div>
+        </div>
+      )}
       {task.check && <CheckBadge check={task.check} className="mt-1" />}
+      {review && (
+        <div className="mt-1.5 flex gap-1.5">
+          <Button size="xs" onClick={onAccept}>
+            <Check />
+            {t('Accept result')}
+          </Button>
+          <Button size="xs" variant="outline" onClick={onReturn}>
+            <Undo2 />
+            {t('Return')}
+          </Button>
+        </div>
+      )}
       <div className="mt-1 flex flex-wrap items-center gap-x-1.5 text-muted-foreground">
         {assignee || task.assigneeBotId ? (
           <span className="flex items-center gap-1">
@@ -297,6 +359,64 @@ function TaskCard({
         <span title={t('Created by {{name}}', { name: creator })}>{stamp(task.updatedAt)}</span>
       </div>
     </div>
+  );
+}
+
+/** 验收退回：必须写原因 */
+function ReturnDialog({
+  task,
+  onClose,
+  onReturn,
+}: {
+  task: GroupTask;
+  onClose: () => void;
+  /** 返回错误文案，成功返回 null */
+  onReturn: (reason: string) => Promise<string | null>;
+}) {
+  const { t } = useI18n();
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!reason.trim()) return setError(t('Enter a reason.'));
+    setBusy(true);
+    try {
+      setError(await onReturn(reason.trim()));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t('Return task #{{n}}', { n: task.seq })}</DialogTitle>
+        </DialogHeader>
+        <DialogPanel className="space-y-2">
+          <FieldLabel>{t('Reason for returning')}</FieldLabel>
+          <Textarea
+            rows={4}
+            autoFocus
+            value={reason}
+            maxLength={GROUP_TASK_TEXT_MAX}
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <p className="text-muted-foreground text-xs">
+            {t('The task goes back to To do with this reason and can be reassigned.')}
+          </p>
+          {error && <p className="text-destructive text-sm">{error}</p>}
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={onClose}>
+            {t('Cancel')}
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => void submit()}>
+            {busy && <Loader2 className="animate-spin" />}
+            {t('Return')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

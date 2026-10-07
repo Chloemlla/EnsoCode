@@ -82,6 +82,8 @@ interface LiveSessionTimelineProps {
   conversationId: string;
   speaker: ChatSpeaker;
   emptyTitle: string;
+  /** 空态副标题；默认沿用 MessageTimeline 的提示，传 '' 隐藏（如委派排队中） */
+  emptyDescription?: string;
   className?: string;
   focus?: MessageFocus;
   onFocusDone?: (nonce: number) => void;
@@ -96,6 +98,7 @@ export function LiveSessionTimeline({
   conversationId,
   speaker,
   emptyTitle,
+  emptyDescription,
   className,
   focus,
   onFocusDone,
@@ -166,6 +169,7 @@ export function LiveSessionTimeline({
           lastOutputAt={projection?.lastOutputAt}
           error={projection?.status === 'failed' ? projection.error : undefined}
           emptyTitle={emptyTitle}
+          emptyDescription={emptyDescription}
           historyLoading={historyLoading}
           hasOlder={hasOlder}
           olderCursor={projection?.historyBaseIndex}
@@ -192,6 +196,10 @@ interface LiveSessionDialogProps {
   conversationId: string | null;
   title: string;
   speaker: ChatSpeaker;
+  /** 会话还没有消息时的占位标题（如委派排队中） */
+  emptyTitle?: string;
+  /** 空态副标题；传 '' 隐藏（如委派排队中） */
+  emptyDescription?: string;
   /** 弹窗底部（该会话的审批 / 提问） */
   footer?: React.ReactNode;
   onClose: () => void;
@@ -202,6 +210,8 @@ export function LiveSessionDialog({
   conversationId,
   title,
   speaker,
+  emptyTitle,
+  emptyDescription,
   footer,
   onClose,
 }: LiveSessionDialogProps) {
@@ -216,7 +226,8 @@ export function LiveSessionDialog({
             className="border-t"
             conversationId={conversationId}
             speaker={speaker}
-            emptyTitle={title}
+            emptyTitle={emptyTitle ?? title}
+            emptyDescription={emptyDescription}
           />
         )}
         {footer && <div className={CHAT_COL}>{footer}</div>}

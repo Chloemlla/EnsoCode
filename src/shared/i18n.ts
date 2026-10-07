@@ -2147,6 +2147,7 @@ export const zhTranslations: Record<string, string> = {
   '{{name}} is replying; new messages are routed after they finish':
     '{{name}}回复中，新消息会在他说完后重新分配',
   'Queued until a session slot frees up': '排队中，等有空闲会话名额后开始',
+  'Queued and has not started yet': '排队中，还没开始',
   '{{name}} is working; your message joins the current turn':
     '{{name}}正在工作，新消息会插入当前这一轮',
   'Message not sent': '消息未发送',
@@ -2187,6 +2188,10 @@ export const zhTranslations: Record<string, string> = {
   '{{name}} owns group chats': '{{name}} 是群主',
   'Choose another owner in {{groups}} first.': '请先在「{{groups}}」中更换群主。',
   'Export character card': '导出人物卡',
+  'Exports a SillyTavern V2 PNG: the avatar as image, persona embedded. Restore it in a new member via "Import character card".':
+    '导出 SillyTavern V2 PNG：图片是头像，人设已嵌在其中。可在新建成员时用「导入人物卡」还原。',
+  'Persona embedded in the PNG. Restore it in a new member via "Import character card".':
+    '人设已嵌在图片里，可在新建成员时用「导入人物卡」还原。',
   Profile: '资料',
   Abilities: '能力',
   Routines: '例行',
@@ -2250,11 +2255,25 @@ export const zhTranslations: Record<string, string> = {
   'Chat history, group notes, routines, task board and group memory':
     '聊天记录（新群是空的）、群笔记、例行任务、任务板、群记忆',
   'Cloned. The chat history is empty.': '已克隆。聊天记录是空的。',
-  'Start a new conversation?': '开始新对话？',
-  'Members still replying are stopped, and delegations not marked keep are canceled. Earlier messages fold into one row; members start fresh after the divider.':
-    '确认后会停掉所有人正在进行的回复，没标「保留」的委派会取消，再插入分隔线。上面的消息还在，先收成一行；成员从分隔线之后重新开始。',
-  'Stop and start': '停掉并开始',
-  'This conversation has no messages yet.': '这一段还没有消息。',
+  Topics: '话题',
+  'New topic': '新话题',
+  'Main topic': '主话题',
+  'Rename topic': '重命名话题',
+  'Delete topic': '删除话题',
+  'Delete this topic?': '删除这个话题？',
+  'Its messages and member sessions are removed; replies in progress are stopped. Group notes, memory and the task board stay.':
+    '话题里的消息和成员会话会被删除，正在进行的回复会停止。群笔记、群记忆和任务看板保留。',
+  'Could not create topic': '无法新建话题',
+  'All topics ({{n}})': '全部话题（{{n}}）',
+  'Search topics...': '搜索话题...',
+  'No matching topics': '没有匹配的话题',
+  'All conversations ({{n}})': '全部对话（{{n}}）',
+  'Untitled conversation': '未命名对话',
+  'Workspace changed; view only': '工作目录已更换，只能查看',
+  'Switch conversation?': '切换对话？',
+  'The reply in progress will be stopped.': '正在进行的回复会停止。',
+  Switch: '切换',
+  Unread: '未读',
   'Earlier conversation · {{n}} messages': '上一段对话 · {{n}} 条',
   'Collapse earlier conversation': '收起上一段对话',
   'Create members with their own persona, model and tools, then chat with them alone or in groups.':
@@ -2602,6 +2621,15 @@ export const zhTranslations: Record<string, string> = {
     '还没有任务。成员也可以用看板工具新建和认领任务。',
   'To do': '待办',
   Doing: '进行中',
+  'Awaiting review': '待验收',
+  'Accept result': '验收通过',
+  Return: '退回',
+  'Return task #{{n}}': '退回任务 #{{n}}',
+  'Reason for returning': '退回原因',
+  'Enter a reason.': '请填写原因。',
+  'The task goes back to To do with this reason and can be reassigned.':
+    '任务会带着原因回到待办，可以重新指派或委派。',
+  'Returned: {{reason}}': '退回原因：{{reason}}',
   'Show all ({{n}})': '显示全部（{{n}}）',
   'Assign to': '指派给',
   'Mark done': '标记完成',

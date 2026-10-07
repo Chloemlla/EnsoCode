@@ -50,7 +50,7 @@ export function WorkspaceMenu({ chat, className }: { chat: BotChat; className?: 
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
           className={cn(
-            'flex h-7 min-w-0 max-w-56 items-center gap-1.5 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground',
+            'flex h-7 min-w-0 max-w-56 @max-[28rem]:max-w-32 @max-[21rem]:max-w-24 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground',
             className
           )}
           title={t('Workspace')}

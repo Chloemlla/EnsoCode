@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { addToast } from '@/components/ui/toast';
+import { Tooltip, TooltipPopup, TooltipTrigger } from '@/components/ui/tooltip';
 import { useI18n } from '@/i18n';
 import { useBotsStore } from '@/stores/bots';
 import { budgetDraft, budgetFormOf, limitsDraft, limitsFormOf } from '@/stores/bots/budget';
@@ -172,6 +173,19 @@ export function BotProfilePanel({ botId, chat, onOpenHistory }: BotProfilePanelP
     }
   };
 
+  const exportCardClick = () => {
+    exportCard(bot, persona ?? '')
+      .then(() =>
+        addToast({
+          type: 'success',
+          title: t(
+            'Persona embedded in the PNG. Restore it in a new member via "Import character card".'
+          ),
+        })
+      )
+      .catch(() => addToast({ type: 'error', title: t('Export failed') }));
+  };
+
   const save = async () => {
     const draft = draftOf(form);
     if (!draft) {
@@ -258,18 +272,19 @@ export function BotProfilePanel({ botId, chat, onOpenHistory }: BotProfilePanelP
           <div className="truncate font-semibold text-base">{bot.name}</div>
           <div className="truncate text-muted-foreground text-sm">{bot.title}</div>
           <div className="mt-1 flex flex-wrap gap-1.5">
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() =>
-                exportCard(bot, persona ?? '').catch(() =>
-                  addToast({ type: 'error', title: t('Export failed') })
-                )
-              }
-            >
-              <Download />
-              {t('Export character card')}
-            </Button>
+            <Tooltip>
+              <TooltipTrigger
+                render={<Button size="xs" variant="outline" onClick={exportCardClick} />}
+              >
+                <Download />
+                {t('Export character card')}
+              </TooltipTrigger>
+              <TooltipPopup className="max-w-72">
+                {t(
+                  'Exports a SillyTavern V2 PNG: the avatar as image, persona embedded. Restore it in a new member via "Import character card".'
+                )}
+              </TooltipPopup>
+            </Tooltip>
             <AvatarButtons
               hasImage={Boolean(bot.avatar.image)}
               disabled={avatarBusy}

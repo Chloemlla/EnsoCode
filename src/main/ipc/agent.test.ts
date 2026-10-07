@@ -934,7 +934,11 @@ describe('压缩完成触发记忆整理', () => {
     distill.mockClear();
     markCompacted.mockClear();
     mocks.sessionFile.mockReturnValue('/tmp/agent/sessions/conv-1.jsonl');
-    mocks.getBotServices.mockReturnValue({ memory: { distill }, groups: { markCompacted } });
+    mocks.getBotServices.mockReturnValue({
+      memory: { distill },
+      groups: { markCompacted },
+      chats: { rootOf: () => undefined },
+    });
   });
 
   const conversation = (bot?: { botId: string; chatId: string | null }) =>

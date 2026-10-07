@@ -86,6 +86,37 @@ describe('SourceAuthorityRegistry', () => {
     expect(registry.conversation(conversation.conversationId)).toBeUndefined();
   });
 
+  it('结束的 bot 会话可由 Main 重新打开；项目不可用或非 bot 会话拒绝', () => {
+    const root = temporary();
+    const registryFile = path.join(root, 'r.json');
+    const registry = new SourceAuthorityRegistry({ registryFile });
+    const home = registry.ensureBotHomeProject(path.join(root, 'home'));
+    if (!home) throw new Error('no project');
+    const draft = registry.createBotConversation(home.projectId, { botId, chatId });
+    const ready = registry.createBotConversation(home.projectId, { botId, chatId });
+    if (!draft || !ready) throw new Error('no conversation');
+    registry.markReady(ready.conversationId, path.join(root, 's.jsonl'), {
+      providerId: 'p',
+      modelId: 'm',
+    });
+    registry.endBotConversation(draft.conversationId);
+    registry.endBotConversation(ready.conversationId);
+
+    expect(registry.reopenBotConversation(draft.conversationId)?.lifecycle).toBe('draft');
+    const reopened = registry.reopenBotConversation(ready.conversationId);
+    expect(reopened?.lifecycle).toBe('ready');
+    expect(reopened?.sessionFile).toBe(path.join(root, 's.jsonl'));
+    expect(
+      new SourceAuthorityRegistry({ registryFile }).conversation(ready.conversationId)?.lifecycle
+    ).toBe('ready');
+    expect(registry.reopenBotConversation('missing')).toBeUndefined();
+
+    registry.endBotConversation(ready.conversationId);
+    expect(registry.removeBotHomeProject(home.projectId)).toBe(true);
+    expect(registry.reopenBotConversation(ready.conversationId)).toBeUndefined();
+    expect(registry.conversation(ready.conversationId)?.lifecycle).toBe('ended');
+  });
+
   it('Main 移除 bot-home 项目时结束其会话；bot 会话也可挂在本地 Code 项目下', () => {
     const root = temporary();
     const registry = new SourceAuthorityRegistry({ registryFile: path.join(root, 'r.json') });

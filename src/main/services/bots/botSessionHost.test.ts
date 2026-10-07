@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentWorkerEvent } from '../../../shared/types/agent';
-import type { BotChat, BotEngine } from '../../../shared/types/bot';
+import type { BotChat, BotEngine, BotProfile } from '../../../shared/types/bot';
 import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import {
   type BotRuntimePort,
@@ -29,6 +29,11 @@ let chats: BotChatStore;
 let runtime: FakeRuntime;
 let events: Array<{ kind: string; chatId?: string }>;
 let host: BotSessionHost;
+let probeResult:
+  | { ok: true; model?: BotEngine; fallback?: { model: BotEngine; label: string; reason: string } }
+  | { ok: false; error: string };
+let probeCalls: BotProfile[] = [];
+let invalidated: Array<BotEngine | undefined> = [];
 
 class FakeRuntime implements BotRuntimePort {
   engines: Array<{ id: string; engine?: BotEngine }> = [];
@@ -74,12 +79,20 @@ beforeEach(() => {
   chats = new BotChatStore(join(root, 'bot-chats'));
   runtime = new FakeRuntime();
   events = [];
+  probeResult = { ok: true };
+  probeCalls = [];
+  invalidated = [];
   host = new BotSessionHost({
     bots,
     chats,
     authority: registry,
     runtime,
     emit: (event) => events.push(event),
+    probe: async (botProfile) => {
+      probeCalls.push(botProfile);
+      return probeResult;
+    },
+    invalidateProbe: (botProfile) => invalidated.push(botProfile.engine),
   });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -210,6 +223,255 @@ describe('BotSessionHost.ensureSession', () => {
     });
     expect(runtime.prompts).toHaveLength(1);
     expect(host.effectiveBot(first.conversationId)?.engine).toBeUndefined();
+  });
+
+  describe('model probe', () => {
+    it('委派按任务自己的模型探测和回退，恢复后回任务模型而非成员后来修改的模型', async () => {
+      const alice = bot('Alice');
+      const bob = bot('Bob');
+      const own = { providerId: 'p', modelId: 'task-model' };
+      const specBot = { ...bob, engine: own };
+      const parent = host.ensureSession(direct(alice.id).id, alice.id);
+      if (!parent.ok) throw new Error(parent.error);
+      const child = registry.createBotConversation(
+        registry.conversation(parent.conversationId)!.projectId,
+        { botId: bob.id, chatId: null, delegationId: 'd1' }
+      )!;
+      host.registerDelegation(child.conversationId, specBot);
+      bots.update(bob.id, { engine: { providerId: 'p', modelId: 'new-member-model' } }, []);
+      await host.deliverConversation(child.conversationId, 'first');
+      expect(probeCalls.at(-1)?.engine).toEqual(own);
+      expect(runtime.spawns[0].bot.engine).toEqual(own);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, child.conversationId));
+      await flush();
+      const fallback = { providerId: 'p', modelId: 'default' };
+      probeResult = {
+        ok: true,
+        fallback: { model: fallback, label: 'Default', reason: '鉴权失败' },
+      };
+      await host.deliverConversation(child.conversationId, 'failed');
+      expect(runtime.engines.at(-1)?.engine).toEqual(fallback);
+      host.observe(ev({ type: 'turn-completed', turnId: 't2' }, child.conversationId));
+      await flush();
+      probeResult = { ok: true };
+      await host.deliverConversation(child.conversationId, 'recovered');
+      expect(runtime.engines.at(-1)?.engine).toEqual(own);
+    });
+
+    it('真实投递报模型错误时作废该成员探测缓存；取消与非模型错误不作废', async () => {
+      const alice = bot('Alice');
+      const engine = { providerId: 'p', modelId: 'member-model' };
+      bots.update(alice.id, { engine }, []);
+      const chat = direct(alice.id);
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      host.observe(ev({ type: 'status', status: 'running' }, first.conversationId));
+      host.observe(
+        ev({ type: 'turn-failed', turnId: 't1', error: 'aborted' }, first.conversationId)
+      );
+      await flush();
+      expect(invalidated).toEqual([]);
+      await host.deliver(chat.id, alice.id, 'again');
+      host.observe(ev({ type: 'status', status: 'running' }, first.conversationId));
+      host.observe(
+        ev(
+          {
+            type: 'message-upsert',
+            index: 1,
+            message: {
+              role: 'assistant',
+              content: [],
+              stopReason: 'error',
+              errorMessage: '401 Unauthorized: invalid api key',
+            },
+          },
+          first.conversationId
+        )
+      );
+      host.observe(ev({ type: 'turn-completed', turnId: 't2' }, first.conversationId));
+      await flush();
+      expect(invalidated).toEqual([engine]);
+    });
+
+    it('委派会话报模型错误时按任务自己的模型作废', async () => {
+      const alice = bot('Alice');
+      const bob = bot('Bob');
+      const own = { providerId: 'p', modelId: 'task-model' };
+      const parent = host.ensureSession(direct(alice.id).id, alice.id);
+      if (!parent.ok) throw new Error(parent.error);
+      const child = registry.createBotConversation(
+        registry.conversation(parent.conversationId)!.projectId,
+        { botId: bob.id, chatId: null, delegationId: 'd1' }
+      )!;
+      host.registerDelegation(child.conversationId, { ...bob, engine: own });
+      await host.deliverConversation(child.conversationId, 'task');
+      host.observe(ev({ type: 'status', status: 'running' }, child.conversationId));
+      host.observe(
+        ev({ type: 'turn-failed', turnId: 't1', error: 'fetch failed' }, child.conversationId)
+      );
+      await flush();
+      expect(invalidated).toEqual([own]);
+    });
+
+    it('实测期间停止，返回后不得spawn、换模型或投递', async () => {
+      const alice = bot('Alice');
+      const chat = direct(alice.id);
+      const ready = host.ensureSession(chat.id, alice.id);
+      if (!ready.ok) throw new Error(ready.error);
+      let release!: () => void;
+      const probing = new Promise<void>((r) => {
+        release = r;
+      });
+      host = new BotSessionHost({
+        bots,
+        chats,
+        authority: registry,
+        runtime,
+        emit: (e) => events.push(e),
+        probe: async () => {
+          await probing;
+          return {
+            ok: true,
+            fallback: {
+              model: { providerId: 'p', modelId: 'default' },
+              label: 'Default',
+              reason: '鉴权失败',
+            },
+          };
+        },
+      });
+      const sent = host.deliver(chat.id, alice.id, 'hi');
+      await flush();
+      const stopping = host.abortConversation(ready.conversationId);
+      release();
+      expect(await sent).toEqual({ ok: false, error: 'canceled' });
+      await stopping;
+      expect(runtime.spawns).toHaveLength(0);
+      expect(runtime.engines).toHaveLength(0);
+      expect(runtime.prompts).toHaveLength(0);
+    });
+    it('虚拟模型备用实测成功后活会话用备用，恢复后回到虚拟模型且全程不提示', async () => {
+      const alice = bot('Alice');
+      const engine = { providerId: 'enso-virtual', modelId: 'v' };
+      bots.update(alice.id, { engine }, []);
+      const chat = direct(alice.id);
+      const first = await host.deliver(chat.id, alice.id, 'first');
+      if (!first.ok) throw new Error(first.error);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+      await flush();
+      const backup = { providerId: 'p', modelId: 'backup' };
+      probeResult = { ok: true, model: backup };
+      await host.deliver(chat.id, alice.id, 'primary failed');
+      expect(runtime.engines.at(-1)?.engine).toEqual(backup);
+      expect(bots.get(alice.id)?.engine).toEqual(engine);
+      host.observe(ev({ type: 'turn-completed', turnId: 't2' }, first.conversationId));
+      await flush();
+      probeResult = { ok: true };
+      await host.deliver(chat.id, alice.id, 'recovered');
+      expect(runtime.engines.at(-1)?.engine).toEqual(engine);
+      expect(events.filter((e) => e.kind === 'model-notice')).toHaveLength(0);
+    });
+    it('冷会话实际用默认模型，活会话恢复成员模型，回退提示按状态去重', async () => {
+      const alice = bot('Alice');
+      const engine = { providerId: 'p', modelId: 'member' };
+      const fallback = { providerId: 'p', modelId: 'default' };
+      bots.update(alice.id, { engine }, []);
+      const chat = direct(alice.id);
+      probeResult = {
+        ok: true,
+        fallback: { model: fallback, label: 'Default', reason: '鉴权失败' },
+      };
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      expect(runtime.spawns[0].bot.engine).toEqual(fallback);
+      expect(bots.get(alice.id)?.engine).toEqual(engine);
+      expect(events.filter((e) => e.kind === 'model-notice')).toHaveLength(1);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+      await flush();
+      await host.deliver(chat.id, alice.id, 'next');
+      expect(events.filter((e) => e.kind === 'model-notice')).toHaveLength(1);
+      host.observe(ev({ type: 'turn-completed', turnId: 't2' }, first.conversationId));
+      await flush();
+      probeResult = { ok: true };
+      await host.deliver(chat.id, alice.id, 'recovered');
+      expect(runtime.engines.at(-1)?.engine).toEqual(engine);
+      host.observe(ev({ type: 'turn-completed', turnId: 't3' }, first.conversationId));
+      await flush();
+      probeResult = {
+        ok: true,
+        fallback: { model: fallback, label: 'Default', reason: '鉴权失败' },
+      };
+      await host.deliver(chat.id, alice.id, 'broken again');
+      expect(runtime.engines.at(-1)?.engine).toEqual(fallback);
+      expect(events.filter((e) => e.kind === 'model-notice')).toHaveLength(2);
+      expect(runtime.prompts).toHaveLength(4);
+    });
+
+    it('群聊回退提示写进系统条，完整备用链成功不提示', async () => {
+      const alice = bot('Alice');
+      const bob = bot('Bob');
+      const home = registry.ensureBotHomeProject(join(root, 'group-home'));
+      const chat = chats.create({
+        kind: 'group',
+        title: 'G',
+        members: [alice.id, bob.id],
+        bossBotId: alice.id,
+        workspace: { kind: 'chat-home', projectId: home!.projectId },
+      });
+      if (!chat) throw new Error('chat');
+      probeResult = {
+        ok: true,
+        fallback: {
+          model: { providerId: 'p', modelId: 'default' },
+          label: 'Default',
+          reason: '模型 member：鉴权失败',
+        },
+      };
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      expect(chats.readEntries(chat.id)).toMatchObject([
+        {
+          kind: 'system',
+          text: 'Alice 的模型不可用，本次改用默认模型 Default（模型 member：鉴权失败）',
+        },
+      ]);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+      await flush();
+      probeResult = { ok: true };
+      await host.deliver(chat.id, alice.id, 'backup healthy');
+      expect(chats.readEntries(chat.id)).toHaveLength(1);
+    });
+
+    it('实测失败时拒绝投递并透出模型原因，不拉起会话', async () => {
+      const alice = bot('Alice');
+      const chat = direct(alice.id);
+      probeResult = { ok: false, error: '模型 gpt-5：鉴权失败' };
+      expect(await host.deliver(chat.id, alice.id, 'hi')).toEqual({
+        ok: false,
+        error: '模型 gpt-5：鉴权失败',
+      });
+      expect(runtime.spawns).toHaveLength(0);
+      expect(runtime.prompts).toHaveLength(0);
+    });
+
+    it('改配后实测失败同样拒绝；实测通过才投递', async () => {
+      const alice = bot('Alice');
+      const chat = direct(alice.id);
+      const first = await host.deliver(chat.id, alice.id, 'hi');
+      if (!first.ok) throw new Error(first.error);
+      host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+      await flush();
+      bots.update(alice.id, { engine: { providerId: 'next', modelId: 'new' } }, []);
+      probeResult = { ok: false, error: '模型 new：网络连接失败' };
+      expect(await host.deliver(chat.id, alice.id, 'next')).toEqual({
+        ok: false,
+        error: '模型 new：网络连接失败',
+      });
+      expect(runtime.prompts).toHaveLength(1);
+      probeResult = { ok: true };
+      expect((await host.deliver(chat.id, alice.id, 'again')).ok).toBe(true);
+      expect(probeCalls).toHaveLength(3);
+    });
   });
 
   it('catches up with a second save while a model update is in flight', async () => {
@@ -645,6 +907,71 @@ describe('BotSessionHost.ensureSession', () => {
     expect(fresh.ok && fresh.conversationId).not.toBe(first.conversationId);
     expect(registry.conversation(first.conversationId)?.lifecycle).toBe('ended');
     expect(host.sessionsOf(chat.id).map((s) => s.current)).toEqual([false, true]);
+  });
+
+  it('私聊切回旧对话：重新打开原会话续写，当前会话结束只读；不属于本聊天或工作区已换的拒绝', async () => {
+    const alice = bot('Alice');
+    const bob = bot('Bob');
+    const chat = direct(alice.id);
+    const other = direct(bob.id);
+    const first = await host.deliver(chat.id, alice.id, 'one');
+    if (!first.ok) throw new Error(first.error);
+    host.observe(ev({ type: 'turn-completed', turnId: 't1' }, first.conversationId));
+    registry.markReady(first.conversationId, join(root, 'first.jsonl'), {
+      providerId: 'p',
+      modelId: 'm',
+    });
+    const second = host.ensureSession(chat.id, alice.id, { fresh: true });
+    if (!second.ok) throw new Error(second.error);
+    const bobSession = host.ensureSession(other.id, bob.id);
+    if (!bobSession.ok) throw new Error(bobSession.error);
+
+    expect(host.switchSession(chat.id, alice.id, bobSession.conversationId)).toEqual({
+      ok: false,
+      error: 'session-not-found',
+    });
+    expect(host.switchSession(chat.id, alice.id, first.conversationId)).toEqual({ ok: true });
+    expect(chats.get(chat.id)?.sessions[alice.id].conversationId).toBe(first.conversationId);
+    expect(registry.conversation(first.conversationId)?.lifecycle).toBe('ready');
+    expect(registry.conversation(second.conversationId)?.lifecycle).toBe('ended');
+    expect(
+      host
+        .sessionsOf(chat.id)
+        .filter((s) => s.current)
+        .map((s) => s.conversationId)
+    ).toEqual([first.conversationId]);
+    expect(events).toContainEqual({ kind: 'chat', chatId: chat.id });
+    expect(host.switchSession(chat.id, alice.id, first.conversationId)).toEqual({ ok: true });
+    expect(host.sessionsOf(chat.id).map((s) => s.resumable)).toEqual([true, true]);
+
+    await flush();
+    const again = await host.deliver(chat.id, alice.id, 'two');
+    expect(again.ok && again.conversationId).toBe(first.conversationId);
+    await flush();
+    expect(runtime.spawns.at(-1)).toMatchObject({
+      conversationId: first.conversationId,
+      resumeFile: join(root, 'first.jsonl'),
+    });
+
+    const code = join(root, 'code');
+    mkdirSync(code);
+    const project = registry.createProject({ requestId: 'p', path: code });
+    if (!project.accepted) throw new Error('project');
+    const moved = chats.update(chat.id, (draft) => {
+      draft.workspace = { kind: 'project', projectId: project.value.projectId };
+      return draft;
+    });
+    expect(moved?.workspace.kind).toBe('project');
+    expect(host.sessionsOf(chat.id).map((s) => s.resumable)).toEqual([false, false]);
+    expect(host.canSwitch(chat.id, alice.id, second.conversationId)).toEqual({
+      ok: false,
+      error: 'workspace-changed',
+    });
+    expect(host.switchSession(chat.id, alice.id, second.conversationId)).toEqual({
+      ok: false,
+      error: 'workspace-changed',
+    });
+    expect(registry.conversation(second.conversationId)?.lifecycle).toBe('ended');
   });
 
   it('Code 项目工作区：cwd 取项目路径；项目移除或 ssh 时报错', () => {

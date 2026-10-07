@@ -18,6 +18,8 @@ interface ConfirmDialogProps {
   /** 确认按钮文案(动作动词) */
   confirmLabel: string;
   onConfirm: () => void;
+  /** 从另一个弹窗里打开时用 nested，压在其上方 */
+  zIndexLevel?: 'base' | 'nested';
 }
 
 /** 危险动作的二次确认弹窗(删除项目/对话、回退等) */
@@ -28,11 +30,12 @@ export function ConfirmDialog({
   description,
   confirmLabel,
   onConfirm,
+  zIndexLevel,
 }: ConfirmDialogProps) {
   const { t } = useI18n();
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogPopup className="sm:max-w-sm">
+      <AlertDialogPopup className="sm:max-w-sm" zIndexLevel={zIndexLevel}>
         <AlertDialogHeader>
           <AlertDialogTitle className="text-base">{title}</AlertDialogTitle>
           {description && <AlertDialogDescription>{description}</AlertDialogDescription>}

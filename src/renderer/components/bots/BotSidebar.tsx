@@ -56,6 +56,7 @@ import {
   chatSummary,
   pendingItems,
   reorderPinned,
+  rollupThreads,
   snoozeTimes,
   sortChats,
 } from '@/stores/bots/selectors';
@@ -127,22 +128,30 @@ export function BotSidebar({
   }, [delegations]);
   const rows = useMemo(
     () =>
-      chats.map((chat) => {
-        const summary = chatSummary(chat, { sessions, timeline: timelines[chat.id], queue, names });
-        return {
-          chat,
-          summary: {
-            ...summary,
-            running:
-              summary.running ||
-              (chat.kind === 'group'
-                ? delegated.chatIds.has(chat.id)
-                : delegated.botIds.has(chat.members[0])),
-            pending: pending.filter((item) => item.chatId === chat.id).length,
-          },
-        };
-      }),
-    [chats, sessions, timelines, queue, names, pending, delegated]
+      rollupThreads(
+        chats.map((chat) => {
+          const summary = chatSummary(chat, {
+            sessions,
+            timeline: timelines[chat.id],
+            queue,
+            names,
+          });
+          return {
+            chat,
+            summary: {
+              ...summary,
+              running:
+                summary.running ||
+                (chat.kind === 'group'
+                  ? delegated.chatIds.has(chat.id)
+                  : delegated.botIds.has(chat.members[0])),
+              pending: pending.filter((item) => item.chatId === chat.id).length,
+            },
+          };
+        }),
+        reads
+      ),
+    [chats, sessions, timelines, queue, names, pending, delegated, reads]
   );
   const live = rows.filter((row) => !row.chat.archivedAt);
   const groups = sortChats(
@@ -307,7 +316,7 @@ export function BotSidebar({
               pinned={chat.pinned}
               meta={status(summary)}
               preview={summary.preview}
-              unread={isUnread(summary.marker, reads[summary.key]) && activeChatId !== chat.id}
+              unread={isUnread(summary.marker, reads[summary.key])}
               pending={summary.pending}
               onClick={() => setView({ kind: 'chat', chatId: chat.id })}
             />
@@ -388,7 +397,10 @@ export function BotSidebar({
                       : status(summary)
                   }
                   preview={summary.preview}
-                  unread={isUnread(summary.marker, reads[summary.key]) && activeChatId !== chat.id}
+                  unread={
+                    isUnread(summary.marker, reads[summary.key]) &&
+                    (chat.kind === 'group' || activeChatId !== chat.id)
+                  }
                   pending={summary.pending}
                   onClick={() =>
                     bot ? void openDirect(bot.id) : setView({ kind: 'chat', chatId: chat.id })

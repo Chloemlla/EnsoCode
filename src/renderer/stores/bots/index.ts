@@ -21,6 +21,7 @@ import type {
 import type { BrowserTabHolder } from '@shared/types/browser';
 import { create } from 'zustand';
 import { draftFromSentText, seedBotDraft } from '@/components/bots/botDraft';
+import { addToast } from '@/components/ui/toast';
 import { usePendingMemoryWrites } from '@/stores/memoryReview';
 import { applyHistoryPage, emptyProjection } from '@/stores/sessions/reducer';
 import { resizeSidePanelWidth, SIDE_PANEL_DEFAULT_WIDTH } from '@/stores/sidePanel/width';
@@ -179,7 +180,11 @@ interface BotsState {
   /** 开始跟踪成员会话；返回首屏历史加载完成的 promise */
   trackSession: (conversationId: string) => Promise<void>;
   loadOlderSession: (conversationId: string) => Promise<void>;
+  /** 打开话题时视图落在根群，并把它设为当前话题 */
   setView: (view: BotView) => void;
+  openThread: (rootId: string, threadId: string) => void;
+  /** 根群下新建话题并切过去 */
+  createThread: (rootId: string) => Promise<boolean>;
   togglePanel: () => void;
   setPanelTab: (tab: BotPanelTab) => void;
   /** 标题按 tabId 记 */
@@ -220,6 +225,19 @@ export const useBotsStore = create<BotsState>()((set, get) => {
   const seeding = new Map<string, Promise<void>>();
   /** 本窗口发起、尚未收到 rewind-done 草稿的回退：conversationId → chatId */
   const rewinds = new Map<string, string>();
+  let threadChoiceSeq = 0;
+  const threadChoices = new Map<string, { seq: number; threadId: string; pending: boolean }>();
+  const chooseThread = (rootId: string, threadId: string) => {
+    const choice = { seq: ++threadChoiceSeq, threadId, pending: true };
+    threadChoices.set(rootId, choice);
+    return choice;
+  };
+  const withThread = (root: BotChat, threadId: string): BotChat => {
+    const next = { ...root };
+    if (threadId === root.id) delete next.activeThreadId;
+    else next.activeThreadId = threadId;
+    return next;
+  };
   /** 整体替换群时间线（跳转 / 回到最新 / 退出历史窗口）时递增，丢弃按旧列表发出的请求结果 */
   const timelineEpochs = new Map<string, number>();
   const epochOf = (chatId: string) => timelineEpochs.get(chatId) ?? 0;
@@ -289,6 +307,9 @@ export const useBotsStore = create<BotsState>()((set, get) => {
 
   const onBotEvent = (event: BotEvent) => {
     switch (event.kind) {
+      case 'model-notice':
+        if (event.text) addToast({ type: 'info', title: event.text });
+        break;
       case 'catalog':
         void get().refreshCatalog();
         void get().refreshUsage();
@@ -496,16 +517,41 @@ export const useBotsStore = create<BotsState>()((set, get) => {
 
     refreshChats: () =>
       coalesce('chats', async () => {
+        const startedAt = threadChoiceSeq;
+        const pending = new Set(
+          [...threadChoices.values()].filter((choice) => choice.pending).map((choice) => choice.seq)
+        );
         const result = await window.electronAPI.bots.chats();
         if (!result.ok) return;
+        const chats = result.chats.map((chat) => {
+          const choice = threadChoices.get(chat.id);
+          if (!choice) return chat;
+          // 选择中，或请求发出后才选择 / 完成的操作：旧快照不能抢回当前话题。
+          if (choice.pending || choice.seq > startedAt || pending.has(choice.seq))
+            return withThread(chat, choice.threadId);
+          threadChoices.delete(chat.id);
+          return chat;
+        });
+        // 新建响应已落地但旧列表尚无它：保留当前选择指向的本地话题。
+        for (const [rootId, choice] of threadChoices) {
+          if (
+            !chats.some((chat) => chat.id === rootId) ||
+            chats.some((chat) => chat.id === choice.threadId)
+          )
+            continue;
+          const thread = get().chats.find(
+            (chat) => chat.id === choice.threadId && chat.parentId === rootId
+          );
+          if (thread) chats.push(thread);
+        }
         set({
-          chats: result.chats,
+          chats,
           queue: result.queue,
           silences: result.silences ?? [],
           enabled: result.enabled,
         });
-        void trackChats(result.chats);
-        for (const chat of result.chats) {
+        void trackChats(chats);
+        for (const chat of chats) {
           if (chat.kind === 'group' && !get().runtime[chat.id]) void get().refreshRuntime(chat.id);
         }
       }),
@@ -779,11 +825,63 @@ export const useBotsStore = create<BotsState>()((set, get) => {
       }
     },
 
-    setView: (view) => {
+    setView: (target) => {
+      let view = target;
+      const chatId = view?.kind === 'chat' ? view.chatId : undefined;
+      const thread = chatId ? get().chats.find((item) => item.id === chatId) : undefined;
+      if (thread?.parentId) {
+        get().openThread(thread.parentId, thread.id);
+        view = { kind: 'chat', chatId: thread.parentId };
+      }
       if (view?.kind === 'chat') localStorage.setItem(VIEW_KEY, view.chatId);
       else if (view?.kind === 'inbox') localStorage.setItem(VIEW_KEY, 'inbox');
       else localStorage.removeItem(VIEW_KEY);
       set({ view });
+    },
+
+    openThread: (rootId, threadId) => {
+      const root = get().chats.find((item) => item.id === rootId);
+      if (root?.kind !== 'group' || root.parentId) return;
+      if (
+        threadId !== rootId &&
+        !get().chats.some((chat) => chat.id === threadId && chat.parentId === rootId)
+      )
+        return;
+      if ((root.activeThreadId ?? rootId) === threadId && !threadChoices.get(rootId)?.pending)
+        return;
+      const choice = chooseThread(rootId, threadId);
+      get().upsertChat(withThread(root, threadId));
+      const finish = (ok: boolean) => {
+        if (threadChoices.get(rootId) !== choice) return;
+        choice.pending = false;
+        if (!ok) {
+          threadChoices.delete(rootId);
+          void get().refreshChats();
+        }
+      };
+      void window.electronAPI.bots.selectThread(rootId, threadId).then(
+        (result) => finish(result.ok),
+        () => finish(false)
+      );
+    },
+
+    createThread: async (rootId) => {
+      const current = get().chats.find((item) => item.id === rootId);
+      if (current?.kind !== 'group' || current.parentId) return false;
+      const choice = chooseThread(rootId, current.activeThreadId ?? rootId);
+      const result = await window.electronAPI.bots.createThread(rootId).catch(() => null);
+      if (!result?.ok) {
+        if (threadChoices.get(rootId) === choice) threadChoices.delete(rootId);
+        return false;
+      }
+      get().upsertChat(result.chat);
+      if (threadChoices.get(rootId) === choice) {
+        choice.threadId = result.chat.id;
+        choice.pending = false;
+        const root = get().chats.find((item) => item.id === rootId);
+        if (root) get().upsertChat(withThread(root, result.chat.id));
+      }
+      return true;
     },
 
     togglePanel: () => {
@@ -945,6 +1043,8 @@ export const useBotsStore = create<BotsState>()((set, get) => {
     setSearchOpen: (searchOpen) => set({ searchOpen }),
 
     focusHit: (hit, query) => {
+      const chat = get().chats.find((item) => item.id === hit.chatId);
+      if (chat?.kind === 'group') get().openThread(chat.parentId ?? chat.id, chat.id);
       get().setView({ kind: 'chat', chatId: hit.chatId });
       set({
         searchOpen: false,

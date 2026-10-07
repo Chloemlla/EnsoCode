@@ -404,6 +404,10 @@ export function App() {
       onBotChatState: ({ type: _type, chatId, ...rest }) =>
         setChatStates((prev) => ({ ...prev, [chatId]: rest })),
       onBotEvent: (event) => {
+        if (event.kind === 'model-notice') {
+          if (event.chatId === botChatIdRef.current && event.text) setBotNotice(event.text);
+          return;
+        }
         // 当前打开的群有变化：合并刷新最新一页时间线与运行态
         if (!event.chatId || event.chatId !== botChatIdRef.current || botRefreshRef.current) {
           return;

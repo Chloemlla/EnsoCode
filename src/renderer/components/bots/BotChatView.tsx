@@ -6,7 +6,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApprovalBar } from '@/components/chat/ApprovalBar';
 import { APPROVAL_MODE_META } from '@/components/chat/ApprovalModePicker';
 import { AskBar } from '@/components/chat/AskBar';
-import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { CHAT_COL } from '@/components/chat/MessageTimeline';
 import { ResizeHandle } from '@/components/chat/ResizeHandle';
 import { sidePanelWidthTransition } from '@/components/sidepanel/sidePanelWidthAnim';
@@ -16,7 +15,7 @@ import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { startDesktopVoiceSession } from '@/lib/voiceSession';
 import { useBotsStore } from '@/stores/bots';
-import { activeDelegations, pendingOwners } from '@/stores/bots/delegations';
+import { activeDelegations, delegationLiveTarget, pendingOwners } from '@/stores/bots/delegations';
 import { chatSummary, type PendingItem, pendingItems } from '@/stores/bots/selectors';
 import { groupReadMark } from '@/stores/bots/unread';
 import { useSettingsStore } from '@/stores/settings';
@@ -44,7 +43,9 @@ import { GroupInfoPanel } from './GroupInfoPanel';
 import { GroupTimeline } from './GroupTimeline';
 import { LiveSessionDialog, LiveSessionTimeline, type MessageFocus } from './LiveSessionTimeline';
 import { SessionHistoryDialog } from './SessionHistoryDialog';
+import { SessionSwitcher } from './SessionSwitcher';
 import { SilenceNote } from './SilenceNote';
+import { ThreadSwitcher } from './ThreadSwitcher';
 import { WorkspaceMenu } from './WorkspaceMenu';
 
 export function useModelLabel(bot: BotProfile | undefined): string {
@@ -59,7 +60,8 @@ export function useModelLabel(bot: BotProfile | undefined): string {
   return model?.label ?? modelId;
 }
 
-export function BotChatView({ chat }: { chat: BotChat }) {
+/** chat 为当前话题（群）或私聊；group 为根群，群级信息（成员面板、浏览器、工作区）按它展示 */
+export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: BotChat }) {
   const { t } = useI18n();
   const bots = useBotsStore((s) => s.bots);
   const chats = useBotsStore((s) => s.chats);
@@ -71,7 +73,7 @@ export function BotChatView({ chat }: { chat: BotChat }) {
   const markRead = useBotsStore((s) => s.markRead);
   const panelOpen = useBotsStore((s) => s.panelOpen);
   const panelTab = useBotsStore((s) => s.panelTab);
-  const browserTabCount = useBotsStore((s) => s.browserTabs[chat.id]?.tabs.length ?? 0);
+  const browserTabCount = useBotsStore((s) => s.browserTabs[group.id]?.tabs.length ?? 0);
   const panelWidth = useBotsStore((s) => s.panelWidth);
   const skillCatalog = useSettingsStore((s) => s.skills);
   const voiceInputEnabled = useSettingsStore((s) => s.voiceInputEnabled);
@@ -100,9 +102,8 @@ export function BotChatView({ chat }: { chat: BotChat }) {
     if (parent) useBotsStore.getState().nudgePanelWidth(-deltaX, parent.clientWidth);
   }, []);
   const [history, setHistory] = useState<{ id: string; title: string } | null>(null);
-  const [confirmNew, setConfirmNew] = useState(false);
   const [historyFocus, setHistoryFocus] = useState<MessageFocus | undefined>();
-  const [live, setLive] = useState<{ id: string; botId: string } | null>(null);
+  const [live, setLive] = useState<{ id: string; botId: string; title: string } | null>(null);
   const focus = useBotsStore((s) => (s.focus?.chatId === chat.id ? s.focus : null));
   const clearFocus = useBotsStore((s) => s.clearFocus);
 
@@ -126,9 +127,9 @@ export function BotChatView({ chat }: { chat: BotChat }) {
   const chatOptions = useMemo<ChatRefOption[]>(
     () =>
       chats
-        .filter((item) => item.id !== chat.id && item.archivedAt === undefined)
+        .filter((item) => item.id !== group.id && !item.parentId && item.archivedAt === undefined)
         .map((item) => ({ id: item.id, title: chatTitle(item, bots, t), kind: item.kind })),
-    [chats, chat.id, bots, t]
+    [chats, group.id, bots, t]
   );
   const summary = chatSummary(chat, { sessions, timeline, queue, names });
   const read = useBotsStore((s) => s.reads[summary.key]);
@@ -160,6 +161,24 @@ export function BotChatView({ chat }: { chat: BotChat }) {
   const historySpeaker = history ? speakerOf(history.id) : undefined;
   const liveBot = live ? byId.get(live.botId) : undefined;
   const livePending = live ? pending.filter((item) => item.conversationId === live.id) : [];
+  const liveTitle = live?.title ?? liveBot?.name ?? t('Deleted member');
+  const liveQueued =
+    live && delegations.find((item) => item.childConversationId === live.id)?.state === 'queued';
+
+  /**
+   * 委派「查看过程」与成员回复共用此回调：排队/进行中的委派子会话看实时投影
+   * （排队时尚未落盘，历史是空的），其余走历史快照。
+   */
+  const openConversation = useCallback((conversationId: string, title: string) => {
+    const target = delegationLiveTarget(useBotsStore.getState().delegations, conversationId);
+    if (target) {
+      if (!useBotsStore.getState().sessions[conversationId])
+        void useBotsStore.getState().trackSession(conversationId);
+      setLive({ id: conversationId, botId: target.botId, title });
+    } else {
+      setHistory({ id: conversationId, title });
+    }
+  }, []);
 
   useEffect(() => {
     markRead(summary.key, readMark);
@@ -244,20 +263,10 @@ export function BotChatView({ chat }: { chat: BotChat }) {
     return true;
   };
 
-  const startNewConversation = () => {
-    const before = chat.epochSeq ?? 0;
-    void window.electronAPI.bots.newSession(chat.id).then((result) => {
-      if (!result.ok) addToast({ type: 'error', title: chatErrorText(result.error, t) });
-      else if ('epochSeq' in result && result.epochSeq === before)
-        addToast({ type: 'info', title: t('This conversation has no messages yet.') });
-      else void useBotsStore.getState().refreshChats();
-    });
-  };
-
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-        <header className="flex h-[52px] shrink-0 items-center gap-2.5 border-b px-4">
+        <header className="@container flex h-[52px] shrink-0 items-center gap-2.5 border-b px-4">
           {direct ? (
             <BotAvatar bot={direct} busy={summary.running} />
           ) : (
@@ -282,59 +291,44 @@ export function BotChatView({ chat }: { chat: BotChat }) {
             </div>
           </div>
           <div className="flex-1" />
-          <WorkspaceMenu chat={chat} />
+          <WorkspaceMenu chat={group} />
           {direct ? (
-            <button
-              type="button"
-              disabled={archived}
-              onClick={() =>
-                void window.electronAPI.bots.newSession(chat.id).then((result) => {
-                  if (!result.ok)
-                    addToast({ type: 'error', title: chatErrorText(result.error, t) });
-                  else void useBotsStore.getState().refreshChats();
-                })
-              }
-              className="flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" />
-              {t('New conversation')}
-            </button>
+            <>
+              <SessionSwitcher
+                chat={chat}
+                botId={direct.id}
+                running={summary.running}
+                onView={(id, title) => setHistory({ id, title })}
+              />
+              <button
+                type="button"
+                disabled={archived}
+                onClick={() =>
+                  void window.electronAPI.bots.newSession(chat.id).then((result) => {
+                    if (!result.ok)
+                      addToast({ type: 'error', title: chatErrorText(result.error, t) });
+                    else void useBotsStore.getState().refreshChats();
+                  })
+                }
+                className="flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                title={t('New conversation')}
+                aria-label={t('New conversation')}
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" />
+                <span className="@min-[28rem]:inline hidden">{t('New conversation')}</span>
+              </button>
+            </>
           ) : (
-            <button
-              type="button"
-              disabled={archived}
-              onClick={() =>
-                summary.running ||
-                runtime?.current ||
-                runtime?.routing ||
-                chatDelegations.some((item) => item.state === 'queued' || item.state === 'running')
-                  ? setConfirmNew(true)
-                  : startNewConversation()
-              }
-              className="flex h-7 items-center gap-1 rounded-md border px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" />
-              {t('New conversation')}
-            </button>
+            <ThreadSwitcher group={group} thread={chat} />
           )}
         </header>
-        <ConfirmDialog
-          open={confirmNew}
-          onOpenChange={setConfirmNew}
-          title={t('Start a new conversation?')}
-          description={t(
-            'Members still replying are stopped, and delegations not marked keep are canceled. Earlier messages fold into one row; members start fresh after the divider.'
-          )}
-          confirmLabel={t('Stop and start')}
-          onConfirm={startNewConversation}
-        />
 
         {direct ? (
           <>
             <ActiveDelegations
               items={activeDelegations(chatDelegations, chat.id)}
               bots={byId}
-              onOpenConversation={(id, title) => setHistory({ id, title })}
+              onOpenConversation={openConversation}
             />
             <DirectTimeline chat={chat} bot={direct} focus={directFocus} onFocusDone={clearFocus} />
           </>
@@ -351,8 +345,10 @@ export function BotChatView({ chat }: { chat: BotChat }) {
             onLoadNewer={() => void useBotsStore.getState().loadNewer(chat.id)}
             onLoadAround={(seq) => useBotsStore.getState().loadAround(chat.id, seq)}
             onJumpLatest={() => void useBotsStore.getState().jumpLatest(chat.id)}
-            onOpenConversation={(id, title) => setHistory({ id, title })}
-            onOpenLive={(id, botId) => setLive({ id, botId })}
+            onOpenConversation={openConversation}
+            onOpenLive={(id, botId) =>
+              setLive({ id, botId, title: byId.get(botId)?.name ?? t('Deleted member') })
+            }
           />
         )}
 
@@ -370,7 +366,9 @@ export function BotChatView({ chat }: { chat: BotChat }) {
                 chatId={chat.id}
                 memberIds={chat.members}
                 bots={byId}
-                onOpenLive={(id, botId) => setLive({ id, botId })}
+                onOpenLive={(id, botId) =>
+                  setLive({ id, botId, title: byId.get(botId)?.name ?? t('Deleted member') })
+                }
               />
             )}
             <BotComposer
@@ -437,18 +435,11 @@ export function BotChatView({ chat }: { chat: BotChat }) {
             ))}
           </div>
           {panelTab === 'browser' ? (
-            <BotBrowserPanel chatId={chat.id} visible={panelOpen} />
+            <BotBrowserPanel chatId={group.id} visible={panelOpen} />
           ) : direct ? (
-            <BotProfilePanel
-              botId={direct.id}
-              chat={chat}
-              onOpenHistory={(id, title) => setHistory({ id, title })}
-            />
+            <BotProfilePanel botId={direct.id} chat={chat} onOpenHistory={openConversation} />
           ) : (
-            <GroupInfoPanel
-              chat={chat}
-              onOpenConversation={(id, title) => setHistory({ id, title })}
-            />
+            <GroupInfoPanel chat={group} thread={chat} onOpenConversation={openConversation} />
           )}
         </div>
       </motion.aside>
@@ -474,12 +465,14 @@ export function BotChatView({ chat }: { chat: BotChat }) {
       />
       <LiveSessionDialog
         conversationId={live?.id ?? null}
-        title={liveBot?.name ?? t('Deleted member')}
+        title={liveTitle}
         speaker={{
-          name: liveBot?.name ?? t('Deleted member'),
+          name: liveBot?.name ?? liveTitle,
           color: liveBot?.avatar.color ?? '#64748b',
           image: liveBot ? botAvatarSrc(liveBot) : undefined,
         }}
+        emptyTitle={liveQueued ? t('Queued and has not started yet') : undefined}
+        emptyDescription={liveQueued ? '' : undefined}
         footer={
           liveBot && livePending.length > 0 ? (
             <PendingBars items={livePending} bots={byId} showNames={false} />

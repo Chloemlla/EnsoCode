@@ -249,7 +249,7 @@ describe('验收条件 check', () => {
     ).toMatchObject({ ok: false });
   });
 
-  it('关联委派随验收流转：通过 → done 记通过；未通过 → 退回 todo，result 记原因', () => {
+  it('关联委派随验收流转：通过 → review 记通过；未通过 → 退回 todo，result 记原因', () => {
     const task = { ...todo, check };
     const linked = taskAfterDelegation(task, delegation({ check }), 5)!;
     expect(
@@ -258,7 +258,7 @@ describe('验收条件 check', () => {
         delegation({ state: 'completed', result: 'ok', check: { ...check, passed: true } }),
         9
       )
-    ).toMatchObject({ status: 'done', check: { ...check, passed: true } });
+    ).toMatchObject({ status: 'review', check: { ...check, passed: true } });
     const back = taskAfterDelegation(
       linked,
       delegation({
@@ -319,6 +319,54 @@ describe('人类指派与成员离开', () => {
   });
 });
 
+describe('群话题', () => {
+  const texts = (id: string) =>
+    chats
+      .readEntries(id, { limit: 100 })
+      .map((entry) => (entry.kind === 'system' ? entry.text : ''));
+
+  it('看板归根群：话题里的成员与根群共用一份；成员动作写本话题，人类动作写当前话题', async () => {
+    const thread = chats.createThread(chatId)!;
+    const other = chats.createThread(chatId)!;
+    chats.update(chatId, (draft) => ({ ...draft, activeThreadId: other.id }));
+    expect(service.add(thread.id, alice, { title: 'Login page' })).toMatchObject({ ok: true });
+    expect(service.list(chatId).map((task) => task.title)).toEqual(['Login page']);
+    expect(service.list(thread.id)).toEqual(service.list(chatId));
+    expect(emit).toHaveBeenCalledWith({ kind: 'tasks', chatId });
+    expect(texts(thread.id)).toEqual(['Alice 新建了任务 #1 Login page']);
+
+    service.claim(chatId, bob, '#1');
+    expect(texts(chatId)).toEqual(['Bob 认领了 #1 Login page']);
+
+    service.add(chatId, 'human', { title: 'API' });
+    expect(texts(other.id)).toEqual(['用户 新建了任务 #2 API']);
+    await service.assign(chatId, '#2', alice);
+    expect(send).toHaveBeenCalledWith(other.id, '@Alice 请处理任务 #2：API');
+
+    const gate = service.gate(thread.id, '#1', bob);
+    expect(gate).toMatchObject({ ok: true });
+    service.sync(
+      delegation({
+        chatId: thread.id,
+        parentBotId: bob,
+        targetBotId: alice,
+        taskId: store().find(chatId, '#1')!.id,
+      })
+    );
+    expect(store().find(chatId, '#1')).toMatchObject({ assigneeBotId: alice });
+    expect(texts(thread.id).at(-1)).toBe('Bob 把 #1 Login page 委派给 Alice');
+  });
+
+  it('根群归档后话题里也不能用看板', () => {
+    const thread = chats.createThread(chatId)!;
+    chats.update(chatId, (draft) => ({ ...draft, archivedAt: 1 }));
+    expect(service.add(thread.id, alice, { title: 'x' })).toEqual({
+      ok: false,
+      error: 'This group is archived.',
+    });
+  });
+});
+
 const DELEGATION = '44444444-4444-4444-8444-444444444444';
 function store(): GroupTaskStore {
   return (service as unknown as { deps: { store: GroupTaskStore } }).deps.store;
@@ -373,11 +421,17 @@ describe('委派联动状态机 taskAfterDelegation', () => {
     expect(taskAfterDelegation(todo, delegation({ taskId: 'other' }), 5)).toBeUndefined();
   });
 
-  it('委派完成 → done 并取结果摘要；失败 / 取消 → 退回 todo 清负责人', () => {
+  it('委派完成：执行人不是创建人 → review 保留负责人与委派；失败 / 取消 → 退回 todo 清负责人', () => {
     const linked = taskAfterDelegation(todo, delegation(), 5)!;
     expect(
       taskAfterDelegation(linked, delegation({ state: 'completed', result: 'all good' }), 9)
-    ).toMatchObject({ status: 'done', result: 'all good', updatedAt: 9 });
+    ).toMatchObject({
+      status: 'review',
+      result: 'all good',
+      assigneeBotId: delegation().targetBotId,
+      delegationId: DELEGATION,
+      updatedAt: 9,
+    });
     for (const state of ['failed', 'canceled'] as const) {
       const back = taskAfterDelegation(linked, delegation({ state }), 9)!;
       expect(back).toMatchObject({ status: 'todo', updatedAt: 9 });
@@ -387,6 +441,21 @@ describe('委派联动状态机 taskAfterDelegation', () => {
     expect(
       taskAfterDelegation({ ...linked, status: 'canceled' }, delegation({ state: 'failed' }), 9)
     ).toBeUndefined();
+    expect(
+      taskAfterDelegation(
+        { ...linked, status: 'review' },
+        delegation({ state: 'completed', deliveredAt: 11 }),
+        10
+      )
+    ).toBeUndefined();
+  });
+
+  it('执行人就是任务创建人：委派完成仍直接 done', () => {
+    const own = { ...todo, createdBy: delegation().targetBotId };
+    const linked = taskAfterDelegation(own, delegation(), 5)!;
+    expect(
+      taskAfterDelegation(linked, delegation({ state: 'completed', result: 'ok' }), 9)
+    ).toMatchObject({ status: 'done', result: 'ok' });
   });
 });
 
@@ -411,10 +480,133 @@ describe('委派闸门与同步', () => {
       delegationId: DELEGATION,
     });
     service.sync({ ...record, state: 'completed', result: 'done!' });
-    expect(store().find(chatId, '#1')).toMatchObject({ status: 'done', result: 'done!' });
+    expect(store().find(chatId, '#1')).toMatchObject({ status: 'review', result: 'done!' });
     expect(systemTexts().slice(-2)).toEqual([
       'Bob 把 #1 Login page 委派给 Alice',
-      'Alice 完成了 #1 Login page：done!',
+      'Alice 交付了 #1 Login page，待用户验收：done!',
     ]);
+  });
+});
+
+describe('待验收 review', () => {
+  /** creator 建任务、delegator 委派给 executor 并完成 → review */
+  const delivered = (creator: string, delegator: string, executor: string) => {
+    const task = added('Login page', creator);
+    const record = delegation({
+      chatId,
+      parentBotId: delegator,
+      targetBotId: executor,
+      taskId: task.id,
+    });
+    service.sync(record);
+    service.sync({ ...record, state: 'completed', result: 'shipped' });
+    expect(store().find(chatId, '#1')).toMatchObject({ status: 'review', assigneeBotId: executor });
+    return record;
+  };
+
+  it('执行人不能验收 / 退回 / 完成 / 取消自己的任务；看板占用提示待验收', () => {
+    delivered(alice, alice, bob);
+    expect(systemTexts().at(-1)).toBe('Bob 交付了 #1 Login page，待Alice验收：shipped');
+    expect(service.accept(chatId, bob, '#1')).toEqual({
+      ok: false,
+      error: 'Only the task creator (Alice) or a human can review task #1.',
+    });
+    expect(service.reject(chatId, bob, '#1', 'no')).toMatchObject({ ok: false });
+    expect(service.complete(chatId, bob, '#1', 'again')).toEqual({
+      ok: false,
+      error: 'Task #1 is awaiting review; only Alice or a human can accept or reject it.',
+    });
+    expect(service.cancel(chatId, bob, '#1')).toEqual({
+      ok: false,
+      error: 'Only the task creator (Alice) or a human can cancel task #1 while it awaits review.',
+    });
+    expect(service.claim(chatId, bob, '#1')).toEqual({
+      ok: false,
+      error: 'Task #1 is awaiting review by Alice.',
+    });
+    expect(service.gate(chatId, '#1', alice)).toEqual({
+      ok: false,
+      error: 'Task #1 is awaiting review by Alice.',
+    });
+    expect(store().find(chatId, '#1')).toMatchObject({ status: 'review' });
+  });
+
+  it('创建人验收通过 → done，写 system 时间线', () => {
+    delivered(alice, alice, bob);
+    expect(service.accept(chatId, alice, '#1')).toMatchObject({
+      ok: true,
+      task: { status: 'done', result: 'shipped', assigneeBotId: bob },
+    });
+    expect(systemTexts().at(-1)).toBe('Alice 验收通过了 #1 Login page');
+    expect(service.accept(chatId, alice, '#1')).toEqual({
+      ok: false,
+      error: 'Task #1 is not awaiting review.',
+    });
+    expect(cancelDelegation).not.toHaveBeenCalled();
+  });
+
+  it('退回必须写原因 → todo 清负责人与委派、记原因，可再次委派；再交付后通过清掉原因', () => {
+    const record = delivered('human', alice, bob);
+    expect(service.accept(chatId, alice, '#1')).toMatchObject({ ok: false });
+    expect(service.reject(chatId, 'human', '#1', '  ')).toEqual({
+      ok: false,
+      error: 'Give a reason when rejecting a task.',
+    });
+    const back = service.reject(chatId, 'human', '#1', '缺少测试');
+    expect(back).toMatchObject({ ok: true, task: { status: 'todo', returnReason: '缺少测试' } });
+    if (!back.ok) throw new Error(back.error);
+    expect(back.task).not.toHaveProperty('assigneeBotId');
+    expect(back.task).not.toHaveProperty('delegationId');
+    expect(systemTexts().at(-1)).toBe('用户 退回了 #1 Login page：缺少测试');
+    expect(service.gate(chatId, '#1', alice)).toMatchObject({ ok: true });
+    const again = { ...record, id: '77777777-7777-4777-8777-777777777777' };
+    service.sync(again);
+    service.sync({ ...again, state: 'completed', result: 'with tests' });
+    expect(store().find(chatId, '#1')).toMatchObject({
+      status: 'review',
+      returnReason: '缺少测试',
+    });
+    const done = service.accept(chatId, 'human', '#1');
+    expect(done).toMatchObject({ ok: true, task: { status: 'done', result: 'with tests' } });
+    expect(done.ok && done.task).not.toHaveProperty('returnReason');
+  });
+
+  it('委派人不是创建人时也不能验收；创建人可取消待验收任务', () => {
+    delivered('human', alice, bob);
+    expect(service.accept(chatId, alice, '#1')).toEqual({
+      ok: false,
+      error: 'Only the task creator (用户) or a human can review task #1.',
+    });
+    expect(service.cancel(chatId, 'human', '#1')).toMatchObject({
+      ok: true,
+      task: { status: 'canceled' },
+    });
+  });
+
+  it('成员自己建、自己认领完成的任务行为不变', () => {
+    added('Own', bob);
+    service.claim(chatId, bob, '#1');
+    expect(service.complete(chatId, bob, '#1', 'ok')).toMatchObject({
+      ok: true,
+      task: { status: 'done' },
+    });
+  });
+
+  it('tool 入口：list 显示 review 与退回原因；accept / reject 走同一校验', () => {
+    delivered(alice, alice, bob);
+    expect(service.tool(chatId, bob, { action: 'accept', id: '#1' })).toMatchObject({
+      ok: false,
+    });
+    expect(service.tool(chatId, alice, { action: 'reject', id: '#1' })).toEqual({
+      ok: false,
+      error: 'Give a reason when rejecting a task.',
+    });
+    expect(
+      service.tool(chatId, alice, { action: 'reject', id: '#1', reason: 'redo' })
+    ).toMatchObject({ ok: true, task: { id: '#1', status: 'todo', returnReason: 'redo' } });
+    expect(service.tool(chatId, alice, { action: 'list' })).toMatchObject({
+      ok: true,
+      tasks: [{ id: '#1', status: 'todo', returnReason: 'redo' }],
+    });
   });
 });

@@ -27,6 +27,7 @@ import { buildBotModeInstruction, buildBotSystemPrompt } from './botPrompt';
 import type { BotStore } from './botStore';
 import type { BotChatStore } from './chatStore';
 import type { MemberTaskClassifier } from './memberTaskClassifier';
+import { isModelFailure, type ModelProbeResult } from './modelProbe';
 import { StartedDeliveryIndex } from './startedDeliveries';
 import { messageTokens } from './turnTokens';
 
@@ -50,6 +51,7 @@ export interface BotAuthorityPort {
     bot: ConversationBotBinding
   ): ConversationAuthority | undefined;
   endBotConversation(conversationId: string): ConversationAuthority | undefined;
+  reopenBotConversation(conversationId: string): ConversationAuthority | undefined;
   removeBotConversation(conversationId: string): ConversationAuthority | undefined;
   botConversations(): ConversationAuthority[];
 }
@@ -117,6 +119,13 @@ export interface BotSessionHostDeps {
   };
   /** 核心笔记：成员 memory 关闭时返回 undefined */
   notes?: { snapshot(botId: string, chatId: string | null): BotNotesSnapshot | undefined };
+  /**
+   * 投递前实测完整模型链；回退配置只用于本次投递，不修改成员档案。
+   * 成员与默认均不可用才拒绝，error 为可读原因。
+   */
+  probe?: (bot: BotProfile) => Promise<ModelProbeResult>;
+  /** 真实投递报模型类错误：作废该成员的测通缓存 */
+  invalidateProbe?: (bot: BotProfile) => void;
   /** 静默看门狗阈值，缺省 BOT_SILENCE_MS */
   silenceMs?: number;
   now?: () => number;
@@ -234,6 +243,7 @@ export class BotSessionHost {
   private readonly contextTokens = new Map<string, number>();
   /** 会话已看到的笔记版本（spawn 时进系统提示词，之后变化在投递前追加一次） */
   private readonly notesSeen = new Map<string, string>();
+  private readonly modelNotices = new Map<string, string>();
   private readonly deliveries = new Map<string, Map<string, 'sent' | 'started'>>();
   /** 入 IPC 不等于已消费；保留原投递与顺序，直到 worker 回执或会话终止。 */
   private readonly pendingSteers = new Map<Delivery, string | undefined>();
@@ -384,15 +394,18 @@ export class BotSessionHost {
     );
   }
 
-  private async syncEngine(conversationId: string): Promise<string | undefined> {
+  private async syncEngine(
+    conversationId: string,
+    effective?: BotProfile
+  ): Promise<string | undefined> {
     if (
       this.disposed ||
       !this.live.has(conversationId) ||
-      this.independentSpecs.has(conversationId)
+      (this.independentSpecs.has(conversationId) && !effective)
     )
       return undefined;
     const previous = this.liveProfiles.get(conversationId);
-    const bot = this.deps.bots.get(this.binding(conversationId)?.botId ?? '');
+    const bot = effective ?? this.deps.bots.get(this.binding(conversationId)?.botId ?? '');
     if (!previous || !bot) return undefined;
     const a = previous.engine;
     const b = bot.engine;
@@ -413,7 +426,7 @@ export class BotSessionHost {
         return 'session-unavailable';
       this.liveProfiles.set(conversationId, { ...previous, engine: b });
       // 配置可能在取凭证期间再次改变；发下一条消息前追上最后一次保存。
-      return this.syncEngine(conversationId);
+      return effective ? undefined : this.syncEngine(conversationId);
     } catch {
       return 'model-update-failed';
     }
@@ -609,6 +622,14 @@ export class BotSessionHost {
   sessionsOf(chatId: string): BotSessionRecord[] {
     const chat = this.deps.chats.get(chatId);
     const current = new Set(Object.values(chat?.sessions ?? {}).map((s) => s.conversationId));
+    const projects = new Map<string, string | undefined>();
+    const projectOf = (botId: string) => {
+      if (!projects.has(botId)) {
+        const workspace = chat && this.resolveWorkspace(chat, botId);
+        projects.set(botId, workspace?.ok ? workspace.projectId : undefined);
+      }
+      return projects.get(botId);
+    };
     return this.deps.authority
       .botConversations()
       .filter((conversation) => conversation.bot?.chatId === chatId)
@@ -617,6 +638,8 @@ export class BotSessionHost {
         botId: conversation.bot!.botId,
         lifecycle: conversation.lifecycle,
         current: current.has(conversation.conversationId),
+        resumable:
+          chat?.kind === 'direct' && conversation.projectId === projectOf(conversation.bot!.botId),
       }));
   }
 
@@ -669,6 +692,43 @@ export class BotSessionHost {
     }
     this.deps.emit({ kind: 'chat', chatId });
     return { ok: true, conversationId: created.conversationId };
+  }
+
+  /** 切回本聊天该成员的旧对话：重新打开它作当前会话，原当前会话结束只读；工作区已换的不能续 */
+  switchSession(chatId: string, botId: string, conversationId: string): { ok: true } | Fail {
+    const checked = this.canSwitch(chatId, botId, conversationId);
+    if (!checked.ok) return checked;
+    const current = this.deps.chats.get(chatId)?.sessions[botId];
+    if (current?.conversationId === conversationId) return { ok: true };
+    if (!this.deps.authority.reopenBotConversation(conversationId))
+      return { ok: false, error: 'authority-unavailable' };
+    if (current) this.retireSession(current.conversationId);
+    this.bindings.set(conversationId, { botId, chatId });
+    const cursor = this.deps.chats.lastSeq(chatId);
+    this.deps.chats.update(chatId, (draft) => {
+      draft.sessions[botId] = { conversationId, cursor };
+      return draft;
+    });
+    this.deps.emit({ kind: 'chat', chatId });
+    return { ok: true };
+  }
+
+  /** switchSession 的前置校验（无副作用），调用方据此决定是否先停掉当前回合 */
+  canSwitch(chatId: string, botId: string, conversationId: string): { ok: true } | Fail {
+    const chat = this.deps.chats.get(chatId);
+    if (!chat) return { ok: false, error: 'chat-not-found' };
+    if (!chat.members.includes(botId)) return { ok: false, error: 'not-member' };
+    const bot = this.deps.bots.get(botId);
+    if (!bot) return { ok: false, error: 'bot-not-found' };
+    if (bot.archivedAt !== undefined) return { ok: false, error: 'bot-archived' };
+    const target = this.deps.authority.conversation(conversationId);
+    if (target?.bot?.botId !== botId || target.bot.chatId !== chatId)
+      return { ok: false, error: 'session-not-found' };
+    if (chat.sessions[botId]?.conversationId === conversationId) return { ok: true };
+    const workspace = this.resolveWorkspace(chat, botId);
+    if (!workspace.ok) return workspace;
+    if (target.projectId !== workspace.projectId) return { ok: false, error: 'workspace-changed' };
+    return { ok: true };
   }
 
   /** 返回 ok 前确认命令已交给 worker；排队时 queued=true，之后失败经 onTurnFinished 回报 */
@@ -798,7 +858,9 @@ export class BotSessionHost {
   discardBot(botId: string): { ok: true } | { ok: false; reason: string; chatIds?: string[] } {
     if (!this.deps.bots.get(botId)) return { ok: false, reason: 'not-found' };
     const chats = this.deps.chats.list();
-    const bossOf = chats.filter((chat) => chat.bossBotId === botId).map((chat) => chat.id);
+    const bossOf = chats
+      .filter((chat) => !chat.parentId && chat.bossBotId === botId)
+      .map((chat) => chat.id);
     if (bossOf.length > 0) return { ok: false, reason: 'boss', chatIds: bossOf };
     for (const listener of this.discardListeners) listener({ botId });
     for (const chat of chats) {
@@ -1080,7 +1142,8 @@ export class BotSessionHost {
   private notesFor(conversationId: string, botId: string): BotNotesSnapshot | undefined {
     if (!this.deps.notes) return undefined;
     const chatId = this.deps.authority.conversation(conversationId)?.bot?.chatId;
-    const chat = chatId ? this.deps.chats.get(chatId) : undefined;
+    // 群话题共用根群的群笔记
+    const chat = chatId ? this.deps.chats.rootOf(chatId) : undefined;
     return this.deps.notes.snapshot(botId, chat?.kind === 'group' ? chat.id : null);
   }
 
@@ -1149,8 +1212,10 @@ export class BotSessionHost {
       delivery.epoch !== (this.epochs.get(conversationId) ?? 0)
     )
       return { ok: false, error: 'canceled' };
-    const bot = this.usableBot(delivery);
+    let bot = this.usableBot(delivery);
     if (!bot) return { ok: false, error: 'session-unavailable' };
+    const independent = this.independentSpecs.get(conversationId)?.bot;
+    if (independent) bot = independent;
     this.slots.set(conversationId, { sawRunning: false });
     if (!this.turnKeys.has(conversationId)) this.turnKeys.set(conversationId, randomUUID());
     this.tasks.set(conversationId, delivery.text.length <= 2000 ? delivery.text : '');
@@ -1166,12 +1231,30 @@ export class BotSessionHost {
       this.quiet(conversationId);
       return { ok: false, error };
     };
+    let fallback: Extract<ModelProbeResult, { ok: true }>['fallback'];
+    let selected: BotProfile | undefined = independent;
+    if (this.deps.probe) {
+      const probed = await this.deps
+        .probe(bot)
+        .catch((): { ok: false; error: string } => ({ ok: false, error: '模型检测失败' }));
+      if (this.disposed) return fail('disabled');
+      if (
+        this.stopping.has(conversationId) ||
+        delivery.epoch !== (this.epochs.get(conversationId) ?? 0)
+      )
+        return fail('canceled');
+      if (!probed.ok) return fail(probed.error);
+      fallback = probed.fallback;
+      if (fallback) bot = { ...bot, engine: fallback.model };
+      else if (probed.model) bot = { ...bot, engine: { ...bot.engine, ...probed.model } };
+      if (fallback || probed.model) selected = bot;
+    }
     let notes: { text: string; seen?: string } = { text: delivery.text };
     if (!this.live.has(conversationId)) {
-      const spawned = await this.spawnLive(delivery, bot);
+      const spawned = await this.spawnLive(delivery, bot, selected);
       if (spawned) return fail(spawned);
     } else {
-      const error = await this.syncEngine(conversationId);
+      const error = await this.syncEngine(conversationId, selected);
       if (error) return fail(error);
       notes = this.withNotesUpdate(delivery);
     }
@@ -1184,6 +1267,7 @@ export class BotSessionHost {
       const sent = this.deps.runtime.retry?.(conversationId);
       if (!sent?.ok) return fail(sent?.error ?? 'retry-failed');
       this.scheduleSettle(conversationId, this.slots.get(conversationId)!, 'nothing-to-retry');
+      this.modelNotice(delivery, bot, fallback);
       return { ok: true, conversationId };
     }
     const sent = this.deps.runtime.prompt(
@@ -1193,10 +1277,39 @@ export class BotSessionHost {
       delivery.deliveryId
     );
     if (!sent.ok) return fail(sent.error ?? 'prompt-failed');
+    this.modelNotice(delivery, bot, fallback);
     this.retryTasks.set(conversationId, this.tasks.get(conversationId) ?? '');
     if (notes.seen !== undefined) this.notesSeen.set(conversationId, notes.seen);
     this.deliverySent(delivery);
     return { ok: true, conversationId };
+  }
+
+  private modelNotice(
+    delivery: Delivery,
+    bot: BotProfile,
+    fallback: Extract<ModelProbeResult, { ok: true }>['fallback']
+  ): void {
+    const chatId = delivery.chatId || this.origins.get(delivery.conversationId)?.chatId || '';
+    const key = `${chatId}:${bot.id}`;
+    if (!fallback) {
+      this.modelNotices.delete(key);
+      return;
+    }
+    const text = `${bot.name} 的模型不可用，本次改用默认模型 ${fallback.label}（${fallback.reason}）`;
+    if (this.modelNotices.get(key) === text) return;
+    this.modelNotices.set(key, text);
+    const chat = this.deps.chats.get(chatId);
+    if (chat?.kind === 'group') {
+      const saved = this.deps.chats.appendEntry(chat.id, {
+        kind: 'system',
+        id: randomUUID(),
+        at: this.now(),
+        text,
+      });
+      if (saved) this.deps.emit({ kind: 'timeline', chatId: chat.id, seq: saved.seq });
+    } else {
+      this.deps.emit({ kind: 'model-notice', chatId, text });
+    }
   }
 
   /** 会话仍可用（未结束、成员未归档、项目在、仍在聊天里）时返回成员档案 */
@@ -1220,10 +1333,16 @@ export class BotSessionHost {
   }
 
   /** spawn（带 resumeFile 恢复）并登记为 live；失败返回错误码 */
-  private async spawnLive(delivery: Delivery, bot: BotProfile): Promise<string | undefined> {
+  private async spawnLive(
+    delivery: Delivery,
+    bot: BotProfile,
+    effective?: BotProfile
+  ): Promise<string | undefined> {
     const { conversationId } = delivery;
     const spec = this.spawnSpec(delivery);
     if (!spec.ok) return spec.error;
+    if (effective)
+      spec.spec = { ...spec.spec, bot: { ...spec.spec.bot, engine: effective.engine } };
     if (spec.spec.bot.tools === 'all')
       spec.spec = {
         ...spec.spec,
@@ -1701,6 +1820,11 @@ export class BotSessionHost {
     };
     if (deliveryId === this.activeDeliveries.get(conversationId))
       this.activeDeliveries.delete(conversationId);
+    if (!ok && !stopped && isModelFailure(error)) {
+      const bot =
+        this.independentSpecs.get(conversationId)?.bot ?? this.deps.bots.get(binding.botId);
+      if (bot) this.deps.invalidateProbe?.(bot);
+    }
     if (deliveryId && this.deliveries.get(conversationId)?.get(deliveryId) !== 'started')
       this.deliveries.get(conversationId)?.delete(deliveryId);
     for (const listener of this.listeners) {
@@ -1754,6 +1878,7 @@ export class BotSessionHost {
     this.sentListeners.clear();
     this.startedListeners.clear();
     this.deliveries.clear();
+    this.modelNotices.clear();
   }
 
   private cancelQueued(predicate: (item: Delivery) => boolean, reason = 'canceled'): void {
@@ -1836,10 +1961,12 @@ export class BotSessionHost {
           : { ok: false, error: 'workspace-unavailable' };
       }
       case 'chat-home': {
-        const project = authority.ensureBotHomeProject(this.deps.chats.workspaceDir(chat.id));
+        // 群话题用根群的群目录；自愈也写回根群（话题配置随根群级联）
+        const home = chat.parentId ?? chat.id;
+        const project = authority.ensureBotHomeProject(this.deps.chats.workspaceDir(home));
         if (!project) return { ok: false, error: 'workspace-unavailable' };
         if (project.projectId !== chat.workspace.projectId) {
-          this.deps.chats.update(chat.id, (draft) => {
+          this.deps.chats.update(home, (draft) => {
             draft.workspace = { kind: 'chat-home', projectId: project.projectId };
             return draft;
           });

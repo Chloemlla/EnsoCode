@@ -26,7 +26,7 @@ function usePresenceContext(chatId: string): PresenceContext {
   const silences = useBotsStore((s) => s.silences);
   const delegations = useBotsStore((s) => s.delegations);
   const holders = useBotsStore((s) => s.browserHolders);
-  const chatTabs = useBotsStore((s) => s.browserTabs[chatId]?.tabs);
+  const chatTabs = useBotsStore((s) => s.browserTabs[chat?.parentId ?? chatId]?.tabs);
   const clearedAt = useBotsStore((s) => lastHumanAt(s.timelines[chatId]?.entries ?? []));
   return useMemo(
     () => ({

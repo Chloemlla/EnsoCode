@@ -19,6 +19,8 @@ export interface SmartRouteDecision {
   intent?: SmartRouteIntent;
   /** build 但没有能动手的成员：交给群主 */
   noWriter?: boolean;
+  /** 选人模型不可用（含原因）；空名单走群主兜底时群里可见提示 */
+  failure?: string;
 }
 
 /** build 时附在被选成员投递末尾的指令 */

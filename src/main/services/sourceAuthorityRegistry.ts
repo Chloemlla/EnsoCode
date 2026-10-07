@@ -366,6 +366,19 @@ export class SourceAuthorityRegistry {
     return this.copyConversation(conversation);
   }
 
+  /** 仅 Main：私聊切回旧对话时重新打开（所属项目须仍 active） */
+  reopenBotConversation(conversationId: string): ConversationAuthorityProjection | undefined {
+    const conversation = this.conversations.get(conversationId);
+    if (!conversation?.bot) return undefined;
+    if (this.projects.get(conversation.projectId)?.state !== 'active') return undefined;
+    if (conversation.lifecycle === 'ended') {
+      conversation.lifecycle = conversation.sessionFile ? 'ready' : 'draft';
+      conversation.version += 1;
+      this.commit();
+    }
+    return this.copyConversation(conversation);
+  }
+
   removeBotConversation(conversationId: string): ConversationAuthorityProjection | undefined {
     const conversation = this.conversations.get(conversationId);
     if (!conversation?.bot) return undefined;

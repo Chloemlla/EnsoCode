@@ -21,6 +21,16 @@ describe('bot 聊天共享浏览器', () => {
     expect(browserSessionKey('conv-a')).toBe('conv-a');
   });
 
+  it('群话题共用根群的浏览器', () => {
+    const rootOf = (id: string) => (id === 'thread-1' ? 'chat-1' : id);
+    expect(browserSessionKey('conv-a', { chatId: 'thread-1' }, undefined, rootOf)).toBe(
+      botBrowserKey('chat-1')
+    );
+    expect(
+      browserSessionKey('child', { chatId: null, delegationId: 'd1' }, () => 'thread-1', rootOf)
+    ).toBe(botBrowserKey('chat-1'));
+  });
+
   it('能从键反解出聊天 id，普通会话 id 不误判', () => {
     expect(botBrowserChatId(botBrowserKey('chat-1'))).toBe('chat-1');
     expect(botBrowserChatId('conv-a')).toBeNull();

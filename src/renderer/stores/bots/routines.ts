@@ -22,9 +22,14 @@ export function schedulePreview(
 
 /** 例行任务可投递的聊天：该成员所在、未归档；私聊在前 */
 export function routineTargets(chats: readonly BotChat[], botId: string): BotChat[] {
-  return chats
-    .filter((chat) => chat.archivedAt === undefined && chat.members.includes(botId))
-    .sort((a, b) => Number(a.kind === 'group') - Number(b.kind === 'group'));
+  return (
+    chats
+      // 群话题不单列：例行任务挂在根群
+      .filter(
+        (chat) => chat.archivedAt === undefined && !chat.parentId && chat.members.includes(botId)
+      )
+      .sort((a, b) => Number(a.kind === 'group') - Number(b.kind === 'group'))
+  );
 }
 
 export type RoutineDraftIssue = 'title' | 'prompt' | 'schedule' | 'chat';

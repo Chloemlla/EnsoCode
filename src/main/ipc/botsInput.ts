@@ -17,6 +17,7 @@ import {
 } from '@shared/types/agent';
 import {
   BOT_ROUTING_MODES,
+  BOT_THREAD_TITLE_MAX,
   type BotChat,
   type BotList,
   type BotRoutingMode,
@@ -461,6 +462,42 @@ export function parseChatCloneInput(value: unknown): { chatId: string; title: st
   if (!input || !onlyKeys(input, ['chatId', 'title']) || !isBotId(input.chatId)) return null;
   const title = typeof input.title === 'string' ? input.title.trim() : '';
   return title && text(title, MAX.short) ? { chatId: input.chatId, title } : null;
+}
+
+export function parseThreadChatInput(value: unknown): string | null {
+  const input = record(value);
+  return input && onlyKeys(input, ['chatId']) && isBotId(input.chatId) ? input.chatId : null;
+}
+
+export function parseThreadSelectInput(
+  value: unknown
+): { chatId: string; threadId: string } | null {
+  const input = record(value);
+  return input &&
+    onlyKeys(input, ['chatId', 'threadId']) &&
+    isBotId(input.chatId) &&
+    isBotId(input.threadId)
+    ? { chatId: input.chatId, threadId: input.threadId }
+    : null;
+}
+
+export function parseThreadUpdateInput(value: unknown): { chatId: string; title: string } | null {
+  const input = record(value);
+  if (!input || !onlyKeys(input, ['chatId', 'title']) || !isBotId(input.chatId)) return null;
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  return title && title.length <= BOT_THREAD_TITLE_MAX ? { chatId: input.chatId, title } : null;
+}
+
+export function parseSessionSwitchInput(
+  value: unknown
+): { chatId: string; conversationId: string } | null {
+  const input = record(value);
+  return input &&
+    onlyKeys(input, ['chatId', 'conversationId']) &&
+    isBotId(input.chatId) &&
+    isBotId(input.conversationId)
+    ? { chatId: input.chatId, conversationId: input.conversationId }
+    : null;
 }
 
 export function parseSessionHistoryInput(

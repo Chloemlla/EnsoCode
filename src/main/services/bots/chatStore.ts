@@ -34,6 +34,15 @@ export interface BotChatDraft {
 
 const TIMELINE = 'timeline.jsonl';
 const NEWLINE = 0x0a;
+/** 话题跟随根群的群配置字段（含归档，归档检查对话题同样生效） */
+const THREAD_SHARED = [
+  'title',
+  'members',
+  'bossBotId',
+  'workspace',
+  'routing',
+  'archivedAt',
+] as const;
 /** 倒读时每隔这么多 seq 记一个行首偏移，深翻页直接从附近开始读 */
 const CHECKPOINT_EVERY = 128;
 /** `{"seq":N,"id":"…"` 是 appendEntry 写出的固定前缀；建索引时免整行解析 */
@@ -102,6 +111,9 @@ export class BotChatStore {
       const chat = parseBotChat(migrateRecord('chat', readJson(join(root, name, 'chat.json'))));
       if (chat?.id === name) this.chats.set(name, chat);
     }
+    // 根群缺失的孤儿话题不加载
+    for (const chat of this.chats.values())
+      if (chat.parentId && !this.isRoot(this.chats.get(chat.parentId))) this.chats.delete(chat.id);
   }
 
   list(): BotChat[] {
@@ -110,6 +122,47 @@ export class BotChatStore {
 
   get(id: string): BotChat | undefined {
     return this.chats.get(id);
+  }
+
+  /** 话题所属根群；根群返回自身 */
+  rootOf(id: string): BotChat | undefined {
+    const chat = this.chats.get(id);
+    return chat?.parentId ? this.chats.get(chat.parentId) : chat;
+  }
+
+  /** 根群自身在前，其余话题按创建顺序；非根群返回空 */
+  threadsOf(rootId: string): BotChat[] {
+    const root = this.chats.get(rootId);
+    if (!this.isRoot(root)) return [];
+    return [root, ...this.list().filter((chat) => chat.parentId === rootId)];
+  }
+
+  activeThread(rootId: string): BotChat | undefined {
+    const root = this.chats.get(rootId);
+    if (!this.isRoot(root)) return undefined;
+    const active = root.activeThreadId && this.chats.get(root.activeThreadId);
+    return active && active.parentId === rootId ? active : root;
+  }
+
+  createThread(rootId: string, title?: string): BotChat | undefined {
+    const root = this.chats.get(rootId);
+    if (!this.isRoot(root)) return undefined;
+    const at = this.now();
+    const chat = parseBotChat({
+      ...this.shared(root),
+      kind: 'group',
+      id: randomUUID(),
+      parentId: root.id,
+      threadTitle: title,
+      pinned: false,
+      sessions: {},
+      createdAt: at,
+      updatedAt: at,
+      version: 1,
+    });
+    if (!chat) return undefined;
+    this.persist(chat);
+    return chat;
   }
 
   workspaceDir(id: string): string {
@@ -145,14 +198,29 @@ export class BotChatStore {
     if (!current) return undefined;
     const next = mutate(structuredClone(current));
     if (next.id !== id) return undefined;
+    const root = current.parentId ? this.chats.get(current.parentId) : undefined;
     const chat = parseBotChat({
       ...next,
+      ...(root ? this.shared(root) : {}),
+      parentId: current.parentId,
       createdAt: current.createdAt,
       updatedAt: this.now(),
       version: current.version + 1,
     });
     if (!chat) return undefined;
     this.persist(chat);
+    if (
+      this.isRoot(chat) &&
+      THREAD_SHARED.some((key) => JSON.stringify(current[key]) !== JSON.stringify(chat[key]))
+    )
+      for (const thread of this.threadsOf(chat.id).slice(1)) {
+        const synced = parseBotChat({
+          ...thread,
+          ...this.shared(chat),
+          version: thread.version + 1,
+        });
+        if (synced) this.persist(synced);
+      }
     return chat;
   }
 
@@ -426,6 +494,15 @@ export class BotChatStore {
   private persist(chat: BotChat): void {
     writeJsonAtomic(join(this.dir(chat.id), 'chat.json'), withSchemaVersion('chat', chat));
     this.chats.set(chat.id, chat);
+  }
+
+  private isRoot(chat: BotChat | undefined): chat is BotChat {
+    return chat?.kind === 'group' && !chat.parentId;
+  }
+
+  private shared(root: BotChat): Pick<BotChat, (typeof THREAD_SHARED)[number]> {
+    const picked = Object.fromEntries(THREAD_SHARED.map((key) => [key, root[key]]));
+    return structuredClone(picked) as Pick<BotChat, (typeof THREAD_SHARED)[number]>;
   }
 
   private dir(id: string): string {

@@ -57,16 +57,18 @@ export class RoutineRunner {
     const options = { deliveryId, queueIfBusy: true, source: 'background' as const };
     return new Promise((resolve) => {
       this.pending.set(deliveryId, resolve);
-      const sent =
-        this.deps.chats.get(routine.chatId)?.kind === 'group'
-          ? this.deps.groups.runAs(
-              routine.chatId,
-              executorId,
-              text,
-              dryRun ? `${routine.title}（试运行）` : routine.title,
-              options
-            )
-          : this.deps.host.deliver(routine.chatId, executorId, text, options);
+      // 群例行任务投进根群的当前话题
+      const root = this.deps.chats.rootOf(routine.chatId);
+      const thread = root?.kind === 'group' ? this.deps.chats.activeThread(root.id) : undefined;
+      const sent = thread
+        ? this.deps.groups.runAs(
+            thread.id,
+            executorId,
+            text,
+            dryRun ? `${routine.title}（试运行）` : routine.title,
+            options
+          )
+        : this.deps.host.deliver(routine.chatId, executorId, text, options);
       void sent
         .then((result) => {
           // 同一 deliveryId 已处理过（占用之外的兜底）：不会再有结束事件

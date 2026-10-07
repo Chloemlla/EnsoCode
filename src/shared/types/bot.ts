@@ -88,6 +88,11 @@ export interface BotChat {
   pinOrder?: number;
   /** 群最近一次「新对话」分隔线的 seq：成员上下文与后台读取从这里之后开始 */
   epochSeq?: number;
+  /** 群话题：所属根群（话题是根群下的隐藏子群，群配置由根群级联） */
+  parentId?: BotChatId;
+  threadTitle?: string;
+  /** 仅根群：当前话题，缺省或失效时为根群自身 */
+  activeThreadId?: BotChatId;
   sessions: Record<BotId, BotChatSession>;
   createdAt: number;
   updatedAt: number;
@@ -309,6 +314,7 @@ const ROUTING_LIMITS = { maxHops: 20, maxTurnsPerBot: 10 } as const;
 export const BOT_NAME_MAX = 24;
 /** 群聊里 @ 全体的保留写法 */
 export const BOT_MENTION_ALL = ['所有人', 'everyone', 'all'] as const;
+export const BOT_THREAD_TITLE_MAX = 80;
 const BOT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const COLOR_RE = /^#[0-9a-f]{6}$/iu;
@@ -517,6 +523,12 @@ export function parseBotChat(value: unknown): BotChat | undefined {
   if (isTime(value.snoozedUntil)) chat.snoozedUntil = value.snoozedUntil;
   if (chat.pinned && isSeq(value.pinOrder)) chat.pinOrder = value.pinOrder;
   if (isSeq(value.epochSeq)) chat.epochSeq = value.epochSeq;
+  if (chat.kind === 'group') {
+    if (isBotChatId(value.parentId) && value.parentId !== chat.id) chat.parentId = value.parentId;
+    else if (isBotChatId(value.activeThreadId)) chat.activeThreadId = value.activeThreadId;
+    const threadTitle = str(value.threadTitle).trim().slice(0, BOT_THREAD_TITLE_MAX);
+    if (threadTitle) chat.threadTitle = threadTitle;
+  }
   return chat;
 }
 
@@ -767,7 +779,8 @@ export function parseBotRoutineRun(value: unknown): BotRoutineRun | undefined {
   return run;
 }
 
-export const GROUP_TASK_STATUSES = ['todo', 'doing', 'done', 'canceled'] as const;
+/** review：委派交付、执行人不是创建人时待创建人或人类验收 */
+export const GROUP_TASK_STATUSES = ['todo', 'doing', 'review', 'done', 'canceled'] as const;
 export type GroupTaskStatus = (typeof GROUP_TASK_STATUSES)[number];
 export const GROUP_TASK_TITLE_MAX = 200;
 export const GROUP_TASK_TEXT_MAX = 4000;
@@ -784,6 +797,8 @@ export interface GroupTask {
   delegationId?: string;
   /** 完成说明 */
   result?: string;
+  /** 最近一次验收退回的原因；验收通过时清除 */
+  returnReason?: string;
   /** 验收条件；passed 为最近一次校验结果 */
   check?: TaskCheck;
   /** 成员认领 / 被指派的时间：complete 验收只看此后的工具结果 */
@@ -840,6 +855,8 @@ export function parseGroupTask(value: unknown): GroupTask | undefined {
   if (isBotId(value.assigneeBotId)) task.assigneeBotId = value.assigneeBotId;
   if (isBotId(value.delegationId)) task.delegationId = value.delegationId;
   if (isText(value.result)) task.result = value.result.slice(0, GROUP_TASK_TEXT_MAX);
+  if (isText(value.returnReason))
+    task.returnReason = value.returnReason.slice(0, GROUP_TASK_TEXT_MAX);
   const check = parseTaskCheck(value.check);
   if (check) task.check = check;
   if (isTime(value.claimedAt)) task.claimedAt = value.claimedAt;
