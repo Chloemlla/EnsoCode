@@ -2188,6 +2188,10 @@ export const zhTranslations: Record<string, string> = {
   '{{name}} owns group chats': '{{name}} 是群主',
   'Choose another owner in {{groups}} first.': '请先在「{{groups}}」中更换群主。',
   'Export character card': '导出人物卡',
+  'Exports a SillyTavern V2 PNG: the avatar as image, persona embedded. Restore it in a new member via "Import character card".':
+    '导出 SillyTavern V2 PNG：图片是头像，人设已嵌在其中。可在新建成员时用「导入人物卡」还原。',
+  'Persona embedded in the PNG. Restore it in a new member via "Import character card".':
+    '人设已嵌在图片里，可在新建成员时用「导入人物卡」还原。',
   Profile: '资料',
   Abilities: '能力',
   Routines: '例行',
