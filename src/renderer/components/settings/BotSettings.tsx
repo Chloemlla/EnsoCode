@@ -1,4 +1,5 @@
 import { MAX_BOT_MAX_RUNNING_TURNS, MIN_BOT_MAX_RUNNING_TURNS } from '@shared/bots/concurrency';
+import { smartRouteTimeoutMs } from '@shared/bots/smartRoute';
 import { canBeVirtualMember } from '@shared/virtualModels';
 import * as React from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
@@ -158,6 +159,8 @@ function BotRouteClassifierRow() {
         offLabel={t('Default (title model)')}
         judgeLabel={t('Fast chat model')}
         description={t('Falls back to the group owner on timeout, error or an unclear answer.')}
+        effectiveTimeoutMs={value ? smartRouteTimeoutMs(value) : undefined}
+        timeoutHint={t('Handed to the group owner on timeout.')}
       />
     </div>
   );

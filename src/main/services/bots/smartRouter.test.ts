@@ -74,6 +74,25 @@ describe('createSmartRouter', () => {
     expect(router().timeoutMs()).toBe(12_000);
   });
 
+  it('用户在设置页明确设的时限照用：3 秒就是 3 秒，越界收到 0.5–15s', async () => {
+    const set = (timeoutMs: number) => {
+      settings = {
+        botRouteClassifier: { source: 'judge', model: judgeModel, timeoutMs, timeoutSet: true },
+      };
+    };
+    set(3000);
+    expect(router().timeoutMs()).toBe(3000);
+    judge.mockResolvedValueOnce('Bob');
+    await router().select(input, signal);
+    expect(judge.mock.calls[0][0]).toMatchObject({ timeoutMs: 3000 });
+    set(500);
+    expect(router().timeoutMs()).toBe(500);
+    set(100);
+    expect(router().timeoutMs()).toBe(500);
+    set(60_000);
+    expect(router().timeoutMs()).toBe(15_000);
+  });
+
   it('judge 回复多名时按顺序返回名单', async () => {
     judge.mockResolvedValueOnce('INTENT: discuss\nCarol\nBob');
     expect(await router().select(input, signal)).toEqual({ ids: ['c', 'b'], intent: 'discuss' });

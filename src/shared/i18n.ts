@@ -2461,6 +2461,9 @@ export const zhTranslations: Record<string, string> = {
   'Fast chat model': '快速聊天模型',
   'Falls back to the group owner on timeout, error or an unclear answer.':
     '超时、出错或回答不明确时由群主回复。',
+  'Handed to the group owner on timeout.': '超时就交给群主处理。',
+  'Uses the primary model on timeout.': '超时就用主模型。',
+  Timeout: '超时',
   'Without @': '不 @ 时',
   'Group owner replies': '群主回复',
   'Smart pick': '智能选人',

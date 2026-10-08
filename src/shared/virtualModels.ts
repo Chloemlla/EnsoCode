@@ -9,14 +9,19 @@ export const VIRTUAL_PROVIDER_ID = 'enso-virtual';
 export const VIRTUAL_CLASSIFIER_SOURCES = ['judge', 'pi-classifier'] as const;
 export type VirtualClassifierSource = (typeof VIRTUAL_CLASSIFIER_SOURCES)[number];
 export const VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS = 3000;
-const CLASSIFIER_TIMEOUT_MIN_MS = 500;
-const CLASSIFIER_TIMEOUT_MAX_MS = 15_000;
+export const CLASSIFIER_TIMEOUT_MIN_MS = 500;
+export const CLASSIFIER_TIMEOUT_MAX_MS = 15_000;
+
+export const clampClassifierTimeoutMs = (ms: number): number =>
+  Math.min(CLASSIFIER_TIMEOUT_MAX_MS, Math.max(CLASSIFIER_TIMEOUT_MIN_MS, Math.round(ms)));
 
 export interface VirtualClassifierConfig {
   source: VirtualClassifierSource;
   /** judge：快聊天模型；pi-classifier：分类器所在 provider 条目 + 分类器模型 id */
   model: DefaultModelRef;
   timeoutMs: number;
+  /** 用户在设置页明确填过时限；缺省表示 timeoutMs 只是旧版写下的默认快照 */
+  timeoutSet?: true;
 }
 
 export interface VirtualModelEntry {
@@ -65,12 +70,17 @@ export function parseVirtualClassifier(value: unknown): VirtualClassifierConfig 
   if (!VIRTUAL_CLASSIFIER_SOURCES.includes(source as VirtualClassifierSource)) return undefined;
   const model = parseMemberRef(value.model);
   if (!model) return undefined;
-  const raw =
+  const timeoutMs = clampClassifierTimeoutMs(
     typeof value.timeoutMs === 'number' && Number.isFinite(value.timeoutMs)
-      ? Math.round(value.timeoutMs)
-      : VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS;
-  const timeoutMs = Math.min(CLASSIFIER_TIMEOUT_MAX_MS, Math.max(CLASSIFIER_TIMEOUT_MIN_MS, raw));
-  return { source: source as VirtualClassifierSource, model, timeoutMs };
+      ? value.timeoutMs
+      : VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS
+  );
+  return {
+    source: source as VirtualClassifierSource,
+    model,
+    timeoutMs,
+    ...(value.timeoutSet === true && { timeoutSet: true as const }),
+  };
 }
 
 function parseEntry(value: unknown): VirtualModelEntry | null {

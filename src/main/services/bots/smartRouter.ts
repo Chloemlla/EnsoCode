@@ -13,11 +13,11 @@ import {
   smartRouteIntentQuestion,
   smartRouteJudgePrompt,
   smartRouteQuestion,
+  smartRouteTimeoutMs,
 } from '../../../shared/bots/smartRoute';
 import type { DefaultModelRef } from '../../../shared/defaultModel';
 import {
   parseVirtualClassifier,
-  VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
   type VirtualClassifierConfig,
 } from '../../../shared/virtualModels';
 import type { GroupResponderSelector } from './groupChat';
@@ -51,16 +51,7 @@ export interface SmartRouterDeps {
 export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector {
   const config = () => {
     const parsed = parseVirtualClassifier(deps.settings()?.botRouteClassifier);
-    // 设置页不暴露时限；3000 是旧版 UI 写下的默认快照，运行时升级，不改用户磁盘配置。
-    return (
-      parsed && {
-        ...parsed,
-        timeoutMs:
-          parsed.timeoutMs === VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS
-            ? SMART_ROUTE_DEFAULT_TIMEOUT_MS
-            : parsed.timeoutMs,
-      }
-    );
+    return parsed && { ...parsed, timeoutMs: smartRouteTimeoutMs(parsed) };
   };
   return {
     timeoutMs: () => config()?.timeoutMs ?? SMART_ROUTE_DEFAULT_TIMEOUT_MS,

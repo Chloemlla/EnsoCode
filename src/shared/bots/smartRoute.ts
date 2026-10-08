@@ -52,6 +52,18 @@ export const SMART_ROUTE_HISTORY = 8;
 export const SMART_ROUTE_MAX_PICKS = 3;
 /** 整体选人时限：judge 常态约 1s，但实测有超过 8s 的长尾；不影响虚拟模型的分档时限 */
 export const SMART_ROUTE_DEFAULT_TIMEOUT_MS = 15_000;
+/** 旧版设置页写下的默认快照，未经用户明确设置时按 SMART_ROUTE_DEFAULT_TIMEOUT_MS 用 */
+const LEGACY_DEFAULT_TIMEOUT_MS = 3000;
+
+/** 选人实际时限：用户明确设过的照用；旧版默认 3000 运行时升到 15s，不改磁盘配置 */
+export function smartRouteTimeoutMs(
+  config: { timeoutMs: number; timeoutSet?: true } | undefined
+): number {
+  if (!config) return SMART_ROUTE_DEFAULT_TIMEOUT_MS;
+  if (!config.timeoutSet && config.timeoutMs === LEGACY_DEFAULT_TIMEOUT_MS)
+    return SMART_ROUTE_DEFAULT_TIMEOUT_MS;
+  return config.timeoutMs;
+}
 /** judge 只回 INTENT 行与至多 3 个名字 */
 export const SMART_ROUTE_JUDGE_MAX_TOKENS = 128;
 /** pi 分类器概率达到此值的候选入选；都不达标视为不确定，交给群主 */
