@@ -1026,6 +1026,73 @@ describe('parent/child commands', () => {
     ).toBeNull();
   });
 
+  it('spawn-child 透传类型级 reasoning/thinkingLevel；非法值拒绝', () => {
+    const { profileId: _omit, ...nonEnsoChild } = { ...child, typeKey: 'builtin:scout' };
+    const baseConfig = {
+      typeKey: 'builtin:scout',
+      spawnSpecId: SPAWN_SPEC_ID,
+      displayName: 'Scout',
+      description: 'Read-only scout',
+      systemPrompt: 'scout role',
+      model,
+      tools: 'readonly',
+      skillBindingIds: [],
+      skillPaths: [],
+      mcpBindingIds: [],
+      systemPromptHash: proof.systemPromptHash,
+      mcpServers: [],
+    };
+    const command = {
+      type: 'spawn-child',
+      identity: nonEnsoChild,
+      cwd: '/repo',
+      config: { ...baseConfig, reasoning: 'on', thinkingLevel: 'xhigh' },
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    // 缺省不带 → 合法（字段可选）
+    expect(parseAgentCommand({ ...command, config: baseConfig })).toEqual({
+      ...command,
+      config: baseConfig,
+    });
+    // 白名单外的取值一律拒收（协议是 Main→worker 的信任边界）
+    for (const bad of [
+      { ...baseConfig, reasoning: 'auto' },
+      { ...baseConfig, thinkingLevel: 'extreme' },
+      { ...baseConfig, thinkingLevel: 3 },
+    ]) {
+      expect(parseAgentCommand({ ...command, config: bad })).toBeNull();
+    }
+  });
+
+  it('spawn-child Enso locked profile 拒收类型级推理预设', () => {
+    const command = {
+      type: 'spawn-child',
+      identity: child,
+      cwd: '/repo',
+      config: {
+        typeKey: 'agent:enso',
+        spawnSpecId: SPAWN_SPEC_ID,
+        displayName: 'Enso',
+        description: 'System agent',
+        systemPrompt: 'Locked prompt',
+        model,
+        tools: 'enso-locked',
+        skillBindingIds: [],
+        skillPaths: [],
+        mcpBindingIds: [],
+        systemPromptHash: proof.systemPromptHash,
+        mcpServers: [],
+        lockedProfileId: 'enso-locked-v1',
+      },
+    };
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, reasoning: 'on' } })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, thinkingLevel: 'high' } })
+    ).toBeNull();
+  });
+
   it('prompt-child 首条 task 绑定 child generation/requestId，旧 generation 拒绝', () => {
     const command = { type: 'prompt-child', identity: child, requestId: 'dispatch-1', task };
     expect(parseAgentCommand(command)).toEqual(command);

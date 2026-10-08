@@ -51,6 +51,8 @@ import {
 } from './fileChanges';
 import {
   MODEL_API_KINDS,
+  MODEL_REASONING_OVERRIDES,
+  MODEL_THINKING_LEVEL_OVERRIDES,
   type ModelApiKind,
   type ModelCapabilityOverrides,
   type ModelEntry,
@@ -879,6 +881,12 @@ export interface ResolvedAgentTypeSpawnConfig {
   systemPrompt: string;
   model: SpawnModelConfig;
   tools: 'all' | 'readonly' | 'enso-locked';
+  /**
+   * 类型级推理预设（子代理类型上配置的档位）：优先级 派发 thinking > 类型预设 >
+   * 模型条目预设 > 父会话。缺省 = 跟随模型条目/父会话。与 AgentTypeSpawnConfig 同语义。
+   */
+  reasoning?: ModelReasoningOverride;
+  thinkingLevel?: ModelThinkingLevelOverride;
   /** Main-authorized exact node/profile intersection; absent keeps the profile tool set. */
   allowedToolIds?: readonly string[];
   skillPaths: readonly string[];
@@ -2734,6 +2742,8 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
       'systemPrompt',
       'model',
       'tools',
+      'reasoning',
+      'thinkingLevel',
       'allowedToolIds',
       'skillPaths',
       'skillBindingIds',
@@ -2776,10 +2786,21 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
   ) {
     return null;
   }
+  // 类型级推理预设：白名单取值，非法一律拒收（Main→worker 信任边界）
+  if (
+    (value.reasoning !== undefined &&
+      !MODEL_REASONING_OVERRIDES.includes(value.reasoning as ModelReasoningOverride)) ||
+    (value.thinkingLevel !== undefined &&
+      !MODEL_THINKING_LEVEL_OVERRIDES.includes(value.thinkingLevel as ModelThinkingLevelOverride))
+  ) {
+    return null;
+  }
   if (
     (typeKey === 'agent:enso' &&
       (value.lockedProfileId !== ENSO_LOCKED_PROFILE_ID ||
         value.tools !== 'enso-locked' ||
+        value.reasoning !== undefined ||
+        value.thinkingLevel !== undefined ||
         value.allowedToolIds !== undefined ||
         skillPaths.length !== 0 ||
         skillBindingIds.length !== 0 ||

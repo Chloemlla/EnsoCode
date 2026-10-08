@@ -2110,9 +2110,11 @@ export class SessionSupervisor {
       }) => {
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
         const base = await resolveSessionModel(runtime, selectedModel);
-        // 派发 thinking > 类型预设 > 模型条目预设 > 父会话
+        // 派发 thinking > 类型预设 > 模型条目预设 > 父会话。
+        // 类型预设来源：typed-spawn 用 resolved（Main 组装的类型配置），
+        // coworker 直雇用 agentType（worker 侧快照）——此前 typed-spawn 不传，类型档被静默丢弃。
         const childReasoning = resolveChildReasoning(
-          pickChildReasoningOverride(thinkingOverride, agentType, selectedModel),
+          pickChildReasoningOverride(thinkingOverride, resolved ?? agentType, selectedModel),
           reasoningEnabled,
           thinkingLevel
         );

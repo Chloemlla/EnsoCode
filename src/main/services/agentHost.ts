@@ -769,6 +769,16 @@ export function resolveAgentTypeSpawnConfig(
       systemPrompt: definition.systemPrompt,
       model: selectedModel.config,
       tools: definition.tools,
+      // 类型级推理预设透传（与 configuredAgentTypes 同口径：非法值不透传）。
+      // 此前只在 coworker 直雇路径生效，typed-spawn 静默丢弃导致子会话回落 medium。
+      ...(MODEL_REASONING_OVERRIDES.includes(definition.reasoning as ModelReasoningOverride)
+        ? { reasoning: definition.reasoning as ModelReasoningOverride }
+        : {}),
+      ...(MODEL_THINKING_LEVEL_OVERRIDES.includes(
+        definition.thinkingLevel as ModelThinkingLevelOverride
+      )
+        ? { thinkingLevel: definition.thinkingLevel as ModelThinkingLevelOverride }
+        : {}),
       allowedToolIds: expectedToolIds,
       skillPaths: resources.skillPaths,
       skillBindingIds: resources.skillPaths.map(() => randomUUID()),
@@ -1594,8 +1604,15 @@ export function configuredAgentTypes(
           ? { mcpServers: [...resources.mcpServers] }
           : {}),
         ...(bound?.ok ? { model: bound.selection.config } : {}),
-        ...(entry.reasoning ? { reasoning: entry.reasoning } : {}),
-        ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+        // 与 custom 分支/resolveAgentTypeSpawnConfig 同口径：白名单过滤，非法不透传
+        ...(MODEL_REASONING_OVERRIDES.includes(entry.reasoning as ModelReasoningOverride)
+          ? { reasoning: entry.reasoning as ModelReasoningOverride }
+          : {}),
+        ...(MODEL_THINKING_LEVEL_OVERRIDES.includes(
+          entry.thinkingLevel as ModelThinkingLevelOverride
+        )
+          ? { thinkingLevel: entry.thinkingLevel as ModelThinkingLevelOverride }
+          : {}),
       };
     }
   );
@@ -1894,7 +1911,11 @@ function spawnModelConfig(
     settingsProviderId: provider.id,
     ...(provider.oauthAccountKey ? { oauthAccountKey: provider.oauthAccountKey } : {}),
     ...(isOauthAccountPool(provider) ? { oauthAccountPool: provider.oauthAccountPool } : {}),
-    ...(!provider.oauthAccountKey ? pickModelCapabilityOverrides(entry) : {}),
+    // 统一目录后 OAuth 条目 models 只承载稀疏用户覆盖（enabled/别名/能力/档位），
+    // 行覆盖对 OAuth 同样生效；旧守卫丢弃它们是因为那时行是 catalog 冻结拷贝。
+    // 已知过渡窗口：renderer 水合才执行 v16 稀疏化，Main 先读（bot 自启/tray）时
+    // v15 稠密行的 catalog 能力字段会被当覆盖透传——只影响子会话档位且水合后自愈，接受。
+    ...pickModelCapabilityOverrides(entry),
   };
 }
 
