@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   beginOauthCredentialRefresh,
   setOauthCredentialState,
+  usableClassifierProvidersForOauthSnapshot,
   usableProvidersForOauthSnapshot,
   useOauthCredentialStore,
 } from './index';
@@ -21,6 +22,33 @@ function provider(id: string, overrides: Partial<ModelProvider> = {}): ModelProv
 }
 
 describe('oauth credential runtime store', () => {
+  it('TypeSafe is available only to classifier selectors, including without chat rows', () => {
+    const ts = provider('typesafe', {
+      baseUrl: 'https://api.typesafe.ai/v1/',
+      models: [{ id: 'jev-latest' }],
+    });
+    const or = provider('openrouter', { baseUrl: 'https://openrouter.ai/api/v1' });
+    const snapshot = { revision: 0, availability: { status: 'unloaded' as const } };
+    expect(usableProvidersForOauthSnapshot([ts, or], snapshot).map((p) => p.id)).toEqual([
+      'openrouter',
+    ]);
+    expect(usableClassifierProvidersForOauthSnapshot([ts, or], snapshot).map((p) => p.id)).toEqual([
+      'typesafe',
+      'openrouter',
+    ]);
+    expect(
+      usableClassifierProvidersForOauthSnapshot([{ ...ts, models: [] }], snapshot)
+    ).toHaveLength(1);
+    expect(
+      usableClassifierProvidersForOauthSnapshot(
+        [
+          { ...ts, apiKey: '' },
+          { ...ts, enabled: false },
+        ],
+        snapshot
+      )
+    ).toEqual([]);
+  });
   beforeEach(() => {
     useOauthCredentialStore.setState({
       snapshot: { revision: 0, availability: { status: 'unloaded' } },

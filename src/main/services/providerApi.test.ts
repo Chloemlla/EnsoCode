@@ -22,6 +22,92 @@ vi.mock('./proxyConfig', () => ({
 
 const originalNetFetch = net.fetch;
 
+describe('TypeSafe provider API', () => {
+  afterEach(() => {
+    net.fetch = originalNetFetch;
+  });
+  const config = {
+    api: 'typesafe-system-one' as const,
+    apiKey: 'fixture-key',
+    baseUrl: 'https://api.typesafe.ai/v1/',
+  };
+  it.each(['typesafe-system-one', 'openai-completions'] as const)(
+    'lists builtin classifier rows, never requests a chat model catalog (%s)',
+    async (api) => {
+      const fetch = vi.fn();
+      net.fetch = fetch;
+      expect(await listModels({ ...config, api })).toEqual({
+        ok: true,
+        models: [{ id: 'jev-latest' }],
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  );
+  it.each(['typesafe-system-one', 'openai-completions'] as const)(
+    'tests the classifier protocol rather than chat, including without a selected model (%s)',
+    async (api) => {
+      const fetch = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+        mockResponse(200, {
+          answers: {
+            connected: {
+              type: 'choice',
+              choice: 'yes',
+              confidence: 1,
+              probabilities: { yes: 1, no: 0 },
+            },
+          },
+        })
+      );
+      net.fetch = fetch;
+      expect(await testProvider({ ...config, api })).toMatchObject({ ok: true });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(String(fetch.mock.calls[0]?.[0])).toBe('https://api.typesafe.ai/v1/systemone');
+      expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: 'POST', redirect: 'manual' });
+      expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({
+        model: 'jev-latest',
+        questions: { connected: { type: 'choice' } },
+      });
+    }
+  );
+  it('keeps the classifier timeout signal active through response-body parsing', async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
+    let enterBody: () => void = () => {};
+    const bodyEntered = new Promise<void>((resolve) => {
+      enterBody = resolve;
+    });
+    net.fetch = vi.fn(async (_url, init) => {
+      const response = mockResponse(200);
+      response.json = () =>
+        new Promise((_resolve, reject) => {
+          enterBody();
+          init?.signal?.addEventListener('abort', () => reject(new Error('body aborted')), {
+            once: true,
+          });
+        });
+      return response;
+    });
+    try {
+      const testing = testProvider(config, 'jev-latest');
+      await bodyEntered;
+      controller.abort();
+      expect(await testing).toMatchObject({ ok: false });
+    } finally {
+      timeout.mockRestore();
+    }
+  }, 1000);
+  it('rejects malformed classification answers and redacts credentials', async () => {
+    net.fetch = vi.fn(async () => mockResponse(200, {}));
+    expect(await testProvider(config, 'jev-latest')).toMatchObject({ ok: false });
+    net.fetch = vi.fn(async () => {
+      throw new Error(`transport ${config.apiKey}`);
+    });
+    const result = await testProvider(config, 'jev-latest');
+    expect(result.ok).toBe(false);
+    expect(result.message).not.toContain(config.apiKey);
+  });
+});
+
 function mockResponse(status: number, body?: unknown, statusText = 'OK'): Response {
   return new Response(body !== undefined ? JSON.stringify(body) : null, {
     status,

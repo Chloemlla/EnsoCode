@@ -70,6 +70,18 @@ const apiKeySpawn = {
 };
 
 describe('resolveBaseModel apiKey', () => {
+  it('rejects TypeSafe before any chat provider registration, even under an old chat protocol', () => {
+    const runtime = mockRuntime({});
+    const register = vi.spyOn(runtime, 'registerProvider');
+    expect(() =>
+      resolveBaseModel(runtime, {
+        ...apiKeySpawn,
+        baseUrl: 'https://api.typesafe.ai/v1/',
+        modelId: 'jev-latest',
+      })
+    ).toThrow(/classification only/i);
+    expect(register).not.toHaveBeenCalled();
+  });
   it('同一端点与 key 的多个模型累积注册，后注册的不把先注册的挤出目录', () => {
     const calls: string[][] = [];
     const runtime = mockRuntime({ catalog: [] });

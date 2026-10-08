@@ -1,10 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { McpServerEntry } from '@shared/types';
+import type { McpServerEntry, ModelProvider } from '@shared/types';
 import { describe, expect, it, vi } from 'vitest';
 import { botToAgentType } from './bots/botAgentType';
+import { createModelProbe } from './bots/modelProbe';
 import { McpToolCatalogStore } from './mcpToolCatalog';
+import { pickSubagentModelRefs } from './subagentModels';
 
 vi.mock('../../agent/index?modulePath', () => ({ default: '/tmp/agent.js' }));
 const settingsMock = vi.hoisted(() => ({
@@ -165,6 +167,82 @@ describe('readSettingsState', () => {
 });
 
 describe('resolveModelSelection 虚拟模型', () => {
+  it('TypeSafe cannot be chat, delegated, probed or a virtual fast/fallback member', async () => {
+    const ts: ModelProvider = {
+      id: 'ts',
+      name: 'TypeSafe',
+      api: 'openai-completions',
+      baseUrl: 'https://api.typesafe.ai/v1/',
+      apiKey: 'fixture',
+      enabled: true,
+      models: [{ id: 'jev-latest' }],
+    };
+    const chat: ModelProvider = {
+      ...ts,
+      id: 'chat',
+      name: 'Chat',
+      baseUrl: 'https://api.example.com/v1',
+      models: [{ id: 'chat-model' }],
+    };
+    const tsRef = { providerId: 'ts', modelId: 'jev-latest' };
+    const chatRef = { providerId: 'chat', modelId: 'chat-model' };
+    const state = {
+      providers: [ts, chat],
+      defaultModel: tsRef,
+      virtualModels: [
+        {
+          id: 'auto',
+          name: 'Auto',
+          enabled: true,
+          primary: chatRef,
+          fast: tsRef,
+          fallbacks: [tsRef],
+        },
+      ],
+    };
+    settingsMock.value = { 'enso-settings': { version: 99, state } };
+    expect(resolveModelSelection('ts', 'jev-latest', new Set())).toEqual({
+      ok: false,
+      error: 'Model is unavailable: classifier-only',
+    });
+    expect(
+      pickSubagentModelRefs(
+        [
+          { ...tsRef, id: 'ts-entry', description: '' },
+          { ...chatRef, id: 'chat-entry', description: '' },
+        ],
+        [ts, chat]
+      ).map((entry) => entry.modelId)
+    ).toEqual(['chat-model']);
+    const resolved = resolveModelSelection('enso-virtual', 'auto', new Set(), {
+      allowVirtual: true,
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error('expected virtual config');
+    expect(resolved.selection.config.virtual).toMatchObject({
+      primary: { modelId: 'chat-model' },
+      fallbacks: [],
+    });
+    expect(resolved.selection.config.virtual?.fast).toBeUndefined();
+    const complete = vi.fn(async () => 'OK');
+    const probe = createModelProbe({
+      settings: () => state,
+      credentials: async () => new Set(),
+      isWorkerReady: () => true,
+      complete,
+      resolve: (ref, keys) => {
+        const result = resolveModelSelection(ref.providerId, ref.modelId, keys, {
+          allowVirtual: true,
+        });
+        return result.ok ? { ok: true, config: result.selection.config } : result;
+      },
+    });
+    expect(await probe(tsRef)).toMatchObject({ ok: false });
+    expect(complete).not.toHaveBeenCalled();
+    state.defaultModel = chatRef;
+    expect(await probe(tsRef)).toMatchObject({ ok: true, fallback: { model: chatRef } });
+    expect(complete.mock.calls).toHaveLength(1);
+  });
   const provider = (id: string, models: string[], extra: Record<string, unknown> = {}) => ({
     id,
     name: id,

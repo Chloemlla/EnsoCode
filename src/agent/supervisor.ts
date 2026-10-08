@@ -44,7 +44,7 @@ import {
   splitPlanPrefix,
   withPlanNote,
 } from '@shared/planMode';
-import { resolvePiProviderBaseUrl } from '@shared/providerCatalog';
+import { isClassifierOnlyProvider, resolvePiProviderBaseUrl } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
 import { DEVIN_PROVIDER_ID, devinProviderConfig } from '@shared/providers/devin';
@@ -4640,6 +4640,8 @@ function listCatalogClone(runtime: ModelRuntime, model: CatalogModel): CatalogMo
  */
 export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig) {
   if (model.virtual) throw new Error('virtual model config must go through resolveSessionModel');
+  if (model.api === 'typesafe-system-one' || isClassifierOnlyProvider(model))
+    throw new Error('This provider is for classification only, not chat.');
   if (model.oauthAccountPool !== undefined && !isOauthAccountPool(model))
     throw new Error('Invalid ChatGPT OAuth pool configuration.');
   if (isOauthAccountPool(model)) return resolveOauthPoolModel(runtime, model);

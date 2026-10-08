@@ -87,6 +87,8 @@ function usabilityReasonText(reason: ModelUsability): string {
       return '找不到供应商';
     case 'provider-disabled':
       return '供应商已停用';
+    case 'classifier-only':
+      return '仅用于分类，不能聊天';
     case 'model-missing':
       return '模型不存在';
     case 'model-disabled':

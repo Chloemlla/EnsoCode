@@ -2,7 +2,6 @@ import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
 import {
   canBeVirtualMember,
-  classifierProviderFor,
   VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
   type VirtualClassifierConfig,
   type VirtualModelEntry,
@@ -24,6 +23,7 @@ import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import {
+  usableClassifierProvidersForOauthSnapshot,
   usableProvidersForOauthSnapshot,
   useOauthCredentialStore,
 } from '@/stores/oauthCredentials';
@@ -439,8 +439,8 @@ export function VirtualModelsSettings() {
   );
   const candidates = useMemo(() => usable.filter(canBeVirtualMember), [usable]);
   const classifierProviders = useMemo(
-    () => usable.filter((provider) => classifierProviderFor(provider) !== undefined),
-    [usable]
+    () => usableClassifierProvidersForOauthSnapshot(providers, snapshot),
+    [providers, snapshot]
   );
   const seed = useMemo((): DefaultModelRef | null => {
     if (defaultModel) {

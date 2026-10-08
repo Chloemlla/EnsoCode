@@ -1,3 +1,4 @@
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import type {
   ModelProvider,
   ModelReasoningOverride,
@@ -44,6 +45,7 @@ export function pickSubagentModelRefs(
     if (seen.has(key)) continue;
     const provider = providers.find((candidate) => candidate.id === entry.providerId);
     if (!provider || provider.enabled === false || !hasProviderCredentials(provider)) continue;
+    if (isClassifierOnlyProvider(provider)) continue;
     if (!Array.isArray(provider.models)) continue;
     const model = provider.models.find((candidate) => candidate?.id === entry.modelId);
     if (!model || model.enabled === false) continue;

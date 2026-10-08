@@ -1,5 +1,5 @@
 import { MAX_BOT_MAX_RUNNING_TURNS, MIN_BOT_MAX_RUNNING_TURNS } from '@shared/bots/concurrency';
-import { canBeVirtualMember, classifierProviderFor } from '@shared/virtualModels';
+import { canBeVirtualMember } from '@shared/virtualModels';
 import * as React from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/select';
 import { useI18n } from '@/i18n';
 import {
+  usableClassifierProvidersForOauthSnapshot,
   usableProvidersForOauthSnapshot,
   useOauthCredentialStore,
 } from '@/stores/oauthCredentials';
@@ -138,8 +139,8 @@ function BotRouteClassifierRow() {
   );
   const candidates = React.useMemo(() => usable.filter(canBeVirtualMember), [usable]);
   const classifierProviders = React.useMemo(
-    () => usable.filter((provider) => classifierProviderFor(provider) !== undefined),
-    [usable]
+    () => usableClassifierProvidersForOauthSnapshot(providers, snapshot),
+    [providers, snapshot]
   );
   return (
     <div className="rounded-md border px-3 py-2.5" data-settings-row="bots.routeClassifier">

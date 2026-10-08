@@ -3,7 +3,9 @@ import {
   type ModelCredentialContext,
   type OauthCredentialAvailability,
 } from '@shared/defaultModel';
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import type { ModelProvider } from '@shared/types';
+import { classifierProviderFor } from '@shared/virtualModels';
 import { create } from 'zustand';
 
 export interface OauthCredentialSnapshot {
@@ -68,4 +70,20 @@ export function usableProvidersForOauthSnapshot(
     usable.push(models.length === provider.models.length ? provider : { ...provider, models });
   }
   return usable;
+}
+
+/** 分类器独立于聊天模型行；混合供应商沿用现有聊天凭证口径。 */
+export function usableClassifierProvidersForOauthSnapshot(
+  providers: readonly ModelProvider[],
+  snapshot: OauthCredentialSnapshot
+): ModelProvider[] {
+  const chatProviders = usableProvidersForOauthSnapshot(providers, snapshot);
+  return providers.filter(
+    (provider) =>
+      provider.enabled &&
+      classifierProviderFor(provider) &&
+      (isClassifierOnlyProvider(provider)
+        ? Boolean(provider.apiKey) && !provider.oauthAccountKey
+        : chatProviders.some((entry) => entry.id === provider.id))
+  );
 }

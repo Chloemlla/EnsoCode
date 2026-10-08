@@ -1,4 +1,5 @@
 import type { DefaultModelRef } from './defaultModel';
+import { DEFAULT_BASE_URLS, isClassifierOnlyProvider } from './providerCatalog';
 import type { ModelProvider } from './types/llm';
 import { providerIdOfAccountKey } from './types/oauthProviders';
 
@@ -126,8 +127,13 @@ export function directMemberRef(entry: VirtualModelEntry): DefaultModelRef {
 }
 
 /** Cursor 走 sessionBridge 直调工具，不经 pi 请求管线，不能做成员。 */
-export function canBeVirtualMember(provider: Pick<ModelProvider, 'oauthAccountKey'>): boolean {
-  return !provider.oauthAccountKey || providerIdOfAccountKey(provider.oauthAccountKey) !== 'cursor';
+export function canBeVirtualMember(
+  provider: Partial<Pick<ModelProvider, 'oauthAccountKey' | 'api' | 'baseUrl' | 'catalogId'>>
+): boolean {
+  return (
+    !isClassifierOnlyProvider(provider) &&
+    (!provider.oauthAccountKey || providerIdOfAccountKey(provider.oauthAccountKey) !== 'cursor')
+  );
 }
 
 /** 界面显示用：虚拟模型 id 显示为其名称，其余原样 */
@@ -143,6 +149,7 @@ const CLASSIFIER_PROVIDER_HOSTS: Readonly<Record<string, string>> = {
   'openrouter.ai': 'openrouter',
   'opencode.ai': 'opencode',
   'ai-gateway.vercel.sh': 'vercel-ai-gateway',
+  'api.typesafe.ai': 'typesafe',
 };
 const CLASSIFIER_PROVIDER_IDS = new Set(Object.values(CLASSIFIER_PROVIDER_HOSTS));
 
@@ -151,7 +158,8 @@ const CLASSIFIER_PROVIDER_IDS = new Set(Object.values(CLASSIFIER_PROVIDER_HOSTS)
  * 订阅账号返回账号 key（多账号克隆同样按 key 取凭证）；API key 条目按 baseUrl 域名识别。
  */
 export function classifierProviderFor(
-  provider: Pick<ModelProvider, 'oauthAccountKey' | 'baseUrl' | 'catalogId'>
+  provider: Pick<ModelProvider, 'oauthAccountKey' | 'baseUrl' | 'catalogId'> &
+    Partial<Pick<ModelProvider, 'api'>>
 ): string | undefined {
   if (provider.oauthAccountKey) {
     return CLASSIFIER_PROVIDER_IDS.has(providerIdOfAccountKey(provider.oauthAccountKey))
@@ -160,7 +168,10 @@ export function classifierProviderFor(
   }
   // 只认 baseUrl 域名：目录 id 相同但 baseUrl 改成中转站时，不能把 key 发到官方域名
   try {
-    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    const baseUrl =
+      provider.baseUrl.trim() ||
+      (provider.api === 'typesafe-system-one' ? DEFAULT_BASE_URLS['typesafe-system-one'] : '');
+    const host = new URL(baseUrl).hostname.toLowerCase();
     for (const [domain, id] of Object.entries(CLASSIFIER_PROVIDER_HOSTS)) {
       if (host === domain || host.endsWith(`.${domain}`)) return id;
     }

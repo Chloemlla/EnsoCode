@@ -1,5 +1,11 @@
+import { classify } from '@earendil-works/pi-ai/api/typesafe-system-one';
+import { typesafeProvider } from '@earendil-works/pi-ai/providers/typesafe';
 import { positiveFiniteNumber } from '@shared/modelCatalog';
-import { DEFAULT_BASE_URLS, withVersionSegment } from '@shared/providerCatalog';
+import {
+  DEFAULT_BASE_URLS,
+  isClassifierOnlyProvider,
+  withVersionSegment,
+} from '@shared/providerCatalog';
 import type {
   FetchedModel,
   ListModelsResult,
@@ -40,7 +46,10 @@ async function request(url: string, init: RequestInit): Promise<Response> {
     // 动态 import：避免 providerApi → proxyConfig → agentHost 把 worker 入口拖进无关测试。
     const { getProxyConfig } = await import('./proxyConfig');
     await getProxyConfig().whenReady();
-    return await net.fetch(url, { ...init, signal: controller.signal });
+    return await net.fetch(url, {
+      ...init,
+      signal: init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -64,6 +73,12 @@ export async function listModels(
   const base = resolveBase(config);
   const key = config.apiKey.trim();
   try {
+    if (isClassifierOnlyProvider(config)) {
+      return {
+        ok: true,
+        models: (typesafeProvider().getAllModels?.() ?? []).map((model) => ({ id: model.id })),
+      };
+    }
     let url: string;
     let headers: Record<string, string> = {};
     switch (config.api) {
@@ -210,6 +225,43 @@ export async function testProvider(
 ): Promise<TestProviderResult> {
   const started = Date.now();
   const model = modelId?.trim();
+
+  if (isClassifierOnlyProvider(config)) {
+    const catalog = typesafeProvider().getAllModels?.() ?? [];
+    const classifier = catalog.find(
+      (entry) => entry.type === 'classifier' && entry.id === (model || 'jev-latest')
+    );
+    if (classifier?.type !== 'classifier' || classifier.api !== 'typesafe-system-one') {
+      return { ok: false, latencyMs: Date.now() - started, message: 'Classifier not found' };
+    }
+    const result = await classify(
+      { ...classifier, baseUrl: resolveBase(config) },
+      {
+        state: { message: 'Connectivity check' },
+        questions: {
+          connected: {
+            type: 'choice',
+            instructions: 'Is this a connectivity check?',
+            criteria: { yes: 'A connectivity check', no: 'Anything else' },
+          },
+        },
+      },
+      {
+        apiKey: config.apiKey.trim(),
+        maxRetries: 0,
+        timeoutMs: TIMEOUT_MS,
+        fetch: (url, init) => request(String(url), { ...init, redirect: 'manual' }),
+      }
+    );
+    return {
+      ok: result.stopReason === 'stop',
+      latencyMs: Date.now() - started,
+      message:
+        result.stopReason === 'stop'
+          ? 'Connected'
+          : createSecretSet([config.apiKey]).redactError(result.errorMessage ?? 'Failed'),
+    };
+  }
 
   // 无模型可用时，退化为拉取模型列表做连通性检查
   if (!model) {

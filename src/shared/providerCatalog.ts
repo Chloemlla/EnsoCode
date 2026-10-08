@@ -1,4 +1,17 @@
-import type { ModelApiKind, OauthProviderInfo } from './types';
+import type { ModelApiKind, ModelProvider, OauthProviderInfo } from './types';
+
+/** 分类协议或官方分类器端点不能注册成聊天供应商，包括旧配置和手动导入。 */
+export function isClassifierOnlyProvider(
+  provider: Partial<Pick<ModelProvider, 'api' | 'baseUrl' | 'catalogId'>>
+): boolean {
+  if (provider.api === 'typesafe-system-one' || provider.catalogId === 'typesafe') return true;
+  try {
+    const host = new URL(provider.baseUrl ?? '').hostname.toLowerCase();
+    return host === 'api.typesafe.ai' || host.endsWith('.api.typesafe.ai');
+  } catch {
+    return false;
+  }
+}
 
 export interface ProviderDefinition {
   id: string;
@@ -17,6 +30,7 @@ export const DEFAULT_BASE_URLS: Readonly<Record<ModelApiKind, string>> = {
   // pi 的 Google SDK 在有自定义 baseUrl 时会把 apiVersion 置空，版本号必须写进地址
   'google-generative-ai': 'https://generativelanguage.googleapis.com/v1beta',
   ollama: 'http://127.0.0.1:11434',
+  'typesafe-system-one': 'https://api.typesafe.ai/v1/',
 };
 
 export function withVersionSegment(base: string, segment: string): string {
@@ -77,6 +91,13 @@ export const STATIC_PROVIDER_DEFINITIONS: readonly ProviderDefinition[] = [
     label: 'OpenRouter',
     defaultApi: 'openai-completions',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    supportsApiKey: true,
+  },
+  {
+    id: 'typesafe',
+    label: 'TypeSafe',
+    defaultApi: 'typesafe-system-one',
+    defaultBaseUrl: DEFAULT_BASE_URLS['typesafe-system-one'],
     supportsApiKey: true,
   },
   {

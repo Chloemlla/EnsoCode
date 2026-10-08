@@ -1,6 +1,7 @@
 import { ENSO_AGENT_TYPE_KEY, isReservedAgentTypeName } from '@shared/builtinAgents';
 import { SUBAGENT_MODELS_CONFIGURE_PROMPT } from '@shared/i18n';
 import { MAX_MAX_ACTIVE_COWORKERS, MIN_MAX_ACTIVE_COWORKERS } from '@shared/maxActiveCoworkers';
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import type { AgentTypeEntry, AgentTypeModelMode } from '@shared/types';
 import { hasProviderCredentials, MODEL_THINKING_LEVEL_OVERRIDES } from '@shared/types';
 import { BUILTIN_AGENT_TYPES } from '@shared/types/assets';
@@ -322,7 +323,7 @@ export function AgentTypeEditDialog({
   const toggleId = (list: string[], id: string): string[] =>
     list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
 
-  const provider = providers.find((p) => p.id === providerId);
+  const provider = providers.find((p) => p.id === providerId && !isClassifierOnlyProvider(p));
   const models = (provider?.models ?? []).filter((m) => m.enabled !== false);
 
   const save = () => {
@@ -417,7 +418,10 @@ export function AgentTypeEditDialog({
                   items={[
                     { value: '', label: t('Select provider') || '选择服务商' },
                     ...providers
-                      .filter((p) => p.enabled && hasProviderCredentials(p))
+                      .filter(
+                        (p) =>
+                          p.enabled && hasProviderCredentials(p) && !isClassifierOnlyProvider(p)
+                      )
                       .map((p) => ({ value: p.id, label: p.name })),
                   ]}
                   value={providerId}
@@ -432,7 +436,10 @@ export function AgentTypeEditDialog({
                   <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL}>
                     <SelectItem value="">{t('Select provider') || '选择服务商'}</SelectItem>
                     {providers
-                      .filter((p) => p.enabled && hasProviderCredentials(p))
+                      .filter(
+                        (p) =>
+                          p.enabled && hasProviderCredentials(p) && !isClassifierOnlyProvider(p)
+                      )
                       .map((p) => (
                         <SelectItem key={p.id} value={p.id}>
                           {p.name}

@@ -1,3 +1,4 @@
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { CUSTOM_VENDOR_ID, groupProviders } from '@shared/providerGroups';
 import type { ModelProvider, OauthProviderInfo } from '@shared/types';
 import {
@@ -253,6 +254,11 @@ export function ProvidersSettings() {
                                   .join(' · ')}
                               </span>
                             </div>
+                            {isClassifierOnlyProvider(provider) && (
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {t('Classification only, not for chat')}
+                              </p>
+                            )}
                             {provider.oauthAccountKey && !provider.oauthAccountPool && (
                               <SubscriptionUsage accountKey={provider.oauthAccountKey} />
                             )}
