@@ -34,6 +34,7 @@ import { ChatScreen } from './ChatScreen';
 import { type ConnState, PairClient, type SessionView } from './client';
 import { formatOnlineConnectionLabel } from './connectionLabel';
 import { pickActive, removeDevice, renameDevice, upsertDevice } from './deviceList';
+import { resolveDrawerSegment, saveDrawerSegment } from './drawerSegment';
 import { GroupChatScreen, type MemberPending } from './GroupChatScreen';
 import { parseSessionFromSearch, parseSessionId, takeStashedSessionId } from './launchSession';
 import { useMediaQuery, WIDE_LAYOUT_QUERY } from './media';
@@ -194,7 +195,10 @@ export function App() {
     items: [],
     offset: 0,
   });
-  const [botSegment, setBotSegment] = useState(initialView.botChatId !== null);
+  // 冷启动时 botEnabled 未知，先按「假设可用」恢复；实际渲染仍由 botEnabled 把关
+  const [botSegment, setBotSegment] = useState(() =>
+    resolveDrawerSegment(true, initialView.botChatId)
+  );
   /** 打开中的 Bot 聊天；非 null 时主屏显示 Bot 视图，Code 的 activeId 原样保留 */
   const [botChatId, setBotChatId] = useState<string | null>(initialView.botChatId);
   /** 群聊「查看过程」的成员会话（只读） */
@@ -841,7 +845,8 @@ export function App() {
   };
 
   const openDrawer = () => {
-    setBotSegment(botEnabled && botChatId !== null);
+    // 恢复上次停留的标签；没记过时沿用「正在看 Bot 聊天就停 Bot」的联动
+    setBotSegment(resolveDrawerSegment(botEnabled, botChatId));
     setDrawerOpen(true);
     if (botEnabled) send({ type: 'bot-catalog-request' });
   };
@@ -1167,6 +1172,7 @@ export function App() {
                 active: botSegment,
                 onChange: (next) => {
                   setBotSegment(next);
+                  saveDrawerSegment(next ? 'bot' : 'code');
                   if (next) send({ type: 'bot-catalog-request' });
                 },
                 panel: (
