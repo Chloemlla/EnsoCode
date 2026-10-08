@@ -91,6 +91,11 @@ export interface BotChat {
   /** 群话题：所属根群（话题是根群下的隐藏子群，群配置由根群级联） */
   parentId?: BotChatId;
   threadTitle?: string;
+  /**
+   * 仅群（根群 / 话题）：参与 AI 自动命名。新建时写入 { seq: 0 }，功能上线前的旧数据没有此字段、不参与；
+   * 手动改名时删除（锁定，进行中的结果也随之作废）。seq = 已总结到的时间线位置，0 表示尚未命名。
+   */
+  autoTitle?: { seq: number };
   /** 仅根群：当前话题，缺省或失效时为根群自身 */
   activeThreadId?: BotChatId;
   sessions: Record<BotId, BotChatSession>;
@@ -528,6 +533,8 @@ export function parseBotChat(value: unknown): BotChat | undefined {
     else if (isBotChatId(value.activeThreadId)) chat.activeThreadId = value.activeThreadId;
     const threadTitle = str(value.threadTitle).trim().slice(0, BOT_THREAD_TITLE_MAX);
     if (threadTitle) chat.threadTitle = threadTitle;
+    if (isObject(value.autoTitle) && isSeq(value.autoTitle.seq))
+      chat.autoTitle = { seq: value.autoTitle.seq };
   }
   return chat;
 }

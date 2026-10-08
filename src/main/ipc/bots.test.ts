@@ -1833,6 +1833,52 @@ describe('群话题', () => {
     mocks.settings.botModeEnabled = true;
   });
 
+  it('话题 AI 命名：开关开时占位标题被替换；主话题只写 threadTitle；手动改名后锁定', async () => {
+    const { TITLE_SYSTEM_PROMPT } = await import('../../agent/titleSummary');
+    mocks.settings.titleSummaryEnabled = true;
+    mocks.completeText.mockImplementation(async (...args: unknown[]) => {
+      const { systemPrompt, userText } = args[0] as { systemPrompt: string; userText: string };
+      if (systemPrompt !== TITLE_SYSTEM_PROMPT) return 'OK';
+      return userText.includes('发布清单') ? '发布清单梳理' : '季度路线图';
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { chatId, services } = await team();
+      const thread = (await call(IPC_CHANNELS.BOT_THREAD_CREATE, { chatId })).chat as {
+        id: string;
+      };
+      expect(services.chats.get(thread.id)?.autoTitle).toEqual({ seq: 0 });
+      expect(
+        await call(IPC_CHANNELS.BOT_SEND, {
+          chatId: thread.id,
+          text: '帮忙看下发布清单\n细节',
+          deliveryId: 'a1',
+        })
+      ).toMatchObject({ ok: true });
+      await vi.waitFor(() =>
+        expect(services.chats.get(thread.id)?.threadTitle).toBe('发布清单梳理')
+      );
+
+      expect(
+        await call(IPC_CHANNELS.BOT_THREAD_UPDATE, { chatId: thread.id, title: '我的标题' })
+      ).toMatchObject({ ok: true, chat: { threadTitle: '我的标题' } });
+      expect(services.chats.get(thread.id)).not.toHaveProperty('autoTitle');
+
+      expect(
+        await call(IPC_CHANNELS.BOT_SEND, { chatId, text: '讨论季度路线图', deliveryId: 'a2' })
+      ).toMatchObject({ ok: true });
+      await vi.waitFor(() =>
+        expect(services.chats.get(chatId)).toMatchObject({
+          title: 'team',
+          threadTitle: '季度路线图',
+        })
+      );
+    } finally {
+      warn.mockRestore();
+      mocks.completeText.mockImplementation(async () => 'OK');
+    }
+  });
+
   it('根群移出成员：各话题里该成员的会话结束；删根群连同话题一起删', async () => {
     const { carol, chatId, services, alice, bob } = await team();
     const registry = mocks.registry as SourceAuthorityRegistry;
