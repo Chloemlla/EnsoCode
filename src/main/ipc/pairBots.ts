@@ -26,11 +26,13 @@ import { projectParentHistoryAll, resolveParentHistoryFile } from '../services/s
 import { getSourceAuthorityRegistry } from './agent';
 import {
   botModeEnabled,
+  createBotThread,
   getBotServices,
   newBotSession,
   observeBotEvents,
   readBotTimeline,
   retryBotChat,
+  selectBotThread,
   sendBotMessage,
 } from './bots';
 import { phoneArtifactImage, phoneArtifacts } from './botsContent';
@@ -50,6 +52,8 @@ const NEW_SESSION_CACHE_LIMIT = 1024;
 
 type NewSessionCommand = Extract<PairBotCommand, { type: 'bot-new-session' }>;
 type NewSessionReply = Extract<HostToPhone, { type: 'bot-new-session-result' }>;
+type ThreadCommand = Extract<PairBotCommand, { type: 'bot-thread-create' | 'bot-thread-select' }>;
+type ThreadReply = Extract<HostToPhone, { type: 'bot-thread-result' }>;
 const newSessionRequests = new Map<
   string,
   {
@@ -103,6 +107,7 @@ function catalogFrame(services: Services): HostToPhone {
     type: 'bot-catalog',
     enabled: true,
     newSession: true,
+    threads: true,
     bots: services.bots
       .list()
       .map((bot) =>
@@ -116,20 +121,23 @@ function catalogFrame(services: Services): HostToPhone {
 
 function chatsFrame(services: Services): HostToPhone {
   const states = runStates(services);
+  const summarize = (chat: BotChat) =>
+    summarizeBotChat(
+      chat,
+      services.chats.readEntries(chat.id, { limit: 1 })[0],
+      services.chats.lastSeq(chat.id),
+      chatState(services, chat, states)
+    );
+  const all = services.chats.list();
+  // 根群进列表；其子话题另列，供手机话题切换
+  const roots = all.filter((chat) => chat.archivedAt === undefined && !chat.parentId);
+  const rootIds = new Set(roots.map((chat) => chat.id));
   return {
     type: 'bot-chats',
-    chats: services.chats
-      .list()
-      // 手机端只看群的根话题
-      .filter((chat) => chat.archivedAt === undefined && !chat.parentId)
-      .map((chat) =>
-        summarizeBotChat(
-          chat,
-          services.chats.readEntries(chat.id, { limit: 1 })[0],
-          services.chats.lastSeq(chat.id),
-          chatState(services, chat, states)
-        )
-      ),
+    chats: roots.map(summarize),
+    threads: all
+      .filter((chat) => chat.parentId !== undefined && rootIds.has(chat.parentId))
+      .map(summarize),
   };
 }
 
@@ -270,8 +278,31 @@ function newSessionResult(
   return result;
 }
 
+function threadResult(services: Services | null, command: ThreadCommand): ThreadReply {
+  const { chatId, requestId } = command;
+  const base = { type: 'bot-thread-result' as const, chatId, requestId };
+  if (!services) return { ...base, ok: false, error: 'disabled' };
+  if (command.type === 'bot-thread-create') {
+    const result = createBotThread(services, { chatId });
+    return result.ok
+      ? { ...base, ok: true, threadId: result.chat.id }
+      : { ...base, ok: false, error: result.error };
+  }
+  const result = selectBotThread(services, { chatId, threadId: command.threadId });
+  return result.ok
+    ? { ...base, ok: true, threadId: command.threadId }
+    : { ...base, ok: false, error: result.error };
+}
+
 async function handle(pairId: string, command: PairBotCommand, reply: PairReply): Promise<void> {
   const services = enabledServices();
+  if (command.type === 'bot-thread-create' || command.type === 'bot-thread-select') {
+    const result = threadResult(services, command);
+    // 先推目录：手机按根群 activeThreadId 换视图，回执到达时已对齐
+    if (result.ok && services) await reply(chatsFrame(services));
+    await reply(result);
+    return;
+  }
   if (command.type === 'bot-new-session') {
     const result = await newSessionResult(pairId, command, services);
     await reply(result);

@@ -16,6 +16,7 @@ import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import {
   type BotRuntimePort,
   BotSessionHost,
+  type BotSessionHostDeps,
   type BotSpawnSpec,
   type BotTurnFinished,
 } from './botSessionHost';
@@ -1849,7 +1850,7 @@ describe('BotSessionHost 私聊回退与重试', () => {
     }
   }
   let control: ControlRuntime;
-  const make = () => {
+  const make = (budget?: BotSessionHostDeps['budget']) => {
     control = new ControlRuntime();
     host = new BotSessionHost({
       bots,
@@ -1857,25 +1858,22 @@ describe('BotSessionHost 私聊回退与重试', () => {
       authority: registry,
       runtime: control,
       emit: () => {},
+      budget,
     });
   };
 
   it('rechecks capacity when the limit drops while a retry is preparing', async () => {
-    make();
+    let preparing = Promise.resolve();
+    make({ prepare: () => preparing, verdict: () => null });
     host.setMaxRunningTurns(2);
     const alice = bot('Alice');
     await host.deliver(direct(alice.id).id, alice.id, 'running');
     const session = host.ensureSession(direct(alice.id).id, alice.id);
     if (!session.ok) throw new Error(session.error);
     let resume!: () => void;
-    const blocked = new Promise<void>((resolve) => {
+    preparing = new Promise<void>((resolve) => {
       resume = resolve;
     });
-    const spawn = control.spawn.bind(control);
-    control.spawn = async (spec) => {
-      await blocked;
-      return spawn(spec);
-    };
     const retry = host.retryConversation(session.conversationId);
     await flush();
     expect(host.runningCount()).toBe(1);

@@ -1,8 +1,10 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
 import {
+  CLASSIFIER_TIMEOUT_MAX_MS,
+  CLASSIFIER_TIMEOUT_MIN_MS,
   canBeVirtualMember,
-  classifierProviderFor,
+  clampClassifierTimeoutMs,
   VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
   type VirtualClassifierConfig,
   type VirtualModelEntry,
@@ -24,6 +26,7 @@ import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import {
+  usableClassifierProvidersForOauthSnapshot,
   usableProvidersForOauthSnapshot,
   useOauthCredentialStore,
 } from '@/stores/oauthCredentials';
@@ -31,6 +34,55 @@ import { useSettingsStore } from '@/stores/settings';
 
 const noop = () => undefined;
 const OFF = 'off';
+
+/** 换来源/模型时沿用已有时限，用户设过的标记一并保留 */
+const keepTimeout = (classifier: VirtualClassifierConfig | undefined) => ({
+  timeoutMs: classifier?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+  ...(classifier?.timeoutSet && { timeoutSet: true as const }),
+});
+
+function ClassifierTimeoutInput({
+  classifier,
+  effectiveMs,
+  hint,
+  onChange,
+}: {
+  classifier: VirtualClassifierConfig;
+  effectiveMs: number;
+  hint: string;
+  onChange: (next: VirtualClassifierConfig) => void;
+}) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState(String(effectiveMs / 1000));
+  useEffect(() => setDraft(String(effectiveMs / 1000)), [effectiveMs]);
+  const commit = () => {
+    const seconds = Number(draft);
+    if (!draft.trim() || !Number.isFinite(seconds)) return setDraft(String(effectiveMs / 1000));
+    const timeoutMs = clampClassifierTimeoutMs(seconds * 1000);
+    setDraft(String(timeoutMs / 1000));
+    if (timeoutMs !== effectiveMs) onChange({ ...classifier, timeoutMs, timeoutSet: true });
+  };
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs">{t('Timeout')}</span>
+      <Input
+        type="number"
+        value={draft}
+        min={CLASSIFIER_TIMEOUT_MIN_MS / 1000}
+        max={CLASSIFIER_TIMEOUT_MAX_MS / 1000}
+        step={0.5}
+        className="h-7 w-20 text-xs"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur();
+        }}
+      />
+      <span className="text-xs text-muted-foreground">{t('seconds')}</span>
+      <span className="text-[10px] text-muted-foreground">{hint}</span>
+    </div>
+  );
+}
 
 function MemberPicker({
   providers,
@@ -93,6 +145,8 @@ export function ClassifierSourceField({
   judgeLabel,
   judgeSeed,
   description,
+  effectiveTimeoutMs,
+  timeoutHint,
 }: {
   value: VirtualClassifierConfig | undefined;
   onChange: (next: VirtualClassifierConfig | undefined) => void;
@@ -103,6 +157,9 @@ export function ClassifierSourceField({
   /** 切到裁判时预填的模型；缺省时等用户选定模型再保存 */
   judgeSeed?: DefaultModelRef;
   description: string;
+  /** 运行时实际时限；缺省即 timeoutMs */
+  effectiveTimeoutMs?: number;
+  timeoutHint: string;
 }) {
   const { t } = useI18n();
   const classifier = value;
@@ -133,7 +190,7 @@ export function ClassifierSourceField({
     onChange({
       source: 'pi-classifier',
       model: { providerId, modelId: first.id },
-      timeoutMs: classifier?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+      ...keepTimeout(classifier),
     });
   };
   const setSource = (next: string) => {
@@ -145,7 +202,7 @@ export function ClassifierSourceField({
       return onChange({
         source: 'judge',
         model: judgeSeed,
-        timeoutMs: VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+        ...keepTimeout(classifier),
       });
     }
     const provider = classifierProviders[0];
@@ -182,7 +239,7 @@ export function ClassifierSourceField({
             onChange({
               source: 'judge',
               model,
-              timeoutMs: classifier?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+              ...keepTimeout(classifier),
             });
           }}
         />
@@ -231,6 +288,14 @@ export function ClassifierSourceField({
       {noClassifierModels && (
         <p className="text-[10px] text-destructive">{t('No classifier models available')}</p>
       )}
+      {classifier && (
+        <ClassifierTimeoutInput
+          classifier={classifier}
+          effectiveMs={effectiveTimeoutMs ?? classifier.timeoutMs}
+          hint={timeoutHint}
+          onChange={onChange}
+        />
+      )}
       <p className="text-[10px] text-muted-foreground">{description}</p>
     </div>
   );
@@ -265,6 +330,7 @@ function ClassifierField({
       description={t(
         'Classifies each new turn: simple turns use the fast model, complex ones the primary model. Adds a short delay before the reply.'
       )}
+      timeoutHint={t('Uses the primary model on timeout.')}
     />
   );
 }
@@ -439,8 +505,8 @@ export function VirtualModelsSettings() {
   );
   const candidates = useMemo(() => usable.filter(canBeVirtualMember), [usable]);
   const classifierProviders = useMemo(
-    () => usable.filter((provider) => classifierProviderFor(provider) !== undefined),
-    [usable]
+    () => usableClassifierProvidersForOauthSnapshot(providers, snapshot),
+    [providers, snapshot]
   );
   const seed = useMemo((): DefaultModelRef | null => {
     if (defaultModel) {

@@ -301,6 +301,26 @@ describe('parseBotChat', () => {
       'activeThreadId'
     );
   });
+
+  it('autoTitle：只在群上、seq 为非负整数；缺省（旧数据）或脏值都不带', () => {
+    const parent = '55555555-5555-4555-8555-555555555555';
+    expect(parseBotChat({ ...group, autoTitle: { seq: 0 } })?.autoTitle).toEqual({ seq: 0 });
+    expect(
+      parseBotChat({ ...group, parentId: parent, autoTitle: { seq: 7, extra: 1 } })?.autoTitle
+    ).toEqual({ seq: 7 });
+    expect(parseBotChat(group)).not.toHaveProperty('autoTitle');
+    for (const bad of [true, 1, 'x', null, {}, { seq: -1 }, { seq: 1.5 }, { seq: '3' }])
+      expect(parseBotChat({ ...group, autoTitle: bad })).not.toHaveProperty('autoTitle');
+    const direct = {
+      ...group,
+      kind: 'direct',
+      members: [BOT_A],
+      bossBotId: null,
+      workspace: { kind: 'member-home' },
+      sessions: {},
+    };
+    expect(parseBotChat({ ...direct, autoTitle: { seq: 0 } })).not.toHaveProperty('autoTitle');
+  });
 });
 
 describe('parseGroupEntry', () => {

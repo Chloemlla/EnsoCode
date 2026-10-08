@@ -23,11 +23,18 @@ import { BotDrawerPanel } from './BotDrawerPanel';
 import { BotArtifactsPort } from './botArtifactsPort';
 import { BotNewSessionPort } from './botNewSessionPort';
 import { BotOutbox, type OutboxItem, phoneOutboxStorage } from './botOutbox';
-import { chatActivities, type GroupTimelineState, mergeGroupTimeline } from './botState';
+import {
+  chatActivities,
+  type GroupTimelineState,
+  groupThreads,
+  mergeGroupTimeline,
+} from './botState';
+import { BotThreadPort } from './botThreadPort';
 import { ChatScreen } from './ChatScreen';
 import { type ConnState, PairClient, type SessionView } from './client';
 import { formatOnlineConnectionLabel } from './connectionLabel';
 import { pickActive, removeDevice, renameDevice, upsertDevice } from './deviceList';
+import { resolveDrawerSegment, saveDrawerSegment } from './drawerSegment';
 import { GroupChatScreen, type MemberPending } from './GroupChatScreen';
 import { parseSessionFromSearch, parseSessionId, takeStashedSessionId } from './launchSession';
 import { useMediaQuery, WIDE_LAYOUT_QUERY } from './media';
@@ -174,6 +181,11 @@ export function App() {
   const [botNewSessionSupported, setBotNewSessionSupported] = useState(false);
   const [botNewSessionBusy, setBotNewSessionBusy] = useState(false);
   const botNewSessionBusyRef = useRef(false);
+  const [botThreadsSupported, setBotThreadsSupported] = useState(false);
+  const [botThreadBusy, setBotThreadBusy] = useState(false);
+  const botThreadBusyRef = useRef(false);
+  /** 列出的根群下的子话题摘要（桌面支持话题时下发） */
+  const [botThreads, setBotThreads] = useState<PairBotChatSummary[]>([]);
   const [bots, setBots] = useState<PairBotMember[]>([]);
   const [botChats, setBotChats] = useState<PairBotChatSummary[]>([]);
   const [botChatsReady, setBotChatsReady] = useState(false);
@@ -183,7 +195,10 @@ export function App() {
     items: [],
     offset: 0,
   });
-  const [botSegment, setBotSegment] = useState(initialView.botChatId !== null);
+  // 冷启动时 botEnabled 未知，先按「假设可用」恢复；实际渲染仍由 botEnabled 把关
+  const [botSegment, setBotSegment] = useState(() =>
+    resolveDrawerSegment(true, initialView.botChatId)
+  );
   /** 打开中的 Bot 聊天；非 null 时主屏显示 Bot 视图，Code 的 activeId 原样保留 */
   const [botChatId, setBotChatId] = useState<string | null>(initialView.botChatId);
   /** 群聊「查看过程」的成员会话（只读） */
@@ -203,6 +218,10 @@ export function App() {
     () => new BotNewSessionPort((command) => clientRef.current?.send(command)),
     []
   );
+  const threadPort = useMemo(
+    () => new BotThreadPort((command) => clientRef.current?.send(command)),
+    []
+  );
   const [outbox, setOutbox] = useState<OutboxItem[]>([]);
   const clientRef = useRef<PairClient | null>(null);
   const activeIdRef = useRef<string | null>(activeId);
@@ -212,6 +231,9 @@ export function App() {
   viewRef.current = view;
   activeIdRef.current = activeId;
   const botChat = botChatId ? botChats.find((chat) => chat.id === botChatId) : undefined;
+  /** 群聊显示根群的当前话题；时间线、运行态、发送都按话题 id */
+  const groupView = botChat?.kind === 'group' ? groupThreads(botChat, botThreads) : undefined;
+  const viewChat = groupView?.current ?? botChat;
   const directSessionId =
     botChat?.kind === 'direct'
       ? (botChat.sessions[botChat.members[0]]?.conversationId ?? null)
@@ -224,10 +246,12 @@ export function App() {
   botChatsRef.current = botChats;
   const botChatIdRef = useRef(botChatId);
   botChatIdRef.current = botChatId;
+  const groupViewIdRef = useRef<string | null>(null);
+  groupViewIdRef.current = groupView?.current.id ?? null;
   const memberIdsRef = useRef(new Set<string>());
   memberIdsRef.current = new Set(
-    botChat?.kind === 'group'
-      ? Object.values(botChat.sessions).map((session) => session.conversationId)
+    groupView
+      ? Object.values(groupView.current.sessions).map((session) => session.conversationId)
       : []
   );
   const botRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -321,6 +345,9 @@ export function App() {
     setBotNewSessionSupported(false);
     setBotNewSessionBusy(false);
     botNewSessionBusyRef.current = false;
+    setBotThreadsSupported(false);
+    setBotThreadBusy(false);
+    botThreadBusyRef.current = false;
     const rejectedReadOnly = () => {
       setDeviceReadOnly(true);
       setReadOnlyRejected(true);
@@ -331,7 +358,9 @@ export function App() {
           outboxRef.current?.interrupted();
           artifactsPort.reset();
           newSessionPort.reset();
+          threadPort.reset();
           setBotNewSessionSupported(false);
+          setBotThreadsSupported(false);
         }
         setState(next);
       },
@@ -339,6 +368,10 @@ export function App() {
       onBotArtifactImage: (frame) => artifactsPort.receiveImage(frame),
       onBotNewSessionResult: (frame) => {
         newSessionPort.receive(frame);
+        if (frame.error === READ_ONLY_ERROR) rejectedReadOnly();
+      },
+      onBotThreadResult: (frame) => {
+        threadPort.receive(frame);
         if (frame.error === READ_ONLY_ERROR) rejectedReadOnly();
       },
       onTransport: (next) => {
@@ -367,20 +400,23 @@ export function App() {
         setView((prev) => (id === subscribedRef.current ? next : prev));
         if (memberIdsRef.current.has(id)) setMemberViews((prev) => ({ ...prev, [id]: next }));
       },
-      onBotCatalog: (enabled, list, newSession) => {
+      onBotCatalog: (enabled, list, newSession, threads) => {
         setBotEnabled(enabled);
         setBotNewSessionSupported(enabled && newSession);
+        setBotThreadsSupported(enabled && threads);
         setBots(list);
         if (enabled) return;
         setBotChats([]);
+        setBotThreads([]);
         setBotInbox([]);
         setBotActivity({ items: [], offset: 0 });
         setBotChatId(null);
         setProcessId(null);
         setBotSegment(false);
       },
-      onBotChats: (chats) => {
+      onBotChats: (chats, threads) => {
         setBotChats(chats);
+        setBotThreads(threads);
         setBotChatsReady(true);
       },
       onBotInbox: setBotInbox,
@@ -405,18 +441,21 @@ export function App() {
         setChatStates((prev) => ({ ...prev, [chatId]: rest })),
       onBotEvent: (event) => {
         if (event.kind === 'model-notice') {
-          if (event.chatId === botChatIdRef.current && event.text) setBotNotice(event.text);
+          if (
+            event.text &&
+            (event.chatId === botChatIdRef.current || event.chatId === groupViewIdRef.current)
+          )
+            setBotNotice(event.text);
           return;
         }
-        // 当前打开的群有变化：合并刷新最新一页时间线与运行态
-        if (!event.chatId || event.chatId !== botChatIdRef.current || botRefreshRef.current) {
+        // 当前打开的群话题有变化：合并刷新最新一页时间线与运行态
+        if (!event.chatId || event.chatId !== groupViewIdRef.current || botRefreshRef.current) {
           return;
         }
         botRefreshRef.current = setTimeout(() => {
           botRefreshRef.current = null;
-          const chatId = botChatIdRef.current;
-          const chat = botChatsRef.current.find((item) => item.id === chatId);
-          if (chatId && chat?.kind === 'group') client.send({ type: 'bot-chat-open', chatId });
+          const chatId = groupViewIdRef.current;
+          if (chatId) client.send({ type: 'bot-chat-open', chatId });
         }, 200);
       },
       onBotSendResult: (result) => {
@@ -424,7 +463,7 @@ export function App() {
         if (result.error === READ_ONLY_ERROR) rejectedReadOnly();
       },
       onBotRetryResult: (result) => {
-        if (result.chatId === botChatIdRef.current)
+        if (result.chatId === groupViewIdRef.current)
           setBotNotice(
             result.ok
               ? '已开始重试'
@@ -506,6 +545,7 @@ export function App() {
       client.close();
       clientRef.current = null;
       newSessionPort.reset();
+      threadPort.reset();
     };
   }, [device?.pairId, device?.token, device?.relayUrl, device?.contentKey]);
 
@@ -564,7 +604,7 @@ export function App() {
   }, []);
 
   // 打开群聊或重连后：拉最新一页时间线与运行态；成员审批先用本地已有投影垫上
-  const groupOpenId = botChat?.kind === 'group' ? botChat.id : null;
+  const groupOpenId = groupView?.current.id ?? null;
   useEffect(() => {
     if (!groupOpenId || state !== 'online') return;
     olderRequestRef.current = null;
@@ -589,7 +629,7 @@ export function App() {
       if (session) seeded[id] = session;
     }
     setMemberViews(seeded);
-  }, [groupOpenId, botChat?.sessions]);
+  }, [groupOpenId, groupView?.current.sessions]);
 
   // 冷启动通知带来的 ?session= 若是 Bot 成员会话：目录到达后转到对应 Bot 聊天
   useEffect(() => {
@@ -705,6 +745,7 @@ export function App() {
     setBotEnabled(false);
     setBots([]);
     setBotChats([]);
+    setBotThreads([]);
     setBotChatsReady(false);
     setBotChatId(nextView.botChatId);
     setBotSegment(nextView.botChatId !== null);
@@ -804,7 +845,8 @@ export function App() {
   };
 
   const openDrawer = () => {
-    setBotSegment(botEnabled && botChatId !== null);
+    // 恢复上次停留的标签；没记过时沿用「正在看 Bot 聊天就停 Bot」的联动
+    setBotSegment(resolveDrawerSegment(botEnabled, botChatId));
     setDrawerOpen(true);
     if (botEnabled) send({ type: 'bot-catalog-request' });
   };
@@ -876,6 +918,42 @@ export function App() {
     }
   };
 
+  const threadHint = deviceReadOnly
+    ? '只读设备不能切换或新建话题'
+    : state !== 'online'
+      ? '请先连接桌面端'
+      : botThreadBusy
+        ? '正在处理话题…'
+        : undefined;
+
+  const runThread = async (command: Parameters<BotThreadPort['request']>[0]): Promise<void> => {
+    if (threadHint || botThreadBusyRef.current) return;
+    const client = clientRef.current;
+    botThreadBusyRef.current = true;
+    setBotThreadBusy(true);
+    setBotNotice(null);
+    try {
+      const result = await threadPort.request(command);
+      if (client !== clientRef.current || botChatIdRef.current !== command.chatId) return;
+      if (result.ok) setProcessId(null);
+      else
+        setBotNotice(
+          result.error === READ_ONLY_ERROR
+            ? '只读设备不能切换或新建话题'
+            : result.error === 'timeout' || result.error === 'offline'
+              ? '未收到桌面确认，请连接后核对当前话题'
+              : result.error === 'invalid'
+                ? '该话题已不存在或群已归档'
+                : `话题操作失败：${result.error ?? '请稍后重试'}`
+        );
+    } finally {
+      if (client === clientRef.current) {
+        botThreadBusyRef.current = false;
+        setBotThreadBusy(false);
+      }
+    }
+  };
+
   const renderBotScreen = (chat: PairBotChatSummary) => {
     if (chat.kind === 'group' && !processId) {
       const pending: MemberPending[] = Object.entries(chat.sessions).flatMap(
@@ -905,6 +983,19 @@ export function App() {
           canCreate={!newSessionHint(chat.id)}
           newSessionHint={newSessionHint(chat.id)}
           newSessionBusy={botNewSessionBusy}
+          threads={
+            botThreadsSupported && groupView && botChat
+              ? {
+                  entries: groupView.entries,
+                  currentId: chat.id,
+                  rootId: botChat.id,
+                  disabledHint: threadHint,
+                  onSelect: (threadId) =>
+                    void runThread({ type: 'bot-thread-select', chatId: botChat.id, threadId }),
+                  onCreate: () => void runThread({ type: 'bot-thread-create', chatId: botChat.id }),
+                }
+              : undefined
+          }
           voice={voice}
           onLoadOlder={() => {
             const beforeSeq = timelines[chat.id]?.entries[0]?.seq;
@@ -1081,6 +1172,7 @@ export function App() {
                 active: botSegment,
                 onChange: (next) => {
                   setBotSegment(next);
+                  saveDrawerSegment(next ? 'bot' : 'code');
                   if (next) send({ type: 'bot-catalog-request' });
                 },
                 panel: (
@@ -1119,7 +1211,7 @@ export function App() {
         )}
         {botChat ? (
           <BotArtifactsContext.Provider value={{ port: artifactsPort, online: state === 'online' }}>
-            {renderBotScreen(botChat)}
+            {renderBotScreen(viewChat ?? botChat)}
           </BotArtifactsContext.Provider>
         ) : botChatId ? (
           <div className="relative flex h-full flex-col items-center justify-center gap-3 px-6 text-center">

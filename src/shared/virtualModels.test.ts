@@ -6,6 +6,7 @@ import {
   classifierProviderFor,
   directMemberRef,
   findVirtualModel,
+  parseVirtualClassifier,
   parseVirtualModels,
   VIRTUAL_PROVIDER_ID,
   type VirtualModelEntry,
@@ -154,6 +155,33 @@ describe('虚拟模型可用性', () => {
         virtualModels: [],
       })
     ).toMatchObject({ status: 'sanitized', defaultModel: { providerId: 'p1', modelId: 'strong' } });
+  });
+});
+
+describe('parseVirtualClassifier', () => {
+  const model = { providerId: 'p', modelId: 'fast' };
+
+  it('用户设的时限照用并带上标记；越界收到 0.5–15s，不报错', () => {
+    expect(
+      parseVirtualClassifier({ source: 'judge', model, timeoutMs: 3000, timeoutSet: true })
+    ).toEqual({ source: 'judge', model, timeoutMs: 3000, timeoutSet: true });
+    expect(
+      parseVirtualClassifier({ source: 'judge', model, timeoutMs: 100, timeoutSet: true })
+    ).toMatchObject({ timeoutMs: 500, timeoutSet: true });
+    expect(
+      parseVirtualClassifier({ source: 'judge', model, timeoutMs: 60_000, timeoutSet: true })
+    ).toMatchObject({ timeoutMs: 15_000, timeoutSet: true });
+  });
+
+  it('旧配置没有标记；非 true 的标记视为未设置', () => {
+    expect(parseVirtualClassifier({ source: 'judge', model, timeoutMs: 3000 })).toEqual({
+      source: 'judge',
+      model,
+      timeoutMs: 3000,
+    });
+    expect(
+      parseVirtualClassifier({ source: 'judge', model, timeoutMs: 3000, timeoutSet: 'yes' })
+    ).not.toHaveProperty('timeoutSet');
   });
 });
 

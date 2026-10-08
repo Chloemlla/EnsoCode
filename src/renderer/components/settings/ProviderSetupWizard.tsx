@@ -1,4 +1,4 @@
-import { mergeProviderDefinitions } from '@shared/providerCatalog';
+import { isClassifierOnlyProvider, mergeProviderDefinitions } from '@shared/providerCatalog';
 import type { OauthAccount, OauthProviderInfo } from '@shared/types';
 import { ArrowLeft, BadgeCheck, KeyRound, Puzzle } from 'lucide-react';
 import * as React from 'react';
@@ -259,6 +259,11 @@ export function ProviderSetupWizard({ open, onOpenChange }: ProviderSetupWizardP
                             <span className="block truncate text-sm font-medium">
                               {t(definition.label)}
                             </span>
+                            {isClassifierOnlyProvider({ catalogId: definition.id }) && (
+                              <span className="block text-xs text-muted-foreground">
+                                {t('Classification only, not for chat')}
+                              </span>
+                            )}
                             <span className="mt-1 flex flex-wrap gap-1">
                               {methods.includes('oauth') && (
                                 <Badge variant="outline" className="text-[10px]">
@@ -282,6 +287,11 @@ export function ProviderSetupWizard({ open, onOpenChange }: ProviderSetupWizardP
               {page.step === 'method' && selected && (
                 <DialogPanel className="space-y-3">
                   <p className="text-sm font-medium">{t('Choose how to connect')}</p>
+                  {isClassifierOnlyProvider({ catalogId: selected.id }) && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('Classification only, not for chat')}
+                    </p>
+                  )}
                   {availableProviderSetupMethods(selected).includes('oauth') && (
                     <button
                       type="button"

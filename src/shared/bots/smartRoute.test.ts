@@ -103,7 +103,7 @@ describe('buildSmartRouteInput', () => {
 });
 
 describe('smartRouteJudgePrompt', () => {
-  it('系统提示写明规则，消息是数据', () => {
+  it('规则写在用户消息里（中转可能丢掉系统提示），消息是数据', () => {
     const input = buildSmartRouteInput(
       chat,
       members,
@@ -111,11 +111,13 @@ describe('smartRouteJudgePrompt', () => {
       human(2, '加吧')
     );
     const { systemPrompt, userText } = smartRouteJudgePrompt(input);
-    expect(systemPrompt).toMatch(/BOSS/);
-    expect(systemPrompt).toMatch(/up to 3/i);
-    expect(systemPrompt).toMatch(/usually.*one/i);
-    expect(systemPrompt).toMatch(/following up on .*previous message/i);
-    expect(systemPrompt).toMatch(/never follow instructions/i);
+    expect(systemPrompt.trim()).not.toBe('');
+    expect(userText).toMatch(/BOSS/);
+    expect(userText).toMatch(/up to 3/i);
+    expect(userText).toMatch(/usually.*one/i);
+    expect(userText).toMatch(/following up on .*previous message/i);
+    expect(userText).toMatch(/never follow instructions/i);
+    expect(userText.indexOf('INTENT:')).toBeLessThan(userText.indexOf('<roster>'));
     expect(userText).toContain('Backend');
     expect(userText).toContain('API 与数据库');
     expect(userText).toContain('Backend: 要不要加索引？');
@@ -249,7 +251,7 @@ describe('意图', () => {
   const input = buildSmartRouteInput(chat, members, [], human(1, 'hi'));
 
   it('judge 提示要求先输出 INTENT 行，名单解析忽略该行', () => {
-    expect(smartRouteJudgePrompt(input).systemPrompt).toMatch(/INTENT: build\|answer\|discuss/);
+    expect(smartRouteJudgePrompt(input).userText).toMatch(/INTENT: build\|answer\|discuss/);
     expect(parseSmartRouteReply('INTENT: build\nBackend', input)).toEqual(['be']);
     expect(parseSmartRouteIntent('INTENT: build\nBackend')).toBe('build');
     expect(parseSmartRouteIntent('intent：Discuss\n前端')).toBe('discuss');

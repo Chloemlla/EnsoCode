@@ -247,6 +247,13 @@ export class BotSessionHost {
   private readonly deliveries = new Map<string, Map<string, 'sent' | 'started'>>();
   /** 入 IPC 不等于已消费；保留原投递与顺序，直到 worker 回执或会话终止。 */
   private readonly pendingSteers = new Map<Delivery, string | undefined>();
+  private readonly redirects = new Map<
+    Delivery,
+    {
+      original: Delivery;
+      settle: (result: ActionResult) => void;
+    }
+  >();
   /** jsonl 里已开始处理的委派结果：首次全量、之后只读追加部分 */
   private readonly persistedStarts = new StartedDeliveryIndex();
   private readonly startedListeners = new Set<
@@ -450,11 +457,118 @@ export class BotSessionHost {
   queueState(): BotQueueItem[] {
     return this.queue.map((item, position) => ({
       chatId: item.chatId,
+      deliveryId: item.deliveryId,
+      canInterject: !this.redirecting(item) && Boolean(this.interjectionTarget(item)),
       botId: item.botId,
       conversationId: item.conversationId,
       position,
       ...this.queueReason(item, position),
     }));
+  }
+
+  async interjectQueued(
+    chatId: string,
+    deliveryId: string,
+    actor: { kind: 'human' | 'bot'; readOnly: boolean }
+  ): Promise<ActionResult> {
+    if (actor.kind !== 'human' || actor.readOnly) return { ok: false, error: 'unavailable' };
+    const original = this.queue.find(
+      (item) => item.chatId === chatId && item.deliveryId === deliveryId
+    );
+    if (original?.source !== 'human' || this.redirecting(original))
+      return { ok: false, error: 'queue-unavailable' };
+    const target = this.interjectionTarget(original);
+    if (!target) return { ok: false, error: this.interjectionEnded(original) };
+    const turnKey = this.turnKeys.get(target);
+    const redirected: Delivery = {
+      ...original,
+      conversationId: target,
+      deliveryId: randomUUID(),
+      epoch: this.epochs.get(target) ?? 0,
+      text: `来自群「${this.deps.chats.get(chatId)!.title}」的插话：\n${original.text}`,
+    };
+    let settle!: (result: ActionResult) => void;
+    const receipt = new Promise<ActionResult>((resolve) => {
+      settle = resolve;
+    });
+    this.redirects.set(redirected, { original, settle });
+    this.deps.emit({ kind: 'queue', chatId });
+    await this.withLock(target, async () => {
+      if (
+        !this.queue.includes(original) ||
+        this.interjectionTarget(original) !== target ||
+        this.turnKeys.get(target) !== turnKey
+      ) {
+        this.settleRedirect(redirected, false);
+        return;
+      }
+      const sent = this.steer(redirected);
+      if (!sent.ok) this.settleRedirect(redirected, false);
+    });
+    this.pump();
+    return receipt;
+  }
+
+  private redirecting(item: Delivery): boolean {
+    return [...this.redirects.values()].some((entry) => entry.original === item);
+  }
+
+  private interjectionTarget(item: Delivery): string | undefined {
+    const chat = this.deps.chats.get(item.chatId);
+    if (
+      this.disposed ||
+      item.source !== 'human' ||
+      !item.deliveryId ||
+      chat?.kind !== 'group' ||
+      chat.archivedAt !== undefined ||
+      !chat.members.includes(item.botId) ||
+      chat.sessions[item.botId]?.conversationId !== item.conversationId ||
+      this.turnActive(item.conversationId) ||
+      this.hasEarlierConversationDelivery(item)
+    )
+      return;
+    const active = this.memberActive(item);
+    if (active.length !== 1) return;
+    const id = active[0];
+    if (
+      !this.binding(id)?.delegationId ||
+      !this.running.has(id) ||
+      !this.turnKeys.has(id) ||
+      this.stopping.has(id) ||
+      this.retrying.has(id) ||
+      this.awaitingTurnEnd(id)
+    )
+      return;
+    return id;
+  }
+
+  private interjectionEnded(item: Delivery): string {
+    return `${this.deps.bots.get(item.botId)?.name ?? '成员'} 当前任务已结束，消息继续排队`;
+  }
+
+  private settleRedirect(delivery: Delivery, accepted: boolean): boolean {
+    const redirect = this.redirects.get(delivery);
+    if (!redirect) return false;
+    this.redirects.delete(delivery);
+    this.pendingSteers.delete(delivery);
+    const { original, settle } = redirect;
+    if (accepted) {
+      this.queue = this.queue.filter((item) => item !== original);
+      original.admission?.controller.abort();
+      const saved = this.deps.chats.appendEntry(original.chatId, {
+        kind: 'system',
+        id: randomUUID(),
+        at: this.now(),
+        text: `已转给 ${this.deps.bots.get(original.botId)?.name ?? '成员'} 当前任务`,
+      });
+      if (saved) this.deps.emit({ kind: 'timeline', chatId: original.chatId, seq: saved.seq });
+      this.deliverySent(original);
+      this.rememberDelivery(original.conversationId, original.deliveryId!, 'started');
+      this.finish(original.conversationId, undefined, true, undefined, '', original.deliveryId);
+    } else this.deliveries.get(delivery.conversationId)?.delete(delivery.deliveryId!);
+    settle(accepted ? { ok: true } : { ok: false, error: this.interjectionEnded(original) });
+    this.deps.emit({ kind: 'queue', chatId: original.chatId });
+    return true;
   }
 
   private queueReason(item: Delivery, position: number): Pick<BotQueueItem, 'reason'> {
@@ -476,7 +590,7 @@ export class BotSessionHost {
   private changedQueueReasons(): string[] {
     const next = new Map<string, string>();
     for (const item of this.queueState()) {
-      const note = `${item.conversationId}:${item.reason ?? ''}`;
+      const note = `${item.conversationId}:${item.reason ?? ''}:${item.canInterject}`;
       next.set(item.chatId, `${next.get(item.chatId) ?? ''}|${note}`);
     }
     const changed = [...next].filter(
@@ -807,7 +921,7 @@ export class BotSessionHost {
       }
       if (
         this.turnActive(conversationId) ||
-        this.queue.some((item) => item.botId === botId) ||
+        this.queue.some((item) => this.sameMemberChat(delivery, item)) ||
         this.hasEarlierTask(delivery) ||
         this.memberActive(delivery).length > 0 ||
         this.runningCount() >= this.maxRunning
@@ -919,6 +1033,13 @@ export class BotSessionHost {
         );
         if (!delivery) return;
         const seen = this.pendingSteers.get(delivery);
+        if (event.type === 'delivery-settled' && seen !== undefined) this.notesSeen.set(id, seen);
+        if (this.settleRedirect(delivery, event.type === 'delivery-settled')) {
+          if (event.type === 'delivery-settled')
+            this.rememberDelivery(id, event.deliveryId, 'started');
+          this.pump();
+          return;
+        }
         this.pendingSteers.delete(delivery);
         if (event.type === 'delivery-settled') {
           if (seen !== undefined) this.notesSeen.set(id, seen);
@@ -946,6 +1067,7 @@ export class BotSessionHost {
           this.running.add(id);
           if (slot) slot.sawRunning = true;
           this.deliveryStarted(id);
+          this.emitQueueChanges();
           return;
         }
         this.running.delete(id);
@@ -953,6 +1075,7 @@ export class BotSessionHost {
         if (slot && (slot.sawRunning || event.status === 'failed'))
           this.scheduleSettle(id, slot, event.status === 'failed' ? event.error : undefined);
         else if (!slot) this.pump();
+        this.emitQueueChanges();
         return;
       }
       case 'message-upsert': {
@@ -990,6 +1113,7 @@ export class BotSessionHost {
       }
       case 'turn-retry':
         if (this.turnActive(id)) this.retrying.add(id);
+        this.emitQueueChanges();
         return;
       case 'turn-completed': {
         if (!this.turnActive(id)) return;
@@ -1451,7 +1575,7 @@ export class BotSessionHost {
       if (
         this.memberActive(ready).length ||
         this.hasEarlierTask(ready) ||
-        this.queue.some((item) => item.botId === ready.botId) ||
+        this.queue.some((item) => this.sameMemberChat(ready, item)) ||
         this.runningCount() >= this.maxRunning
       ) {
         this.enqueue(ready);
@@ -1528,6 +1652,8 @@ export class BotSessionHost {
   }
 
   private release(conversationId: string): void {
+    for (const delivery of this.redirects.keys())
+      if (delivery.conversationId === conversationId) this.settleRedirect(delivery, false);
     this.cancelSettle(conversationId);
     this.retrying.delete(conversationId);
     this.turnKeys.delete(conversationId);
@@ -1656,6 +1782,7 @@ export class BotSessionHost {
 
   /** 活轮里可 steer 的插话（重试倒计时中改排下一轮），或可开的新轮 */
   private dequeueable(item: Delivery): boolean {
+    if (this.redirecting(item)) return false;
     if (this.stopping.has(item.conversationId)) return false;
     if (this.hasEarlierConversationDelivery(item)) return false;
     if (!this.turnActive(item.conversationId)) {
@@ -1689,8 +1816,37 @@ export class BotSessionHost {
   private hasEarlierTask(item: Delivery): boolean {
     return [...this.queue, ...this.preparing, ...this.pendingSteers.keys()].some(
       (other) =>
-        other !== item && other.botId === item.botId && (other.order ?? 0) < (item.order ?? 0)
+        other !== item && this.sameMemberChat(item, other) && (other.order ?? 0) < (item.order ?? 0)
     );
+  }
+
+  /** 同成员准入只在同一聊天内生效 */
+  private sameMemberChat(item: Delivery, other: Delivery): boolean {
+    return (
+      other.botId === item.botId &&
+      (item.conversationId === other.conversationId ||
+        this.sameChat(item.conversationId, other.conversationId))
+    );
+  }
+
+  private sameChat(a: string, b: string): boolean {
+    const chatA = this.chatOf(a);
+    const chatB = this.chatOf(b);
+    return chatA !== undefined && chatA === chatB;
+  }
+
+  /** 会话所属聊天：委派子会话按发起它的聊天，沿委派链追到根 */
+  private chatOf(id: string): string | undefined {
+    for (const seen = new Set<string>(); !seen.has(id); ) {
+      seen.add(id);
+      const chatId = this.binding(id)?.chatId;
+      if (chatId) return chatId;
+      const origin = this.origins.get(id);
+      if (!origin) return undefined;
+      if (origin.chatId) return origin.chatId;
+      id = origin.parentConversationId;
+    }
+    return undefined;
   }
 
   private hasEarlierConversationDelivery(item: Delivery): boolean {
@@ -1707,7 +1863,8 @@ export class BotSessionHost {
       .filter(
         (id) =>
           id !== item.conversationId &&
-          (this.stopping.get(id) ?? this.binding(id)?.botId) === item.botId
+          (this.stopping.get(id) ?? this.binding(id)?.botId) === item.botId &&
+          this.sameChat(item.conversationId, id)
       )
       .sort();
   }
@@ -1761,6 +1918,11 @@ export class BotSessionHost {
     this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1);
     const botId = this.binding(id)?.botId;
     if (botId && (this.turnActive(id) || this.live.has(id))) this.stopping.set(id, botId);
+    this.emitQueueChanges();
+  }
+
+  private emitQueueChanges(): void {
+    for (const chatId of this.changedQueueReasons()) this.deps.emit({ kind: 'queue', chatId });
   }
 
   /** A release timeout is not a release; only runtime acknowledgement or actual worker death can unblock. */
@@ -1882,6 +2044,8 @@ export class BotSessionHost {
   }
 
   private cancelQueued(predicate: (item: Delivery) => boolean, reason = 'canceled'): void {
+    for (const [delivery, redirect] of this.redirects)
+      if (predicate(redirect.original)) this.settleRedirect(delivery, false);
     this.failPendingSteers(predicate, reason);
     const canceled = this.queue.filter(predicate);
     this.queue = this.queue.filter((item) => !predicate(item));
@@ -1895,6 +2059,7 @@ export class BotSessionHost {
   private failPendingSteers(predicate: (item: Delivery) => boolean, reason: string): void {
     for (const item of this.pendingSteers.keys()) {
       if (!predicate(item)) continue;
+      if (this.settleRedirect(item, false)) continue;
       this.pendingSteers.delete(item);
       this.finish(item.conversationId, undefined, false, reason, '', item.deliveryId ?? null);
     }

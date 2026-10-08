@@ -19,6 +19,24 @@ function provider(id: string, overrides: Partial<ModelProvider> = {}): ModelProv
 }
 
 describe('toPairProviderEntries', () => {
+  it('does not publish TypeSafe classifiers to phone or remote chat selectors', () => {
+    const ts = provider('typesafe', {
+      api: 'typesafe-system-one',
+      baseUrl: 'https://api.typesafe.ai/v1/',
+      models: [{ id: 'jev-latest' }],
+    });
+    const snapshot = { revision: 0, availability: { status: 'unloaded' as const } };
+    const entries = toPairProviderEntries([ts, provider('chat')], snapshot, [
+      {
+        id: 'auto',
+        name: 'Auto',
+        enabled: true,
+        primary: { providerId: ts.id, modelId: 'jev-latest' },
+        fallbacks: [],
+      },
+    ]);
+    expect(entries.map((entry) => entry.id)).toEqual(['chat']);
+  });
   it('includes authenticated subscription providers and strips secrets', () => {
     const entries = toPairProviderEntries(
       [

@@ -1,4 +1,5 @@
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from './oauthAccountPool';
+import { isClassifierOnlyProvider } from './providerCatalog';
 import type { ModelProvider } from './types';
 import type { ApprovalMode, ThinkingLevel } from './types/agent';
 import { findVirtualModel, isVirtualRef, type VirtualModelEntry } from './virtualModels';
@@ -36,6 +37,7 @@ export type DeterministicModelUnavailability =
   | 'missing-selection'
   | 'provider-missing'
   | 'provider-disabled'
+  | 'classifier-only'
   | 'model-missing'
   | 'model-disabled'
   | 'api-key-missing'
@@ -140,6 +142,7 @@ export function modelUsability(
   const provider = providers.find((entry) => entry.id === selection.providerId);
   if (!provider) return 'provider-missing';
   if (!provider.enabled) return 'provider-disabled';
+  if (isClassifierOnlyProvider(provider)) return 'classifier-only';
   const model = provider.models.find((entry) => entry.id === selection.modelId);
   if (!model) return 'model-missing';
   if (model.enabled === false) return 'model-disabled';

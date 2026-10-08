@@ -66,7 +66,7 @@ interface BotChat {
 
 - 不把老群里「新对话」切出的旧段拆成话题。
 - 话题之间不做引用或合并。
-- 手机端只显示根群自身这一个话题，不能切换；pair 协议不变。
+- 手机端话题改名 / 删除。（列出、切换、新建已由 #34 补上：`bot-thread-create / bot-thread-select` 复用桌面 handler，`bot-chats.threads` 下发子话题，`bot-catalog.threads` 声明能力；切换即改根群 `activeThreadId`，桌面与手机同步；只读设备由 Main 拦截。）
 
 ## 实施
 

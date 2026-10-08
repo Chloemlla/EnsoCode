@@ -81,6 +81,26 @@ describe('BotChatStore chats', () => {
     expect(store.get(chat.id)).toBeUndefined();
     expect(store.readEntries(chat.id)).toEqual([]);
   });
+
+  it('新建的群与话题带 autoTitle 标记，私聊不带；旧数据（无标记）重载后仍不带', () => {
+    const chat = group();
+    expect(chat.autoTitle).toEqual({ seq: 0 });
+    expect(store.createThread(chat.id)?.autoTitle).toEqual({ seq: 0 });
+    const direct = store.create({
+      kind: 'direct',
+      title: 'd',
+      members: [BOT_A],
+      bossBotId: null,
+      workspace: { kind: 'member-home' },
+    })!;
+    expect(direct).not.toHaveProperty('autoTitle');
+    const legacy = store.update(chat.id, (draft) => {
+      delete draft.autoTitle;
+      return draft;
+    })!;
+    expect(legacy).not.toHaveProperty('autoTitle');
+    expect(new BotChatStore(root, now).get(chat.id)).not.toHaveProperty('autoTitle');
+  });
 });
 
 describe('BotChatStore threads', () => {

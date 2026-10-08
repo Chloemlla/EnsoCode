@@ -3,6 +3,25 @@ import { describe, expect, it } from 'vitest';
 import { availableProviderSetupMethods, initialProviderApiValue } from './providerSetup';
 
 describe('统一提供商向导分支', () => {
+  it('TypeSafe 预置启用的 jev-latest，普通聊天供应商不预置模型', () => {
+    const definition: ProviderDefinition = {
+      id: 'typesafe',
+      label: 'TypeSafe',
+      defaultApi: 'typesafe-system-one',
+      defaultBaseUrl: 'https://api.typesafe.ai/v1',
+      supportsApiKey: true,
+    };
+    expect(initialProviderApiValue(definition)).toMatchObject({
+      api: 'typesafe-system-one',
+      apiKey: '',
+      models: [{ id: 'jev-latest', enabled: true }],
+    });
+    expect(
+      initialProviderApiValue({ ...definition, id: 'custom', defaultApi: 'openai-completions' })
+        .models
+    ).toEqual([]);
+  });
+
   it('同时支持订阅与 API Key 的厂商先展示两种接入方式', () => {
     const definition: ProviderDefinition = {
       id: 'anthropic',

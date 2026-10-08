@@ -399,6 +399,55 @@ it('uses delegationId and only marks delivered after the parent turn actually st
 });
 const results = (f: ReturnType<typeof fixture>) =>
   f.prompts.filter((prompt) => prompt.text.includes('<delegation-result'));
+it('重启后回传给委派父会话仍按原聊天归属，不受其他聊天的同成员活轮阻塞', async () => {
+  const f = fixture(false);
+  const carol = f.deps.bots.create({ name: 'Carol' }, []);
+  if (!carol.ok) throw new Error('Carol');
+  const first = f.service.delegate(f.parent, { to: 'Bob', task: 'outer' });
+  if (!first.ok) throw new Error(first.error);
+  await vi.advanceTimersByTimeAsync(0);
+  const parent = f.store.get(first.delegationId)!.childConversationId;
+  const nested = f.service.delegate(parent, { to: 'Carol', task: 'inner' });
+  if (!nested.ok) throw new Error(nested.error);
+  await vi.advanceTimersByTimeAsync(0);
+  f.service.dispose();
+  f.host.dispose();
+
+  const classify = vi.fn<MemberTaskClassifier>(async () => 'serial');
+  const prompt = vi.fn(() => ({ ok: true }));
+  const host = new BotSessionHost({
+    ...f.deps,
+    classifyMemberTask: classify,
+    runtime: {
+      spawn: async () => ({ ok: true }),
+      prompt,
+      steer: () => ({ ok: true }),
+      release: async () => {},
+      removeSessionFiles: () => {},
+    },
+  });
+  const other = f.deps.chats.create({
+    kind: 'direct',
+    members: [f.bob],
+    bossBotId: null,
+    title: '',
+    workspace: { kind: 'member-home' },
+  })!;
+  await host.deliver(other.id, f.bob, 'busy in another chat');
+  const service = new DelegationService({ ...f.deps, host });
+  await service.deliverPending();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(prompt.mock.calls).toContainEqual([
+    parent,
+    expect.stringContaining('<delegation-result'),
+    undefined,
+    expect.any(String),
+  ]);
+  expect(classify).not.toHaveBeenCalled();
+  expect(host.queueState()).toEqual([]);
+  service.dispose();
+  host.dispose();
+});
 async function sameTurn(f: ReturnType<typeof fixture>, tasks: string[]) {
   await f.host.deliverConversation(f.parent, 'busy');
   const records = tasks.map((task) => {

@@ -30,6 +30,7 @@ export const API_KIND_LABELS: Record<ModelApiKind, string> = {
   'openai-responses': 'OpenAI Responses',
   'anthropic-messages': 'Anthropic',
   'google-generative-ai': 'Gemini',
+  'typesafe-system-one': 'TypeSafe System One',
   ollama: 'Ollama',
 };
 

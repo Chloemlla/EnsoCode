@@ -84,6 +84,23 @@ describe('配对作用域', () => {
     });
   });
 
+  it('rejects thread create/select on read-only devices with the original request identity', () => {
+    for (const command of [
+      { type: 'bot-thread-create', chatId: 'chat', requestId: 'request' },
+      { type: 'bot-thread-select', chatId: 'chat', threadId: 'thread', requestId: 'request' },
+    ] as const) {
+      expect(commandAllowedForScope('read', command.type)).toBe(false);
+      expect(commandAllowedForScope('operate', command.type)).toBe(true);
+      expect(scopeRejection(command)).toEqual({
+        type: 'bot-thread-result',
+        chatId: 'chat',
+        requestId: 'request',
+        ok: false,
+        error: 'read-only',
+      });
+    }
+  });
+
   it('拦截后回执：bot-send 走 bot-send-result，其余写命令回 command-rejected', () => {
     expect(scopeRejection({ type: 'bot-send', chatId: 'c', deliveryId: 'd', text: 'hi' })).toEqual({
       type: 'bot-send-result',

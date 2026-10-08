@@ -18,6 +18,6 @@ export function initialProviderApiValue(definition: ProviderDefinition): Provide
     api: definition.defaultApi ?? 'openai-completions',
     apiKey: '',
     baseUrl: definition.defaultBaseUrl ?? '',
-    models: [],
+    models: definition.id === 'typesafe' ? [{ id: 'jev-latest', enabled: true }] : [],
   };
 }

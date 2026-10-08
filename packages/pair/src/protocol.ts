@@ -138,6 +138,9 @@ export type PhoneToHost =
   | { type: 'bot-timeline'; chatId: string; beforeSeq?: number }
   | { type: 'bot-stop'; chatId: string }
   | { type: 'bot-new-session'; chatId: string; requestId: string; confirmed?: boolean }
+  /** 群话题：chatId 为根群；复用桌面新建 / 切换逻辑，切换会同步桌面当前话题 */
+  | { type: 'bot-thread-create'; chatId: string; requestId: string }
+  | { type: 'bot-thread-select'; chatId: string; threadId: string; requestId: string }
   | { type: 'bot-retry'; chatId: string; entryId: string }
   /** 收件箱：请求当前条目；忽略只对提示类条目有效（审批、提问、例程需要处理） */
   | { type: 'bot-inbox-request' }
@@ -196,6 +199,8 @@ export const PHONE_COMMAND_TYPES = [
   'bot-timeline',
   'bot-stop',
   'bot-new-session',
+  'bot-thread-create',
+  'bot-thread-select',
   'bot-retry',
   'bot-inbox-request',
   'bot-inbox-dismiss',
@@ -315,6 +320,10 @@ export interface PairBotChatSummary {
   updatedAt: number;
   lastSeq: number;
   epochSeq?: number;
+  /** 群话题：子话题指向根群；根群带当前话题（缺省 = 根群自身） */
+  parentId?: string;
+  threadTitle?: string;
+  activeThreadId?: string;
   /** 时间线末条摘要（私聊无时间线时缺省） */
   last?: { kind: PairGroupEntry['kind']; text: string; botId?: string; at: number };
   /** 各成员当前在用会话：手机打开私聊 / 查看过程时订阅它 */
@@ -542,8 +551,15 @@ export type HostToPhone =
    * Bot 模式目录。enabled=false 表示桌面已关闭 Bot 模式（手机隐藏 Bot 分段）。
    * 旧手机 switch 无 default 分支，以下 bot 帧一律忽略。
    */
-  | { type: 'bot-catalog'; enabled: boolean; bots: PairBotMember[]; newSession?: boolean }
-  | { type: 'bot-chats'; chats: PairBotChatSummary[] }
+  | {
+      type: 'bot-catalog';
+      enabled: boolean;
+      bots: PairBotMember[];
+      newSession?: boolean;
+      threads?: boolean;
+    }
+  /** threads：列出的根群下的子话题（带 parentId）；旧手机只读 chats */
+  | { type: 'bot-chats'; chats: PairBotChatSummary[]; threads?: PairBotChatSummary[] }
   /** 群时间线一页（升序）；beforeSeq 回显请求，缺省 = 最新一页；单帧超限时由 host 减少条数 */
   | {
       type: 'group-timeline';
@@ -566,6 +582,15 @@ export type HostToPhone =
       ok: boolean;
       error?: string;
       needsConfirmation?: boolean;
+    }
+  /** bot-thread-create / select 的应答；threadId 为当前话题 */
+  | {
+      type: 'bot-thread-result';
+      chatId: string;
+      requestId: string;
+      ok: boolean;
+      threadId?: string;
+      error?: string;
     }
   /** 只读设备的写命令被 host 拦截（bot-send 走 bot-send-result）；旧手机忽略 */
   | { type: 'command-rejected'; command: string; error: 'read-only' }

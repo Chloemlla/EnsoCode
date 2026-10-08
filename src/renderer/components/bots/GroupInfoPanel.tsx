@@ -307,7 +307,7 @@ export function GroupInfoPanel({
           </PanelSection>
 
           <PanelSection title={t('Workspace')}>
-            <div className="rounded-lg border bg-card px-2.5 py-2">
+            <div data-slot="bot-card" className="rounded-lg border bg-card px-2.5 py-2">
               <WorkspaceMenu chat={chat} className="w-full max-w-none" />
               <p className="mt-1.5 text-muted-foreground text-xs">
                 {workspaceProject ? `${workspaceProject.path} · ` : ''}

@@ -141,7 +141,11 @@ export function BotView({ sidebarWidth, collapsed, onToggleCollapse, onResize }:
           {(inboxCount > 0 || view?.kind === 'inbox') && (
             <button
               type="button"
-              className={cn(RAIL_BUTTON, view?.kind === 'inbox' && 'bg-muted text-foreground')}
+              className={cn(
+                RAIL_BUTTON,
+                view?.kind === 'inbox' &&
+                  'bg-brand/10 text-foreground hover:bg-brand/10 dark:bg-brand/15 dark:hover:bg-brand/15'
+              )}
               onClick={() => setView({ kind: 'inbox' })}
               title={t('Inbox')}
             >

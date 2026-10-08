@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ providers: [] as unknown[] }));
 const getModelsOfType = vi.hoisted(() =>
   vi.fn((_type: string, provider: string) =>
-    provider === 'openrouter' ? [{ id: 'typesafe/jev-1.13', name: 'Jev' }] : []
+    provider === 'openrouter'
+      ? [{ id: 'typesafe/jev-1.13', name: 'Jev' }]
+      : provider === 'typesafe'
+        ? [{ id: 'jev-latest', name: 'Jev' }]
+        : []
   )
 );
 vi.mock('./agentHost', () => ({ readSettingsState: () => state }));
@@ -12,6 +16,11 @@ vi.mock('./oauthProviders', () => ({ getRuntime: async () => ({ getModelsOfType 
 import { listClassifierModels } from './classifierModels';
 
 describe('listClassifierModels', () => {
+  it('lists Jev from the official TypeSafe classifier catalog', async () => {
+    state.providers = [{ id: 'ts', baseUrl: 'https://api.typesafe.ai/v1/', apiKey: 'fixture' }];
+    await expect(listClassifierModels('ts')).resolves.toEqual([{ id: 'jev-latest', name: 'Jev' }]);
+    expect(getModelsOfType).toHaveBeenCalledWith('classifier', 'typesafe');
+  });
   it('只按设置里的条目 id 判定分类器来源，订阅多账号按基础 provider 列出', async () => {
     state.providers = [
       { id: 'or', baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'k' },

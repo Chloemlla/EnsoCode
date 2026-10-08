@@ -192,6 +192,7 @@ export function RoutineList({
         return (
           <div
             key={routine.id}
+            data-slot="bot-card"
             className={cn(
               'rounded-lg border bg-card px-2.5 py-2 text-xs',
               routine.status === 'paused' && 'opacity-70'

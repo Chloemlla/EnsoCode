@@ -8,10 +8,9 @@ import { normalizeBotMaxRunningTurns } from '@shared/bots/concurrency';
 import { BOT_NOTES_MAX_CHARS } from '@shared/bots/notes';
 import { isSkipReply } from '@shared/bots/router';
 import { assignTeamNames } from '@shared/bots/team';
-import { threadTitleFrom } from '@shared/bots/threads';
 import type { SessionIdentity } from '@shared/builtinAgents';
 import { BUILTIN_AGENT_TYPES, IPC_CHANNELS } from '@shared/types';
-import type { AttachedImage } from '@shared/types/agent';
+import { type AttachedImage, isDeliveryId } from '@shared/types/agent';
 import type { SkillEntry } from '@shared/types/assets';
 import {
   type BotChat,
@@ -123,6 +122,7 @@ import {
 } from '../services/bots/sessionMessages';
 import { createSmartRouter, type SmartRouterDeps } from '../services/bots/smartRouter';
 import { createTeam } from '../services/bots/teamCreate';
+import { ThreadTitler } from '../services/bots/threadTitler';
 import { browserHost } from '../services/browserHost';
 import { searchFiles } from '../services/fileSearch';
 import { resolveGlobalInstruction } from '../services/instructionStore';
@@ -184,6 +184,9 @@ interface BotServices {
   snooze: ChatSnoozeTimer;
   inbox: BotInboxService;
   composerRefs: ComposerRefs;
+  titler: ThreadTitler;
+  /** 停掉话题命名：退订事件并丢弃进行中的结果 */
+  stopTitler: () => void;
 }
 
 type GroupSender = (
@@ -416,7 +419,7 @@ export function getBotServices(): BotServices | null {
   });
   const routingDeps: SmartRouterDeps = {
     settings: () => readSettingsState(),
-    judge: async ({ preferred, ...request }, signal) => {
+    judge: async ({ preferred, maxTokens = 1024, ...request }, signal) => {
       const state = readSettingsState();
       if (!state) throw new Error('设置不可用');
       if (!isAgentWorkerReady()) throw new Error('会话服务未启动');
@@ -433,7 +436,13 @@ export function getBotServices(): BotServices | null {
       const abort = () => abortCompleteText(requestId);
       signal.addEventListener('abort', abort, { once: true });
       try {
-        return await completeText({ requestId, ...request, candidates, maxTokens: 1024 });
+        return await completeText({
+          requestId,
+          ...request,
+          candidates,
+          maxTokens,
+          reasoning: 'off',
+        });
       } catch (error) {
         if (signal.aborted) return null;
         const ref = preferred ?? chain[0];
@@ -495,6 +504,7 @@ export function getBotServices(): BotServices | null {
     path.join(userData, 'bot-chats', 'delegations.jsonl')
   );
   const taskStore = new GroupTaskStore(path.join(userData, 'bot-chats'));
+  let titlerRef: ThreadTitler | undefined;
   const composerRefs = createComposerRefs({
     bots,
     chats,
@@ -519,6 +529,7 @@ export function getBotServices(): BotServices | null {
       }),
     refsAppendix: (chat, botId, entries) => composerRefs.groupAppendix(chat, botId, entries),
     onBatchSettled: (batch) => {
+      titlerRef?.notify(batch.chatId);
       const chat = chats.get(batch.chatId);
       if (!chat) return;
       const name = (id: string) => bots.get(id)?.name ?? '?';
@@ -622,6 +633,32 @@ export function getBotServices(): BotServices | null {
     },
   });
   delegationsRef = delegations;
+  // 群话题 AI 命名：复用设置里的标题总结开关与标题模型回退链（群话题没有会话模型这一级）
+  const titler = new ThreadTitler({
+    chats,
+    enabled: () => readSettingsState()?.titleSummaryEnabled === true,
+    work: {
+      groupState: (chatId) => groups.state(chatId),
+      conversationBusy: (conversationId) => host.isBusy(conversationId),
+      queued: (chatId) => host.queueState().some((item) => item.chatId === chatId),
+      delegations: (chatId) => delegationStore.list(chatId),
+    },
+    candidates: async () => {
+      const state = readSettingsState();
+      if (!state || !isAgentWorkerReady()) return [];
+      return resolveRemoteModels(titleModelCandidates(state));
+    },
+    complete: (input) => completeText(input),
+    abort: (requestId) => abortCompleteText(requestId),
+    emit: (chatId) => emitBotEvent({ kind: 'chat', chatId }),
+  });
+  titlerRef = titler;
+  host.onTurnFinished((event) => {
+    if (event.chatId) titler.notify(event.chatId);
+  });
+  const stopTitlerEvents = observeBotEvents((event) => {
+    if (event.kind === 'delegation' && event.chatId) titler.notify(event.chatId);
+  });
   const routines = new BotRoutineStore(botsRoot);
   const routineRuns = new BotRoutineRunLog(botsRoot);
   const runner = new RoutineRunner({
@@ -709,6 +746,11 @@ export function getBotServices(): BotServices | null {
     composerRefs,
     snooze,
     inbox,
+    titler,
+    stopTitler: () => {
+      stopTitlerEvents();
+      titler.dispose();
+    },
   };
   if (botModeEnabled()) scheduler.start();
   snooze.refresh();
@@ -730,6 +772,7 @@ export function syncBotModeServices(): void {
     previous.runner.dispose();
     previous.memory.dispose();
     previous.snooze.dispose();
+    previous.stopTitler();
     setBotWorkerEventObserver(null);
     setBotGroupSender(null);
     services = null;
@@ -853,6 +896,35 @@ export async function newBotSession(
 }
 
 /** 私聊切回旧对话：先停当前回合并提炼当前会话记忆，再重新打开目标会话；回复中由桌面先确认 */
+/** 群新话题（桌面与手机共用）：当前话题还没人说话时直接复用，不堆空话题 */
+export function createBotThread({ chats }: BotServices, request: unknown): BotChatWriteResult {
+  const chatId = parseThreadChatInput(request);
+  const root = chatId ? chats.get(chatId) : undefined;
+  if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined) return INVALID;
+  const active = chats.activeThread(root.id);
+  if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };
+  const thread = chats.createThread(root.id);
+  if (!thread) return INVALID;
+  chats.update(root.id, (draft) => ({ ...draft, activeThreadId: thread.id }));
+  emitBotEvent({ kind: 'chat', chatId: thread.id });
+  emitBotEvent({ kind: 'chat', chatId: root.id });
+  return { ok: true, chat: thread };
+}
+
+export function selectBotThread({ chats }: BotServices, request: unknown): BotActionResult {
+  const input = parseThreadSelectInput(request);
+  const root = input ? chats.get(input.chatId) : undefined;
+  if (!input || !root || !chats.threadsOf(root.id).some((chat) => chat.id === input.threadId))
+    return INVALID;
+  chats.update(root.id, (draft) => {
+    if (input.threadId === root.id) delete draft.activeThreadId;
+    else draft.activeThreadId = input.threadId;
+    return draft;
+  });
+  emitBotEvent({ kind: 'chat', chatId: root.id });
+  return { ok: true };
+}
+
 async function switchBotSession(services: BotServices, request: unknown): Promise<BotActionResult> {
   const { chats, host, memory } = services;
   const input = parseSessionSwitchInput(request);
@@ -988,17 +1060,9 @@ function keepGroupImages(
   return { ok: true, ids };
 }
 
-/** 话题还没有标题时取首条人类消息 */
-function nameThread(chats: BotChatStore, chat: BotChat, text: string): void {
-  if (!chat.parentId || chats.get(chat.id)?.threadTitle) return;
-  const threadTitle = threadTitleFrom(text);
-  if (threadTitle && chats.update(chat.id, (draft) => ({ ...draft, threadTitle })))
-    emitBotEvent({ kind: 'chat', chatId: chat.id });
-}
-
 /** 桌面 BOT_SEND 与手机 bot-send 共用 */
 export async function sendBotMessage(
-  { chats, host, composerRefs }: BotServices,
+  { chats, host, composerRefs, titler }: BotServices,
   request: unknown
 ): Promise<BotSendResult> {
   const input = parseSendInput(request);
@@ -1029,7 +1093,8 @@ export async function sendBotMessage(
     const images = keepGroupImages(chats, chat.id, input.images);
     if (!images.ok) return images;
     const sent = await groupSender(chat, input.text, options, refs, images.ids);
-    if (sent.ok) nameThread(chats, chat, input.text);
+    // 话题标题：首句占位 + 新话题的 AI 命名（开关关时与原来一样只给子话题取首句）
+    if (sent.ok && !sent.duplicate) titler.humanSent(chat.id, input.text);
     return sent;
   }
   const text = await composerRefs.expandDirect(chat, input);
@@ -1789,41 +1854,11 @@ export function registerBotHandlers(): void {
     switchBotSession(services, request)
   );
 
-  handle(
-    IPC_CHANNELS.BOT_THREAD_CREATE,
-    'write',
-    (_sender, request, { chats }): BotChatWriteResult => {
-      const chatId = parseThreadChatInput(request);
-      const root = chatId ? chats.get(chatId) : undefined;
-      if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined) return INVALID;
-      // 当前话题还没人说话：直接用它，不堆空话题
-      const active = chats.activeThread(root.id);
-      if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };
-      const thread = chats.createThread(root.id);
-      if (!thread) return INVALID;
-      chats.update(root.id, (draft) => ({ ...draft, activeThreadId: thread.id }));
-      emitBotEvent({ kind: 'chat', chatId: thread.id });
-      emitBotEvent({ kind: 'chat', chatId: root.id });
-      return { ok: true, chat: thread };
-    }
+  handle(IPC_CHANNELS.BOT_THREAD_CREATE, 'write', (_sender, request, services) =>
+    createBotThread(services, request)
   );
-
-  handle(
-    IPC_CHANNELS.BOT_THREAD_SELECT,
-    'write',
-    (_sender, request, { chats }): BotActionResult => {
-      const input = parseThreadSelectInput(request);
-      const root = input ? chats.get(input.chatId) : undefined;
-      if (!input || !root || !chats.threadsOf(root.id).some((chat) => chat.id === input.threadId))
-        return INVALID;
-      chats.update(root.id, (draft) => {
-        if (input.threadId === root.id) delete draft.activeThreadId;
-        else draft.activeThreadId = input.threadId;
-        return draft;
-      });
-      emitBotEvent({ kind: 'chat', chatId: root.id });
-      return { ok: true };
-    }
+  handle(IPC_CHANNELS.BOT_THREAD_SELECT, 'write', (_sender, request, services) =>
+    selectBotThread(services, request)
   );
 
   handle(
@@ -1833,7 +1868,11 @@ export function registerBotHandlers(): void {
       const input = parseThreadUpdateInput(request);
       const current = input ? chats.get(input.chatId) : undefined;
       if (!input || current?.kind !== 'group') return INVALID;
-      const chat = chats.update(current.id, (draft) => ({ ...draft, threadTitle: input.title }));
+      // 手动改名即锁定：删掉 autoTitle，之后（含进行中的）自动命名都不再写回
+      const chat = chats.update(current.id, (draft) => {
+        delete draft.autoTitle;
+        return { ...draft, threadTitle: input.title };
+      });
       if (!chat) return INVALID;
       emitBotEvent({ kind: 'chat', chatId: chat.id });
       return { ok: true, chat };
@@ -1921,6 +1960,16 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_CHAT_STOP, 'write', (_sender, request, { groups }) => {
     const chatId = chatIdOf(request);
     return chatId ? groups.stop(chatId) : INVALID;
+  });
+  handle(IPC_CHANNELS.BOT_CHAT_INTERJECT_QUEUED, 'write', (_sender, request, { host }) => {
+    const chatId = chatIdOf(request);
+    const deliveryId =
+      request && typeof request === 'object' && 'deliveryId' in request
+        ? request.deliveryId
+        : undefined;
+    if (!chatId || !isDeliveryId(deliveryId)) return INVALID;
+    // Only the writable desktop Main renderer reaches this handler; no worker / phone route.
+    return host.interjectQueued(chatId, deliveryId, { kind: 'human', readOnly: false });
   });
   handle(IPC_CHANNELS.BOT_CHAT_STATE, 'read', (_sender, request, { groups }) => {
     const chatId = chatIdOf(request);

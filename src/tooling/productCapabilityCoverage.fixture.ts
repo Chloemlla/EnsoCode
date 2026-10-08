@@ -750,6 +750,7 @@ export const IPC_PRODUCT_COVERAGE = {
   BOT_THREAD_DELETE: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
   BOT_CHAT_SWITCH_SESSION: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
   BOT_CHAT_STOP: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
+  BOT_CHAT_INTERJECT_QUEUED: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
   BOT_CHAT_STATE: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
   BOT_CHAT_SESSIONS: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),
   BOT_CHAT_TIMELINE: excluded('Experimental Bot mode desktop UI; not an Enso capability.'),

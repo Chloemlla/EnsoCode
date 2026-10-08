@@ -138,7 +138,7 @@ function SilenceCard({
   const dismiss = useBotsStore((s) => s.dismissInbox);
   const name = bot?.name ?? t('Deleted member');
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
       <div className="flex items-center gap-2 text-muted-foreground text-xs">
         <BotAvatar bot={bot} size="sm" busy />
         <span className="text-foreground">{name}</span>
@@ -175,7 +175,7 @@ function BudgetCard({ item, bot }: { item: BotInboxItem; bot: BotProfile | undef
   const openDirect = useBotsStore((s) => s.openDirect);
   const name = bot?.name ?? t('Deleted member');
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
       <div className="flex items-center gap-2 text-muted-foreground text-xs">
         <BotAvatar bot={bot} size="sm" />
         <span className="text-foreground">{name}</span>
@@ -224,7 +224,7 @@ function InterruptedCard({
   const fromName = from?.name ?? t('Deleted member');
   const toName = to?.name ?? t('Deleted member');
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
       <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
         <BotAvatar bot={from} size="xs" />
         <span className="text-foreground">{fromName}</span>
@@ -302,7 +302,7 @@ function InboxCard({
   const reviewing = item.kind === 'approval' && item.request.phase === 'reviewing';
 
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
       <div className="flex items-center gap-2 text-muted-foreground text-xs">
         <BotAvatar bot={bot} size="sm" />
         <span className="text-foreground">

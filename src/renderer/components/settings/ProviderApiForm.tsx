@@ -1,4 +1,5 @@
 import { commitPendingModel, mergeFetchedModels } from '@shared/modelEntry';
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import type { ModelEntry, ModelMeta, ModelProvider } from '@shared/types';
 import { MODEL_API_KINDS } from '@shared/types';
 import { CircleCheck, CircleX, Eye, EyeOff, ListPlus, Loader2, Plus, Zap } from 'lucide-react';
@@ -185,6 +186,9 @@ export function ProviderApiForm({
     <>
       <DialogPanel className="space-y-4">
         {extraFields}
+        {isClassifierOnlyProvider({ api, baseUrl }) && (
+          <p className="text-xs text-muted-foreground">{t('Classification only, not for chat')}</p>
+        )}
         {!hideName && (
           <Field>
             <FieldLabel>{t('Name')}</FieldLabel>

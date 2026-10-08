@@ -889,6 +889,7 @@ describe('PairClient Bot 帧', () => {
       onBotChatState: vi.fn(),
       onBotSendResult: vi.fn(),
       onBotNewSessionResult: vi.fn(),
+      onBotThreadResult: vi.fn(),
       onBotInbox: vi.fn(),
       onBotActivity: vi.fn(),
     };
@@ -918,7 +919,7 @@ describe('PairClient Bot 帧', () => {
     socket.receive({ type: 'from-the-future', payload: 1 });
     socket.receive({ type: 'bot-chats', chats: [] });
     await settle();
-    expect(events.onBotChats).toHaveBeenCalledWith([]);
+    expect(events.onBotChats).toHaveBeenCalledWith([], []);
   });
 
   it('Bot 帧分发到对应回调', async () => {
@@ -954,7 +955,7 @@ describe('PairClient Bot 帧', () => {
       error: 'x',
     });
     await settle();
-    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], false);
+    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], false, false);
     expect(events.onBotInbox).toHaveBeenCalledTimes(1);
     expect(events.onBotInbox).toHaveBeenCalledWith([{ key: 'k', kind: 'budget', chatId: null }]);
     expect(events.onBotActivity).toHaveBeenCalledTimes(1);
@@ -1002,7 +1003,31 @@ describe('PairClient Bot 帧', () => {
     socket.receive({ ...result, requestId: 3 });
     socket.receive({ ...result, ok: 'yes' });
     await settle();
-    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], true);
+    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], true, false);
     expect(events.onBotNewSessionResult).toHaveBeenCalledExactlyOnceWith(result);
+  });
+
+  it('dispatches thread capability, thread summaries and correlated thread results', async () => {
+    const socket = await start();
+    socket.receive({ type: 'bot-catalog', enabled: true, bots: [], threads: true });
+    const thread = { id: 't', kind: 'group', parentId: 'chat' };
+    socket.receive({ type: 'bot-chats', chats: [], threads: [thread] });
+    socket.receive({ type: 'bot-chats', chats: [], threads: 'bad' });
+    const result = {
+      type: 'bot-thread-result',
+      chatId: 'chat',
+      requestId: 'request',
+      ok: true,
+      threadId: 't',
+    };
+    socket.receive(result);
+    socket.receive({ ...result, requestId: 3 });
+    socket.receive({ ...result, chatId: null });
+    socket.receive({ ...result, ok: 'yes' });
+    await settle();
+    expect(events.onBotCatalog).toHaveBeenCalledWith(true, [], false, true);
+    expect(events.onBotChats).toHaveBeenNthCalledWith(1, [], [thread]);
+    expect(events.onBotChats).toHaveBeenNthCalledWith(2, [], []);
+    expect(events.onBotThreadResult).toHaveBeenCalledExactlyOnceWith(result);
   });
 });

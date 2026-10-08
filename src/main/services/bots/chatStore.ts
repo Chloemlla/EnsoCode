@@ -154,6 +154,7 @@ export class BotChatStore {
       id: randomUUID(),
       parentId: root.id,
       threadTitle: title,
+      autoTitle: { seq: 0 },
       pinned: false,
       sessions: {},
       createdAt: at,
@@ -180,6 +181,8 @@ export class BotChatStore {
       ...draft,
       // 解析缺省为 boss（旧数据不变）；新建群缺省智能选人
       routing: { ...(draft.kind === 'group' ? { mode: 'smart' } : {}), ...draft.routing },
+      // 新建群的主话题参与 AI 自动命名；旧数据没有此标记
+      ...(draft.kind === 'group' ? { autoTitle: { seq: 0 } } : {}),
       id,
       pinned: false,
       sessions: {},

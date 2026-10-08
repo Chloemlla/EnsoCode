@@ -7,15 +7,17 @@ import {
   pickSmartRouteChoice,
   pickSmartRouteIntent,
   rankSmartRouteChoice,
+  SMART_ROUTE_DEFAULT_TIMEOUT_MS,
+  SMART_ROUTE_JUDGE_MAX_TOKENS,
   type SmartRouteInput,
   smartRouteIntentQuestion,
   smartRouteJudgePrompt,
   smartRouteQuestion,
+  smartRouteTimeoutMs,
 } from '../../../shared/bots/smartRoute';
 import type { DefaultModelRef } from '../../../shared/defaultModel';
 import {
   parseVirtualClassifier,
-  VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
   type VirtualClassifierConfig,
 } from '../../../shared/virtualModels';
 import type { GroupResponderSelector } from './groupChat';
@@ -30,6 +32,7 @@ export interface SmartRouterDeps {
       userText: string;
       preferred: DefaultModelRef | undefined;
       timeoutMs: number;
+      maxTokens?: number;
     },
     signal: AbortSignal
   ) => Promise<string | null>;
@@ -46,9 +49,12 @@ export interface SmartRouterDeps {
  * （成员与意图各问一次）。判不出意图时用关键词兜底。
  */
 export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector {
-  const config = () => parseVirtualClassifier(deps.settings()?.botRouteClassifier);
+  const config = () => {
+    const parsed = parseVirtualClassifier(deps.settings()?.botRouteClassifier);
+    return parsed && { ...parsed, timeoutMs: smartRouteTimeoutMs(parsed) };
+  };
   return {
-    timeoutMs: () => config()?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+    timeoutMs: () => config()?.timeoutMs ?? SMART_ROUTE_DEFAULT_TIMEOUT_MS,
     async select(input: SmartRouteInput, signal: AbortSignal) {
       // 点名全员时规则直出，不受模型挑人上限与置信度影响
       if (addressesEveryone(input.message))
@@ -74,7 +80,8 @@ export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector
           {
             ...smartRouteJudgePrompt(input),
             preferred: current?.model,
-            timeoutMs: current?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+            timeoutMs: current?.timeoutMs ?? SMART_ROUTE_DEFAULT_TIMEOUT_MS,
+            maxTokens: SMART_ROUTE_JUDGE_MAX_TOKENS,
           },
           signal
         );

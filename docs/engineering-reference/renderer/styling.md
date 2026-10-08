@@ -92,6 +92,11 @@ style={{ backgroundColor: theme.background }}
 - **只是想要「稍暗一层」的层次感** → 优先换语义令牌（`bg-muted` / `bg-card`）。
   Tailwind 4 的 `/N`（如 `bg-muted/50`）用 `color-mix` 乘在重映射后的令牌上，仍会跟随透明度；
   但承载内容的大面板应慎用，避免父子多层半透明叠色后比周围更实。hover/选中等瞬态可正常使用。
+- **承载内容的卡片叠在已半透明的面板上**（`bg-card` / `bg-muted` 卡片放在 `bg-background` 面板里）→
+  两层 `--bg-panel-alpha` 叠成近乎不透明。给卡片挂 `data-slot`，加进 `globals.css` 的置透明列表
+  （`tool-details`、`welcome-suggestion`、Bot 页 `bot-card` / `bot-notice`），背景图模式下只留边框；
+  带 `hover:bg-*` 的可点卡片行用 `bot-card-button`（只在非 hover 态置透明）。常驻的选中高亮
+  不要用实色 `bg-muted`，与 Code 侧栏一致用 `bg-brand/10 dark:bg-brand/15` 淡染。
 - **第三方组件自己刷底色**（终端、代码高亮、diff）→ 给宿主元素挂 `data-slot`，在
   `globals.css` 的 `html.bg-image-enabled` 区块加一条覆写：内部置透，宿主只刷**一层**。
   若要求与主体完全一致，底色和 alpha 都取 `var(--background)` + `var(--bg-panel-alpha)`；

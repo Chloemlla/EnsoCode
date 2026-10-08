@@ -283,6 +283,7 @@ function FileCards({ target, artifacts }: { target: BotArtifactTarget; artifacts
         return (
           <div
             key={artifact.rel}
+            data-slot="bot-card"
             className="group/artifact flex max-w-64 items-center gap-1 rounded-lg border bg-card py-1 pr-1 pl-2 text-xs"
           >
             <button

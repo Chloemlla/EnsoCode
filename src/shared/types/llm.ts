@@ -5,6 +5,7 @@ export const MODEL_API_KINDS = [
   'anthropic-messages',
   'google-generative-ai',
   'ollama',
+  'typesafe-system-one',
 ] as const;
 
 export type ModelApiKind = (typeof MODEL_API_KINDS)[number];

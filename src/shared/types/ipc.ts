@@ -390,6 +390,7 @@ export const IPC_CHANNELS = {
   BOT_THREAD_UPDATE: 'bots:thread-update',
   BOT_THREAD_DELETE: 'bots:thread-delete',
   BOT_CHAT_STOP: 'bots:chat-stop',
+  BOT_CHAT_INTERJECT_QUEUED: 'bots:chat-interject-queued',
   BOT_CHAT_STATE: 'bots:chat-state',
   BOT_CHAT_SESSIONS: 'bots:chat-sessions',
   BOT_CHAT_TIMELINE: 'bots:chat-timeline',

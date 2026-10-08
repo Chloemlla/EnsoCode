@@ -16,6 +16,7 @@ const PROBE_FAILURE_TTL_MS = 60_000;
 const PROBE_ERROR_MAX = 80;
 const MODEL_FAILURES = new Set([
   '鉴权失败',
+  '当前地区不可用',
   '请求被限流',
   '模型不存在',
   '网络连接失败',
@@ -86,6 +87,8 @@ function usabilityReasonText(reason: ModelUsability): string {
       return '找不到供应商';
     case 'provider-disabled':
       return '供应商已停用';
+    case 'classifier-only':
+      return '仅用于分类，不能聊天';
     case 'model-missing':
       return '模型不存在';
     case 'model-disabled':
@@ -132,6 +135,8 @@ export function briefErrorReason(error: unknown): string {
   if (/^agent worker is not running/i.test(text)) return '会话服务未启动';
   if (/aborted|cancelled|canceled/i.test(text)) return '已取消';
   if (/model[- ]missing/.test(text)) return '模型不存在';
+  if (/not available in your region|territory not supported|unsupported_country/i.test(text))
+    return '当前地区不可用';
   const classified =
     /401|403|unauthorized|forbidden|authentication|invalid.{0,20}(key|token)|api.?key/i.test(text)
       ? '鉴权失败'

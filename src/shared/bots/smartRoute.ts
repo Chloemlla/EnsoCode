@@ -50,6 +50,22 @@ export interface SmartRouteInput {
 export const SMART_ROUTE_HISTORY = 8;
 /** 最多选几位成员依次回复 */
 export const SMART_ROUTE_MAX_PICKS = 3;
+/** 整体选人时限：judge 常态约 1s，但实测有超过 8s 的长尾；不影响虚拟模型的分档时限 */
+export const SMART_ROUTE_DEFAULT_TIMEOUT_MS = 15_000;
+/** 旧版设置页写下的默认快照，未经用户明确设置时按 SMART_ROUTE_DEFAULT_TIMEOUT_MS 用 */
+const LEGACY_DEFAULT_TIMEOUT_MS = 3000;
+
+/** 选人实际时限：用户明确设过的照用；旧版默认 3000 运行时升到 15s，不改磁盘配置 */
+export function smartRouteTimeoutMs(
+  config: { timeoutMs: number; timeoutSet?: true } | undefined
+): number {
+  if (!config) return SMART_ROUTE_DEFAULT_TIMEOUT_MS;
+  if (!config.timeoutSet && config.timeoutMs === LEGACY_DEFAULT_TIMEOUT_MS)
+    return SMART_ROUTE_DEFAULT_TIMEOUT_MS;
+  return config.timeoutMs;
+}
+/** judge 只回 INTENT 行与至多 3 个名字 */
+export const SMART_ROUTE_JUDGE_MAX_TOKENS = 128;
 /** pi 分类器概率达到此值的候选入选；都不达标视为不确定，交给群主 */
 export const SMART_ROUTE_MIN_CONFIDENCE = 0.4;
 /** pi 分类器意图概率达到此值才采信，否则用关键词规则 */
@@ -125,12 +141,13 @@ function describe(c: SmartRouteCandidate): string {
 
 const escapeTags = (text: string): string => text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** 规则放进用户消息：部分中转（订阅转发）会丢弃或替换系统提示，只放系统提示时模型会闲聊 */
 export function smartRouteJudgePrompt(input: SmartRouteInput): {
   systemPrompt: string;
   userText: string;
 } {
-  const systemPrompt = [
-    'You classify the human’s newest message in a group chat and pick which members reply, in what order.',
+  const instructions = [
+    'Classify the human’s newest message in the group chat below and pick which members reply, in what order.',
     'First line: INTENT: build|answer|discuss',
     ...INTENT_RULES.map((rule) => `- ${rule}`),
     `Then up to ${SMART_ROUTE_MAX_PICKS} member names from the roster, one per line in reply order, or BOSS to let the group owner reply. Output nothing else.`,
@@ -138,6 +155,8 @@ export function smartRouteJudgePrompt(input: SmartRouteInput): {
     ...RULES.map((rule) => `- ${rule}`),
   ].join('\n');
   const userText = [
+    instructions,
+    '',
     '<roster>',
     ...input.candidates.map((c) => `- ${escapeTags(describe(c))}`),
     '</roster>',
@@ -148,7 +167,10 @@ export function smartRouteJudgePrompt(input: SmartRouteInput): {
     escapeTags(input.message),
     '</message>',
   ].join('\n');
-  return { systemPrompt, userText };
+  return {
+    systemPrompt: 'You are a group chat router. Output only what the user message asks for.',
+    userText,
+  };
 }
 
 const ASCII_WORD = /[A-Za-z0-9_-]/;

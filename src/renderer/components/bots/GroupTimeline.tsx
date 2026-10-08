@@ -44,6 +44,7 @@ import { BotLiveStatus } from './BotLiveStatus';
 import { PresenceAvatar } from './BotPresence';
 import { chatErrorText, chatTitle } from './botText';
 import { DelegationCard } from './DelegationCard';
+import { QueuedInterjections } from './QueuedInterjections';
 import { RoutineProposalCard } from './RoutineCards';
 import { SilenceNote } from './SilenceNote';
 
@@ -383,6 +384,7 @@ export function GroupTimeline({
                 {t('Choosing who replies…')}
               </div>
             )}
+            {!history && <QueuedInterjections chatId={chat.id} bots={bots} />}
             {!history && replying && (
               <button
                 type="button"
@@ -499,7 +501,10 @@ const EntryRow = memo(function EntryRow({
       return entry.routine ? (
         <RoutineProposalCard text={entry.text} target={entry.routine} />
       ) : (
-        <div className="self-center rounded-full bg-muted px-2.5 py-0.5 text-center text-muted-foreground text-xs">
+        <div
+          data-slot="bot-notice"
+          className="self-center rounded-full bg-muted px-2.5 py-0.5 text-center text-muted-foreground text-xs"
+        >
           {entry.text}
           {retryable && (
             <Button
@@ -666,7 +671,10 @@ function TurnProcess({
         {state && 'steps' in state && ` · ${t('{{n}} steps', { n: state.steps.length })}`}
       </button>
       {open && (
-        <div className="mt-1.5 rounded-lg border bg-card px-3 py-2 font-mono text-muted-foreground text-xs leading-relaxed">
+        <div
+          data-slot="bot-card"
+          className="mt-1.5 rounded-lg border bg-card px-3 py-2 font-mono text-muted-foreground text-xs leading-relaxed"
+        >
           {!state && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {state && 'error' in state && <span>{state.error}</span>}
           {state && 'steps' in state && (

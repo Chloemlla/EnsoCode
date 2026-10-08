@@ -37,6 +37,7 @@ import {
   visibleGroupEntries,
 } from './botState';
 import type { ConnState, SessionView } from './client';
+import { GroupThreadSwitcher, type GroupThreads } from './GroupThreadSwitcher';
 import { compressImages } from './image';
 import { readOnlyBanner } from './readOnly';
 
@@ -69,6 +70,8 @@ interface Props {
   canCreate?: boolean;
   newSessionHint?: string;
   newSessionBusy?: boolean;
+  /** 桌面支持群话题时提供；旧桌面缺省，保持「新建会话」 */
+  threads?: GroupThreads;
   /** 大屏横屏侧栏已常驻：左上不再显示抽屉入口 */
   drawerDocked?: boolean;
   onLoadOlder(): void;
@@ -370,22 +373,42 @@ export function GroupChatScreen(props: Props) {
         )}
         <div className="min-w-0 flex-1 text-center">
           <p className="truncate font-medium text-sm">{chat.title || '群聊'}</p>
-          <p className="truncate text-[11px] text-muted-foreground">
-            {props.connState === 'online' ? `${chat.members.length} 位成员` : props.stateLabel}
-          </p>
+          {props.threads ? (
+            <GroupThreadSwitcher
+              threads={props.threads}
+              status={props.connState === 'online' ? undefined : props.stateLabel}
+            />
+          ) : (
+            <p className="truncate text-[11px] text-muted-foreground">
+              {props.connState === 'online' ? `${chat.members.length} 位成员` : props.stateLabel}
+            </p>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={props.onNewSession}
-          disabled={
-            !props.canCreate || props.deviceReadOnly || sending || props.connState !== 'online'
-          }
-          aria-label="新建会话"
-          title={props.newSessionHint ?? '新建会话'}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
-        >
-          <SquarePen className="h-4.5 w-4.5" />
-        </button>
+        {props.threads ? (
+          <button
+            type="button"
+            onClick={props.threads.onCreate}
+            disabled={Boolean(props.threads.disabledHint)}
+            aria-label="新话题"
+            title={props.threads.disabledHint ?? '新话题'}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+          >
+            <SquarePen className="h-4.5 w-4.5" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={props.onNewSession}
+            disabled={
+              !props.canCreate || props.deviceReadOnly || sending || props.connState !== 'online'
+            }
+            aria-label="新建会话"
+            title={props.newSessionHint ?? '新建会话'}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+          >
+            <SquarePen className="h-4.5 w-4.5" />
+          </button>
+        )}
       </header>
 
       <div

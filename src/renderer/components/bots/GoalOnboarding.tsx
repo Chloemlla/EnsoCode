@@ -109,7 +109,7 @@ export function GoalOnboarding({ onPick }: { onPick: (pick: GoalPick) => void | 
 
   return (
     <div className="w-full max-w-lg space-y-3 text-left">
-      <div className="rounded-xl border bg-card p-3">
+      <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
         <p className="mb-2 flex items-center gap-1.5 text-muted-foreground text-xs">
           <Target className="h-3.5 w-3.5" />
           {suggestion.kind === 'team' ? t('Recommended: a team') : t('Recommended: one member')}

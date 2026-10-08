@@ -27,6 +27,7 @@ export function MemorySpaceList({ spaceId, emptyText }: { spaceId: string; empty
       {items.map((item) => (
         <div
           key={item.id}
+          data-slot="bot-card"
           className="group flex items-start gap-2 rounded-lg border bg-card px-2.5 py-2"
         >
           <div className="min-w-0 flex-1">

@@ -56,6 +56,9 @@ export function summarizeBotChat(
     updatedAt: Math.max(chat.updatedAt, last?.at ?? 0),
     lastSeq,
     ...(chat.epochSeq !== undefined ? { epochSeq: chat.epochSeq } : {}),
+    ...(chat.parentId ? { parentId: chat.parentId } : {}),
+    ...(chat.threadTitle ? { threadTitle: chat.threadTitle } : {}),
+    ...(chat.activeThreadId ? { activeThreadId: chat.activeThreadId } : {}),
     ...(last
       ? {
           last: {

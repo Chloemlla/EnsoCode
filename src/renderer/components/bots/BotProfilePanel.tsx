@@ -461,6 +461,7 @@ function SessionList({
           key={session.conversationId}
           type="button"
           onClick={() => onOpen(session.conversationId)}
+          data-slot="bot-card-button"
           className="flex w-full items-center justify-between rounded-lg border bg-card px-2.5 py-2 text-left text-xs hover:bg-muted"
         >
           <span>{t('Conversation {{n}}', { n: sessions.length - index })}</span>

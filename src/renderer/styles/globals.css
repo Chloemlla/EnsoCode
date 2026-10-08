@@ -374,9 +374,18 @@ html.bg-image-enabled [data-slot='composer'] {
   background-color: oklch(from var(--background) l c h / var(--bg-composer-alpha, 0.6));
 }
 
-/* 欢迎页建议卡片和工具详情卡片不再额外叠一层面板色，直接透出壁纸。 */
+/*
+ * 承载内容的卡片叠在已半透明的面板上会叠成近乎不透明，这些卡片不再额外叠一层面板色，
+ * 只留边框、直接透出壁纸：欢迎页建议、工具详情、Bot 页的内容卡片与系统提示条。
+ */
 html.bg-image-enabled [data-slot='welcome-suggestion'],
-html.bg-image-enabled [data-slot='tool-details'] {
+html.bg-image-enabled [data-slot='tool-details'],
+html.bg-image-enabled [data-slot='bot-card'],
+html.bg-image-enabled [data-slot='bot-notice'] {
+  background-color: transparent;
+}
+/* 可点击的卡片行：只在静止态置透明，保留 hover 底色反馈 */
+html.bg-image-enabled [data-slot='bot-card-button']:not(:hover) {
   background-color: transparent;
 }
 
