@@ -113,4 +113,36 @@ describe('phone group recovery and folding UI', () => {
     expect(render()).not.toContain('aria-label="语音输入"');
     expect(render({ voice: noop as never })).toContain('aria-label="语音输入"');
   });
+  it('shows the topic switcher only when the desktop supports threads', () => {
+    expect(render({ onNewSession: noop, canCreate: true })).not.toContain('aria-label="切换话题"');
+    const threads = {
+      entries: [
+        { id: 'chat', title: '主话题', activityAt: 1, unread: false, running: false },
+        { id: 't1', title: '发布清单', activityAt: 2, unread: false, running: true },
+      ],
+      currentId: 't1',
+      rootId: 'chat',
+      onSelect: noop,
+      onCreate: noop,
+    };
+    const html = render({ onNewSession: noop, canCreate: true, threads });
+    const trigger = html.match(/<button[^>]*aria-label="切换话题"[^>]*>[\s\S]*?<\/button>/)?.[0];
+    expect(trigger).toContain('发布清单');
+    expect(trigger).not.toContain('disabled=""');
+    const create = (patch: Partial<typeof threads> & { disabledHint?: string }) =>
+      render({ threads: { ...threads, ...patch } }).match(
+        /<button[^>]*aria-label="新话题"[^>]*>/
+      )?.[0];
+    expect(html).not.toContain('aria-label="新建会话"');
+    expect(create({})).not.toContain('disabled=""');
+    const blocked = create({ disabledHint: '只读设备不能切换或新建话题' });
+    expect(blocked).toContain('disabled=""');
+    expect(blocked).toContain('title="只读设备不能切换或新建话题"');
+    // 只读也能看列表
+    expect(
+      render({ threads: { ...threads, disabledHint: 'x' } }).match(
+        /<button[^>]*aria-label="切换话题"[^>]*>/
+      )?.[0]
+    ).not.toContain('disabled=""');
+  });
 });

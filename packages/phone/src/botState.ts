@@ -27,6 +27,36 @@ export function botChatSections(
   };
 }
 
+export interface PhoneThreadEntry {
+  id: string;
+  title: string;
+  preview?: string;
+  activityAt: number;
+  /** 手机端不跟踪话题已读，恒为 false */
+  unread: boolean;
+  running: boolean;
+}
+
+/** 群话题：根群自身是主话题；当前话题取根群 activeThreadId，找不到回到根群 */
+export function groupThreads(
+  root: PairBotChatSummary,
+  threads: readonly PairBotChatSummary[]
+): { current: PairBotChatSummary; entries: PhoneThreadEntry[] } {
+  const own = [root, ...threads.filter((chat) => chat.parentId === root.id)];
+  return {
+    current: own.find((chat) => chat.id === root.activeThreadId) ?? root,
+    entries: own.map((chat) => ({
+      id: chat.id,
+      title: chat.threadTitle ?? (chat.parentId ? '新话题' : '主话题'),
+      ...(chat.last?.text ? { preview: chat.last.text } : {}),
+      // 根群切换话题也会刷新 updatedAt：有消息时按末条时间
+      activityAt: chat.last?.at ?? chat.updatedAt,
+      unread: false,
+      running: chat.status !== 'idle',
+    })),
+  };
+}
+
 export interface GroupTimelineState {
   entries: PairGroupEntry[];
   lastSeq: number;

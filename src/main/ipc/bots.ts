@@ -853,6 +853,35 @@ export async function newBotSession(
 }
 
 /** 私聊切回旧对话：先停当前回合并提炼当前会话记忆，再重新打开目标会话；回复中由桌面先确认 */
+/** 群新话题（桌面与手机共用）：当前话题还没人说话时直接复用，不堆空话题 */
+export function createBotThread({ chats }: BotServices, request: unknown): BotChatWriteResult {
+  const chatId = parseThreadChatInput(request);
+  const root = chatId ? chats.get(chatId) : undefined;
+  if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined) return INVALID;
+  const active = chats.activeThread(root.id);
+  if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };
+  const thread = chats.createThread(root.id);
+  if (!thread) return INVALID;
+  chats.update(root.id, (draft) => ({ ...draft, activeThreadId: thread.id }));
+  emitBotEvent({ kind: 'chat', chatId: thread.id });
+  emitBotEvent({ kind: 'chat', chatId: root.id });
+  return { ok: true, chat: thread };
+}
+
+export function selectBotThread({ chats }: BotServices, request: unknown): BotActionResult {
+  const input = parseThreadSelectInput(request);
+  const root = input ? chats.get(input.chatId) : undefined;
+  if (!input || !root || !chats.threadsOf(root.id).some((chat) => chat.id === input.threadId))
+    return INVALID;
+  chats.update(root.id, (draft) => {
+    if (input.threadId === root.id) delete draft.activeThreadId;
+    else draft.activeThreadId = input.threadId;
+    return draft;
+  });
+  emitBotEvent({ kind: 'chat', chatId: root.id });
+  return { ok: true };
+}
+
 async function switchBotSession(services: BotServices, request: unknown): Promise<BotActionResult> {
   const { chats, host, memory } = services;
   const input = parseSessionSwitchInput(request);
@@ -1789,41 +1818,11 @@ export function registerBotHandlers(): void {
     switchBotSession(services, request)
   );
 
-  handle(
-    IPC_CHANNELS.BOT_THREAD_CREATE,
-    'write',
-    (_sender, request, { chats }): BotChatWriteResult => {
-      const chatId = parseThreadChatInput(request);
-      const root = chatId ? chats.get(chatId) : undefined;
-      if (root?.kind !== 'group' || root.parentId || root.archivedAt !== undefined) return INVALID;
-      // 当前话题还没人说话：直接用它，不堆空话题
-      const active = chats.activeThread(root.id);
-      if (active?.parentId && chats.lastSeq(active.id) === 0) return { ok: true, chat: active };
-      const thread = chats.createThread(root.id);
-      if (!thread) return INVALID;
-      chats.update(root.id, (draft) => ({ ...draft, activeThreadId: thread.id }));
-      emitBotEvent({ kind: 'chat', chatId: thread.id });
-      emitBotEvent({ kind: 'chat', chatId: root.id });
-      return { ok: true, chat: thread };
-    }
+  handle(IPC_CHANNELS.BOT_THREAD_CREATE, 'write', (_sender, request, services) =>
+    createBotThread(services, request)
   );
-
-  handle(
-    IPC_CHANNELS.BOT_THREAD_SELECT,
-    'write',
-    (_sender, request, { chats }): BotActionResult => {
-      const input = parseThreadSelectInput(request);
-      const root = input ? chats.get(input.chatId) : undefined;
-      if (!input || !root || !chats.threadsOf(root.id).some((chat) => chat.id === input.threadId))
-        return INVALID;
-      chats.update(root.id, (draft) => {
-        if (input.threadId === root.id) delete draft.activeThreadId;
-        else draft.activeThreadId = input.threadId;
-        return draft;
-      });
-      emitBotEvent({ kind: 'chat', chatId: root.id });
-      return { ok: true };
-    }
+  handle(IPC_CHANNELS.BOT_THREAD_SELECT, 'write', (_sender, request, services) =>
+    selectBotThread(services, request)
   );
 
   handle(

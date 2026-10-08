@@ -47,7 +47,15 @@ export const scopeRejection = (command: PhoneToHost): HostToPhone =>
           ok: false,
           error: 'read-only',
         }
-      : { type: 'command-rejected', command: command.type, error: 'read-only' };
+      : command.type === 'bot-thread-create' || command.type === 'bot-thread-select'
+        ? {
+            type: 'bot-thread-result',
+            chatId: command.chatId,
+            requestId: command.requestId,
+            ok: false,
+            error: 'read-only',
+          }
+        : { type: 'command-rejected', command: command.type, error: 'read-only' };
 
 export function setScopeInList(
   list: readonly PairedDevice[],

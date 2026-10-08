@@ -33,6 +33,24 @@ describe('手机命令白名单', () => {
       expect(parsePhoneCommand({ ...command, ...patch }).ok).toBe(false);
   });
 
+  it('validates group thread create/select IDs, dropping unknown fields', () => {
+    const create = { type: 'bot-thread-create', chatId: 'chat', requestId: 'request' };
+    const select = { ...create, type: 'bot-thread-select', threadId: 'thread' };
+    for (const command of [create, select])
+      expect(parsePhoneCommand({ ...command, title: 'ignored' })).toEqual({ ok: true, command });
+    for (const [command, patch] of [
+      [create, { chatId: '' }],
+      [create, { chatId: 'x'.repeat(129) }],
+      [create, { requestId: '' }],
+      [create, { requestId: 'x'.repeat(201) }],
+      [select, { threadId: undefined }],
+      [select, { threadId: '' }],
+      [select, { threadId: 3 }],
+      [select, { requestId: null }],
+    ] as const)
+      expect(parsePhoneCommand({ ...command, ...patch }).ok).toBe(false);
+  });
+
   it('Bot sessions reject generic execution/queue/policy commands but permit abort and answers', () => {
     for (const type of [
       'prompt',

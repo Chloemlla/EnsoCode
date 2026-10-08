@@ -271,6 +271,8 @@ export type PairBotCommand = Extract<
       | 'bot-timeline'
       | 'bot-stop'
       | 'bot-new-session'
+      | 'bot-thread-create'
+      | 'bot-thread-select'
       | 'bot-retry'
       | 'bot-inbox-request'
       | 'bot-inbox-dismiss'
@@ -1044,6 +1046,8 @@ async function handleFrame(
     case 'bot-timeline':
     case 'bot-stop':
     case 'bot-new-session':
+    case 'bot-thread-create':
+    case 'bot-thread-select':
     case 'bot-retry':
     case 'bot-inbox-request':
     case 'bot-inbox-dismiss':

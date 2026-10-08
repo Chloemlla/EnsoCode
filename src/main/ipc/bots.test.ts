@@ -1754,6 +1754,85 @@ describe('群话题', () => {
     expect(services.chats.threadsOf(chatId).map((chat) => chat.id)).toEqual([chatId, thread.id]);
   });
 
+  it('手机话题：目录声明支持并下发子话题；新建 / 切换复用桌面逻辑、按请求回执', async () => {
+    const { alice, bob, chatId, services } = await team();
+    const { registerPairBotHandlers } = await import('./pairBots');
+    registerPairBotHandlers();
+    const run = async (command: Parameters<PairBotPort['handle']>[1]) => {
+      const frames: HostToPhone[] = [];
+      await mocks.pairPort!.handle('peer', command, async (frame) => {
+        frames.push(frame);
+        return true;
+      });
+      return frames;
+    };
+    const result = (requestId: string, patch: Record<string, unknown>) => ({
+      type: 'bot-thread-result',
+      chatId,
+      requestId,
+      ...patch,
+    });
+
+    expect(await run({ type: 'bot-catalog-request' })).toContainEqual(
+      expect.objectContaining({ type: 'bot-catalog', threads: true })
+    );
+    const created = await run({ type: 'bot-thread-create', chatId, requestId: 'c1' });
+    const threadId = services.chats.get(chatId)?.activeThreadId as string;
+    expect(threadId).toEqual(expect.any(String));
+    expect(created).toContainEqual(result('c1', { ok: true, threadId }));
+    expect(created).toContainEqual(
+      expect.objectContaining({
+        type: 'bot-chats',
+        chats: [expect.objectContaining({ id: chatId, activeThreadId: threadId })],
+        threads: [expect.objectContaining({ id: threadId, parentId: chatId, kind: 'group' })],
+      })
+    );
+    // 当前话题仍为空：与桌面一样复用，不堆空话题
+    expect(await run({ type: 'bot-thread-create', chatId, requestId: 'c2' })).toContainEqual(
+      result('c2', { ok: true, threadId })
+    );
+    expect(services.chats.threadsOf(chatId)).toHaveLength(2);
+
+    expect(
+      await run({ type: 'bot-thread-select', chatId, threadId: chatId, requestId: 's1' })
+    ).toContainEqual(result('s1', { ok: true, threadId: chatId }));
+    expect(services.chats.get(chatId)).not.toHaveProperty('activeThreadId');
+    expect(
+      await run({ type: 'bot-thread-select', chatId, threadId, requestId: 's2' })
+    ).toContainEqual(result('s2', { ok: true, threadId }));
+    expect(services.chats.get(chatId)?.activeThreadId).toBe(threadId);
+
+    const other = await call(IPC_CHANNELS.BOT_CHAT_CREATE, {
+      kind: 'group',
+      title: 'other',
+      members: [alice, bob],
+      bossBotId: alice,
+      workspace: { kind: 'chat-home' },
+    });
+    const otherId = (other.chat as { id: string }).id;
+    expect(
+      await run({ type: 'bot-thread-select', chatId, threadId: otherId, requestId: 'bad' })
+    ).toEqual([result('bad', { ok: false, error: 'invalid' })]);
+    expect(await run({ type: 'bot-thread-create', chatId: threadId, requestId: 'nested' })).toEqual(
+      [
+        {
+          type: 'bot-thread-result',
+          chatId: threadId,
+          requestId: 'nested',
+          ok: false,
+          error: 'invalid',
+        },
+      ]
+    );
+    expect(services.chats.get(chatId)?.activeThreadId).toBe(threadId);
+
+    mocks.settings.botModeEnabled = false;
+    expect(await run({ type: 'bot-thread-create', chatId, requestId: 'off' })).toEqual([
+      result('off', { ok: false, error: 'disabled' }),
+    ]);
+    mocks.settings.botModeEnabled = true;
+  });
+
   it('根群移出成员：各话题里该成员的会话结束；删根群连同话题一起删', async () => {
     const { carol, chatId, services, alice, bob } = await team();
     const registry = mocks.registry as SourceAuthorityRegistry;

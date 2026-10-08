@@ -12,6 +12,7 @@ import {
   botChatSections,
   chatActivities,
   formatElapsed,
+  groupThreads,
   inboxLabel,
   insertMention,
   mentionOptions,
@@ -64,6 +65,42 @@ const page = (
   lastSeq: extra.lastSeq ?? Math.max(0, ...seqs),
   hasOlder: extra.hasOlder ?? (seqs[0] ?? 1) > 1,
   ...(extra.beforeSeq !== undefined ? { beforeSeq: extra.beforeSeq } : {}),
+});
+
+describe('群话题', () => {
+  const root = chat('root', 'group', 50, {
+    last: { kind: 'human', text: 'root preview', at: 5 },
+  });
+  const first = chat('t1', 'group', 9, {
+    parentId: 'root',
+    threadTitle: '发布',
+    status: 'running',
+  });
+  const second = chat('t2', 'group', 7, { parentId: 'root' });
+  const foreign = chat('t3', 'group', 8, { parentId: 'other' });
+
+  it('lists the root then its own threads with desktop default titles', () => {
+    const { current, entries } = groupThreads(root, [foreign, second, first]);
+    expect(current).toBe(root);
+    expect(entries).toEqual([
+      {
+        id: 'root',
+        title: '主话题',
+        preview: 'root preview',
+        activityAt: 5,
+        unread: false,
+        running: false,
+      },
+      { id: 't2', title: '新话题', activityAt: 7, unread: false, running: false },
+      { id: 't1', title: '发布', activityAt: 9, unread: false, running: true },
+    ]);
+  });
+
+  it('views the active thread, falling back to the root when it is missing', () => {
+    expect(groupThreads({ ...root, activeThreadId: 't1' }, [first, second]).current).toBe(first);
+    expect(groupThreads({ ...root, activeThreadId: 't3' }, [foreign]).current.id).toBe('root');
+    expect(groupThreads({ ...root, activeThreadId: 'gone' }, []).current.id).toBe('root');
+  });
 });
 
 describe('Bot 抽屉列表', () => {

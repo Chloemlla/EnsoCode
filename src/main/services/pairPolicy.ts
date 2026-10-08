@@ -91,6 +91,30 @@ function parseBotCommand(v: Record<string, unknown>): CommandCheck {
           ...(v.confirmed !== undefined ? { confirmed: v.confirmed } : {}),
         },
       };
+    case 'bot-thread-create':
+      if (!isChatId(v.chatId) || !isStr(v.requestId) || v.requestId.length > 200)
+        return { ok: false, error: 'invalid thread request' };
+      return {
+        ok: true,
+        command: { type: 'bot-thread-create', chatId: v.chatId, requestId: v.requestId },
+      };
+    case 'bot-thread-select':
+      if (
+        !isChatId(v.chatId) ||
+        !isChatId(v.threadId) ||
+        !isStr(v.requestId) ||
+        v.requestId.length > 200
+      )
+        return { ok: false, error: 'invalid thread request' };
+      return {
+        ok: true,
+        command: {
+          type: 'bot-thread-select',
+          chatId: v.chatId,
+          threadId: v.threadId,
+          requestId: v.requestId,
+        },
+      };
     case 'bot-retry':
       if (!isChatId(v.chatId) || !isStr(v.entryId) || v.entryId.length > 200)
         return { ok: false, error: 'invalid retry target' };

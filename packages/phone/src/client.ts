@@ -116,13 +116,20 @@ export interface ClientEvents {
   /** 写命令被 host 拦截（如作用域刚被改成只读） */
   onCommandRejected?(command: string, error: string): void;
   /** Bot 模式（桌面开启时才下发；enabled=false = 已关闭） */
-  onBotCatalog?(enabled: boolean, bots: PairBotMember[], newSession: boolean): void;
-  onBotChats?(chats: PairBotChatSummary[]): void;
+  onBotCatalog?(
+    enabled: boolean,
+    bots: PairBotMember[],
+    newSession: boolean,
+    threads: boolean
+  ): void;
+  /** threads：根群下的子话题摘要；旧桌面不发时为空 */
+  onBotChats?(chats: PairBotChatSummary[], threads: PairBotChatSummary[]): void;
   onGroupTimeline?(frame: GroupTimelineFrame): void;
   onBotEvent?(event: PairBotEvent): void;
   onBotChatState?(frame: BotChatStateFrame): void;
   onBotSendResult?(frame: BotSendResultFrame): void;
   onBotNewSessionResult?(frame: Extract<HostToPhone, { type: 'bot-new-session-result' }>): void;
+  onBotThreadResult?(frame: Extract<HostToPhone, { type: 'bot-thread-result' }>): void;
   onBotRetryResult?(frame: Extract<HostToPhone, { type: 'bot-retry-result' }>): void;
   /** Bot 收件箱整表（未结束且未忽略） */
   onBotInbox?(items: PairBotInboxItem[]): void;
@@ -557,12 +564,17 @@ export class PairClient {
           this.events.onBotCatalog?.(
             payload.enabled === true,
             payload.bots,
-            payload.newSession === true
+            payload.newSession === true,
+            payload.threads === true
           );
         }
         break;
       case 'bot-chats':
-        if (Array.isArray(payload.chats)) this.events.onBotChats?.(payload.chats);
+        if (Array.isArray(payload.chats))
+          this.events.onBotChats?.(
+            payload.chats,
+            Array.isArray(payload.threads) ? payload.threads : []
+          );
         break;
       case 'group-timeline':
         if (typeof payload.chatId === 'string' && Array.isArray(payload.entries)) {
@@ -587,6 +599,14 @@ export class PairClient {
           typeof payload.ok === 'boolean'
         )
           this.events.onBotNewSessionResult?.(payload);
+        break;
+      case 'bot-thread-result':
+        if (
+          typeof payload.chatId === 'string' &&
+          typeof payload.requestId === 'string' &&
+          typeof payload.ok === 'boolean'
+        )
+          this.events.onBotThreadResult?.(payload);
         break;
       case 'bot-retry-result':
         if (typeof payload.chatId === 'string' && typeof payload.entryId === 'string')
