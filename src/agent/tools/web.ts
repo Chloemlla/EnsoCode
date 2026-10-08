@@ -64,9 +64,15 @@ export function createWebTools(
       if (chainRefs.length > 0) {
         candidates = [];
         for (const ref of chainRefs) {
-          const found = ctx?.modelRegistry?.find(ref.providerId, ref.modelId) as
+          let found = ctx?.modelRegistry?.find(ref.providerId, ref.modelId) as
             | SearchModel
             | undefined;
+          if (!found) {
+            // 容错：若 providerId 仍是 settings UUID 或别名，按 modelId 在注册表内兜底查找
+            found = ctx?.modelRegistry?.getAll?.()?.find((m) => m.id === ref.modelId) as
+              | SearchModel
+              | undefined;
+          }
           if (found) candidates.push(found);
           else chainNotes.push(`Candidate ${ref.providerId}/${ref.modelId} unavailable; skipped.`);
         }

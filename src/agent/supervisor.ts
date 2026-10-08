@@ -1125,7 +1125,20 @@ export class SessionSupervisor {
       // OAuth 第二账号克隆在 worker runtime 里按需注册，否则链物化时 find 取不到
       void this.getRuntime()
         .then((runtime) => {
-          for (const ref of command.chain) ensureAccountProvider(runtime, ref.providerId);
+          for (const ref of command.chain) {
+            ensureAccountProvider(runtime, ref.providerId);
+            const exact = runtime.getModel(ref.providerId, ref.modelId);
+            if (!exact) {
+              const baseId = providerIdOfAccountKey(ref.providerId);
+              const clone = resolveOauthCatalogModel(
+                baseId,
+                ref.modelId,
+                runtime.getModels(ref.providerId),
+                undefined
+              );
+              if (clone) listCatalogClone(runtime, clone);
+            }
+          }
         })
         .catch((error) => console.warn('[web-search] ensure account providers failed:', error));
       return;

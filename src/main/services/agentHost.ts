@@ -93,7 +93,7 @@ import {
   type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
-import { parseWebSearchChain } from '@shared/webSearchChain';
+import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { app, type UtilityProcess, utilityProcess } from 'electron';
 import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
@@ -1819,9 +1819,17 @@ export function pushDisabledWorkflowPresets(): void {
 /** web_search 候选链推送：只发引用，凭证由 worker 调用时经 modelRegistry 现取。 */
 export function pushWebSearchConfig(): void {
   if (!worker || !workerReady) return;
+  const rawChain = parseWebSearchChain(readSettingsState()?.webSearchChain);
+  const providers = providersFromSettings();
+  const chain: WebSearchChainEntry[] = [];
+  for (const entry of rawChain) {
+    const provider = providers.find((p) => p.id === entry.providerId);
+    const runtimeProviderId = provider?.oauthAccountKey ?? entry.providerId;
+    chain.push({ providerId: runtimeProviderId, modelId: entry.modelId });
+  }
   worker.postMessage({
     type: 'set-web-search-config',
-    chain: parseWebSearchChain(readSettingsState()?.webSearchChain),
+    chain,
   } satisfies AgentCommand);
 }
 
