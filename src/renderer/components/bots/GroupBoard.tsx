@@ -251,6 +251,7 @@ function TaskCard({
     task.createdBy === 'human' ? t('You') : (bots.get(task.createdBy)?.name ?? t('Deleted member'));
   return (
     <div
+      data-slot="bot-card"
       className={cn(
         'group rounded-lg border bg-card px-2.5 py-2 text-xs',
         !open && !review && 'opacity-75'

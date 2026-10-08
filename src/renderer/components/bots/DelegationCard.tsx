@@ -143,7 +143,7 @@ export function DelegationCard({
     to: to?.name ?? t('Deleted member'),
   });
   return (
-    <div className="max-w-lg rounded-xl border bg-card px-3 py-2.5">
+    <div data-slot="bot-card" className="max-w-lg rounded-xl border bg-card px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-1.5 whitespace-nowrap text-muted-foreground text-xs">
         <BotAvatar bot={from} size="xs" />
         <span className="text-foreground">{from?.name ?? t('Deleted member')}</span>

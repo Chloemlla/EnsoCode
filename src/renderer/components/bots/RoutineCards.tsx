@@ -161,7 +161,7 @@ export function RoutineAlertCard({ alert }: { alert: RoutineAlert }) {
   const owner = bots.find((bot) => bot.id === routine.botId);
   const chat = chats.find((item) => item.id === routine.chatId);
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div data-slot="bot-card" className="rounded-xl border bg-card p-3">
       <div className="flex items-center gap-2 text-muted-foreground text-xs">
         <BotAvatar bot={owner} size="sm" />
         <span className="text-foreground">{owner?.name ?? t('Deleted member')}</span>
@@ -236,7 +236,10 @@ export function RoutineProposalCard({
   );
   const { busy, review, run } = useRoutineActions();
   return (
-    <div className="w-full max-w-md self-center rounded-xl border bg-card px-3 py-2 text-xs">
+    <div
+      data-slot="bot-card"
+      className="w-full max-w-md self-center rounded-xl border bg-card px-3 py-2 text-xs"
+    >
       <div className="flex items-center gap-2 text-muted-foreground">
         <span className="min-w-0 flex-1">{text}</span>
         {routine ? (
