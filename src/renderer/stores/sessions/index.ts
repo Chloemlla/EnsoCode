@@ -70,6 +70,7 @@ import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 import { createElectronPersistStorage, openPersistWriteGate } from '@/stores/settings/storage';
@@ -2446,7 +2447,6 @@ export const useSessionsStore = create<SessionsState>()(
             defaultThinkingLevel,
             approvalReviewer,
             lastApprovalMode,
-            providers,
             projects,
             projectGroups,
           } = settings;
@@ -2474,7 +2474,7 @@ export const useSessionsStore = create<SessionsState>()(
             thinkingLevel: scopedReasoning.thinkingLevel,
             approvalMode: defaultApprovalMode(
               approvalReviewer,
-              providers,
+              readMaterializedProviders(),
               oauthCredentialContext(useOauthCredentialStore.getState().snapshot),
               lastApprovalMode
             ),
@@ -3280,7 +3280,7 @@ export const useSessionsStore = create<SessionsState>()(
             ...scopedDefaultModels(project, settings.projectGroups),
             lastProviderId: conversation.lastProviderId,
             lastModelId: conversation.lastModelId,
-            providers: settings.providers,
+            providers: readMaterializedProviders(),
             credentials: oauthCredentialContext(snapshot),
             virtualModels: settings.virtualModels,
           });

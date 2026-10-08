@@ -219,8 +219,15 @@ describe('ChatGPT 池编辑边界', () => {
     );
     expect(harness.formProps.saveDisabled).toBe(false);
     (harness.formProps.onSave as (value: unknown) => void)({ models: fixed.models });
+    // 稀疏契约：thinkingLevel 是用户意图保留；enabled:true 与缺省等价被剥离
     expect(harness.updateProvider.mock.calls).toEqual([
-      ['pool', { models: fixed.models, oauthAccountPool: { accountKeys: ['openai-codex'] } }],
+      [
+        'pool',
+        {
+          models: [{ id: 'gpt-model', thinkingLevel: 'high' }],
+          oauthAccountPool: { accountKeys: ['openai-codex'] },
+        },
+      ],
     ]);
     expect(onClose).toHaveBeenCalledOnce();
   });

@@ -22,6 +22,12 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('./bots', () => ({ syncBotModeServices: mocks.syncBotModeServices }));
 
+// scheduleWrite 成功后会动态通知统一模型目录；mock 掉避免动态 import 链
+// （modelDirectory → 本模块 → oauthProviders）把无关模块拉进测试的注册表。
+vi.mock('../services/modelDirectory', () => ({
+  notifyModelDirectorySettingsChanged: () => {},
+}));
+
 vi.mock('electron', () => ({
   app: { getPath: () => userData, on: vi.fn() },
   BrowserWindow: { getAllWindows: () => mocks.windows },

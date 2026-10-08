@@ -98,7 +98,9 @@ const isOauthUnknown = (value: ModelUsability): value is OauthCredentialUnavaila
   value === 'oauth-credentials-loading' ||
   value === 'oauth-credentials-error';
 
-function oauthCredentialBlock(credentials: ModelCredentialContext): OauthCredentialBlock | null {
+export function oauthCredentialBlock(
+  credentials: ModelCredentialContext
+): OauthCredentialBlock | null {
   switch (credentials.oauthCredentials.status) {
     case 'unloaded':
       return {

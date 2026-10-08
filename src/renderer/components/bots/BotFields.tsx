@@ -3,7 +3,6 @@ import type { ApprovalMode, ThinkingLevel } from '@shared/types/agent';
 import { BUILTIN_AGENT_TYPES } from '@shared/types/assets';
 import { type BotEngine, type BotProfile, checkBotName } from '@shared/types/bot';
 import { Check } from 'lucide-react';
-import { useMemo } from 'react';
 import { APPROVAL_MODE_META, APPROVAL_MODE_ORDER } from '@/components/chat/ApprovalModePicker';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import {
@@ -16,10 +15,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { type TFunction, useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import { botErrorText } from './botText';
 
@@ -114,14 +110,9 @@ export function EngineField({
   zIndex?: number;
 }) {
   const { t } = useI18n();
-  const providers = useSettingsStore((s) => s.providers);
   const defaultModel = useSettingsStore((s) => s.defaultModel);
   const virtualModels = useSettingsStore((s) => s.virtualModels);
-  const snapshot = useOauthCredentialStore((s) => s.snapshot);
-  const usable = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const usable = useUsableProviders();
   const follow = engine === null;
   return (
     <div className="space-y-2">

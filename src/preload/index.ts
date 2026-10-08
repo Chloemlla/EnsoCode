@@ -281,6 +281,15 @@ const electronAPI = {
     },
   },
 
+  modelDirectory: {
+    get: (): Promise<unknown> => ipcRenderer.invoke(IPC_CHANNELS.MODEL_DIRECTORY_GET),
+    onChanged: (callback: (snapshot: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, snapshot: unknown) => callback(snapshot);
+      ipcRenderer.on(IPC_CHANNELS.MODEL_DIRECTORY_CHANGED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.MODEL_DIRECTORY_CHANGED, listener);
+    },
+  },
+
   configSync: {
     exportConfig: (options: ConfigSyncExportOptions): Promise<ConfigSyncExportResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SYNC_EXPORT, options),

@@ -28,6 +28,7 @@ import {
 import { normalizeMaxActiveCoworkers } from '@shared/maxActiveCoworkers';
 import { mcpTimeoutsForSpawn } from '@shared/mcpTimeout';
 import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
+import { materializeProviders } from '@shared/modelDirectory';
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
@@ -58,6 +59,7 @@ import type {
   TitleSummaryInput,
   VirtualClassifierCredentials,
   VirtualSpawnClassifier,
+  WorkerCustomProvider,
 } from '@shared/types/agent';
 import { parseAgentWorkerEvent } from '@shared/types/agent';
 import type { SubagentModelEntry } from '@shared/types/assets';
@@ -103,6 +105,7 @@ import { isComputerPlatformSupported } from './computer/support';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
+import { getModelDirectorySnapshot, onModelDirectoryChanged } from './modelDirectory';
 import { OAUTH_POOL_EXHAUSTED } from './oauthAccountPool';
 import { getOauthQuotaCoordinator, getRuntime as getOauthRuntime } from './oauthProviders';
 import { PendingReloadRegistry } from './pendingReloads';
@@ -318,6 +321,7 @@ export function startAgentWorker(): void {
     pushApprovalReviewer();
     pushMaxActiveCoworkers();
     pushDisabledWorkflowPresets();
+    pushModelDirectory();
   });
   child.on('message', (raw) => {
     const event = parseAgentWorkerEvent(raw);
@@ -1793,6 +1797,55 @@ export function pushDisabledWorkflowPresets(): void {
   } satisfies AgentCommand);
 }
 
+let modelDirectoryListenerBound = false;
+
+function bindModelDirectoryListener(): void {
+  if (modelDirectoryListenerBound) return;
+  modelDirectoryListenerBound = true;
+  onModelDirectoryChanged(() => pushModelDirectory());
+}
+
+function customProvidersForWorker(): WorkerCustomProvider[] {
+  const providers = readSettingsState()?.providers;
+  if (!Array.isArray(providers)) return [];
+  const out: WorkerCustomProvider[] = [];
+  for (const item of providers) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const provider = item as Partial<ModelProvider>;
+    if (provider.oauthAccountKey) continue;
+    if (typeof provider.id !== 'string' || provider.id.length === 0) continue;
+    if (typeof provider.name !== 'string') continue;
+    if (
+      typeof provider.api !== 'string' ||
+      typeof provider.baseUrl !== 'string' ||
+      typeof provider.apiKey !== 'string'
+    ) {
+      continue;
+    }
+    if (!Array.isArray(provider.models)) continue;
+    out.push({
+      settingsId: provider.id,
+      name: provider.name,
+      api: provider.api,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      models: provider.models,
+    });
+  }
+  return out;
+}
+
+/** 把目录快照和自定义 provider 注册信息推给 worker。worker 未就绪时丢掉，ready 时会再推一次。 */
+export function pushModelDirectory(): void {
+  bindModelDirectoryListener();
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-model-directory',
+    snapshot: getModelDirectorySnapshot(),
+    customProviders: customProvidersForWorker(),
+  } satisfies AgentCommand);
+}
+
 export function readSettingsState(): Record<string, unknown> | undefined {
   return persistedSettingsState(readSettings()?.['enso-settings']);
 }
@@ -1803,7 +1856,7 @@ function virtualModelsFromSettings(): VirtualModelEntry[] {
 
 function providersFromSettings(): ModelProvider[] {
   const providers = readSettingsState()?.providers;
-  return Array.isArray(providers)
+  const raw = Array.isArray(providers)
     ? providers.filter(
         (provider): provider is ModelProvider =>
           Boolean(provider) &&
@@ -1811,6 +1864,8 @@ function providersFromSettings(): ModelProvider[] {
           typeof (provider as ModelProvider).id === 'string'
       )
     : [];
+  // OAuth 条目的 models 只是稀疏覆盖；存在性、enabled 与凭证校验都看目录物化后的清单。
+  return materializeProviders(raw, getModelDirectorySnapshot());
 }
 
 export function modelRefForSpawnConfig(config: SpawnModelConfig): ModelRef {

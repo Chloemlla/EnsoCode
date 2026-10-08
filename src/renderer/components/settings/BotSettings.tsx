@@ -13,10 +13,9 @@ import {
 } from '@/components/ui/select';
 import { useI18n } from '@/i18n';
 import {
-  usableClassifierProvidersForOauthSnapshot,
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+  useUsableClassifierProviders,
+  useUsableProviders,
+} from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import { ClassifierSourceField } from './VirtualModelsSettings';
 
@@ -86,12 +85,7 @@ function BotAssistantModelRow() {
   const { t } = useI18n();
   const model = useSettingsStore((s) => s.botAssistantModel);
   const setModel = useSettingsStore((s) => s.setBotAssistantModel);
-  const providers = useSettingsStore((s) => s.providers);
-  const snapshot = useOauthCredentialStore((s) => s.snapshot);
-  const candidates = React.useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const provider = model ? candidates.find((p) => p.id === model.providerId) : undefined;
   const selected = provider?.models.find((m) => m.id === model?.modelId);
   return (
@@ -132,17 +126,9 @@ function BotRouteClassifierRow() {
   const { t } = useI18n();
   const value = useSettingsStore((s) => s.botRouteClassifier);
   const setValue = useSettingsStore((s) => s.setBotRouteClassifier);
-  const providers = useSettingsStore((s) => s.providers);
-  const snapshot = useOauthCredentialStore((s) => s.snapshot);
-  const usable = React.useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const usable = useUsableProviders();
   const candidates = React.useMemo(() => usable.filter(canBeVirtualMember), [usable]);
-  const classifierProviders = React.useMemo(
-    () => usableClassifierProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const classifierProviders = useUsableClassifierProviders();
   return (
     <div className="rounded-md border px-3 py-2.5" data-settings-row="bots.routeClassifier">
       <p className="text-sm">{t('Group reply picker model')}</p>

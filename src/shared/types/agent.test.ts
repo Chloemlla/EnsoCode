@@ -676,6 +676,24 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ type: 'set-disabled-workflow-presets' })).toBeNull();
   });
 
+  it('set-model-directory 只校验键，载荷留给 worker 收窄', () => {
+    const command = {
+      type: 'set-model-directory',
+      snapshot: { revision: 1 },
+      customProviders: [],
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(parseAgentCommand({ type: 'set-model-directory', snapshot: null })).toBeNull();
+    expect(
+      parseAgentCommand({
+        type: 'set-model-directory',
+        snapshot: null,
+        customProviders: [],
+        extra: 1,
+      })
+    ).toBeNull();
+  });
+
   it('spawn-parent 携 editMode:仅接受三个互斥模式', () => {
     const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
     for (const editMode of ['replace', 'apply_patch'] as const) {

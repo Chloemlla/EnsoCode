@@ -126,11 +126,8 @@ export function ProviderSetupWizard({ open, onOpenChange }: ProviderSetupWizardP
       (provider) => provider.oauthAccountKey === account.key && !provider.oauthAccountPool
     );
     if (existing) {
-      const known = new Set(existing.models.map((model) => model.id));
-      const fresh = info.models.filter((id) => !known.has(id)).map((id) => ({ id, enabled: true }));
-      if (fresh.length > 0) {
-        store.updateProvider(existing.id, { models: [...existing.models, ...fresh] });
-      }
+      // 模型清单由统一模型目录实时派生，不再把登录时刻的清单冻结进 settings；
+      // 已有条目保留稀疏覆盖表（禁用/别名/能力覆盖）原样。
       return;
     }
     store.addProviders([
@@ -141,7 +138,8 @@ export function ProviderSetupWizard({ open, onOpenChange }: ProviderSetupWizardP
         apiKey: '',
         baseUrl: '',
         enabled: true,
-        models: info.models.map((id) => ({ id, enabled: true })),
+        // 稀疏覆盖表起步为空：目录里的模型缺省全部启用
+        models: [],
         oauthAccountKey: account.key,
       },
     ]);

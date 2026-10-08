@@ -70,8 +70,51 @@ describe('设置持久化迁移', () => {
     expect(migrated.providers[0]).toMatchObject({
       id: 'p1',
       name: 'Anthropic',
-      models: [{ id: 'claude-sonnet-4-5', enabled: true }],
+      // v16：登录时冻结的全量拷贝收缩为稀疏覆盖表；无意图行（enabled:true）被丢弃，
+      // 清单改由统一模型目录派生，用户无需重登
+      models: [],
     });
+  });
+
+  it('v16：OAuth 条目只保留用户意图行，自定义条目不动，且幂等', () => {
+    const v15 = {
+      providers: [
+        {
+          id: 'oauth-1',
+          oauthAccountKey: 'google-antigravity',
+          models: [
+            { id: 'gemini-3-pro', enabled: true },
+            { id: 'gemini-3.8-flash', enabled: false },
+            { id: 'claude-sonnet-4-6', reasoning: 'off' as const },
+            { id: 'renamed', label: '别名' },
+          ],
+        },
+        {
+          id: 'custom-1',
+          apiKey: 'sk-x',
+          models: [
+            { id: 'a', enabled: true },
+            { id: 'b', contextWindow: 100_000 },
+          ],
+        },
+      ],
+    };
+    const migrated = migrateSettings(v15, 15) as {
+      providers: { id: string; models: Record<string, unknown>[] }[];
+    };
+    expect(migrated.providers[0]?.models).toEqual([
+      { id: 'gemini-3.8-flash', enabled: false },
+      { id: 'claude-sonnet-4-6', reasoning: 'off' },
+      { id: 'renamed', label: '别名' },
+    ]);
+    // 自定义 provider 的 models 是用户数据，原样保留（含 enabled:true）
+    expect(migrated.providers[1]?.models).toEqual([
+      { id: 'a', enabled: true },
+      { id: 'b', contextWindow: 100_000 },
+    ]);
+    // 幂等：对迁移结果再跑一次 v16 段，不变
+    const again = migrateSettings(migrated, 15) as typeof migrated;
+    expect(again.providers[0]?.models).toEqual(migrated.providers[0]?.models);
   });
 
   it('v1 → v2 只新增 defaultModel:null，不把数组第一项迁成用户默认', () => {

@@ -1,9 +1,15 @@
+import {
+  directorySectionForAccount,
+  extractModelOverrides,
+  materializeProviders,
+} from '@shared/modelDirectory';
 import type { ModelProvider, OauthProviderInfo } from '@shared/types';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { useI18n } from '@/i18n';
+import { useModelDirectoryStore } from '@/stores/modelDirectory';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 import { chatgptPoolSources, providerDisplayName } from './chatgptPool';
@@ -13,6 +19,12 @@ function PoolProviderForm({ provider, onClose }: { provider: ModelProvider; onCl
   const { t } = useI18n();
   const providers = useSettingsStore((state) => state.providers);
   const updateProvider = useSettingsStore((state) => state.updateProvider);
+  const directory = useModelDirectoryStore((state) => state.snapshot);
+  // OAuth 条目的持久化 models 是稀疏覆盖表；表单编辑的是「目录 + 覆盖」的物化视图
+  const materializedModels = useMemo(
+    () => materializeProviders([provider], directory)[0]?.models ?? provider.models,
+    [provider, directory]
+  );
   const availability = useOauthCredentialStore((state) => state.snapshot.availability);
   const oauthRevision = useOauthCredentialStore((state) => state.snapshot.revision);
   const [oauthInfos, setOauthInfos] = useState<OauthProviderInfo[]>([]);
@@ -46,7 +58,11 @@ function PoolProviderForm({ provider, onClose }: { provider: ModelProvider; onCl
   ];
   return (
     <ProviderApiForm
-      initialValue={{ ...provider, name: providerDisplayName(provider, t) }}
+      initialValue={{
+        ...provider,
+        name: providerDisplayName(provider, t),
+        models: materializedModels,
+      }}
       oauth
       hideName
       saveDisabled={selected.length === 0}
@@ -98,7 +114,11 @@ function PoolProviderForm({ provider, onClose }: { provider: ModelProvider; onCl
       onSave={(value) => {
         if (selected.length === 0) return;
         updateProvider(provider.id, {
-          models: value.models,
+          // 基线 diff：物化注入的目录 label 不是用户意图（防稀疏表重新膨胀）
+          models: extractModelOverrides(
+            value.models,
+            directorySectionForAccount(directory, provider.oauthAccountKey ?? '')?.models
+          ),
           oauthAccountPool: { accountKeys: keys.filter((key) => selected.includes(key)) },
         });
         onClose();
@@ -116,6 +136,14 @@ interface ProviderEditDialogProps {
 export function ProviderEditDialog({ provider, onClose }: ProviderEditDialogProps) {
   const { t } = useI18n();
   const updateProvider = useSettingsStore((state) => state.updateProvider);
+  const directory = useModelDirectoryStore((state) => state.snapshot);
+  const materializedModels = useMemo(
+    () =>
+      provider?.oauthAccountKey
+        ? (materializeProviders([provider], directory)[0]?.models ?? provider.models)
+        : provider?.models,
+    [provider, directory]
+  );
 
   return (
     <Dialog open={provider !== null} onOpenChange={(open) => !open && onClose()}>
@@ -136,7 +164,7 @@ export function ProviderEditDialog({ provider, onClose }: ProviderEditDialogProp
                 api: provider.api,
                 apiKey: provider.apiKey,
                 baseUrl: provider.baseUrl,
-                models: provider.models,
+                models: materializedModels ?? provider.models,
               }}
               oauth={Boolean(provider.oauthAccountKey)}
               oauthAccountKey={provider.oauthAccountKey}
@@ -144,7 +172,15 @@ export function ProviderEditDialog({ provider, onClose }: ProviderEditDialogProp
               onSave={(value) => {
                 updateProvider(
                   provider.id,
-                  provider.oauthAccountKey ? { name: value.name, models: value.models } : value
+                  provider.oauthAccountKey
+                    ? {
+                        name: value.name,
+                        models: extractModelOverrides(
+                          value.models,
+                          directorySectionForAccount(directory, provider.oauthAccountKey)?.models
+                        ),
+                      }
+                    : value
                 );
                 onClose();
               }}

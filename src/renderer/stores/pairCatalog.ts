@@ -4,6 +4,8 @@ import { projectDisplayName } from '@shared/projectName';
 import type { PairCatalogPayload } from '@shared/types';
 import { resolveContextUsage } from '@/components/chat/usageSegments';
 import { getXtermTheme } from '@/lib/ghosttyTheme';
+import { useModelDirectoryStore } from '@/stores/modelDirectory';
+import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { pairProviderSyncPlan } from '@/stores/pairCatalogProviders';
 import { useSessionsStore } from '@/stores/sessions';
@@ -117,7 +119,7 @@ function buildPayload(): PairCatalogPayload {
   // 与桌面选择器同一套可用口径（启用 + 凭证真实可用 + 启用模型），并剥掉密钥。
   // OAuth 未就绪的空列表不结算，main 会扣下这一帧，避免手机显示没有模型服务。
   const providerPlan = pairProviderSyncPlan(
-    settings.providers,
+    readMaterializedProviders(),
     useOauthCredentialStore.getState().snapshot,
     settings.virtualModels
   );
@@ -203,6 +205,9 @@ export function bindPairCatalogSync(): void {
     if (state.conversations !== prev.conversations || state.order !== prev.order) schedulePush();
   });
   useOauthCredentialStore.subscribe((state, prev) => {
+    if (state.snapshot !== prev.snapshot) schedulePush();
+  });
+  useModelDirectoryStore.subscribe((state, prev) => {
     if (state.snapshot !== prev.snapshot) schedulePush();
   });
   useSettingsStore.subscribe((state, prev) => {

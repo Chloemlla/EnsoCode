@@ -53,6 +53,7 @@ import {
   MODEL_API_KINDS,
   type ModelApiKind,
   type ModelCapabilityOverrides,
+  type ModelEntry,
   type ModelReasoningOverride,
   type ModelThinkingLevelOverride,
 } from './llm';
@@ -67,6 +68,19 @@ import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot 
 
 export type { ChildSessionIdentity, SessionIdentity } from '../builtinAgents';
 export { parseChildSessionIdentity, parseSessionIdentity } from '../builtinAgents';
+
+/**
+ * Main → worker 的自定义 provider 注册信息。api 在 shared 侧保持 string，
+ * worker 再用 MODEL_API_KINDS 收窄。
+ */
+export interface WorkerCustomProvider {
+  settingsId: string;
+  name: string;
+  api: string;
+  baseUrl: string;
+  apiKey: string;
+  models: ModelEntry[];
+}
 
 /** 会话状态。waiting/done 属权限门与 subagent 刀，M1 不引入 */
 export type NodeStatus = 'idle' | 'running' | 'failed';
@@ -1167,6 +1181,8 @@ export type AgentCommand =
   | { type: 'set-max-active-coworkers'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
+  /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
+  | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
   | { type: 'ask-respond'; identity: SessionIdentity; requestId: string; answer: string }
   | {
@@ -3187,6 +3203,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         Array.isArray(value.ids) &&
         value.ids.length <= 64 &&
         value.ids.every((id) => typeof id === 'string' && isWorkflowPresetId(id))
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-model-directory':
+      return hasExactKeys(value, ['type', 'snapshot', 'customProviders'])
         ? (value as unknown as AgentCommand)
         : null;
     case 'ask-respond':

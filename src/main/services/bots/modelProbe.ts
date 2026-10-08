@@ -4,10 +4,12 @@ import {
   type ModelUsability,
   modelUsability,
 } from '../../../shared/defaultModel';
+import { materializeProviders } from '../../../shared/modelDirectory';
 import type { SpawnModelConfig } from '../../../shared/types/agent';
 import type { BotEngine } from '../../../shared/types/bot';
 import type { ModelProvider } from '../../../shared/types/llm';
 import { findVirtualModel, isVirtualRef, parseVirtualModels } from '../../../shared/virtualModels';
+import { getModelDirectorySnapshot } from '../modelDirectory';
 import { pickBotModel } from './botPrompt';
 
 /** 实测成员模型的最短往返：worker 真实模型栈发一次性补全 */
@@ -58,7 +60,7 @@ export interface ModelProbeDeps {
 
 function providersFrom(state: Record<string, unknown> | undefined): ModelProvider[] {
   const providers = state?.providers;
-  return Array.isArray(providers)
+  const raw = Array.isArray(providers)
     ? providers.filter(
         (provider): provider is ModelProvider =>
           Boolean(provider) &&
@@ -66,6 +68,7 @@ function providersFrom(state: Record<string, unknown> | undefined): ModelProvide
           typeof (provider as ModelProvider).id === 'string'
       )
     : [];
+  return materializeProviders(raw, getModelDirectorySnapshot());
 }
 
 /** 展示用模型名：虚拟条目用其名字，物理模型用「模型 id (供应商名)」 */

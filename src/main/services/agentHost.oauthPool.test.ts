@@ -29,6 +29,10 @@ vi.mock('./oauthProviders', async (original) => ({
       fixture.unavailable.has(key) ? undefined : { provider: key, id: modelId },
   }),
 }));
+vi.mock('./modelDirectory', () => ({
+  getModelDirectorySnapshot: () => ({ revision: 0, generatedAt: 0, providers: [] }),
+  onModelDirectoryChanged: () => () => {},
+}));
 
 import { selectOauthPoolAccount } from './agentHost';
 

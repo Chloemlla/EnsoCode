@@ -27,6 +27,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 
@@ -74,7 +75,7 @@ export function NewRemoteSessionDialog({
   const { t } = useI18n();
   const approvalReviewer = useSettingsStore((state) => state.approvalReviewer);
   const lastApprovalMode = useSettingsStore((state) => state.lastApprovalMode);
-  const localProviders = useSettingsStore((state) => state.providers);
+  const localProviders = useMaterializedProviders();
   const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
   const initialApprovalMode = useMemo(
     () =>

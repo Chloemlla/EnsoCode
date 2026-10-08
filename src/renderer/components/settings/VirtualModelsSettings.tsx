@@ -26,10 +26,9 @@ import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import {
-  usableClassifierProvidersForOauthSnapshot,
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+  useUsableClassifierProviders,
+  useUsableProviders,
+} from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 const noop = () => undefined;
@@ -494,20 +493,12 @@ function VirtualModelCard({
  */
 export function VirtualModelsSettings() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const entries = useSettingsStore((state) => state.virtualModels);
   const addEntry = useSettingsStore((state) => state.addVirtualModel);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const usable = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const usable = useUsableProviders();
   const candidates = useMemo(() => usable.filter(canBeVirtualMember), [usable]);
-  const classifierProviders = useMemo(
-    () => usableClassifierProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const classifierProviders = useUsableClassifierProviders();
   const seed = useMemo((): DefaultModelRef | null => {
     if (defaultModel) {
       const provider = candidates.find((entry) => entry.id === defaultModel.providerId);
