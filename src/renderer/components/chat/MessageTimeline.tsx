@@ -35,7 +35,11 @@ import {
   TimelineRow,
 } from './TimelineRow';
 import { nextTimelineReveal } from './timelineReveal';
-import { nextTimelineRowOrigin, type TimelineRowAnchor } from './timelineRowOrigin';
+import {
+  nextTimelineRowOrigin,
+  type TimelineRowAnchor,
+  virtuosoScrollIndex,
+} from './timelineRowOrigin';
 import { WelcomeSuggestions } from './WelcomeSuggestions';
 
 /** 消息列/输入区共用的列：阶梯 max-w + 水平 padding。padding 必须在列上而不是 @container 上，否则两侧查询宽度差 2rem，会在断点附近上下错位。默认到 4xl 保持原阅读宽度，更宽再逐级加档。 */
@@ -412,7 +416,11 @@ export function MessageTimeline({
     }
     const index = foldedIndexOf(key);
     if (index >= 0) {
-      virtuosoRef.current?.scrollToIndex({ index: firstItemIndex + index, align: 'center' });
+      // scrollToIndex 吃 data 相对下标（详见 virtuosoScrollIndex）；叠 firstItemIndex 会被钳到末行
+      virtuosoRef.current?.scrollToIndex({
+        index: virtuosoScrollIndex(firstItemIndex, index),
+        align: 'center',
+      });
     }
   };
   /** 目标藏在折叠轮次里：先展开，等 folded 重算后再滚动（同步滚动拿到的是旧 folded / 旧 DOM） */

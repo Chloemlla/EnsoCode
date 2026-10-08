@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { foldTimeline, type TimelineItem } from '@/stores/sessions/timeline';
-import { nextTimelineRowOrigin, TIMELINE_ROW_INDEX_BASE } from './timelineRowOrigin';
+import {
+  nextTimelineRowOrigin,
+  TIMELINE_ROW_INDEX_BASE,
+  virtuosoScrollIndex,
+} from './timelineRowOrigin';
 
 function readTool(key: string): TimelineItem {
   return {
@@ -82,5 +86,18 @@ describe('nextTimelineRowOrigin', () => {
     const origin = nextTimelineRowOrigin(null, ['group-80-0', '128-0']);
     const next = nextTimelineRowOrigin(origin.anchor, ['group-21-0', '128-0']);
     expect(next).toMatchObject({ firstItemIndex: TIMELINE_ROW_INDEX_BASE, remount: false });
+  });
+});
+
+describe('virtuosoScrollIndex', () => {
+  // 回归钉死：409e67e9 曾把 firstItemIndex 叠进 scrollToIndex 入参。Virtuoso 4.x 的
+  // scrollToIndex 吃 data 相对下标、按 [0, totalCount-1] 钳位且不叠 firstItemIndex；
+  // 原点恒为百万级（TIMELINE_ROW_INDEX_BASE），叠加后任何跳转都被钳到末行，
+  // 表现就是点导航条 / 搜索跳转永远落在最新一条消息。
+  it('scrollToIndex 用 data 相对下标，原点再大也不参与计算', () => {
+    expect(virtuosoScrollIndex(TIMELINE_ROW_INDEX_BASE, 0)).toBe(0);
+    expect(virtuosoScrollIndex(TIMELINE_ROW_INDEX_BASE, 3)).toBe(3);
+    expect(virtuosoScrollIndex(TIMELINE_ROW_INDEX_BASE - 12, 7)).toBe(7);
+    expect(virtuosoScrollIndex(TIMELINE_ROW_INDEX_BASE, 199)).toBe(199);
   });
 });

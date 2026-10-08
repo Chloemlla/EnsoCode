@@ -29,3 +29,13 @@ export function nextTimelineRowOrigin(
   }
   return { anchor: { keys, index: base }, firstItemIndex: base, remount: true };
 }
+
+/**
+ * Virtuoso scrollToIndex 的下标空间是 data 相对下标（0 基），不是 rangeChanged 上报的
+ * firstItemIndex 绝对下标：库内部按 [0, totalCount-1] 钳位且不叠 firstItemIndex。
+ * 叠了原点（恒为百万级 TIMELINE_ROW_INDEX_BASE）必被钳到末行——表现就是点导航条 /
+ * 搜索跳转永远落在最新一条消息（409e67e9 回归）。_firstItemIndex 留在签名里作陷阱路标。
+ */
+export function virtuosoScrollIndex(_firstItemIndex: number, dataIndex: number): number {
+  return dataIndex;
+}
