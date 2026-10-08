@@ -64,7 +64,7 @@ describe('createWebTools', () => {
     expect(first?.type === 'text' && first.text).toContain('via exa');
     expect(result.details).toMatchObject({
       source: 'exa',
-      notes: [expect.stringMatching(/no key/)],
+      notes: expect.arrayContaining([expect.stringMatching(/no key/)]),
     });
   });
 
@@ -91,5 +91,51 @@ describe('createWebTools', () => {
     const first = result.content[0];
     expect(first?.type === 'text' && first.text).toContain('hello');
     expect(result.details).toMatchObject({ url: 'https://a.example/', status: 200 });
+  });
+
+  it('候选链经 modelRegistry 物化后依序执行；找不到的候选跳过并记 details.notes', async () => {
+    const anthropicHit = {
+      content: [
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: 't1',
+          content: [{ type: 'web_search_result', title: 'N', url: 'https://n.example/' }],
+        },
+        { type: 'text', text: 'chain answer.' },
+      ],
+    };
+    const fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify(anthropicHit), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
+    const [search] = createWebTools({
+      fetch,
+      chain: () => [
+        { providerId: 'gone', modelId: 'ghost' },
+        { providerId: 'p', modelId: 'm' },
+      ],
+    });
+    if (!search) throw new Error('missing tool');
+    const registry = {
+      find: vi.fn((providerId: string, modelId: string) =>
+        providerId === 'p'
+          ? { provider: 'p', api: 'anthropic-messages', baseUrl: 'https://gw', id: modelId }
+          : undefined
+      ),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: 'k' })),
+    };
+    const result = await search.execute('c1', { query: 'node' }, undefined, undefined, {
+      modelRegistry: registry,
+    } as never);
+    const first = result.content[0];
+    expect(first?.type === 'text' && first.text).toContain('via anthropic');
+    expect(result.details).toMatchObject({ source: 'anthropic' });
+    const notes = (result.details as { notes: string[] }).notes.join('\n');
+    expect(notes).toMatch(/gone\/ghost.*skipped/);
+    // 会话模型不被自动插队：请求打向链候选的网关
+    expect(String((fetch.mock.calls[0] as unknown[])[0])).toBe('https://gw/v1/messages');
   });
 });

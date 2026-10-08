@@ -1069,6 +1069,13 @@ export const zhTranslations: Record<string, string> = {
     '单个会话最多同时保留多少个 coworker。调低上限不会解散现有成员，雇新的前需先解雇。subagent 不计入。',
   'Built-in tools': '内置工具',
   'Toggle the built-in tools available to agents.': '开关 agent 可用的内置工具。',
+  "Try these models' built-in search in order. Credentials resolve at call time; if all fail, the keyless Exa service is the permanent fallback.":
+    '按顺序尝试这些模型的原生搜索。凭证在调用时现取；全部失败时由免 key 的 Exa 服务永久兜底。',
+  "Default: use the current session model's built-in search when available, otherwise Exa.":
+    '默认：优先使用当前会话模型的原生搜索能力，不支持时回退 Exa。',
+  'Add candidate': '添加候选',
+  'Final fallback: Exa (keyless hosted search). Not a chain entry; always last.':
+    '最终兜底：Exa（免 key 托管搜索）。不是链条目，永远在最后。',
   'Isolated sandbox': '隔离沙箱',
   Memory: '记忆',
   'Durable knowledge the agent can search and write across sessions. Stored locally in a SQLite database.':

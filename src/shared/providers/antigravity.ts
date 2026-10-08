@@ -73,11 +73,13 @@ const USERINFO_URL = 'https://www.googleapis.com/oauth2/v1/userinfo?alt=json';
 export const ANTIGRAVITY_PRIMARY_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com';
 export const ANTIGRAVITY_SANDBOX_ENDPOINT = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
 export const ANTIGRAVITY_PROD_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
-const ENDPOINTS = [
+/** CCA 端点 fallback 顺序（web_search grounding 等旁路调用也复用） */
+export const ANTIGRAVITY_ENDPOINTS = [
   ANTIGRAVITY_PRIMARY_ENDPOINT,
   ANTIGRAVITY_SANDBOX_ENDPOINT,
   ANTIGRAVITY_PROD_ENDPOINT,
 ];
+const ENDPOINTS = ANTIGRAVITY_ENDPOINTS;
 
 const FREE_TIER_ID = 'free-tier';
 const ONBOARD_TIMEOUT_MS = 30_000;
@@ -142,7 +144,7 @@ async function ensureAntigravityVersion(
  * os_type/arch 固定成抓包时的 darwin/arm64 参考客户端，与本机平台无关；
  * 实测后端不校验 cl，只按 version 门控模型。
  */
-function antigravityUserAgent(): string {
+export function antigravityUserAgent(): string {
   const version = discoveredVersion ?? DEFAULT_ANTIGRAVITY_VERSION;
   return `antigravity/hub/${version} (aidev_client; os_type=darwin; arch=arm64; cl=963137146)`;
 }

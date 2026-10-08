@@ -1,3 +1,12 @@
+import { randomUUID } from 'node:crypto';
+import {
+  ANTIGRAVITY_ENDPOINTS,
+  antigravityUserAgent,
+  isAccessTokenExpired,
+  parseAntigravityApiKey,
+  resolveAntigravityWireModelId,
+} from '@shared/providers/antigravity';
+import { nativeSearchKindFor } from '@shared/webSearchChain';
 import { UNTRUSTED_WEB_NOTICE } from './webFetch';
 
 /** ctx.model 的最小形状（pi Model<Api> 的子集） */
@@ -21,7 +30,7 @@ export interface SearchHit {
 }
 
 export interface SearchOutcome {
-  source: 'anthropic' | 'openai' | 'gemini' | 'exa';
+  source: 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'exa';
   answer?: string;
   hits: SearchHit[];
 }
@@ -95,22 +104,11 @@ function sseEvents(text: string): Record<string, unknown>[] {
   return events;
 }
 
-type Kind = 'anthropic' | 'responses' | 'codex' | 'gemini';
+type Kind = 'anthropic' | 'responses' | 'codex' | 'gemini' | 'antigravity';
 
-function nativeKind(model: SearchModel): Kind | undefined {
-  switch (model.api) {
-    case 'anthropic-messages':
-      return 'anthropic';
-    case 'openai-responses':
-      return 'responses';
-    case 'openai-codex-responses':
-      return 'codex';
-    case 'google-generative-ai':
-      return 'gemini';
-    default:
-      return undefined;
-  }
-}
+/** 原生通道判定与设置页候选过滤共用同一实现（@shared/webSearchChain），避免口径漂移。 */
+const nativeKind = (model: SearchModel): Kind | undefined =>
+  nativeSearchKindFor(model.api, model.baseUrl);
 
 const trimBase = (baseUrl: string) => baseUrl.replace(/\/+$/, '');
 
@@ -316,6 +314,86 @@ async function geminiSearch(
   return { source: 'gemini', answer: answer.trim(), hits };
 }
 
+/**
+ * Antigravity（Cloud Code Assist）googleSearch grounding：会话模型或链候选为
+ * google-antigravity 时走这条路。凭证是 auth.json 里的 OAuth JSON blob；
+ * 过期不在这里刷新（下次聊天请求会刷新），直接失败让链下移。
+ */
+async function antigravitySearch(
+  query: string,
+  model: SearchModel,
+  auth: SearchAuth,
+  signal: AbortSignal,
+  fetchImpl: FetchLike
+): Promise<SearchOutcome> {
+  if (!auth.apiKey) throw new Error('Antigravity 需要 OAuth 登录后才能调用');
+  const credentials = parseAntigravityApiKey(auth.apiKey);
+  if (isAccessTokenExpired(credentials.expires)) {
+    throw new Error('Antigravity access token 已过期（下一次聊天请求会自动刷新）');
+  }
+  const body = JSON.stringify({
+    project: credentials.projectId,
+    model: resolveAntigravityWireModelId(model.id, undefined),
+    requestId: `agent/${randomUUID()}/${Date.now()}/${randomUUID()}/1`,
+    requestType: 'agent',
+    userAgent: 'antigravity',
+    request: {
+      contents: [{ role: 'user', parts: [{ text: prompt(query) }] }],
+      tools: [{ googleSearch: {} }],
+    },
+  });
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${credentials.access}`,
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+    'User-Agent': antigravityUserAgent(),
+    ...model.headers,
+    ...auth.headers,
+  };
+  let response: Response | undefined;
+  let lastError: Error | undefined;
+  for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
+    try {
+      response = await post(fetchImpl, `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+        signal,
+        headers,
+        body,
+      });
+      break;
+    } catch (error) {
+      // 只有网络层错误才换端点；HTTP 错误（4xx/5xx）说明端点通了但请求被拒，换点无意义
+      if (error instanceof HttpError) throw error;
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (!response) throw lastError ?? new Error('all antigravity endpoints unreachable');
+  const hits: SearchHit[] = [];
+  let answer = '';
+  for (const event of sseEvents(await response.text())) {
+    const frame = event as {
+      response?: {
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string }> };
+          groundingMetadata?: {
+            groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+          };
+        }>;
+      };
+      error?: { message?: string };
+    };
+    if (frame.error) throw new Error(String(frame.error.message ?? 'stream error'));
+    const candidate = frame.response?.candidates?.[0];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (typeof part.text === 'string') answer += part.text;
+    }
+    for (const chunk of candidate?.groundingMetadata?.groundingChunks ?? []) {
+      pushHit(hits, { title: chunk.web?.title, url: chunk.web?.uri });
+    }
+  }
+  if (hits.length === 0) throw new NoSearchPerformed();
+  return { source: 'antigravity', answer: answer.trim(), hits };
+}
+
 async function exaSearch(
   query: string,
   signal: AbortSignal,
@@ -355,7 +433,13 @@ async function exaSearch(
  */
 export async function webSearch(
   query: string,
-  context: { model?: SearchModel; auth: (model: SearchModel) => Promise<SearchAuth> },
+  context: {
+    /** 会话模型：链为空时的唯一候选（现行行为） */
+    model?: SearchModel;
+    /** 全局候选链（已物化）：非空时严格按链依序尝试，不自动插入会话模型 */
+    candidates?: readonly SearchModel[];
+    auth: (model: SearchModel) => Promise<SearchAuth>;
+  },
   deps: WebSearchDeps,
   signal?: AbortSignal
 ): Promise<{ outcome: SearchOutcome; notes: string[] }> {
@@ -364,10 +448,23 @@ export async function webSearch(
     signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
   const notes: string[] = [];
   const failures: string[] = [];
-  const model = context.model;
-  const kind = model ? nativeKind(model) : undefined;
-  const key = model ? `${model.provider}\n${model.baseUrl}\n${model.id}` : '';
-  if (model && kind && !deps.unsupported.has(key)) {
+  const candidates = context.candidates?.length
+    ? context.candidates
+    : context.model
+      ? [context.model]
+      : [];
+  for (const model of candidates) {
+    const kind = nativeKind(model);
+    if (!kind) {
+      notes.push(`Skipped ${model.id}: no native web search support.`);
+      failures.push(`${model.id}: no native search kind`);
+      continue;
+    }
+    const key = `${model.provider}\n${model.baseUrl}\n${model.id}`;
+    if (deps.unsupported.has(key)) {
+      notes.push(`Skipped ${model.id}: endpoint already known to lack web search.`);
+      continue;
+    }
     try {
       const auth = await context.auth(model);
       const nativeSignal = withTimeout(NATIVE_TIMEOUT_MS);
@@ -376,16 +473,29 @@ export async function webSearch(
           ? await anthropicSearch(query, model, auth, nativeSignal, fetchImpl)
           : kind === 'gemini'
             ? await geminiSearch(query, model, auth, nativeSignal, fetchImpl)
-            : await responsesSearch(query, model, auth, nativeSignal, fetchImpl, kind === 'codex');
+            : kind === 'antigravity'
+              ? await antigravitySearch(query, model, auth, nativeSignal, fetchImpl)
+              : await responsesSearch(
+                  query,
+                  model,
+                  auth,
+                  nativeSignal,
+                  fetchImpl,
+                  kind === 'codex'
+                );
+      if (candidates.length > 1 || context.candidates?.length) {
+        notes.push(`Native search via ${model.id} (${outcome.source}).`);
+      }
       return { outcome, notes };
     } catch (error) {
       if (signal?.aborted) throw error;
       if (isUnsupported(error)) deps.unsupported.add(key);
       const reason = error instanceof Error ? error.message : String(error);
-      failures.push(`${kind}: ${reason}`);
-      notes.push(`Native search via ${model.id} unavailable (${reason}); used Exa instead.`);
+      failures.push(`${model.id}(${kind}): ${reason}`);
+      notes.push(`Native search via ${model.id} unavailable (${reason}).`);
     }
   }
+  if (failures.length > 0) notes.push('All native candidates failed; fell back to Exa.');
   try {
     return { outcome: await exaSearch(query, withTimeout(EXA_TIMEOUT_MS), fetchImpl), notes };
   } catch (error) {

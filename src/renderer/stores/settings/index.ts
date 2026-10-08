@@ -43,6 +43,7 @@ import {
   type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
+import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
@@ -230,6 +231,7 @@ const initialState = {
   virtualModels: [] as VirtualModelEntry[],
   disabledBuiltinAgentTypes: [] as string[],
   disabledBuiltinTools: [...DEFAULT_DISABLED_BUILTIN_TOOLS] as string[],
+  webSearchChain: [] as WebSearchChainEntry[],
   disabledWorkflowPresets: [] as string[],
   subagentAllowedModes: ['task', 'coworker'] as import('@shared/types/agent').AgentMode[],
   onboarded: false,
@@ -774,6 +776,8 @@ export const useSettingsStore = create<SettingsState>()(
             ? state.disabledBuiltinTools.filter((n) => n !== id)
             : [...new Set([...state.disabledBuiltinTools, id])],
         })),
+
+      setWebSearchChain: (entries) => set({ webSearchChain: parseWebSearchChain(entries) }),
 
       toggleWorkflowPreset: (id, enabled) =>
         set((state) => ({

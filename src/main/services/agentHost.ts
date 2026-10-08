@@ -93,6 +93,7 @@ import {
   type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
+import { parseWebSearchChain } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { app, type UtilityProcess, utilityProcess } from 'electron';
 import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
@@ -322,6 +323,7 @@ export function startAgentWorker(): void {
     pushMaxActiveCoworkers();
     pushDisabledWorkflowPresets();
     pushModelDirectory();
+    pushWebSearchConfig();
   });
   child.on('message', (raw) => {
     const event = parseAgentWorkerEvent(raw);
@@ -1811,6 +1813,15 @@ export function pushDisabledWorkflowPresets(): void {
   worker.postMessage({
     type: 'set-disabled-workflow-presets',
     ids: parseDisabledWorkflowPresets(readSettingsState()?.disabledWorkflowPresets),
+  } satisfies AgentCommand);
+}
+
+/** web_search 候选链推送：只发引用，凭证由 worker 调用时经 modelRegistry 现取。 */
+export function pushWebSearchConfig(): void {
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-web-search-config',
+    chain: parseWebSearchChain(readSettingsState()?.webSearchChain),
   } satisfies AgentCommand);
 }
 

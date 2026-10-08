@@ -990,6 +990,29 @@ describe('parent/child commands', () => {
     ).toBeNull();
   });
 
+  it('set-web-search-config 链收窄：合法透传，非法/超限拒收', () => {
+    const chain = [{ providerId: 'ga', modelId: 'gemini-3.8-flash' }];
+    const command = { type: 'set-web-search-config', chain };
+    expect(parseAgentCommand(command)).toEqual(command);
+    // 空链合法（= 回退现行行为）
+    expect(parseAgentCommand({ type: 'set-web-search-config', chain: [] })).toEqual({
+      type: 'set-web-search-config',
+      chain: [],
+    });
+    for (const bad of [
+      { type: 'set-web-search-config' },
+      { type: 'set-web-search-config', chain: 'x' },
+      { type: 'set-web-search-config', chain: [{ providerId: '', modelId: 'm' }] },
+      { type: 'set-web-search-config', chain: [{ providerId: 'p' }] },
+      {
+        type: 'set-web-search-config',
+        chain: Array.from({ length: 9 }, (_, i) => ({ providerId: `p${i}`, modelId: 'm' })),
+      },
+    ]) {
+      expect(parseAgentCommand(bad)).toBeNull();
+    }
+  });
+
   it('spawn-child Enso 必须 locked profile、exact tools、无 skills/MCP', () => {
     const command = {
       type: 'spawn-child',
