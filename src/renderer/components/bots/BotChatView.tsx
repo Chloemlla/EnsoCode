@@ -418,7 +418,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
                 className={cn(
                   'flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs transition-colors',
                   panelTab === tab
-                    ? 'bg-muted font-medium text-foreground'
+                    ? 'bg-brand/10 font-medium text-foreground dark:bg-brand/15'
                     : 'text-muted-foreground hover:text-foreground'
                 )}
               >
