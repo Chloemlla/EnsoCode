@@ -84,17 +84,58 @@ export function parseWebSearchChain(value: unknown): WebSearchChainEntry[] {
 }
 
 /**
+ * OAuth 条目在 settings.json 里的 api 字段是历史遗留占位（如 openai-completions），
+ * worker 运行时是按 oauthAccountKey 的基础 providerId 注册的。
+ * 推导真实通信使用的 api 与 baseUrl，供原生搜索能力判定使用。
+ */
+export function effectiveSearchEndpoint(provider: {
+  api: string;
+  baseUrl: string;
+  oauthAccountKey?: string | null;
+}): { api: string; baseUrl: string } {
+  if (provider.oauthAccountKey) {
+    const baseId = providerIdOfAccountKey(provider.oauthAccountKey);
+    switch (baseId) {
+      case 'google-antigravity':
+        return { api: 'google-antigravity', baseUrl: provider.baseUrl || '' };
+      case 'anthropic':
+        return {
+          api: 'anthropic-messages',
+          baseUrl: provider.baseUrl || 'https://api.anthropic.com',
+        };
+      case 'openai-codex':
+        return {
+          api: 'openai-codex-responses',
+          baseUrl: provider.baseUrl || 'https://api.openai.com',
+        };
+      case 'xai':
+        return { api: 'openai-completions', baseUrl: provider.baseUrl || 'https://api.x.ai/v1' };
+      default:
+        break;
+    }
+  }
+  return { api: provider.api, baseUrl: provider.baseUrl };
+}
+
+/**
  * 可配置进 web_search 候选链的 provider：启用 + 有原生搜索通道。
  * OAuth 池（openai-codex 多账号合并条目）v1 不支持——worker 按 providerId 取模型时
  * 池条目没有对应的注册 provider，物化会落空，先从候选范围排除。
  */
 export function webSearchCandidateProviders<
-  T extends { enabled?: boolean; oauthAccountPool?: unknown; api: string; baseUrl: string },
+  T extends {
+    enabled?: boolean;
+    oauthAccountPool?: unknown;
+    api: string;
+    baseUrl: string;
+    oauthAccountKey?: string | null;
+  },
 >(providers: readonly T[]): T[] {
-  return providers.filter(
-    (provider) =>
-      provider.enabled !== false &&
-      provider.oauthAccountPool === undefined &&
-      nativeSearchKindFor(provider.api, provider.baseUrl) !== undefined
-  );
+  return providers.filter((provider) => {
+    if (provider.enabled === false || provider.oauthAccountPool !== undefined) return false;
+    const effective = effectiveSearchEndpoint(provider);
+    return nativeSearchKindFor(effective.api, effective.baseUrl) !== undefined;
+  });
 }
+
+import { providerIdOfAccountKey } from './types/oauthProviders';

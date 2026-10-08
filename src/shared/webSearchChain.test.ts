@@ -74,6 +74,31 @@ describe('webSearchCandidateProviders', () => {
       ...extra,
     }) as Fixture;
 
+  it('OAuth 条目：根据 oauthAccountKey 纠正遗留 api 占位（如 antigravity 标 openai-completions）', () => {
+    const list = [
+      provider({
+        id: 'ag-oauth',
+        api: 'openai-completions', // 历史占位
+        baseUrl: '',
+        oauthAccountKey: 'google-antigravity',
+      }),
+      provider({
+        id: 'kimi-oauth',
+        api: 'openai-completions',
+        baseUrl: '',
+        oauthAccountKey: 'kimi-coding', // 无原生搜索
+      }),
+      provider({
+        id: 'xai-oauth',
+        api: 'openai-completions',
+        baseUrl: '', // 缺省空 baseUrl 自动补 x.ai
+        oauthAccountKey: 'xai',
+      }),
+    ];
+    const out = webSearchCandidateProviders(list);
+    expect(out.map((p) => p.id)).toEqual(['ag-oauth', 'xai-oauth']);
+  });
+
   it('只保留有原生搜索能力的启用条目；pool 与禁用排除', () => {
     const list = [
       provider({ id: 'xai' }), // openai-completions + api.x.ai → responses ✓
