@@ -7,6 +7,8 @@ import {
   pickSmartRouteChoice,
   pickSmartRouteIntent,
   rankSmartRouteChoice,
+  SMART_ROUTE_DEFAULT_TIMEOUT_MS,
+  SMART_ROUTE_JUDGE_MAX_TOKENS,
   type SmartRouteInput,
   smartRouteIntentQuestion,
   smartRouteJudgePrompt,
@@ -30,6 +32,7 @@ export interface SmartRouterDeps {
       userText: string;
       preferred: DefaultModelRef | undefined;
       timeoutMs: number;
+      maxTokens?: number;
     },
     signal: AbortSignal
   ) => Promise<string | null>;
@@ -46,9 +49,21 @@ export interface SmartRouterDeps {
  * （成员与意图各问一次）。判不出意图时用关键词兜底。
  */
 export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector {
-  const config = () => parseVirtualClassifier(deps.settings()?.botRouteClassifier);
+  const config = () => {
+    const parsed = parseVirtualClassifier(deps.settings()?.botRouteClassifier);
+    // 设置页不暴露时限；3000 是旧版 UI 写下的默认快照，运行时升级，不改用户磁盘配置。
+    return (
+      parsed && {
+        ...parsed,
+        timeoutMs:
+          parsed.timeoutMs === VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS
+            ? SMART_ROUTE_DEFAULT_TIMEOUT_MS
+            : parsed.timeoutMs,
+      }
+    );
+  };
   return {
-    timeoutMs: () => config()?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+    timeoutMs: () => config()?.timeoutMs ?? SMART_ROUTE_DEFAULT_TIMEOUT_MS,
     async select(input: SmartRouteInput, signal: AbortSignal) {
       // 点名全员时规则直出，不受模型挑人上限与置信度影响
       if (addressesEveryone(input.message))
@@ -74,7 +89,8 @@ export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector
           {
             ...smartRouteJudgePrompt(input),
             preferred: current?.model,
-            timeoutMs: current?.timeoutMs ?? VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS,
+            timeoutMs: current?.timeoutMs ?? SMART_ROUTE_DEFAULT_TIMEOUT_MS,
+            maxTokens: SMART_ROUTE_JUDGE_MAX_TOKENS,
           },
           signal
         );

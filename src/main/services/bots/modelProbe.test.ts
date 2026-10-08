@@ -283,6 +283,7 @@ describe('isModelFailure', () => {
       'fetch failed',
       'request timed out',
       '429 rate limit',
+      '403 This model is not available in your region.',
     ])
       expect(isModelFailure(error)).toBe(true);
     for (const error of ['aborted', 'canceled', 'steer-rejected', 'context window exceeded', ''])
@@ -329,5 +330,14 @@ describe('briefErrorReason', () => {
     const long = `x${'y'.repeat(200)}`;
     expect(briefErrorReason(new Error(long))).toHaveLength(81);
     expect(briefErrorReason('模型 gpt-5：鉴权失败')).toBe('模型 gpt-5：鉴权失败');
+  });
+
+  it('地区限制的 403 不算鉴权失败', () => {
+    for (const text of [
+      '403 {"error":{"message":"This model is not available in your region.","code":403}}',
+      '403 Country, region, or territory not supported',
+      'unsupported_country_region_territory',
+    ])
+      expect(briefErrorReason(new Error(text)), text).toBe('当前地区不可用');
   });
 });

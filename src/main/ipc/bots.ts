@@ -419,7 +419,7 @@ export function getBotServices(): BotServices | null {
   });
   const routingDeps: SmartRouterDeps = {
     settings: () => readSettingsState(),
-    judge: async ({ preferred, ...request }, signal) => {
+    judge: async ({ preferred, maxTokens = 1024, ...request }, signal) => {
       const state = readSettingsState();
       if (!state) throw new Error('设置不可用');
       if (!isAgentWorkerReady()) throw new Error('会话服务未启动');
@@ -436,7 +436,13 @@ export function getBotServices(): BotServices | null {
       const abort = () => abortCompleteText(requestId);
       signal.addEventListener('abort', abort, { once: true });
       try {
-        return await completeText({ requestId, ...request, candidates, maxTokens: 1024 });
+        return await completeText({
+          requestId,
+          ...request,
+          candidates,
+          maxTokens,
+          reasoning: 'off',
+        });
       } catch (error) {
         if (signal.aborted) return null;
         const ref = preferred ?? chain[0];
