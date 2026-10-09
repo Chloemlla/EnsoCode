@@ -54,7 +54,7 @@ describe('member task admission classifier', () => {
     expect(judge.mock.calls[0][0]).toMatchObject({ preferred: model, timeoutMs: 500 });
     settings = { botRouteClassifier: { source: 'judge', model, timeoutMs: 999999 } };
     await classifier(input, new AbortController().signal);
-    expect(judge.mock.calls[1][0].timeoutMs).toBe(15000);
+    expect(judge.mock.calls[1][0].timeoutMs).toBe(30000);
     settings = { botRouteClassifier: { source: 'invalid', model } };
     await classifier(input, new AbortController().signal);
     expect(judge.mock.calls[2][0]).toMatchObject({ preferred: undefined, timeoutMs: 3000 });

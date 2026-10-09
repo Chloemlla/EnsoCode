@@ -74,7 +74,7 @@ describe('createSmartRouter', () => {
     expect(router().timeoutMs()).toBe(12_000);
   });
 
-  it('用户在设置页明确设的时限照用：3 秒就是 3 秒，越界收到 0.5–15s', async () => {
+  it('用户在设置页明确设的时限照用：3 秒就是 3 秒，越界收到 0.5–30s', async () => {
     const set = (timeoutMs: number) => {
       settings = {
         botRouteClassifier: { source: 'judge', model: judgeModel, timeoutMs, timeoutSet: true },
@@ -90,7 +90,25 @@ describe('createSmartRouter', () => {
     set(100);
     expect(router().timeoutMs()).toBe(500);
     set(60_000);
-    expect(router().timeoutMs()).toBe(15_000);
+    expect(router().timeoutMs()).toBe(30_000);
+  });
+
+  it.each(['judge', 'pi-classifier'])('%s 使用用户设置的 30 秒时限', async (source) => {
+    settings = {
+      botRouteClassifier: {
+        source,
+        model: judgeModel,
+        timeoutMs: 30_000,
+        timeoutSet: true,
+      },
+    };
+    judge.mockResolvedValueOnce('Bob');
+    classify.mockResolvedValueOnce({ b: 0.9 }).mockResolvedValueOnce({ answer: 0.9 });
+    expect(router().timeoutMs()).toBe(30_000);
+    expect(await router().select(input, signal)).toEqual({ ids: ['b'], intent: 'answer' });
+    const calls = source === 'judge' ? judge.mock.calls : classify.mock.calls;
+    expect(calls).toHaveLength(source === 'judge' ? 1 : 2);
+    for (const [config] of calls) expect(config.timeoutMs).toBe(30_000);
   });
 
   it('judge 回复多名时按顺序返回名单', async () => {
