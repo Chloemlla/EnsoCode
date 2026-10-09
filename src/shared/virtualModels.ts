@@ -10,7 +10,7 @@ export const VIRTUAL_CLASSIFIER_SOURCES = ['judge', 'pi-classifier'] as const;
 export type VirtualClassifierSource = (typeof VIRTUAL_CLASSIFIER_SOURCES)[number];
 export const VIRTUAL_CLASSIFIER_DEFAULT_TIMEOUT_MS = 3000;
 export const CLASSIFIER_TIMEOUT_MIN_MS = 500;
-export const CLASSIFIER_TIMEOUT_MAX_MS = 15_000;
+export const CLASSIFIER_TIMEOUT_MAX_MS = 30_000;
 
 export const clampClassifierTimeoutMs = (ms: number): number =>
   Math.min(CLASSIFIER_TIMEOUT_MAX_MS, Math.max(CLASSIFIER_TIMEOUT_MIN_MS, Math.round(ms)));

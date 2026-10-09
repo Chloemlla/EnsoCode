@@ -161,7 +161,7 @@ describe('虚拟模型可用性', () => {
 describe('parseVirtualClassifier', () => {
   const model = { providerId: 'p', modelId: 'fast' };
 
-  it('用户设的时限照用并带上标记；越界收到 0.5–15s，不报错', () => {
+  it('用户设的时限照用并带上标记；越界收到 0.5–30s，不报错', () => {
     expect(
       parseVirtualClassifier({ source: 'judge', model, timeoutMs: 3000, timeoutSet: true })
     ).toEqual({ source: 'judge', model, timeoutMs: 3000, timeoutSet: true });
@@ -170,7 +170,18 @@ describe('parseVirtualClassifier', () => {
     ).toMatchObject({ timeoutMs: 500, timeoutSet: true });
     expect(
       parseVirtualClassifier({ source: 'judge', model, timeoutMs: 60_000, timeoutSet: true })
-    ).toMatchObject({ timeoutMs: 15_000, timeoutSet: true });
+    ).toMatchObject({ timeoutMs: 30_000, timeoutSet: true });
+  });
+
+  it.each([20_000, 30_000])('保留合法的 %i ms 时限', (timeoutMs) => {
+    for (const source of ['judge', 'pi-classifier']) {
+      expect(parseVirtualClassifier({ source, model, timeoutMs, timeoutSet: true })).toEqual({
+        source,
+        model,
+        timeoutMs,
+        timeoutSet: true,
+      });
+    }
   });
 
   it('旧配置没有标记；非 true 的标记视为未设置', () => {

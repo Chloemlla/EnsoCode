@@ -32,7 +32,7 @@ import { StartedDeliveryIndex } from './startedDeliveries';
 import { messageTokens } from './turnTokens';
 
 /** 运行中的轮次超过该时长没有任何输出（流式、工具进度、子代理）即视为静默 */
-export const BOT_SILENCE_MS = 90_000;
+export const BOT_SILENCE_MS = 5 * 60_000;
 /** 进行中的回合为成员日预算预留的估算 token：本回合已用部分抵扣，回合结束即释放 */
 export const BOT_TURN_RESERVE_TOKENS = 32_000;
 

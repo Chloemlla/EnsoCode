@@ -1754,6 +1754,29 @@ describe('BotSessionHost silence watchdog', () => {
   };
   const silenceEvents = () => events.filter((event) => event.kind === 'silence');
 
+  it('defaults to 5 minutes so long quiet commands are not flagged early', async () => {
+    clock = 1_000;
+    host = new BotSessionHost({
+      bots,
+      chats,
+      authority: registry,
+      runtime,
+      emit: (event) => events.push(event),
+      now: () => clock,
+    });
+    const alice = bot('Alice');
+    const chat = direct(alice.id);
+    const sent = await host.deliver(chat.id, alice.id, 'sleep');
+    if (!sent.ok) throw new Error(sent.error);
+    host.observe(ev({ type: 'status', status: 'running' }, sent.conversationId));
+    clock += 299_000;
+    host.checkSilence();
+    expect(host.silences()).toEqual([]);
+    clock += 2_000;
+    host.checkSilence();
+    expect(host.silences()).toHaveLength(1);
+  });
+
   it('flags a running turn after 90s without output and clears it when output resumes', async () => {
     make();
     const alice = bot('Alice');
