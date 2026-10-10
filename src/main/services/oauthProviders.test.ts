@@ -1289,6 +1289,9 @@ describe('OAuth 登录的安装级 deviceId', () => {
     const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
       '@earendil-works/pi-coding-agent'
     );
+    // 实际模块加载期间可能完成旧的后台 import；切 fake runtime 前先排空并清缓存。
+    await vi.dynamicImportSettled();
+    vi.resetModules();
     let getDeviceId: (() => string) | undefined;
     interface FakeProvider {
       id: string;
@@ -1339,7 +1342,10 @@ describe('OAuth 登录的安装级 deviceId', () => {
     try {
       const { sender, events } = fakeSender();
       await completeOauthLogin('device-oauth', sender);
-      expect(events.at(-1)).toMatchObject({ type: 'done', providerId: 'device-oauth' });
+      expect(events.at(-1), JSON.stringify(events)).toMatchObject({
+        type: 'done',
+        providerId: 'device-oauth',
+      });
 
       const first = getDeviceId?.();
       expect(first).toMatch(
@@ -1353,6 +1359,7 @@ describe('OAuth 登录的安装级 deviceId', () => {
         expect(saved.deviceId).toBe(first);
       });
     } finally {
+      await vi.dynamicImportSettled();
       vi.doUnmock('@earendil-works/pi-coding-agent');
       vi.resetModules();
     }
