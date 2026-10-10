@@ -4322,6 +4322,12 @@ export class SessionSupervisor {
             .map((part) => (part.type === 'text' ? part.text : ''))
             .join('');
           if (!text.trim()) {
+            // 连通性探测只判「模型是否响应」：输出预算被思维链用尽（length）或只回了思考内容，
+            // 都说明模型与配置是通的；判成不可用会连带把这条投递整轮拦下。
+            if (command.probe) {
+              this.options.emit({ type: 'text-completed', requestId: command.requestId, text });
+              return;
+            }
             lastError = `${label}: empty completion`;
             continue;
           }

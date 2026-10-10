@@ -14,6 +14,8 @@ import { pickBotModel } from './botPrompt';
 
 /** 实测成员模型的最短往返：worker 真实模型栈发一次性补全 */
 const PROBE_TIMEOUT_MS = 15_000;
+/** 探测输出预算：太小会在 thinking 模型的思维链阶段就用尽，正文为空（对齐 providerApi 的 TEST_MAX_OUTPUT_TOKENS） */
+const PROBE_MAX_TOKENS = 256;
 const PROBE_FAILURE_TTL_MS = 60_000;
 const PROBE_ERROR_MAX = 80;
 const MODEL_FAILURES = new Set([
@@ -140,6 +142,9 @@ export function briefErrorReason(error: unknown): string {
   if (/model[- ]missing/.test(text)) return '模型不存在';
   if (/not available in your region|territory not supported|unsupported_country/i.test(text))
     return '当前地区不可用';
+  // worker 的 empty completion = 模型已经响应，只是没有正文（输出预算被思维链用尽 / 只回思考）。
+  // 必须在 401/403 归类之前：错误串首是 provider 标识，UUID 恰好含 401/403 时会被改判成鉴权失败。
+  if (/: empty completion$/.test(text)) return '模型没有返回正文';
   const classified =
     /401|403|unauthorized|forbidden|authentication|invalid.{0,20}(key|token)|api.?key/i.test(text)
       ? '鉴权失败'
@@ -199,7 +204,7 @@ export function createModelProbe(deps: ModelProbeDeps): ModelProbe {
           userText: 'ping',
           candidates,
           timeoutMs: PROBE_TIMEOUT_MS,
-          maxTokens: 16,
+          maxTokens: PROBE_MAX_TOKENS,
         });
         result = { ok: true };
       } catch (error) {

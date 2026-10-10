@@ -292,3 +292,92 @@ describe('SessionSupervisor.completeText：stream 增量', () => {
     ]);
   });
 });
+
+describe('SessionSupervisor.completeText：连通性探测允许没有正文', () => {
+  let events: AgentWorkerEvent[];
+  let supervisor: SessionSupervisor;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.completeSimple.mockReset();
+    mocks.streamSimple.mockReset();
+    mocks.missingModelIds.clear();
+    events = [];
+    supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: '/tmp/sessions',
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const probe = (candidates: ReturnType<typeof candidate>[]) => ({
+    type: 'complete-text' as const,
+    requestId: 'probe-1',
+    systemPrompt: 'You are a connectivity check. Reply with OK.',
+    userText: 'ping',
+    candidates,
+    timeoutMs: 1_000,
+    maxTokens: 256,
+    probe: true as const,
+  });
+
+  /** thinking 模型的典型形态：输出预算全用于思维链，正文为空 */
+  const thinkingOnly = (stopReason: string) => ({
+    role: 'assistant',
+    content: [{ type: 'thinking', text: '想想' }],
+    stopReason,
+  });
+
+  it('被预算截断（length）且没有正文仍算完成', async () => {
+    mocks.completeSimple.mockResolvedValueOnce(thinkingOnly('length'));
+    supervisor.handleCommand(probe([candidate('thinker')]));
+    await flush();
+    expect(events).toEqual([{ type: 'text-completed', requestId: 'probe-1', text: '' }]);
+  });
+
+  it('只回了思考内容也算完成', async () => {
+    mocks.completeSimple.mockResolvedValueOnce(thinkingOnly('stop'));
+    supervisor.handleCommand(probe([candidate('thinker')]));
+    await flush();
+    expect(events).toEqual([{ type: 'text-completed', requestId: 'probe-1', text: '' }]);
+  });
+
+  it('没有 probe 标记的补全仍然把空正文当失败，继续下一个候选', async () => {
+    mocks.completeSimple
+      .mockResolvedValueOnce(thinkingOnly('length'))
+      .mockResolvedValueOnce(text('ok'));
+    supervisor.handleCommand({
+      type: 'complete-text',
+      requestId: 'btw-1',
+      systemPrompt: 'sys',
+      userText: 'hi',
+      candidates: [candidate('thinker'), candidate('good')],
+      timeoutMs: 1_000,
+    });
+    await flush();
+    expect(mocks.completeSimple).toHaveBeenCalledTimes(2);
+    expect(events).toEqual([{ type: 'text-completed', requestId: 'btw-1', text: 'ok' }]);
+  });
+
+  it('探测遇到 error 仍失败，鉴权类问题照旧拦截', async () => {
+    mocks.completeSimple.mockResolvedValueOnce({
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: '401 Unauthorized',
+    });
+    supervisor.handleCommand(probe([candidate('thinker')]));
+    await flush();
+    expect(events).toEqual([
+      {
+        type: 'text-failed',
+        requestId: 'probe-1',
+        error: 'provider-thinker/thinker: 401 Unauthorized',
+      },
+    ]);
+  });
+});

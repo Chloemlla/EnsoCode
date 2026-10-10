@@ -1272,6 +1272,8 @@ export type AgentCommand =
       stream?: true;
       /** 透传 streamSimple/completeSimple 的思考档；off 表示关闭 */
       reasoning?: ThinkingLevel | 'off';
+      /** 连通性探测：只判模型是否响应，被预算截断或只输出思考也算完成 */
+      probe?: true;
     }
   | {
       /** 中止一次性文本补全（btw / 记忆蒸馏）；无会话身份，按 requestId 对准 */
@@ -3076,6 +3078,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         'maxTokens',
         'stream',
         'reasoning',
+        'probe',
       ]) &&
         isNonEmptyString(value.requestId) &&
         typeof value.systemPrompt === 'string' &&
@@ -3091,6 +3094,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.reasoning === undefined ||
           value.reasoning === 'off' ||
           THINKING_LEVELS.includes(value.reasoning as ThinkingLevel)) &&
+        (value.probe === undefined || value.probe === true) &&
         Array.isArray(value.candidates) &&
         value.candidates.length >= 1 &&
         value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
