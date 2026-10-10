@@ -1190,10 +1190,12 @@ export function completeText(input: {
   maxTokens?: number;
   stream?: boolean;
   reasoning?: ThinkingLevel | 'off';
+  /** 连通性探测：模型已响应但正文为空（被预算截断 / 只输出思考）也算完成 */
+  probe?: boolean;
 }): Promise<string> {
   if (!worker || !workerReady) return Promise.reject(new Error('Agent worker is not running.'));
   const requestId = input.requestId?.trim() || randomUUID();
-  const { requestId: _requestId, stream, reasoning, ...rest } = input;
+  const { requestId: _requestId, stream, reasoning, probe, ...rest } = input;
   return new Promise<string>((resolve, reject) => {
     // 每个候选各自 timeoutMs，整体再留一点余量做兑底
     const timer = setTimeout(
@@ -1219,6 +1221,7 @@ export function completeText(input: {
       ...rest,
       ...(stream ? { stream: true as const } : {}),
       ...(reasoning ? { reasoning } : {}),
+      ...(probe ? { probe: true as const } : {}),
     });
     if (!posted.ok) {
       pendingCompletions.get(requestId)?.reject(new Error(posted.error ?? 'post failed'));

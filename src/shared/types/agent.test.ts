@@ -1192,6 +1192,22 @@ describe('一次性文本补全命令', () => {
     expect(parseAgentCommand({ ...command, stream: false })).toBeNull();
     expect(parseAgentCommand({ ...command, reasoning: 'nope' })).toBeNull();
   });
+
+  it('探测调用只接受 probe: true', () => {
+    const command = {
+      type: 'complete-text',
+      requestId: 'probe-1',
+      systemPrompt: 'You are a connectivity check. Reply with OK.',
+      userText: 'ping',
+      candidates: [model],
+      timeoutMs: 1000,
+      maxTokens: 256,
+      probe: true as const,
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    for (const probe of [false, 'true', 1, ''])
+      expect(parseAgentCommand({ ...command, probe })).toBeNull();
+  });
 });
 
 describe('标题总结命令与事件', () => {

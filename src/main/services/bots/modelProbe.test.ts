@@ -135,6 +135,12 @@ describe('createModelProbe', () => {
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
+  it('探测预算给 thinking 模型的思维链留出余量', async () => {
+    const { probe, complete } = fixture({});
+    await probe(ENGINE);
+    expect(complete.mock.calls[0]?.[0]?.maxTokens).toBeGreaterThanOrEqual(128);
+  });
+
   it('失败缓存 60 秒，过期后重新实测并恢复成员模型', async () => {
     let now = 0;
     const fx = fixture({ completeError: '401 Unauthorized', now: () => now });
@@ -330,6 +336,14 @@ describe('briefErrorReason', () => {
     const long = `x${'y'.repeat(200)}`;
     expect(briefErrorReason(new Error(long))).toHaveLength(81);
     expect(briefErrorReason('模型 gpt-5：鉴权失败')).toBe('模型 gpt-5：鉴权失败');
+  });
+
+  it('空正文归成可读原因，且 provider UUID 里的 401/403 不会改判成鉴权失败', () => {
+    for (const text of [
+      '965e2e3c-be13-4a72-b3c0-4247edefabd5/deepseek-v4.1-flash: empty completion',
+      '401403-0000-4000-8000-000000000000/m: empty completion',
+    ])
+      expect(briefErrorReason(new Error(text)), text).toBe('模型没有返回正文');
   });
 
   it('地区限制的 403 不算鉴权失败', () => {
