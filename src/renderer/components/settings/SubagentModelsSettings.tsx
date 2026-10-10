@@ -12,10 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 const isModelEnabled = (provider: ModelProvider, modelId: string): boolean =>
@@ -42,7 +39,6 @@ function isThinkingLevelOverride(value: unknown): value is ModelThinkingLevelOve
  */
 export function SubagentModelsSettings() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const enabled = useSettingsStore((state) => state.subagentModelsEnabled);
   const entries = useSettingsStore((state) => state.subagentModels);
   const setEnabled = useSettingsStore((state) => state.setSubagentModelsEnabled);
@@ -50,11 +46,7 @@ export function SubagentModelsSettings() {
   const updateEntry = useSettingsStore((state) => state.updateSubagentModel);
   const removeEntry = useSettingsStore((state) => state.removeSubagentModel);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
 
   // 新条目的初始选择：全局默认模型可用则用它,否则第一个可用模型
   const seedSelection = useMemo((): { providerId: string; modelId: string } | null => {

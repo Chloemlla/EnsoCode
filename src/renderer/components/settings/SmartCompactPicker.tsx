@@ -4,7 +4,6 @@ import {
   resolveCompactStrategy,
 } from '@shared/compactStrategy';
 import { SMART_COMPACT_MODES, type SmartCompactMode } from '@shared/smartCompactMode';
-import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
 import {
@@ -15,10 +14,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useI18n } from '@/i18n';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 const MODE_LABEL: Record<SmartCompactMode, string> = {
@@ -38,7 +34,6 @@ const STRATEGY_LABEL: Record<CompactStrategy, string> = {
 /** 验证式智能压缩：开关 + 档位 + 独立摘要模型（null = 跟随当前会话模型）。 */
 export function SmartCompactPicker() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const storedStrategy = useSettingsStore((state) => state.compactStrategy);
   const legacyEnabled = useSettingsStore((state) => state.smartCompactEnabled);
   const strategy = resolveCompactStrategy(storedStrategy, legacyEnabled);
@@ -48,11 +43,7 @@ export function SmartCompactPicker() {
   const setModel = useSettingsStore((state) => state.setSmartCompactModel);
   const mode = useSettingsStore((state) => state.smartCompactMode);
   const setMode = useSettingsStore((state) => state.setSmartCompactMode);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const selectedProvider = model
     ? candidates.find((entry) => entry.id === model.providerId)
     : undefined;

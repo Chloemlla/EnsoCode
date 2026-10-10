@@ -7,6 +7,7 @@ import {
   effectiveSubagentAllowedModes,
   isBuiltinToolEnabledForProject,
   isWorkflowAvailable,
+  persistedSettingsState,
   projectDisabledBuiltinTools,
   resolveDisabledBuiltinTools,
 } from './builtinTools';
@@ -132,5 +133,21 @@ describe('addComputerDefaultOff', () => {
       ],
     });
     expect(addComputerDefaultOff({ theme: 'dark' })).toEqual({ theme: 'dark' });
+  });
+});
+
+describe('persistedSettingsState webSearchChain 收窄', () => {
+  it('脏数据收窄为空链；合法链透传', () => {
+    expect(
+      persistedSettingsState({ state: { webSearchChain: 'garbage' }, version: 99 })?.webSearchChain
+    ).toEqual([]);
+    expect(
+      persistedSettingsState({
+        state: { webSearchChain: [{ providerId: 'ga', modelId: 'm' }, { bad: true }] },
+        version: 99,
+      })?.webSearchChain
+    ).toEqual([{ providerId: 'ga', modelId: 'm' }]);
+    // 缺省字段保持缺失（不向老数据注入新键）；读取方自行 parse 缺省为空链
+    expect(persistedSettingsState({ state: {}, version: 99 })).not.toHaveProperty('webSearchChain');
   });
 });

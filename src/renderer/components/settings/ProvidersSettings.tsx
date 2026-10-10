@@ -20,6 +20,7 @@ import { Switch } from '@/components/ui/switch';
 import { useCachedAccountUsage } from '@/hooks/useAccountUsage';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 import { ApprovalReviewerPicker } from './ApprovalReviewerPicker';
@@ -44,6 +45,7 @@ function SubscriptionUsage({ accountKey }: { accountKey: string }) {
 export function ProvidersSettings() {
   const { t } = useI18n();
   const providers = useSettingsStore((state) => state.providers);
+  const materializedProviders = useMaterializedProviders();
   const updateProvider = useSettingsStore((state) => state.updateProvider);
   const addProviders = useSettingsStore((state) => state.addProviders);
   const removeProvider = useSettingsStore((state) => state.removeProvider);
@@ -75,6 +77,11 @@ export function ProvidersSettings() {
     () => groupProviders(providers, oauthInfos),
     [providers, oauthInfos]
   );
+  const modelCountById = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of materializedProviders) counts.set(entry.id, entry.models.length);
+    return counts;
+  }, [materializedProviders]);
 
   /**
    * 删除订阅条目时联动退登（凭证与条目一体，否则订阅登录仍显示已登录）。
@@ -188,6 +195,7 @@ export function ProvidersSettings() {
                 <div className="mt-1.5 space-y-1 border-l pl-3">
                   {group.providers.map((provider) => {
                     const isSubscription = Boolean(provider.oauthAccountKey);
+                    const modelCount = modelCountById.get(provider.id) ?? provider.models.length;
                     const account =
                       provider.oauthAccountKey && !provider.oauthAccountPool
                         ? oauthInfo?.accounts.find((a) => a.key === provider.oauthAccountKey)
@@ -246,8 +254,8 @@ export function ProvidersSettings() {
                                         count: provider.oauthAccountPool.accountKeys.length,
                                       })
                                     : undefined,
-                                  provider.models.length > 0
-                                    ? t('{{count}} models', { count: provider.models.length })
+                                  modelCount > 0
+                                    ? t('{{count}} models', { count: modelCount })
                                     : undefined,
                                 ]
                                   .filter(Boolean)

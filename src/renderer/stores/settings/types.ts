@@ -25,6 +25,7 @@ import type { AgentMode, ApprovalMode, ThinkingLevel } from '@shared/types/agent
 import type { SpeechModelId } from '@shared/types/speech';
 import type { ModelPricing, PricingTable } from '@shared/usage/pricing';
 import type { VirtualClassifierConfig, VirtualModelEntry } from '@shared/virtualModels';
+import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import type { OauthCredentialSnapshot } from '@/stores/oauthCredentials';
 
@@ -293,6 +294,8 @@ export interface SettingsState {
   disabledBuiltinAgentTypes: string[];
   /** 被关闭的内置工具（id 集合;默认全开） */
   disabledBuiltinTools: string[];
+  /** web_search 全局候选链（空 = 现行行为：会话模型原生 → Exa） */
+  webSearchChain: WebSearchChainEntry[];
   /** 被关闭的内置工作流预设（id 集合;默认全开） */
   disabledWorkflowPresets: string[];
   /** 统一 subagent 工具允许创建的 Agent 模式。 */
@@ -465,6 +468,7 @@ export interface SettingsState {
   removeAgentType: (id: string) => void;
   toggleBuiltinAgentType: (name: string, enabled: boolean) => void;
   toggleBuiltinTool: (id: string, enabled: boolean) => void;
+  setWebSearchChain: (entries: WebSearchChainEntry[]) => void;
   toggleWorkflowPreset: (id: string, enabled: boolean) => void;
   setSubagentAllowedModes: (modes: AgentMode[]) => void;
 

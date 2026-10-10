@@ -1,6 +1,7 @@
 import type { OauthCredentialAvailability } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useModelDirectoryStore } from '@/stores/modelDirectory';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import type * as SettingsModule from './index';
 
@@ -52,6 +53,26 @@ function setSnapshot(revision: number, availability: OauthCredentialAvailability
   return snapshot;
 }
 
+let directoryRevision = 0;
+/** 给目录服务喂 OAuth 分区；sections 缺省 = 目录冷态（升级首启） */
+function setDirectory(sections?: { key: string; modelIds: string[] }[]) {
+  directoryRevision += 1;
+  useModelDirectoryStore.setState({
+    snapshot: sections
+      ? {
+          revision: directoryRevision,
+          generatedAt: Date.now(),
+          providers: sections.map((section) => ({
+            key: section.key,
+            kind: 'oauth' as const,
+            label: section.key,
+            models: section.modelIds.map((id) => ({ id })),
+          })),
+        }
+      : undefined,
+  });
+}
+
 describe('settings default model actions', () => {
   beforeAll(async () => {
     // settings/index reads browser globals at module load; import only after this test installs them.
@@ -61,6 +82,7 @@ describe('settings default model actions', () => {
     useOauthCredentialStore.setState({
       snapshot: { revision: 0, availability: { status: 'unloaded' } },
     });
+    setDirectory(undefined);
     readSettings.mockResolvedValue(null);
     settingsModule.useSettingsStore.setState({ providers: [], defaultModel: null });
     settingsModule.useDefaultModelRevalidationStore.setState({ latest: null });
@@ -108,9 +130,142 @@ describe('settings default model actions', () => {
     }
   });
 
+  it('目录冷态（升级首启）defer OAuth 默认模型且不写回；分区到达后闭环为 unchanged', () => {
+    const oauth = provider('oauth', {
+      apiKey: '',
+      oauthAccountKey: 'anthropic',
+      models: [], // v16 稀疏覆盖表：无任何意图行
+    });
+    const snapshot = setSnapshot(1, {
+      status: 'ready',
+      authenticatedAccountKeys: new Set(['anthropic']),
+    });
+    settingsModule.useSettingsStore.setState({
+      providers: [oauth],
+      defaultModel: { providerId: oauth.id, modelId: 'model' },
+    });
+
+    // 目录冷态：section 缺失 → defer，默认模型原样保留，绝不写回
+    setDirectory(undefined);
+    const cold = settingsModule.useSettingsStore.getState().revalidateDefaultModel(snapshot);
+    expect(cold).toMatchObject({ status: 'deferred', writeback: false });
+    expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual({
+      providerId: oauth.id,
+      modelId: 'model',
+    });
+
+    // 空分区（发现从未成功）同样视为冷态
+    setDirectory([{ key: 'anthropic', modelIds: [] }]);
+    expect(
+      settingsModule.useSettingsStore.getState().revalidateDefaultModel(snapshot)
+    ).toMatchObject({ status: 'deferred', writeback: false });
+
+    // 分区到达：物化视图含该模型，闭环为 unchanged
+    setDirectory([{ key: 'anthropic', modelIds: ['model'] }]);
+    const warm = settingsModule.useSettingsStore.getState().revalidateDefaultModel(snapshot);
+    expect(warm).toEqual({
+      status: 'unchanged',
+      defaultModel: { providerId: oauth.id, modelId: 'model' },
+      writeback: false,
+      notice: null,
+    });
+  });
+
+  it('虚拟默认模型的 OAuth 成员分区冷态时同样 defer（Major-1 逃生口）', () => {
+    const oauth = provider('oauth', {
+      apiKey: '',
+      oauthAccountKey: 'anthropic',
+      models: [],
+    });
+    const virtualEntry = {
+      id: 'auto',
+      name: 'Auto',
+      enabled: true,
+      primary: { providerId: oauth.id, modelId: 'model' },
+      fallbacks: [],
+    };
+    const snapshot = setSnapshot(1, {
+      status: 'ready',
+      authenticatedAccountKeys: new Set(['anthropic']),
+    });
+    settingsModule.useSettingsStore.setState({
+      providers: [oauth],
+      virtualModels: [virtualEntry],
+      defaultModel: { providerId: 'enso-virtual', modelId: 'auto' },
+    });
+
+    // 目录冷态：虚拟默认经 primary 解析到 OAuth 成员，分区缺失 → defer 不写回
+    setDirectory(undefined);
+    const cold = settingsModule.useSettingsStore.getState().revalidateDefaultModel(snapshot);
+    expect(cold).toMatchObject({ status: 'deferred', writeback: false });
+    expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual({
+      providerId: 'enso-virtual',
+      modelId: 'auto',
+    });
+
+    // 分区到达后闭环
+    setDirectory([{ key: 'anthropic', modelIds: ['model'] }]);
+    const warm = settingsModule.useSettingsStore.getState().revalidateDefaultModel(snapshot);
+    expect(warm.status).toBe('unchanged');
+  });
+
+  it.each(['before', 'after'] as const)(
+    'v15 无目录缓存升级：静态分区在水合 %s 到达，延迟发现前后均保留旧动态默认',
+    async (order) => {
+      const oauth = provider('oauth', {
+        apiKey: '',
+        oauthAccountKey: 'xai',
+        models: [{ id: 'grok-static' }, { id: 'grok-dynamic' }, { id: 'unselected-old' }],
+      });
+      const chosen = { providerId: oauth.id, modelId: 'grok-dynamic' };
+      const credentials = setSnapshot(1, {
+        status: 'ready',
+        authenticatedAccountKeys: new Set(['xai']),
+      });
+      const oldState = { providers: [oauth], defaultModel: chosen, onboarded: true };
+      readSettings.mockResolvedValueOnce({ 'enso-settings': { version: 15, state: oldState } });
+      if (order === 'before') setDirectory([{ key: 'xai', modelIds: ['grok-static'] }]);
+      await settingsModule.useSettingsStore.persist.rehydrate();
+      if (order === 'after') setDirectory([{ key: 'xai', modelIds: ['grok-static'] }]);
+      expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual(chosen);
+      // 无意图的旧完整清单不能重新冻结进设置。
+      expect(
+        settingsModule.useSettingsStore.getState().providers[0]?.models.map((model) => model.id)
+      ).not.toContain('unselected-old');
+      settingsModule.useSettingsStore.getState().setDefaultReasoningEnabled(true);
+      await Promise.resolve();
+      const persisted = writeKey.mock.calls
+        .map((call) => call as unknown[])
+        .filter(([key]) => key === 'enso-settings')
+        .map(([, value]) => value as { state: { defaultModel: unknown } });
+      expect(persisted.length).toBeGreaterThan(0);
+      expect(
+        persisted.every(
+          (value) => JSON.stringify(value.state.defaultModel) === JSON.stringify(chosen)
+        )
+      ).toBe(true);
+      // 发现尚未到达时重读已升级设置，选型意图仍在，不依赖本次迁移的内存。
+      readSettings.mockResolvedValueOnce({ 'enso-settings': persisted.at(-1) });
+      await settingsModule.useSettingsStore.persist.rehydrate();
+      expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual(chosen);
+
+      // 在线发现晚一个异步阶段到达，不能靠事后用户重选修复已被清空的引用。
+      await Promise.resolve();
+      setDirectory([{ key: 'xai', modelIds: ['grok-static', 'grok-dynamic', 'brand-new'] }]);
+      expect(
+        settingsModule.useSettingsStore.getState().revalidateDefaultModel(credentials)
+      ).toMatchObject({
+        status: 'unchanged',
+        defaultModel: chosen,
+        writeback: false,
+      });
+    }
+  );
+
   it('ready logout falls back in provider order and publishes previous to next notice', () => {
     const oauth = provider('oauth', { apiKey: '', oauthAccountKey: 'anthropic' });
     const fallback = provider('fallback');
+    setDirectory([{ key: 'anthropic', modelIds: ['model'] }]);
     const snapshot = setSnapshot(2, {
       status: 'ready',
       authenticatedAccountKeys: new Set(),
@@ -136,6 +291,7 @@ describe('settings default model actions', () => {
 
   it('ready with no candidate clears the default', () => {
     const oauth = provider('oauth', { apiKey: '', oauthAccountKey: 'anthropic' });
+    setDirectory([{ key: 'anthropic', modelIds: ['model'] }]);
     const snapshot = setSnapshot(1, {
       status: 'ready',
       authenticatedAccountKeys: new Set(),
@@ -154,6 +310,7 @@ describe('settings default model actions', () => {
   it('revalidates a hydrated default when OAuth bootstrap became ready first', async () => {
     const oauth = provider('oauth', { apiKey: '', oauthAccountKey: 'anthropic' });
     const fallback = provider('fallback');
+    setDirectory([{ key: 'anthropic', modelIds: ['model'] }]);
     setSnapshot(5, { status: 'ready', authenticatedAccountKeys: new Set() });
     readSettings.mockResolvedValueOnce({
       'enso-settings': {

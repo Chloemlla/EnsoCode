@@ -676,6 +676,24 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ type: 'set-disabled-workflow-presets' })).toBeNull();
   });
 
+  it('set-model-directory 只校验键，载荷留给 worker 收窄', () => {
+    const command = {
+      type: 'set-model-directory',
+      snapshot: { revision: 1 },
+      customProviders: [],
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(parseAgentCommand({ type: 'set-model-directory', snapshot: null })).toBeNull();
+    expect(
+      parseAgentCommand({
+        type: 'set-model-directory',
+        snapshot: null,
+        customProviders: [],
+        extra: 1,
+      })
+    ).toBeNull();
+  });
+
   it('spawn-parent 携 editMode:仅接受三个互斥模式', () => {
     const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
     for (const editMode of ['replace', 'apply_patch'] as const) {
@@ -972,6 +990,32 @@ describe('parent/child commands', () => {
     ).toBeNull();
   });
 
+  it('set-web-search-config 链收窄：合法透传，非法/超限拒收', () => {
+    const exhausted = { type: 'set-web-search-config', chain: [], configured: true };
+    expect(parseAgentCommand(exhausted)).toEqual(exhausted);
+    expect(parseAgentCommand({ ...exhausted, configured: 'yes' })).toBeNull();
+    const chain = [{ providerId: 'ga', modelId: 'gemini-3.8-flash' }];
+    const command = { type: 'set-web-search-config', chain };
+    expect(parseAgentCommand(command)).toEqual(command);
+    // 空链合法（= 回退现行行为）
+    expect(parseAgentCommand({ type: 'set-web-search-config', chain: [] })).toEqual({
+      type: 'set-web-search-config',
+      chain: [],
+    });
+    for (const bad of [
+      { type: 'set-web-search-config' },
+      { type: 'set-web-search-config', chain: 'x' },
+      { type: 'set-web-search-config', chain: [{ providerId: '', modelId: 'm' }] },
+      { type: 'set-web-search-config', chain: [{ providerId: 'p' }] },
+      {
+        type: 'set-web-search-config',
+        chain: Array.from({ length: 9 }, (_, i) => ({ providerId: `p${i}`, modelId: 'm' })),
+      },
+    ]) {
+      expect(parseAgentCommand(bad)).toBeNull();
+    }
+  });
+
   it('spawn-child Enso 必须 locked profile、exact tools、无 skills/MCP', () => {
     const command = {
       type: 'spawn-child',
@@ -1005,6 +1049,73 @@ describe('parent/child commands', () => {
         ...command,
         identity: { ...child, profileId: 'other' },
       })
+    ).toBeNull();
+  });
+
+  it('spawn-child 透传类型级 reasoning/thinkingLevel；非法值拒绝', () => {
+    const { profileId: _omit, ...nonEnsoChild } = { ...child, typeKey: 'builtin:scout' };
+    const baseConfig = {
+      typeKey: 'builtin:scout',
+      spawnSpecId: SPAWN_SPEC_ID,
+      displayName: 'Scout',
+      description: 'Read-only scout',
+      systemPrompt: 'scout role',
+      model,
+      tools: 'readonly',
+      skillBindingIds: [],
+      skillPaths: [],
+      mcpBindingIds: [],
+      systemPromptHash: proof.systemPromptHash,
+      mcpServers: [],
+    };
+    const command = {
+      type: 'spawn-child',
+      identity: nonEnsoChild,
+      cwd: '/repo',
+      config: { ...baseConfig, reasoning: 'on', thinkingLevel: 'xhigh' },
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    // 缺省不带 → 合法（字段可选）
+    expect(parseAgentCommand({ ...command, config: baseConfig })).toEqual({
+      ...command,
+      config: baseConfig,
+    });
+    // 白名单外的取值一律拒收（协议是 Main→worker 的信任边界）
+    for (const bad of [
+      { ...baseConfig, reasoning: 'auto' },
+      { ...baseConfig, thinkingLevel: 'extreme' },
+      { ...baseConfig, thinkingLevel: 3 },
+    ]) {
+      expect(parseAgentCommand({ ...command, config: bad })).toBeNull();
+    }
+  });
+
+  it('spawn-child Enso locked profile 拒收类型级推理预设', () => {
+    const command = {
+      type: 'spawn-child',
+      identity: child,
+      cwd: '/repo',
+      config: {
+        typeKey: 'agent:enso',
+        spawnSpecId: SPAWN_SPEC_ID,
+        displayName: 'Enso',
+        description: 'System agent',
+        systemPrompt: 'Locked prompt',
+        model,
+        tools: 'enso-locked',
+        skillBindingIds: [],
+        skillPaths: [],
+        mcpBindingIds: [],
+        systemPromptHash: proof.systemPromptHash,
+        mcpServers: [],
+        lockedProfileId: 'enso-locked-v1',
+      },
+    };
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, reasoning: 'on' } })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, thinkingLevel: 'high' } })
     ).toBeNull();
   });
 
@@ -1191,6 +1302,22 @@ describe('一次性文本补全命令', () => {
     });
     expect(parseAgentCommand({ ...command, stream: false })).toBeNull();
     expect(parseAgentCommand({ ...command, reasoning: 'nope' })).toBeNull();
+  });
+
+  it('探测调用只接受 probe: true', () => {
+    const command = {
+      type: 'complete-text',
+      requestId: 'probe-1',
+      systemPrompt: 'You are a connectivity check. Reply with OK.',
+      userText: 'ping',
+      candidates: [model],
+      timeoutMs: 1000,
+      maxTokens: 256,
+      probe: true as const,
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    for (const probe of [false, 'true', 1, ''])
+      expect(parseAgentCommand({ ...command, probe })).toBeNull();
   });
 });
 

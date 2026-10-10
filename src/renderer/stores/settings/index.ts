@@ -3,7 +3,11 @@ import {
   DEFAULT_BOT_MAX_RUNNING_TURNS,
   normalizeBotMaxRunningTurns,
 } from '@shared/bots/concurrency';
-import { sanitizeDefaultModel } from '@shared/defaultModel';
+import {
+  type DefaultModelRef,
+  oauthCredentialBlock,
+  sanitizeDefaultModel,
+} from '@shared/defaultModel';
 import type { Locale } from '@shared/i18n';
 import { normalizeLocale } from '@shared/i18n';
 import {
@@ -14,6 +18,7 @@ import {
   DEFAULT_MEMORY_MODEL_IDLE_MINUTES,
   normalizeMemoryModelIdleMinutes,
 } from '@shared/memory/modelIdle';
+import { directorySectionForAccount, materializeProviders } from '@shared/modelDirectory';
 import { applyProjectGroupPatch } from '@shared/projectGroups';
 import { projectNameFromPath } from '@shared/projectName';
 import { applyIncomingProviders } from '@shared/providerIdentity';
@@ -31,11 +36,14 @@ import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
 import { DEFAULT_SPEECH_MODEL_ID, SYSTEM_MICROPHONE } from '@shared/types/speech';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
 import {
+  findVirtualModel,
+  isVirtualRef,
   parseVirtualClassifier,
   parseVirtualModels,
   type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
+import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
@@ -45,6 +53,7 @@ import {
   clearTerminalThemeFromApp,
   isTerminalThemeDark,
 } from '@/lib/ghosttyTheme';
+import { useModelDirectoryStore } from '@/stores/modelDirectory';
 import {
   type OauthCredentialSnapshot,
   oauthCredentialContext,
@@ -222,6 +231,7 @@ const initialState = {
   virtualModels: [] as VirtualModelEntry[],
   disabledBuiltinAgentTypes: [] as string[],
   disabledBuiltinTools: [...DEFAULT_DISABLED_BUILTIN_TOOLS] as string[],
+  webSearchChain: [] as WebSearchChainEntry[],
   disabledWorkflowPresets: [] as string[],
   subagentAllowedModes: ['task', 'coworker'] as import('@shared/types/agent').AgentMode[],
   onboarded: false,
@@ -469,9 +479,52 @@ export const useSettingsStore = create<SettingsState>()(
           return stale;
         }
 
+        // 目录未覆盖默认模型所属的 OAuth 分区时（升级首启无缓存 / 发现从未成功），
+        // 物化视图只剩稀疏覆盖行，sanitize 会把默认模型误判成 model-missing 并写没。
+        // 与 OAuth 凭证未就绪同等对待：defer 不写回；目录到达后由订阅重验（见
+        // OauthCredentialBootstrap）。分区存在但 0 个模型同样视为冷态——
+        // 每个 OAuth 厂商的 catalog 都至少有一个模型，空分区只能是发现未就绪。
+        // 虚拟默认模型解析其全部成员引用，任一 OAuth 成员分区冷态即 defer。
+        if (defaultModel) {
+          const refs: DefaultModelRef[] = [];
+          if (isVirtualRef(defaultModel)) {
+            const entry = findVirtualModel(get().virtualModels, defaultModel);
+            if (entry)
+              refs.push(entry.primary, ...(entry.fast ? [entry.fast] : []), ...entry.fallbacks);
+          } else {
+            refs.push(defaultModel);
+          }
+          const directory = useModelDirectoryStore.getState().snapshot;
+          const cold = refs.some((ref) => {
+            if (isVirtualRef(ref)) return false;
+            const provider = get().providers.find((entry) => entry.id === ref.providerId);
+            if (!provider?.oauthAccountKey) return false;
+            const section = directorySectionForAccount(directory, provider.oauthAccountKey);
+            return !section || section.models.length === 0;
+          });
+          if (cold) {
+            const blocked = oauthCredentialBlock(oauthCredentialContext(snapshot));
+            const deferred: DefaultModelRevalidation = {
+              status: 'deferred',
+              defaultModel,
+              writeback: false,
+              notice: null,
+              ...(blocked ?? {
+                reason: 'oauth-credentials-loading' as const,
+                suggestedAction: 'wait-for-oauth-credentials' as const,
+              }),
+            };
+            publishDefaultModelRevalidation(deferred);
+            return deferred;
+          }
+        }
+
         const sanitized = sanitizeDefaultModel({
           defaultModel,
-          providers: get().providers,
+          providers: materializeProviders(
+            get().providers,
+            useModelDirectoryStore.getState().snapshot
+          ),
           credentials: oauthCredentialContext(snapshot),
           virtualModels: get().virtualModels,
         });
@@ -723,6 +776,8 @@ export const useSettingsStore = create<SettingsState>()(
             ? state.disabledBuiltinTools.filter((n) => n !== id)
             : [...new Set([...state.disabledBuiltinTools, id])],
         })),
+
+      setWebSearchChain: (entries) => set({ webSearchChain: parseWebSearchChain(entries) }),
 
       toggleWorkflowPreset: (id, enabled) =>
         set((state) => ({
@@ -1200,4 +1255,10 @@ async function syncSettingsFromMain(): Promise<void> {
 // Generic settings is display persistence only; executable project identity is always re-projected by Main.
 window.electronAPI.settings.onChanged(() => {
   void syncSettingsFromMain();
+});
+
+// 目录晚于 settings 水合到达时，稀疏 OAuth 覆盖表不能把仍有效的默认模型判丢。
+useModelDirectoryStore.subscribe((state, prev) => {
+  if (state.snapshot === prev.snapshot) return;
+  useSettingsStore.getState().revalidateDefaultModel(useOauthCredentialStore.getState().snapshot);
 });

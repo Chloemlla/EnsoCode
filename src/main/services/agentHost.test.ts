@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,22 @@ vi.mock('../ipc/settings', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../ipc/settings')>()),
   readSettings: () => settingsMock.value,
 }));
+const directoryMock = vi.hoisted(() => ({
+  snapshot: {
+    revision: 0,
+    generatedAt: 0,
+    providers: [] as Array<{
+      key: string;
+      kind: 'oauth' | 'custom';
+      label: string;
+      models: Array<{ id: string; label?: string }>;
+    }>,
+  },
+}));
+vi.mock('./modelDirectory', () => ({
+  getModelDirectorySnapshot: () => directoryMock.snapshot,
+  onModelDirectoryChanged: () => () => {},
+}));
 
 import {
   agentTypeRegistrySnapshot,
@@ -26,9 +43,90 @@ import {
   resolveAgentTypeSpawnConfig,
   resolveModelSelection,
   resolvePresetSystemPrompt,
+  resolveSubagentModelSelection,
+  resolveWebSearchConfig,
   setMemberAgentTypeSource,
   toSessionMcpConfig,
 } from './agentHost';
+
+describe('resolveWebSearchConfig', () => {
+  const custom: ModelProvider = {
+    id: 'p',
+    name: 'P',
+    api: 'anthropic-messages',
+    baseUrl: 'https://gateway.example',
+    apiKey: 'secret',
+    enabled: true,
+    models: [{ id: 'm' }],
+  };
+  it.each([
+    { ...custom, enabled: false },
+    { ...custom, models: [] },
+    { ...custom, models: [{ id: 'm', enabled: false }] },
+    { ...custom, apiKey: undefined },
+  ])('does not resolve disabled, removed or malformed providers/models', (provider) => {
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [provider],
+          webSearchChain: [{ providerId: 'p', modelId: 'm' }],
+        },
+      },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: true });
+  });
+  it('distinguishes no configuration from an unavailable configured chain', () => {
+    settingsMock.value = {
+      'enso-settings': { state: { providers: [custom], webSearchChain: [] } },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: false });
+    settingsMock.value = {
+      'enso-settings': {
+        state: { providers: [], webSearchChain: [{ providerId: 'gone', modelId: 'm' }] },
+      },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: true });
+  });
+  it('自定义 provider 使用 worker 注册指纹，OAuth 保留精确账号身份', () => {
+    const provider: ModelProvider = {
+      id: 'custom-uuid',
+      name: 'Gateway',
+      api: 'openai-responses',
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'custom-secret',
+      enabled: true,
+      models: [{ id: 'gpt-shared' }],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [
+            provider,
+            {
+              ...provider,
+              id: 'oauth-uuid',
+              oauthAccountKey: 'anthropic#2',
+              models: [{ id: 'claude-shared' }],
+            },
+          ],
+          webSearchChain: [
+            { providerId: provider.id, modelId: 'gpt-shared' },
+            { providerId: 'oauth-uuid', modelId: 'claude-shared' },
+          ],
+        },
+      },
+    };
+    const host = createHash('sha256')
+      .update(`${provider.api}\0${provider.baseUrl}`)
+      .digest('hex')
+      .slice(0, 12);
+    const key = createHash('sha256').update(provider.apiKey).digest('hex').slice(0, 8);
+    expect(resolveWebSearchConfig().chain).toEqual([
+      { providerId: `enso-${host}-${key}`, modelId: 'gpt-shared' },
+      { providerId: 'anthropic#2', modelId: 'claude-shared' },
+    ]);
+  });
+});
 
 describe('agentHost session MCP config', () => {
   it('deferred 带 loadMode 与缓存工具名，direct 与缺省保持原样', () => {
@@ -487,5 +585,183 @@ describe('agentHost 成员 agent type', () => {
     } finally {
       setMemberAgentTypeSource(() => []);
     }
+  });
+});
+
+describe('resolveModelSelection OAuth 目录物化', () => {
+  const keys = new Set(['google-antigravity']);
+  const provider = (models: Array<{ id: string; enabled?: boolean }>) => ({
+    id: 'ga',
+    name: 'Antigravity',
+    api: 'google-generative-ai',
+    apiKey: '',
+    baseUrl: '',
+    enabled: true,
+    oauthAccountKey: 'google-antigravity',
+    models,
+  });
+  const entry = {
+    id: 'e1',
+    providerId: 'ga',
+    modelId: 'gemini-3.8-flash',
+    description: '新静态模型',
+  };
+
+  const useDirectory = (models: Array<{ id: string; enabled?: boolean }>) => {
+    directoryMock.snapshot = {
+      revision: 1,
+      generatedAt: 1,
+      providers: [
+        {
+          key: 'google-antigravity',
+          kind: 'oauth',
+          label: 'Antigravity',
+          models: [{ id: 'gemini-3.8-flash', label: 'Flash' }],
+        },
+      ],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          subagentModelsEnabled: true,
+          subagentModels: [entry],
+          providers: [provider(models)],
+        },
+      },
+    };
+  };
+
+  it('稀疏覆盖为空时，目录里的新模型仍能通过选型与子代理校验', () => {
+    useDirectory([]);
+    try {
+      const selected = resolveModelSelection('ga', 'gemini-3.8-flash', keys);
+      expect(selected.ok).toBe(true);
+      if (selected.ok) {
+        expect(selected.selection.ref).toEqual({
+          providerId: 'ga',
+          modelId: 'gemini-3.8-flash',
+        });
+      }
+      const subagent = resolveSubagentModelSelection('Antigravity/gemini-3.8-flash', keys);
+      expect(subagent.ok).toBe(true);
+      if (subagent.ok) expect(subagent.selection.config.modelId).toBe('gemini-3.8-flash');
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+
+  it('物化视图保留 enabled:false 覆盖，停用的目录模型不能通过校验', () => {
+    useDirectory([{ id: 'gemini-3.8-flash', enabled: false }]);
+    try {
+      expect(resolveModelSelection('ga', 'gemini-3.8-flash', keys)).toEqual({
+        ok: false,
+        error: 'Model is unavailable: model-disabled',
+      });
+      expect(resolveSubagentModelSelection('Antigravity/gemini-3.8-flash', keys).ok).toBe(false);
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+
+  it('OAuth 稀疏行上的用户覆盖（thinkingLevel）进入 spawn 配置', () => {
+    // 统一目录后 OAuth 行只承载用户意图；spawnModelConfig 不能再按 oauthAccountKey 丢弃行覆盖
+    directoryMock.snapshot = {
+      revision: 1,
+      generatedAt: 1,
+      providers: [
+        {
+          key: 'google-antigravity',
+          kind: 'oauth',
+          label: 'Antigravity',
+          models: [{ id: 'gemini-3.8-flash', label: 'Flash' }],
+        },
+      ],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            {
+              id: 'ga',
+              name: 'Antigravity',
+              api: 'google-generative-ai',
+              apiKey: '',
+              baseUrl: '',
+              enabled: true,
+              oauthAccountKey: 'google-antigravity',
+              models: [{ id: 'gemini-3.8-flash', thinkingLevel: 'high' }],
+            },
+          ],
+        },
+      },
+    };
+    try {
+      const selected = resolveModelSelection('ga', 'gemini-3.8-flash', keys);
+      expect(selected.ok).toBe(true);
+      if (selected.ok) {
+        expect(selected.selection.config).toMatchObject({ thinkingLevel: 'high' });
+      }
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+});
+
+describe('resolveAgentTypeSpawnConfig 类型级推理预设', () => {
+  const TYPE_ID = '66666666-6666-4666-8666-666666666666';
+  const setTypeSettings = (extra: Record<string, unknown>) => {
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            {
+              id: 'p1',
+              name: 'p1',
+              api: 'anthropic-messages',
+              apiKey: 'key-p1',
+              baseUrl: 'https://p1.test',
+              enabled: true,
+              models: [{ id: 'strong' }],
+            },
+          ],
+          agentTypes: [
+            {
+              id: TYPE_ID,
+              name: 'deep-scout',
+              description: 'Deep scout',
+              systemPrompt: 'Be thorough.',
+              tools: 'readonly',
+              providerId: 'p1',
+              modelId: 'strong',
+              ...extra,
+            },
+          ],
+        },
+      },
+    };
+  };
+
+  it('fixed 模型类型的 reasoning/thinkingLevel 透传进 resolved config', () => {
+    setTypeSettings({ reasoning: 'on', thinkingLevel: 'xhigh' });
+    const parent = resolveModelSelection('p1', 'strong', new Set());
+    if (!parent.ok) throw new Error(parent.error);
+    const resolved = resolveAgentTypeSpawnConfig(`custom:${TYPE_ID}`, parent.selection, new Set());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.config).toMatchObject({ reasoning: 'on', thinkingLevel: 'xhigh' });
+  });
+
+  it('非法取值不透传（与 configuredAgentTypes 同口径）', () => {
+    setTypeSettings({ reasoning: 'auto', thinkingLevel: 'extreme' });
+    const parent = resolveModelSelection('p1', 'strong', new Set());
+    if (!parent.ok) throw new Error(parent.error);
+    const resolved = resolveAgentTypeSpawnConfig(`custom:${TYPE_ID}`, parent.selection, new Set());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.config).not.toHaveProperty('reasoning');
+    expect(resolved.config).not.toHaveProperty('thinkingLevel');
   });
 });

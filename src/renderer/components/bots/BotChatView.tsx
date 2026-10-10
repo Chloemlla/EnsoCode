@@ -18,6 +18,7 @@ import { useBotsStore } from '@/stores/bots';
 import { activeDelegations, delegationLiveTarget, pendingOwners } from '@/stores/bots/delegations';
 import { chatSummary, type PendingItem, pendingItems } from '@/stores/bots/selectors';
 import { groupReadMark } from '@/stores/bots/unread';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import {
   CHAT_MIN_WIDTH,
@@ -50,7 +51,7 @@ import { WorkspaceMenu } from './WorkspaceMenu';
 
 export function useModelLabel(bot: BotProfile | undefined): string {
   const { t } = useI18n();
-  const providers = useSettingsStore((s) => s.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((s) => s.virtualModels);
   if (!bot?.engine) return t('Default model');
   const { providerId, modelId } = bot.engine;

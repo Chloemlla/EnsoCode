@@ -484,7 +484,7 @@ export function getBotServices(): BotServices | null {
     },
     isWorkerReady: isAgentWorkerReady,
     complete: ({ systemPrompt, userText, candidates, timeoutMs, maxTokens }) =>
-      completeText({ systemPrompt, userText, candidates, timeoutMs, maxTokens }),
+      completeText({ systemPrompt, userText, candidates, timeoutMs, maxTokens, probe: true }),
   });
   const host = new BotSessionHost({
     bots,

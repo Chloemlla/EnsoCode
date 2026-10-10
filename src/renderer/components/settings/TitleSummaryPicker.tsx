@@ -1,12 +1,8 @@
-import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 /**
@@ -15,16 +11,11 @@ import { useSettingsStore } from '@/stores/settings';
  */
 export function TitleSummaryPicker() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const enabled = useSettingsStore((state) => state.titleSummaryEnabled);
   const setEnabled = useSettingsStore((state) => state.setTitleSummaryEnabled);
   const model = useSettingsStore((state) => state.titleSummaryModel);
   const setModel = useSettingsStore((state) => state.setTitleSummaryModel);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const selectedProvider = model
     ? candidates.find((entry) => entry.id === model.providerId)
     : undefined;

@@ -78,6 +78,16 @@ export function ProviderApiForm({
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const [catalogMeta, setCatalogMeta] = React.useState<Record<string, ModelMeta>>({});
 
+  React.useEffect(() => {
+    if (!oauth) return;
+    // 目录可能晚于弹窗到达；只补新行，已有行保留用户尚未保存的编辑。
+    setModels((current) => {
+      const known = new Set(current.map((model) => model.id));
+      const added = initialValue.models.filter((model) => !known.has(model.id));
+      return added.length > 0 ? [...current, ...added] : current;
+    });
+  }, [oauth, initialValue.models]);
+
   const modelIdKey = models.map((model) => model.id).join('\0');
   React.useEffect(() => {
     if (!oauthAccountKey && (oauth || !modelIdKey)) return;
@@ -143,7 +153,17 @@ export function ProviderApiForm({
       const nextMeta: Record<string, ModelMeta> = {};
       for (const meta of result.models) nextMeta[meta.modelId] = meta;
       setCatalogMeta((current) => ({ ...current, ...nextMeta }));
-      setModels((current) => mergeFetchedModels(current, fetched));
+      // OAuth 条目的清单归统一目录管：拉取只刷新目录（Main 侧已触发），
+      // 本地按目录语义重建——保留已有行（含用户意图）、新模型追加裸行。
+      // 不能用 mergeFetchedModels：回填的 contextWindow/maxTokens 是 catalog 事实，
+      // 保存时会被 extractModelOverrides 误当用户覆盖持久化，重新冻结清单。
+      setModels((current) => {
+        const byId = new Map(current.map((model) => [model.id, model]));
+        const fresh = fetched.map((model) => byId.get(model.id) ?? { id: model.id });
+        const fetchedIds = new Set(fetched.map((model) => model.id));
+        const retired = current.filter((model) => !fetchedIds.has(model.id));
+        return [...fresh, ...retired];
+      });
       setStatus({ ok: true, text: t('Fetched {{count}} models', { count: fetched.length }) });
       return;
     }
@@ -313,6 +333,7 @@ export function ProviderApiForm({
                         )
                       )
                     }
+                    canRemove={!oauth}
                     onRemove={() => {
                       setModels((current) => current.filter((entry) => entry.id !== model.id));
                       setTestModel((current) => (current === model.id ? '' : current));
@@ -336,29 +357,33 @@ export function ProviderApiForm({
             </>
           )}
 
-          <div className="flex w-full items-center gap-2">
-            <Input
-              value={newModel}
-              onChange={(event) => setNewModel(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing || event.key !== 'Enter') return;
-                event.preventDefault();
-                addModel(newModel);
-              }}
-              placeholder={t('Add a model id')}
-              className="h-8 font-mono text-xs"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              disabled={!newModel.trim()}
-              onClick={() => addModel(newModel)}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
-          </div>
+          {/* OAuth 条目的清单归统一目录管：手动添加的 id 保存时会被当无意图行丢弃，
+              不渲染入口以免误导。需要新模型请走静态表补丁或目录刷新。 */}
+          {!oauth && (
+            <div className="flex w-full items-center gap-2">
+              <Input
+                value={newModel}
+                onChange={(event) => setNewModel(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.key !== 'Enter') return;
+                  event.preventDefault();
+                  addModel(newModel);
+                }}
+                placeholder={t('Add a model id')}
+                className="h-8 font-mono text-xs"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                disabled={!newModel.trim()}
+                onClick={() => addModel(newModel)}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
         </Field>
       </DialogPanel>
 

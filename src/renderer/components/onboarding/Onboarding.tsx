@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { useOverlayGuard } from '@/hooks/useOverlayGuard';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 import { AgentTypeList } from '../settings/AgentTypesSettings';
@@ -39,7 +40,7 @@ export function Onboarding() {
   const { t } = useI18n();
   useOverlayGuard();
   const setOnboarded = useSettingsStore((s) => s.setOnboarded);
-  const providers = useSettingsStore((s) => s.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((s) => s.virtualModels);
   const skills = useSettingsStore((s) => s.skills);
   const mcpServers = useSettingsStore((s) => s.mcpServers);

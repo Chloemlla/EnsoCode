@@ -1,3 +1,5 @@
+import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
+import { extractModelOverrides } from '@shared/modelDirectory';
 import { isCodexAccountKey } from '@shared/oauthAccountPool';
 import type { ModelProvider } from '@shared/types';
 import type { TFunction } from '@/i18n';
@@ -21,7 +23,12 @@ export function chatgptPoolSources(providers: readonly ModelProvider[]): ModelPr
 }
 
 /**
- * 显式创建池；固定账号保持不变，首个源账号仅是目录兼容锚点，不表示运行账号。同名模型保留首源配置，任一源启用即可启用池模型。
+ * 显式创建池；固定账号保持不变，首个源账号仅是目录兼容锚点，不表示运行账号。
+ * 同名模型保留首源的 label/能力覆盖，任一源启用即可启用池模型。
+ *
+ * 稀疏覆盖语义：源条目缺行 = 缺省启用，所以「禁用」只在**所有**来源都显式
+ * `enabled: false` 时成立。池条目自身同样是 OAuth 稀疏条目（读取时按锚点账号的
+ * 目录分区物化），这里只产意图行，无意图的裸行不落盘。
  *
  * Create a pool explicitly; fixed accounts stay unchanged and the first source is only a catalog anchor. Duplicate models retain the first source's configuration and are enabled if any source enables them.
  */
@@ -32,16 +39,25 @@ export function createChatgptPoolProvider(
   const sources = chatgptPoolSources(providers);
   const first = sources[0];
   if (!first) return null;
-  const models = new Map<string, ModelProvider['models'][number]>();
+  const ids: string[] = [];
   for (const source of sources) {
     for (const model of source.models) {
-      const existing = models.get(model.id);
-      if (existing) {
-        existing.enabled = existing.enabled !== false || model.enabled !== false;
-      } else {
-        models.set(model.id, { ...model, enabled: model.enabled !== false });
-      }
+      if (!ids.includes(model.id)) ids.push(model.id);
     }
+  }
+  const models: ModelProvider['models'] = [];
+  for (const modelId of ids) {
+    const row: ModelProvider['models'][number] = { id: modelId };
+    const firstRow = first.models.find((model) => model.id === modelId);
+    Object.assign(row, pickModelCapabilityOverrides(firstRow));
+    if (firstRow?.label) row.label = firstRow.label;
+    const allDisabled = sources.every((source) => {
+      const entry = source.models.find((model) => model.id === modelId);
+      return entry !== undefined && entry.enabled === false;
+    });
+    if (allDisabled) row.enabled = false;
+    // 无意图行（如来源的冻结拷贝 {id, enabled:true}）不进池的稀疏覆盖表
+    if (extractModelOverrides([row]).length > 0) models.push(row);
   }
   return {
     id,
@@ -52,7 +68,7 @@ export function createChatgptPoolProvider(
     enabled: true,
     oauthAccountKey: first.oauthAccountKey,
     oauthAccountPool: { accountKeys: sources.flatMap((source) => source.oauthAccountKey ?? []) },
-    models: [...models.values()],
+    models,
   };
 }
 

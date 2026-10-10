@@ -39,6 +39,11 @@ import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsag
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSmartCompactMode } from '../smartCompactMode';
 import { parseSshTimeoutSeconds } from '../sshTimeout';
+import {
+  isWebSearchChainEntry,
+  WEB_SEARCH_CHAIN_MAX,
+  type WebSearchChainEntry,
+} from '../webSearchChain';
 import { WINDOWS_LOCAL_SHELLS, type WindowsLocalShell } from '../windowsLocalShell';
 import { type EditMode, isEditMode } from './editMode';
 import {
@@ -51,8 +56,11 @@ import {
 } from './fileChanges';
 import {
   MODEL_API_KINDS,
+  MODEL_REASONING_OVERRIDES,
+  MODEL_THINKING_LEVEL_OVERRIDES,
   type ModelApiKind,
   type ModelCapabilityOverrides,
+  type ModelEntry,
   type ModelReasoningOverride,
   type ModelThinkingLevelOverride,
 } from './llm';
@@ -67,6 +75,19 @@ import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot 
 
 export type { ChildSessionIdentity, SessionIdentity } from '../builtinAgents';
 export { parseChildSessionIdentity, parseSessionIdentity } from '../builtinAgents';
+
+/**
+ * Main → worker 的自定义 provider 注册信息。api 在 shared 侧保持 string，
+ * worker 再用 MODEL_API_KINDS 收窄。
+ */
+export interface WorkerCustomProvider {
+  settingsId: string;
+  name: string;
+  api: string;
+  baseUrl: string;
+  apiKey: string;
+  models: ModelEntry[];
+}
 
 /** 会话状态。waiting/done 属权限门与 subagent 刀，M1 不引入 */
 export type NodeStatus = 'idle' | 'running' | 'failed';
@@ -865,6 +886,12 @@ export interface ResolvedAgentTypeSpawnConfig {
   systemPrompt: string;
   model: SpawnModelConfig;
   tools: 'all' | 'readonly' | 'enso-locked';
+  /**
+   * 类型级推理预设（子代理类型上配置的档位）：优先级 派发 thinking > 类型预设 >
+   * 模型条目预设 > 父会话。缺省 = 跟随模型条目/父会话。与 AgentTypeSpawnConfig 同语义。
+   */
+  reasoning?: ModelReasoningOverride;
+  thinkingLevel?: ModelThinkingLevelOverride;
   /** Main-authorized exact node/profile intersection; absent keeps the profile tool set. */
   allowedToolIds?: readonly string[];
   skillPaths: readonly string[];
@@ -1167,6 +1194,9 @@ export type AgentCommand =
   | { type: 'set-max-active-coworkers'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
+  | { type: 'set-web-search-config'; chain: WebSearchChainEntry[]; configured?: boolean }
+  /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
+  | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
   | { type: 'ask-respond'; identity: SessionIdentity; requestId: string; answer: string }
   | {
@@ -1242,6 +1272,8 @@ export type AgentCommand =
       stream?: true;
       /** 透传 streamSimple/completeSimple 的思考档；off 表示关闭 */
       reasoning?: ThinkingLevel | 'off';
+      /** 连通性探测：只判模型是否响应，被预算截断或只输出思考也算完成 */
+      probe?: true;
     }
   | {
       /** 中止一次性文本补全（btw / 记忆蒸馏）；无会话身份，按 requestId 对准 */
@@ -2718,6 +2750,8 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
       'systemPrompt',
       'model',
       'tools',
+      'reasoning',
+      'thinkingLevel',
       'allowedToolIds',
       'skillPaths',
       'skillBindingIds',
@@ -2760,10 +2794,21 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
   ) {
     return null;
   }
+  // 类型级推理预设：白名单取值，非法一律拒收（Main→worker 信任边界）
+  if (
+    (value.reasoning !== undefined &&
+      !MODEL_REASONING_OVERRIDES.includes(value.reasoning as ModelReasoningOverride)) ||
+    (value.thinkingLevel !== undefined &&
+      !MODEL_THINKING_LEVEL_OVERRIDES.includes(value.thinkingLevel as ModelThinkingLevelOverride))
+  ) {
+    return null;
+  }
   if (
     (typeKey === 'agent:enso' &&
       (value.lockedProfileId !== ENSO_LOCKED_PROFILE_ID ||
         value.tools !== 'enso-locked' ||
+        value.reasoning !== undefined ||
+        value.thinkingLevel !== undefined ||
         value.allowedToolIds !== undefined ||
         skillPaths.length !== 0 ||
         skillBindingIds.length !== 0 ||
@@ -3033,6 +3078,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         'maxTokens',
         'stream',
         'reasoning',
+        'probe',
       ]) &&
         isNonEmptyString(value.requestId) &&
         typeof value.systemPrompt === 'string' &&
@@ -3048,6 +3094,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.reasoning === undefined ||
           value.reasoning === 'off' ||
           THINKING_LEVELS.includes(value.reasoning as ThinkingLevel)) &&
+        (value.probe === undefined || value.probe === true) &&
         Array.isArray(value.candidates) &&
         value.candidates.length >= 1 &&
         value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
@@ -3182,11 +3229,23 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'limit']) && parseMaxActiveCoworkers(value.limit) !== null
         ? (value as unknown as AgentCommand)
         : null;
+    case 'set-web-search-config':
+      return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
+        (value.configured === undefined || typeof value.configured === 'boolean') &&
+        Array.isArray(value.chain) &&
+        value.chain.length <= WEB_SEARCH_CHAIN_MAX &&
+        value.chain.every(isWebSearchChainEntry)
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'set-disabled-workflow-presets':
       return hasExactKeys(value, ['type', 'ids']) &&
         Array.isArray(value.ids) &&
         value.ids.length <= 64 &&
         value.ids.every((id) => typeof id === 'string' && isWorkflowPresetId(id))
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-model-directory':
+      return hasExactKeys(value, ['type', 'snapshot', 'customProviders'])
         ? (value as unknown as AgentCommand)
         : null;
     case 'ask-respond':

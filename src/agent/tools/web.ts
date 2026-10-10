@@ -1,4 +1,5 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import { formatFetchResult, type WebFetchDeps, webFetch } from './webFetch';
 import { formatSearchResult, type SearchAuth, type SearchModel, webSearch } from './webSearch';
 
@@ -36,7 +37,10 @@ const text = (value: string) => [{ type: 'text' as const, text: value }];
 
 /** 联网搜索与抓取。unsupported 按会话隔离：每个会话各自记住哪些模型端点不支持原生搜索 */
 export function createWebTools(
-  deps: Pick<WebFetchDeps, 'fetch' | 'lookup'> = {}
+  deps: Pick<WebFetchDeps, 'fetch' | 'lookup'> & {
+    /** undefined 跟随会话；空数组为已耗尽的配置链。 */
+    chain?: () => readonly WebSearchChainEntry[] | undefined;
+  } = {}
 ): ToolDefinition[] {
   const unsupported = new Set<string>();
   const search: ToolDefinition = {
@@ -53,10 +57,25 @@ export function createWebTools(
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const query = normalizeSearch(params).query;
       if (typeof query !== 'string' || !query) throw new Error('query must be a non-empty string');
+      // 链物化在调用时进行：modelRegistry 现取模型与凭证，auth.json 刷新即时生效
+      const chainRefs = deps.chain?.();
+      const chainNotes: string[] = [];
+      let candidates: SearchModel[] | undefined;
+      if (chainRefs !== undefined) {
+        candidates = [];
+        for (const ref of chainRefs) {
+          const found = ctx?.modelRegistry?.find(ref.providerId, ref.modelId) as
+            | SearchModel
+            | undefined;
+          if (found) candidates.push(found);
+          else chainNotes.push(`Candidate ${ref.providerId}/${ref.modelId} unavailable; skipped.`);
+        }
+      }
       const { outcome, notes } = await webSearch(
         query,
         {
           model: ctx?.model as SearchModel | undefined,
+          candidates,
           auth: async (model): Promise<SearchAuth> => {
             const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model as never);
             if (!resolved.ok) throw new Error(resolved.error);
@@ -73,7 +92,11 @@ export function createWebTools(
       );
       return {
         content: text(formatSearchResult(query, outcome)),
-        details: { source: outcome.source, sources: outcome.hits, notes },
+        details: {
+          source: outcome.source,
+          sources: outcome.hits,
+          notes: [...chainNotes, ...notes],
+        },
       };
     },
   };

@@ -34,7 +34,9 @@ describe('ChatGPT 自动接替设置', () => {
       apiKey: '',
       oauthAccountKey: first.oauthAccountKey,
       oauthAccountPool: { accountKeys: [first.oauthAccountKey, second.oauthAccountKey] },
-      models: [{ id: 'gpt-model', thinkingLevel: 'high' }, { id: 'another' }],
+      // 稀疏语义：无意图行（{id, enabled:true} 冻结拷贝）不落盘，
+      // 目录物化后这些模型照样出现在池里
+      models: [{ id: 'gpt-model', thinkingLevel: 'high' }],
     });
     expect(first).not.toHaveProperty('oauthAccountPool');
     expect(pool?.models[0]).not.toBe(first.models[0]);
@@ -49,12 +51,12 @@ describe('ChatGPT 自动接替设置', () => {
   });
 
   it.each([
-    { firstEnabled: false, secondEnabled: true, enabled: true },
-    { firstEnabled: false, secondEnabled: undefined, enabled: true },
-    { firstEnabled: undefined, secondEnabled: false, enabled: true },
+    { firstEnabled: false, secondEnabled: true, enabled: undefined },
+    { firstEnabled: false, secondEnabled: undefined, enabled: undefined },
+    { firstEnabled: undefined, secondEnabled: false, enabled: undefined },
     { firstEnabled: false, secondEnabled: false, enabled: false },
   ])(
-    '同一模型保留首源配置，任意源模型启用即可选择池：%j',
+    '同一模型保留首源配置，任一源缺省/启用即池启用（稀疏行不记 enabled:true）：%j',
     ({ firstEnabled, secondEnabled, enabled }) => {
       const first = source('openai-codex');
       first.models = [
@@ -67,9 +69,13 @@ describe('ChatGPT 自动接替设置', () => {
 
       const pool = createChatgptPoolProvider([first, second], 'pool');
 
-      expect(pool?.models).toEqual([
-        { id: 'gpt-model', enabled, label: 'First', thinkingLevel: 'high' },
-      ]);
+      const row: Record<string, unknown> = {
+        id: 'gpt-model',
+        label: 'First',
+        thinkingLevel: 'high',
+      };
+      if (enabled !== undefined) row.enabled = enabled;
+      expect(pool?.models).toEqual([row]);
       expect(first.models[0].enabled).toBe(firstEnabled);
       expect(second.models[0].enabled).toBe(secondEnabled);
     }

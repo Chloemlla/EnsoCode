@@ -126,6 +126,7 @@ export const SETTINGS_DATA_COVERAGE = {
   virtualModels: excluded('virtual model routing is configured in the settings UI only'),
   disabledBuiltinAgentTypes: surfaces('agent-types.toggle-builtin'),
   disabledBuiltinTools: surfaces('tools.toggle-builtin'),
+  webSearchChain: surfaces('tools.toggle-builtin'),
   disabledWorkflowPresets: excluded('Built-in workflow preset toggles in the settings page.'),
   subagentAllowedModes: surfaces('tools.toggle-builtin'),
   onboarded: surfaces('onboarding.complete'),
@@ -306,6 +307,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   removeAgentType: surfaces('agent-types.delete'),
   toggleBuiltinAgentType: surfaces('agent-types.toggle-builtin'),
   toggleBuiltinTool: surfaces('tools.toggle-builtin'),
+  setWebSearchChain: surfaces('tools.toggle-builtin'),
   toggleWorkflowPreset: excluded('Built-in workflow preset toggles in the settings page.'),
   setSubagentAllowedModes: surfaces('tools.toggle-builtin'),
   setOnboarded: surfaces('onboarding.complete'),
@@ -406,6 +408,12 @@ export const IPC_PRODUCT_COVERAGE = {
   PROVIDERS_MODEL_META: surfaces('providers.model-meta'),
   PROVIDERS_CLASSIFIER_MODELS: excluded(
     'classifier models are listed only by the virtual model settings UI'
+  ),
+  MODEL_DIRECTORY_GET: excluded(
+    'Renderer bootstrap for the derived model directory snapshot; settings keep sparse overrides only.'
+  ),
+  MODEL_DIRECTORY_CHANGED: excluded(
+    'Cross-window model directory snapshot transport; not a standalone product capability.'
   ),
   OAUTH_PROVIDERS_LIST: surfaces('providers.oauth.list'),
   OAUTH_LOGIN: surfaces('providers.oauth.login'),

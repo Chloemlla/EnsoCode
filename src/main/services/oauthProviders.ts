@@ -35,6 +35,11 @@ import {
   parseCodexAuthJson,
 } from '@shared/providers/codexAuth';
 import { DEVIN_PROVIDER_ID, devinProviderConfig, fetchDevinUsage } from '@shared/providers/devin';
+import {
+  KIMI_CODING_USAGE_URL,
+  kimiCodingBearerToken,
+  parseKimiCodingUsageWindows,
+} from '@shared/providers/kimiCoding';
 import type {
   OauthAccount,
   OauthAccountUsage,
@@ -197,8 +202,18 @@ export async function ensureProviderModelsRefreshed(
         onlineCatalogRefreshes.delete(providerId);
       }
     });
+    void refresh.finally(() => {
+      refreshModelDirectoryInBackground();
+    });
   }
   await refresh;
+}
+
+/** 动态 import：oauthProviders 被 modelDirectory 经 settings 静态引用，不能反向静态依赖。 */
+function refreshModelDirectoryInBackground(): void {
+  void import('./modelDirectory')
+    .then(({ refreshModelDirectory }) => refreshModelDirectory())
+    .catch(() => {});
 }
 
 // ---- 账号身份缓存 ----
@@ -643,6 +658,7 @@ async function runOauthLogin(
       providerId,
       account: { key: accountKey, providerId, ...accountIdentity },
     });
+    refreshModelDirectoryInBackground();
     broadcastOauthCredentialsChanged(sender);
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
@@ -1145,12 +1161,51 @@ async function devinProbe(token: string): Promise<AccountProbe> {
   };
 }
 
+/**
+ * kimi-coding：订阅用量走 coding usages。toAuth 不给 apiKey，token 由调用方从
+ * Authorization 头解出。401 是登录失效，404 是该账号没有用量端点；网络失败向上抛，
+ * 由 getOauthAccountUsage 收成 error。
+ */
+async function kimiCodingProbe(token: string): Promise<AccountProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ACCOUNT_TIMEOUT_MS);
+  try {
+    const response = await fetch(KIMI_CODING_USAGE_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      throw new Error('Kimi Code 登录已失效 (401 unauthorized)');
+    }
+    if (response.status === 404) {
+      throw new Error('该账号不支持用量查询 (404)');
+    }
+    if (!response.ok) {
+      throw new Error(`Kimi Code 用量查询失败 (${response.status})`);
+    }
+    const data = (await response.json()) as unknown;
+    return { windows: parseKimiCodingUsageWindows(data) };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Kimi Code 用量查询超时');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 按基础 provider 分派探测；未接入额度端点的 provider 返回空窗口而不是报错 */
 async function probeAccount(runtime: ModelRuntimeType, accountKey: string): Promise<AccountProbe> {
   ensureAccountProvider(runtime, accountKey);
   // getAuth 在 store 锁内自动 refresh；多数 provider 的 apiKey 就是 access token。
   // Cursor 的 getApiKey 返回占位符 `cursor-native`（真 token 由 pi-cursor 另取），
   // 所以 refresh 之后改读 auth.json 里的 oauth.access。
+  // kimi-coding 的 toAuth 只给 Authorization 头，没有 apiKey。
   const auth = await runtime.getAuth(accountKey);
   const providerId = providerIdOfAccountKey(accountKey);
   const apiKey = auth?.auth.apiKey;
@@ -1159,6 +1214,8 @@ async function probeAccount(runtime: ModelRuntimeType, accountKey: string): Prom
     const { readStoredCredential } = await import('@earendil-works/pi-coding-agent');
     const credential = readStoredCredential(accountKey, authPath());
     token = credential?.type === 'oauth' ? credential.access : apiKey;
+  } else if (!token && providerId === 'kimi-coding') {
+    token = kimiCodingBearerToken(auth?.auth.headers);
   }
   if (!token) throw new Error(`no credential for account: ${accountKey}`);
   const claims = decodeJwtPayload(token);
@@ -1170,13 +1227,15 @@ async function probeAccount(runtime: ModelRuntimeType, accountKey: string): Prom
         ? await codexProbe(token, claims)
         : providerId === 'xai'
           ? await xaiProbe(token)
-          : providerId === 'cursor'
-            ? await cursorProbe(token)
-            : providerId === ANTIGRAVITY_PROVIDER_ID
-              ? await antigravityProbe(token)
-              : providerId === DEVIN_PROVIDER_ID
-                ? await devinProbe(token)
-                : { windows: [] as OauthUsageWindow[] };
+          : providerId === 'kimi-coding'
+            ? await kimiCodingProbe(token)
+            : providerId === 'cursor'
+              ? await cursorProbe(token)
+              : providerId === ANTIGRAVITY_PROVIDER_ID
+                ? await antigravityProbe(token)
+                : providerId === DEVIN_PROVIDER_ID
+                  ? await devinProbe(token)
+                  : { windows: [] as OauthUsageWindow[] };
   // 网络结果优先，缺的字段用 token 里读到的兜底
   return sanitizeAccountProbe({ ...fromToken, ...probe });
 }

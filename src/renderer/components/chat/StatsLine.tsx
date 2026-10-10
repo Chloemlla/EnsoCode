@@ -35,6 +35,7 @@ import { fetchAccountUsage, USAGE_CACHE_TTL_MS, usageCache } from '@/hooks/useAc
 import { type TFunction, useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import type { Conversation } from '@/stores/sessions';
 import { useSessionsStore } from '@/stores/sessions';
 import { computeStats, formatDuration } from '@/stores/sessions/stats';
@@ -404,7 +405,7 @@ export function StatsLine({ conversationId }: StatsLineProps) {
   const { t } = useI18n();
   const conversation = useSessionsStore((state) => state.conversations[conversationId]);
   const messages = conversation?.messages ?? [];
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((state) => state.virtualModels);
   // 虚拟模型按名称显示：以伪 provider 参与模型名查找
   const labelProviders = useMemo(

@@ -14,6 +14,14 @@ import {
   type CapabilityGatewayTransport,
   createCapabilityHandlers,
 } from './capabilityGateway';
+
+// capabilityGateway 静态 import modelDirectory（物化 settings providers）；
+// mock 掉以隔离 electron/settings 依赖链，目录分区缺失时物化原样透传，不影响本文件用例。
+vi.mock('./modelDirectory', () => ({
+  getModelDirectorySnapshot: () => ({ revision: 0, generatedAt: 0, providers: [] }),
+  onModelDirectoryChanged: () => () => {},
+}));
+
 import { pickSubagentModelRefs } from './subagentModels';
 
 const child: ChildSessionIdentity = {

@@ -118,6 +118,7 @@ export const SETTINGS_STATE_FIELDS = [
   'agentTypes',
   'disabledBuiltinAgentTypes',
   'disabledBuiltinTools',
+  'webSearchChain',
   'disabledWorkflowPresets',
   'subagentAllowedModes',
   'memoryEmbeddingModel',
@@ -189,6 +190,8 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'projects',
   'projectGroups',
   'disabledWorkflowPresets',
+  // 与 CONFIG_SYNC_FIELD_POLICY 的 excluded 一致：引用本机 provider 条目，跨机悬空
+  'webSearchChain',
 ]);
 
 export const CONFIG_SYNC_COMMIT_FIELDS = SETTINGS_STATE_FIELDS.filter(
@@ -418,12 +421,24 @@ function scheduleWrite(
 
     void import('../services/agentHost')
       .then(
-        async ({ pushApprovalReviewer, pushMaxActiveCoworkers, pushDisabledWorkflowPresets }) => {
+        async ({
+          pushApprovalReviewer,
+          pushMaxActiveCoworkers,
+          pushDisabledWorkflowPresets,
+          pushModelDirectory,
+          pushWebSearchConfig,
+        }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
           pushDisabledWorkflowPresets();
+          pushModelDirectory();
+          pushWebSearchConfig();
         }
       )
+      .catch(() => {});
+    // 目录只重合成自定义分区；动态 import 避免 settings ↔ modelDirectory 静态环。
+    void import('../services/modelDirectory')
+      .then(({ notifyModelDirectorySettingsChanged }) => notifyModelDirectorySettingsChanged())
       .catch(() => {});
     return true;
   } catch {
@@ -528,11 +543,21 @@ export function commitSettingsTransaction(
     // Durable write already succeeded; a dead renderer must not fail the import.
   }
   void import('../services/agentHost')
-    .then(async ({ pushApprovalReviewer, pushMaxActiveCoworkers, pushDisabledWorkflowPresets }) => {
-      pushApprovalReviewer(await readStoredOauthCredentialKeys());
-      pushMaxActiveCoworkers();
-      pushDisabledWorkflowPresets();
-    })
+    .then(
+      async ({
+        pushApprovalReviewer,
+        pushMaxActiveCoworkers,
+        pushDisabledWorkflowPresets,
+        pushModelDirectory,
+        pushWebSearchConfig,
+      }) => {
+        pushApprovalReviewer(await readStoredOauthCredentialKeys());
+        pushMaxActiveCoworkers();
+        pushDisabledWorkflowPresets();
+        pushModelDirectory();
+        pushWebSearchConfig();
+      }
+    )
     .catch(() => {});
   return { ok: true, backupPath };
 }

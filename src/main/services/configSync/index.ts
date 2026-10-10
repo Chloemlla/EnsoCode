@@ -170,6 +170,12 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   agentTypes: { mode: 'portable' },
   disabledBuiltinAgentTypes: { mode: 'portable' },
   disabledBuiltinTools: { mode: 'portable' },
+  webSearchChain: {
+    mode: 'excluded',
+    // 链条目引用本机 provider 条目 id（自定义 provider 是安装期 uuid），跨机导出会悬空；
+    // 且候选可用性取决于本机凭证，按机器单独配置更不容易误配
+    reason: 'references per-installation provider entries',
+  },
   disabledWorkflowPresets: {
     mode: 'excluded',
     reason: 'pairs with device-local custom workflow presets in userData',

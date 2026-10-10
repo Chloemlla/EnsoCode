@@ -30,11 +30,13 @@
 | [main-cjs-shim-regex.md](main-cjs-shim-regex.md) | 构建报 i18n 某条译文 Unterminated string literal，后面紧跟 CommonJS Shims |
 | [history-paging-stuck-at-top.md](history-paging-stuck-at-top.md) | 长会话上滑翻一两页就停，顶部钉着「上下文已压缩」；或每翻一页跳回底部 |
 | [coworker-adopt-phantom-run.md](coworker-adopt-phantom-run.md) | subagent 雇的 coworker 回复完了 Run 仍一直「进行中」，send 带 wait:true 永远不返回；单测全绿 |
+| [virtuoso-scrolltoindex-index-space.md](virtuoso-scrolltoindex-index-space.md) | 导航条/搜索跳转点哪条都跳到最新一条：scrollToIndex 误叠 firstItemIndex 原点被钳到末行 |
 | [coworker-restart-adopt.md](coworker-restart-adopt.md) | 重启后 coworker 的 tab 还在，subagent list 却是空的，给原 agentId 发消息报 not-found |
 | [pi-project-trust-default.md](pi-project-trust-default.md) | 无报错；打开带 `.pi/extensions` 或项目包的仓库，其代码即在 worker 里运行、缺包还会自动安装 |
 | [koffi-view-electron-sandbox.md](koffi-view-electron-sandbox.md) | Windows `ax()`/`getState` 报 AX_WORKER_EXITED；单测和 Node 探针全绿，只在 Electron 里崩 |
 | [macos-window-focus.md](macos-window-focus.md) | 系统设置已在前台，computer 仍报窗口无法置于前台；浮窗被误判为输入焦点 |
 | [macos-ax-identity.md](macos-ax-identity.md) | AX 树中有亮度滑块但 find 返回空，setValue 无可见效果、actions 为空 |
+| [model-directory-single-source.md](model-directory-single-source.md) | 新版本静态表里的模型进不了老账号的 picker（清单冻结在登录时刻）；vitest 里莫名 `unknown oauth provider` |
 
 ## 共同教训
 

@@ -39,6 +39,9 @@ export const IPC_CHANNELS = {
   PROVIDERS_TEST: 'providers:test',
   PROVIDERS_MODEL_META: 'providers:model-meta',
   PROVIDERS_CLASSIFIER_MODELS: 'providers:classifier-models',
+  /** Main 合成的统一模型目录快照（Renderer 订阅，不落 settings.json） */
+  MODEL_DIRECTORY_GET: 'modelDirectory:get',
+  MODEL_DIRECTORY_CHANGED: 'modelDirectory:changed',
 
   // Local token usage statistics
   USAGE_SUMMARY: 'usage:summary',

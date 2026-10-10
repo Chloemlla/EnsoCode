@@ -1,14 +1,11 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
 import { CircleAlert, Server } from 'lucide-react';
-import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/i18n';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useMaterializedProviders, useUsableProviders } from '@/stores/modelDirectory/useProviders';
+import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useDefaultModelRevalidationStore, useSettingsStore } from '@/stores/settings';
 
 function selectionLabel(selection: DefaultModelRef, providers: readonly ModelProvider[]): string {
@@ -20,7 +17,7 @@ function selectionLabel(selection: DefaultModelRef, providers: readonly ModelPro
 /** 设置页的全局默认模型入口；账号分组与模型菜单完全复用聊天区 ModelPicker。 */
 export function DefaultModelPicker() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((state) => state.virtualModels);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const setDefaultModel = useSettingsStore((state) => state.setDefaultModel);
@@ -32,10 +29,7 @@ export function DefaultModelPicker() {
   const setDefaultThinkingLevel = useSettingsStore((state) => state.setDefaultThinkingLevel);
   const snapshot = useOauthCredentialStore((state) => state.snapshot);
   const revalidation = useDefaultModelRevalidationStore((state) => state.latest);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const selectedProvider = defaultModel
     ? candidates.find((entry) => entry.id === defaultModel.providerId)
     : undefined;

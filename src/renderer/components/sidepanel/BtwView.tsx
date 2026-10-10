@@ -27,11 +27,8 @@ import { TaskBar } from '@/components/chat/TaskBar';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import {
-  oauthCredentialContext,
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useMaterializedProviders, useUsableProviders } from '@/stores/modelDirectory/useProviders';
+import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSessionsStore } from '@/stores/sessions';
 import { chatSurfaceBusy } from '@/stores/sessions/messageCache';
 import { useSettingsStore } from '@/stores/settings';
@@ -45,16 +42,13 @@ export function BtwView({
 }) {
   const { t } = useI18n();
   const sessionId = panelApi.id.startsWith('btw:') ? panelApi.id.slice(4) : panelApi.id;
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((state) => state.virtualModels);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
   const projects = useSettingsStore((state) => state.projects);
   const projectGroups = useSettingsStore((state) => state.projectGroups);
   const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
-  const enabledProviders = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, oauthSnapshot),
-    [providers, oauthSnapshot]
-  );
+  const enabledProviders = useUsableProviders();
   const [mode, setMode] = useState<BtwMode>('contextual');
   const [resetting, setResetting] = useState(false);
   const [snapshot] = useState(() =>

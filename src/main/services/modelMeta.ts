@@ -94,10 +94,18 @@ export async function queryModelMeta(query: ModelMetaQuery): Promise<ModelMetaRe
         const token = await oauthAccessToken(runtime, query.oauthAccountKey);
         if (token) {
           try {
+            const fetched = await fetchXaiSubscriptionModels(token);
             catalog = mergeFetchedOauthModels(
               catalog,
-              (await fetchXaiSubscriptionModels(token)).map((model) => model.id)
+              fetched.map((model) => model.id)
             );
+            // xAI 探测绕过 runtime，结果必须并入统一目录——否则编辑器拉取到的
+            // 新模型在保存时被稀疏化丢弃、picker 也看不到（复审 Major-2）
+            void import('./modelDirectory')
+              .then(({ noteDiscoveredOauthModels }) =>
+                noteDiscoveredOauthModels(XAI_PROVIDER_ID, fetched)
+              )
+              .catch(() => {});
           } catch {
             // 上游失败仍用 pi catalog + overlay，不让设置页拉取整条失败
           }

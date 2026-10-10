@@ -1,16 +1,12 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ThinkingLevel } from '@shared/types';
 import { findVirtualModel } from '@shared/virtualModels';
-import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 export function ScopedDefaultModelField({
@@ -33,13 +29,8 @@ export function ScopedDefaultModelField({
   inheritLabel: string;
 }) {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const virtualModels = useSettingsStore((state) => state.virtualModels);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const selectedProvider = value
     ? candidates.find((entry) => entry.id === value.providerId)
     : undefined;
