@@ -118,6 +118,7 @@ export const SETTINGS_STATE_FIELDS = [
   'agentTypes',
   'disabledBuiltinAgentTypes',
   'disabledBuiltinTools',
+  'webSearchChain',
   'disabledWorkflowPresets',
   'subagentAllowedModes',
   'memoryEmbeddingModel',
@@ -189,6 +190,8 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'projects',
   'projectGroups',
   'disabledWorkflowPresets',
+  // 与 CONFIG_SYNC_FIELD_POLICY 的 excluded 一致：引用本机 provider 条目，跨机悬空
+  'webSearchChain',
 ]);
 
 export const CONFIG_SYNC_COMMIT_FIELDS = SETTINGS_STATE_FIELDS.filter(
@@ -423,11 +426,13 @@ function scheduleWrite(
           pushMaxActiveCoworkers,
           pushDisabledWorkflowPresets,
           pushModelDirectory,
+          pushWebSearchConfig,
         }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
           pushDisabledWorkflowPresets();
           pushModelDirectory();
+          pushWebSearchConfig();
         }
       )
       .catch(() => {});
@@ -544,11 +549,13 @@ export function commitSettingsTransaction(
         pushMaxActiveCoworkers,
         pushDisabledWorkflowPresets,
         pushModelDirectory,
+        pushWebSearchConfig,
       }) => {
         pushApprovalReviewer(await readStoredOauthCredentialKeys());
         pushMaxActiveCoworkers();
         pushDisabledWorkflowPresets();
         pushModelDirectory();
+        pushWebSearchConfig();
       }
     )
     .catch(() => {});

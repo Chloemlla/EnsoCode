@@ -1,3 +1,5 @@
+import { parseWebSearchChain } from '../webSearchChain';
+
 /** 内置工具:设置页可开关;禁用后不下发给会话(模型看不到)。默认开关见 DEFAULT_DISABLED_BUILTIN_TOOLS。 */
 export interface BuiltinToolInfo {
   /** 稳定 id,用于开关持久化与下发过滤 */
@@ -112,7 +114,12 @@ export function persistedSettingsState(persisted: unknown): Record<string, unkno
   if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined;
   const current = typeof version === 'number' ? version : 0;
   const record = state as Record<string, unknown>;
-  return current < COMPUTER_DEFAULT_OFF_SETTINGS_VERSION ? addComputerDefaultOff(record) : record;
+  const base =
+    current < COMPUTER_DEFAULT_OFF_SETTINGS_VERSION ? addComputerDefaultOff(record) : record;
+  // web_search 候选链：只在字段存在时收窄（不向老数据注入新键，保持形状逐字节稳定）；
+  // 缺省读取方（pushWebSearchConfig 等）自行 parseWebSearchChain(undefined) → 空链
+  if (base.webSearchChain === undefined) return base;
+  return { ...base, webSearchChain: parseWebSearchChain(base.webSearchChain) };
 }
 
 export function effectiveSubagentAllowedModes(

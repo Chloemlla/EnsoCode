@@ -31,6 +31,7 @@ import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
 import { materializeProviders } from '@shared/modelDirectory';
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
+import { providerKeyFor } from '@shared/providers/providerKey';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
 import {
@@ -93,6 +94,7 @@ import {
   type VirtualClassifierConfig,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
+import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
 import { app, type UtilityProcess, utilityProcess } from 'electron';
 import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
@@ -322,6 +324,7 @@ export function startAgentWorker(): void {
     pushMaxActiveCoworkers();
     pushDisabledWorkflowPresets();
     pushModelDirectory();
+    pushWebSearchConfig();
   });
   child.on('message', (raw) => {
     const event = parseAgentWorkerEvent(raw);
@@ -1814,12 +1817,50 @@ export function pushDisabledWorkflowPresets(): void {
   } satisfies AgentCommand);
 }
 
+export function resolveWebSearchConfig(): { chain: WebSearchChainEntry[]; configured: boolean } {
+  const rawChain = parseWebSearchChain(readSettingsState()?.webSearchChain);
+  const providers = providersFromSettings();
+  const chain: WebSearchChainEntry[] = [];
+  for (const entry of rawChain) {
+    const provider = providers.find((p) => p.id === entry.providerId);
+    if (!provider || provider.enabled === false || provider.oauthAccountPool !== undefined)
+      continue;
+    if (
+      !Array.isArray(provider.models) ||
+      !provider.models.some((model) => model?.id === entry.modelId && model.enabled !== false)
+    )
+      continue;
+    if (
+      !provider.oauthAccountKey &&
+      (typeof provider.api !== 'string' ||
+        typeof provider.baseUrl !== 'string' ||
+        typeof provider.apiKey !== 'string')
+    )
+      continue;
+    const runtimeProviderId = provider.oauthAccountKey ?? providerKeyFor(provider);
+    chain.push({ providerId: runtimeProviderId, modelId: entry.modelId });
+  }
+  return { chain, configured: rawChain.length > 0 };
+}
+
+/** web_search 候选链推送：只发引用，凭证由 worker 调用时经 modelRegistry 现取。 */
+export function pushWebSearchConfig(): void {
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-web-search-config',
+    ...resolveWebSearchConfig(),
+  } satisfies AgentCommand);
+}
+
 let modelDirectoryListenerBound = false;
 
 function bindModelDirectoryListener(): void {
   if (modelDirectoryListenerBound) return;
   modelDirectoryListenerBound = true;
-  onModelDirectoryChanged(() => pushModelDirectory());
+  onModelDirectoryChanged(() => {
+    pushModelDirectory();
+    pushWebSearchConfig();
+  });
 }
 
 function customProvidersForWorker(): WorkerCustomProvider[] {

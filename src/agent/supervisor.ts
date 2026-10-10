@@ -79,6 +79,7 @@ import type { ModelEntry } from '@shared/types/llm';
 import { providerIdOfAccountKey } from '@shared/types/oauthProviders';
 import type { PluginCommandSpawn, PluginHookSpawn } from '@shared/types/plugins';
 import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
+import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import { AgentControlInvoker } from './agentControl';
 import {
@@ -776,6 +777,8 @@ export class SessionSupervisor {
   private approvalReviewer: SpawnModelConfig | undefined;
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
   private disabledWorkflowPresets: string[] = [];
+  /** undefined 跟随会话；空数组表示已配置但全部不可用，直接走 Exa。 */
+  private webSearchChain: readonly WebSearchChainEntry[] | undefined;
   /**
    * Main 推送的统一模型目录。revision 与自定义 provider 语义都没变时不再注册。
    * 当前消费者是自定义 provider 预注册；快照本体由后续的全局 web_search
@@ -1115,6 +1118,30 @@ export class SessionSupervisor {
     }
     if (command.type === 'set-disabled-workflow-presets') {
       this.disabledWorkflowPresets = command.ids;
+      return;
+    }
+    if (command.type === 'set-web-search-config') {
+      this.webSearchChain =
+        (command.configured ?? command.chain.length > 0) ? command.chain : undefined;
+      // OAuth 第二账号克隆在 worker runtime 里按需注册，否则链物化时 find 取不到
+      void this.getRuntime()
+        .then((runtime) => {
+          for (const ref of command.chain) {
+            ensureAccountProvider(runtime, ref.providerId);
+            const exact = runtime.getModel(ref.providerId, ref.modelId);
+            if (!exact) {
+              const baseId = providerIdOfAccountKey(ref.providerId);
+              const clone = resolveOauthCatalogModel(
+                baseId,
+                ref.modelId,
+                runtime.getModels(ref.providerId),
+                undefined
+              );
+              if (clone) listCatalogClone(runtime, clone);
+            }
+          }
+        })
+        .catch((error) => console.warn('[web-search] ensure account providers failed:', error));
       return;
     }
     if (command.type === 'set-model-directory') {
@@ -2435,7 +2462,7 @@ export class SessionSupervisor {
             createSendImageTool(delegation, cwd, confirmOutsideImage(gate)),
           ]
         : []),
-      ...(toolEnabled('web') ? createWebTools() : []),
+      ...(toolEnabled('web') ? createWebTools({ chain: () => this.webSearchChain }) : []),
       ...(toolEnabled('todo') ? [createTodoTool((todos) => todoReminder.update(todos))] : []),
       ...(computer ? [withComputerApproval(gate, createComputerTool(computer))] : []),
       ...(toolEnabled('ask_user') ? [createAskTool(askManager)] : []),

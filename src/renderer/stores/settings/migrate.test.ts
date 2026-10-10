@@ -2,6 +2,32 @@ import { STATUS_LINE_PRESETS, STATUS_LINE_SEGMENT_IDS } from '@shared/statusLine
 import { describe, expect, it } from 'vitest';
 import { mergeSettingsState, migrateSettings, SETTINGS_VERSION } from './migrate';
 
+describe('web search chain hydration', () => {
+  const current = {
+    editMode: 'apply_patch' as const,
+    accentColor: 'indigo' as const,
+    webSearchChain: [],
+  };
+
+  it.each([null, {}, 'bad', [null, { providerId: '', modelId: 'x' }]])(
+    'rejects malformed persisted chain %j',
+    (webSearchChain) => {
+      expect(mergeSettingsState({ webSearchChain }, current).webSearchChain).toEqual([]);
+    }
+  );
+
+  it('normalizes current-version persisted entries before UI consumption', () => {
+    const webSearchChain = [
+      { providerId: ' p ', modelId: ' m ' },
+      { providerId: 'p', modelId: 'm' },
+    ];
+    expect(mergeSettingsState({ webSearchChain }, current).webSearchChain).toEqual([
+      { providerId: 'p', modelId: 'm' },
+    ]);
+    expect(mergeSettingsState({}, current).webSearchChain).toEqual([]);
+  });
+});
+
 describe('请求体状态栏段位升级', () => {
   const oldDefault = [
     'model',

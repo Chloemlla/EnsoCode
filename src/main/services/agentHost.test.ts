@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -43,9 +44,89 @@ import {
   resolveModelSelection,
   resolvePresetSystemPrompt,
   resolveSubagentModelSelection,
+  resolveWebSearchConfig,
   setMemberAgentTypeSource,
   toSessionMcpConfig,
 } from './agentHost';
+
+describe('resolveWebSearchConfig', () => {
+  const custom: ModelProvider = {
+    id: 'p',
+    name: 'P',
+    api: 'anthropic-messages',
+    baseUrl: 'https://gateway.example',
+    apiKey: 'secret',
+    enabled: true,
+    models: [{ id: 'm' }],
+  };
+  it.each([
+    { ...custom, enabled: false },
+    { ...custom, models: [] },
+    { ...custom, models: [{ id: 'm', enabled: false }] },
+    { ...custom, apiKey: undefined },
+  ])('does not resolve disabled, removed or malformed providers/models', (provider) => {
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [provider],
+          webSearchChain: [{ providerId: 'p', modelId: 'm' }],
+        },
+      },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: true });
+  });
+  it('distinguishes no configuration from an unavailable configured chain', () => {
+    settingsMock.value = {
+      'enso-settings': { state: { providers: [custom], webSearchChain: [] } },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: false });
+    settingsMock.value = {
+      'enso-settings': {
+        state: { providers: [], webSearchChain: [{ providerId: 'gone', modelId: 'm' }] },
+      },
+    };
+    expect(resolveWebSearchConfig()).toEqual({ chain: [], configured: true });
+  });
+  it('自定义 provider 使用 worker 注册指纹，OAuth 保留精确账号身份', () => {
+    const provider: ModelProvider = {
+      id: 'custom-uuid',
+      name: 'Gateway',
+      api: 'openai-responses',
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'custom-secret',
+      enabled: true,
+      models: [{ id: 'gpt-shared' }],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [
+            provider,
+            {
+              ...provider,
+              id: 'oauth-uuid',
+              oauthAccountKey: 'anthropic#2',
+              models: [{ id: 'claude-shared' }],
+            },
+          ],
+          webSearchChain: [
+            { providerId: provider.id, modelId: 'gpt-shared' },
+            { providerId: 'oauth-uuid', modelId: 'claude-shared' },
+          ],
+        },
+      },
+    };
+    const host = createHash('sha256')
+      .update(`${provider.api}\0${provider.baseUrl}`)
+      .digest('hex')
+      .slice(0, 12);
+    const key = createHash('sha256').update(provider.apiKey).digest('hex').slice(0, 8);
+    expect(resolveWebSearchConfig().chain).toEqual([
+      { providerId: `enso-${host}-${key}`, modelId: 'gpt-shared' },
+      { providerId: 'anthropic#2', modelId: 'claude-shared' },
+    ]);
+  });
+});
 
 describe('agentHost session MCP config', () => {
   it('deferred 带 loadMode 与缓存工具名，direct 与缺省保持原样', () => {

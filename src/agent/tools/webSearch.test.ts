@@ -53,6 +53,19 @@ function initOf(fetch: { mock: { calls: unknown[] } }, index: number): RequestIn
 }
 
 describe('webSearch', () => {
+  it('显式空候选表示配置链全失效，直接 Exa，不回退会话模型', async () => {
+    const fetch = vi.fn(async () => exaReply());
+    const resolveAuth = vi.fn(auth);
+    const { outcome } = await webSearch(
+      'node',
+      { model: anthropicModel, candidates: [], auth: resolveAuth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('exa');
+    expect(resolveAuth).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(urlOf(fetch.mock.calls[0])).toMatch(/^https:\/\/mcp\.exa\.ai/);
+  });
   it('Anthropic 原生搜索：带 server tool 请求并解析结果', async () => {
     const fetch = vi.fn(async () => json(anthropicHit));
     const { outcome } = await webSearch(
@@ -185,6 +198,113 @@ describe('webSearch', () => {
     });
   });
 
+  it('xAI（openai-completions + api.x.ai）走 Responses 原生 web_search', async () => {
+    const fetch = vi.fn(async () =>
+      sse([
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'web_search_call',
+            action: {
+              type: 'search',
+              sources: [{ url: 'https://a.example/' }, { url: 'https://b.example/', title: 'B' }],
+            },
+          },
+        },
+        { type: 'response.output_text.delta', delta: 'Grok answer' },
+      ])
+    );
+    const { outcome } = await webSearch(
+      'q',
+      {
+        model: {
+          provider: 'xai',
+          api: 'openai-completions',
+          baseUrl: 'https://api.x.ai/v1',
+          id: 'grok-4.7',
+        },
+        auth,
+      },
+      { fetch, unsupported: new Set() }
+    );
+    expect(urlOf(fetch.mock.calls[0])).toBe('https://api.x.ai/v1/responses');
+    expect(initOf(fetch, 0).method).toBe('POST');
+    expect(JSON.parse(String(initOf(fetch, 0).body)).tools).toEqual([{ type: 'web_search' }]);
+    expect(outcome).toMatchObject({
+      source: 'openai',
+      answer: 'Grok answer',
+      hits: [
+        { title: 'https://a.example/', url: 'https://a.example/' },
+        { title: 'B', url: 'https://b.example/' },
+      ],
+    });
+  });
+
+  it('openai-completions 且 baseUrl 不是 api.x.ai 时仍直接走 Exa', async () => {
+    const fetch = vi.fn(async () => exaReply());
+    const baseUrls = [
+      'https://api.deepseek.com/v1',
+      'https://proxy.example/openai/v1',
+      'https://api.x.ai.evil.com/v1',
+      'https://cli-chat-proxy.grok.com/v1',
+      'not a url',
+    ];
+    for (const baseUrl of baseUrls) {
+      const { outcome } = await webSearch(
+        'q',
+        {
+          model: { provider: 'p', api: 'openai-completions', baseUrl, id: 'm' },
+          auth,
+        },
+        { fetch, unsupported: new Set() }
+      );
+      expect(outcome.source).toBe('exa');
+    }
+    expect(fetch).toHaveBeenCalledTimes(baseUrls.length);
+    for (const call of fetch.mock.calls) {
+      expect(urlOf(call)).toMatch(/^https:\/\/mcp\.exa\.ai\/mcp/);
+      expect(urlOf(call)).not.toContain('/responses');
+    }
+  });
+
+  it('xAI 端点明确拒绝后记入 unsupported（按模型+端点），本会话不再尝试且不影响其它端点', async () => {
+    const unsupported = new Set<string>();
+    const xaiModel: SearchModel = {
+      provider: 'xai',
+      api: 'openai-completions',
+      baseUrl: 'https://api.x.ai/v1',
+      id: 'grok-4.7',
+    };
+    const fetch = vi.fn(async (url: string) =>
+      url.startsWith('https://mcp.exa.ai') ? exaReply() : json({ error: 'bad request' }, 400)
+    );
+    const first = await webSearch('q', { model: xaiModel, auth }, { fetch, unsupported });
+    expect(first.outcome.source).toBe('exa');
+    expect(unsupported.size).toBe(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    // 第二次：跳过 api.x.ai 直接打 Exa
+    await webSearch('q', { model: xaiModel, auth }, { fetch, unsupported });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(urlOf(fetch.mock.calls[2])).toMatch(/^https:\/\/mcp\.exa\.ai\/mcp/);
+
+    // 其它端点（如 deepseek）不受 xAI 的记忆影响
+    await webSearch(
+      'q',
+      {
+        model: {
+          provider: 'deepseek',
+          api: 'openai-completions',
+          baseUrl: 'https://api.deepseek.com',
+          id: 'm',
+        },
+        auth,
+      },
+      { fetch, unsupported }
+    );
+    expect(unsupported.size).toBe(1);
+  });
+
   it('ChatGPT 订阅走 codex 端点并带账号头', async () => {
     const payload = { 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-1' } };
     const token = `x.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.y`;
@@ -299,5 +419,222 @@ describe('webSearch', () => {
     expect(text).toContain('Node 26');
     expect(text).toContain('1. [Node.js](https://nodejs.org/) (1d)');
     expect(text).toMatch(/untrusted/i);
+  });
+});
+
+describe('webSearch 候选链', () => {
+  const geminiModel: SearchModel = {
+    provider: 'ga',
+    api: 'google-generative-ai',
+    baseUrl: 'https://generativelanguage.googleapis.com',
+    id: 'gemini-x',
+  };
+  const geminiHit = {
+    candidates: [
+      {
+        content: { parts: [{ text: 'Gemini answer.' }] },
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: 'https://example.com/', title: 'Example' } }],
+        },
+      },
+    ],
+  };
+  const kimiModel: SearchModel = {
+    provider: 'kimi',
+    api: 'kimi-coding',
+    baseUrl: 'https://api.kimi.com/coding',
+    id: 'k3',
+  };
+
+  it('链非空时依序尝试，首候选成功不试后续', async () => {
+    const fetch = vi.fn(async () => json(geminiHit));
+    const { outcome, notes } = await webSearch(
+      'node',
+      { model: anthropicModel, candidates: [geminiModel, anthropicModel], auth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome).toMatchObject({ source: 'gemini', answer: 'Gemini answer.' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(notes.join('\n')).toMatch(/gemini-x/);
+  });
+
+  it('首候选失败下移并记录，次候选成功', async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.includes('generativelanguage') ? json({ error: 'bad' }, 400) : json(anthropicHit)
+    );
+    const { outcome, notes } = await webSearch(
+      'node',
+      { candidates: [geminiModel, anthropicModel], auth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('anthropic');
+    expect(notes.join('\n')).toMatch(/gemini-x.*400/s);
+  });
+
+  it('无原生能力的候选跳过并记 note，不消耗请求', async () => {
+    const fetch = vi.fn(async () => json(anthropicHit));
+    const { outcome, notes } = await webSearch(
+      'node',
+      { candidates: [kimiModel, anthropicModel], auth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('anthropic');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(notes.join('\n')).toMatch(/k3/);
+  });
+
+  it('unsupported 集合里的候选直接跳过', async () => {
+    const unsupported = new Set<string>([
+      `ga\nhttps://generativelanguage.googleapis.com\ngemini-x`,
+    ]);
+    const fetch = vi.fn(async () => json(anthropicHit));
+    const { outcome } = await webSearch(
+      'node',
+      { candidates: [geminiModel, anthropicModel], auth },
+      { fetch, unsupported }
+    );
+    expect(outcome.source).toBe('anthropic');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('全部候选失败落 Exa；Exa 也败报全部摘要', async () => {
+    const failing = vi.fn(async (url: string) =>
+      url.startsWith('https://mcp.exa.ai') ? exaReply() : json({ error: 'x' }, 500)
+    );
+    const { outcome, notes } = await webSearch(
+      'node',
+      { candidates: [geminiModel], auth },
+      { fetch: failing, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('exa');
+    expect(notes.join('\n')).toMatch(/Exa/i);
+
+    const allFail = vi.fn(async (url: string) =>
+      url.startsWith('https://mcp.exa.ai')
+        ? new Response('rate limited', {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : json({ error: 'x' }, 500)
+    );
+    await expect(
+      webSearch(
+        'node',
+        { candidates: [geminiModel], auth },
+        { fetch: allFail, unsupported: new Set() }
+      )
+    ).rejects.toThrow(/gemini[\s\S]*exa/i);
+  });
+
+  it('空链保持现状：只用会话模型', async () => {
+    const fetch = vi.fn(async () => json(anthropicHit));
+    const { outcome } = await webSearch(
+      'node',
+      { model: anthropicModel, candidates: undefined, auth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('anthropic');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('antigravity grounding 搜索', () => {
+  const agModel: SearchModel = {
+    provider: 'google-antigravity',
+    api: 'google-antigravity',
+    baseUrl: '',
+    id: 'gemini-3.8-flash',
+  };
+  const agAuth = async () => ({
+    apiKey: JSON.stringify({
+      access: 'ya29.test',
+      refresh: 'r',
+      expires: Date.now() + 3600_000,
+      projectId: 'proj-1',
+    }),
+  });
+  const agSse = () =>
+    sse([
+      {
+        response: {
+          candidates: [
+            {
+              content: { parts: [{ text: 'AG answer.' }] },
+              groundingMetadata: {
+                groundingChunks: [{ web: { uri: 'https://ag.example/', title: 'AG' } }],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+  it('CCA 信封 + googleSearch 工具 + Bearer + UA；解析文本与 grounding 来源', async () => {
+    const fetch = vi.fn(async () => agSse());
+    const { outcome } = await webSearch(
+      'node',
+      { model: agModel, auth: agAuth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome).toMatchObject({
+      source: 'antigravity',
+      answer: 'AG answer.',
+      hits: [{ title: 'AG', url: 'https://ag.example/' }],
+    });
+    const url = urlOf(fetch.mock.calls[0]);
+    expect(url).toMatch(/cloudcode-pa.*\/v1internal:streamGenerateContent\?alt=sse/);
+    const init = initOf(fetch, 0);
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer ya29.test');
+    expect(headers['User-Agent']).toMatch(/^antigravity\//);
+    const body = JSON.parse(String(init.body));
+    expect(body.project).toBe('proj-1');
+    expect(body.requestType).toBe('agent');
+    expect(body.userAgent).toBe('antigravity');
+    expect(body.request.tools).toEqual([{ googleSearch: {} }]);
+    expect(typeof body.model).toBe('string');
+    expect(body.requestId).toMatch(/^agent\//);
+  });
+
+  it('首个端点网络错误时 fallback 到下一端点；HTTP 错误不 fallback', async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockImplementation(async () => agSse());
+    const { outcome } = await webSearch(
+      'node',
+      { model: agModel, auth: agAuth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('antigravity');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(urlOf(fetch.mock.calls[0])).not.toBe(urlOf(fetch.mock.calls[1]));
+
+    const httpFail = vi.fn(async (url: string) =>
+      url.startsWith('https://mcp.exa.ai') ? exaReply() : json({ error: 'forbidden' }, 403)
+    );
+    const { outcome: fallback } = await webSearch(
+      'node',
+      { model: agModel, auth: agAuth },
+      { fetch: httpFail, unsupported: new Set() }
+    );
+    expect(fallback.source).toBe('exa');
+    // 403 不换端点（1 次 CCA 尝试）+ Exa 1 次
+    expect(httpFail).toHaveBeenCalledTimes(2);
+  });
+
+  it('凭证过期/非法时该候选失败并下移', async () => {
+    const expired = async () => ({
+      apiKey: JSON.stringify({ access: 'a', refresh: 'r', expires: 1, projectId: 'p' }),
+    });
+    const fetch = vi.fn(async () => exaReply());
+    const { outcome, notes } = await webSearch(
+      'node',
+      { model: agModel, auth: expired },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('exa');
+    expect(notes.join('\n')).toMatch(/过期|expired/i);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

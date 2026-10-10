@@ -39,6 +39,11 @@ import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsag
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSmartCompactMode } from '../smartCompactMode';
 import { parseSshTimeoutSeconds } from '../sshTimeout';
+import {
+  isWebSearchChainEntry,
+  WEB_SEARCH_CHAIN_MAX,
+  type WebSearchChainEntry,
+} from '../webSearchChain';
 import { WINDOWS_LOCAL_SHELLS, type WindowsLocalShell } from '../windowsLocalShell';
 import { type EditMode, isEditMode } from './editMode';
 import {
@@ -1189,6 +1194,7 @@ export type AgentCommand =
   | { type: 'set-max-active-coworkers'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
+  | { type: 'set-web-search-config'; chain: WebSearchChainEntry[]; configured?: boolean }
   /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
   | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
@@ -3217,6 +3223,14 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         : null;
     case 'set-max-active-coworkers':
       return hasExactKeys(value, ['type', 'limit']) && parseMaxActiveCoworkers(value.limit) !== null
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-web-search-config':
+      return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
+        (value.configured === undefined || typeof value.configured === 'boolean') &&
+        Array.isArray(value.chain) &&
+        value.chain.length <= WEB_SEARCH_CHAIN_MAX &&
+        value.chain.every(isWebSearchChainEntry)
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-disabled-workflow-presets':
