@@ -29,11 +29,8 @@ import { WORKSPACE_WRITE_TOOL_ID } from '@shared/childProfileTools';
 import { type CompactStrategy, resolveCompactStrategy } from '@shared/compactStrategy';
 import { HUMAN_REQUEST_TIMEOUT_MS } from '@shared/humanRequestTimeout';
 import { DEFAULT_MAX_ACTIVE_COWORKERS } from '@shared/maxActiveCoworkers';
-import {
-  findCatalogModelById,
-  positiveContextWindow,
-  resolveCustomModelCapabilities,
-} from '@shared/modelCatalog';
+import { positiveContextWindow } from '@shared/modelCatalog';
+import type { ModelDirectorySnapshot } from '@shared/modelDirectory';
 import { isOauthAccountPool } from '@shared/oauthAccountPool';
 import { resolveOauthCatalogModel } from '@shared/oauthCatalog';
 import { ensureAccountProvider } from '@shared/piAccounts';
@@ -44,7 +41,7 @@ import {
   splitPlanPrefix,
   withPlanNote,
 } from '@shared/planMode';
-import { isClassifierOnlyProvider, resolvePiProviderBaseUrl } from '@shared/providerCatalog';
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
 import { DEVIN_PROVIDER_ID, devinProviderConfig } from '@shared/providers/devin';
@@ -78,11 +75,11 @@ import type {
 } from '@shared/types/agent';
 import { parseAgentSessionCustomEntry, STALE_SESSION_ERROR } from '@shared/types/agent';
 import { type EditMode, resolveEditMode } from '@shared/types/editMode';
+import type { ModelEntry } from '@shared/types/llm';
 import { providerIdOfAccountKey } from '@shared/types/oauthProviders';
 import type { PluginCommandSpawn, PluginHookSpawn } from '@shared/types/plugins';
 import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
-import { version } from '../../package.json';
 import { AgentControlInvoker } from './agentControl';
 import {
   createApplyPatchTool,
@@ -134,7 +131,12 @@ import {
 } from './continuousMemory/extension';
 import { CURSOR_PROVIDER_ID, loadCursorProvider } from './cursor/loadProvider';
 import { attachCursorBridgeToSession, isCursorModel } from './cursor/sessionBridge';
-import { resolveCustomModelCompat, selectCatalogEntryForCompat } from './customModelCompat';
+import {
+  installPushedCustomProviders,
+  type ModelDirectoryPushState,
+  previewModelDirectoryPush,
+  registerCustomProviderModels,
+} from './customProviderRegistry';
 import { createNormalizedEditTool } from './editTool';
 import { ENSO_SYSTEM_PROMPT } from './ensoPrompt';
 import { EnsoSafeJournal } from './ensoSafeJournal';
@@ -160,7 +162,6 @@ import {
   resetOauthPoolActivity,
   resolveOauthPoolModel,
 } from './oauthAccountPool';
-import { withOpenAIResponsesRouting } from './openaiResponsesRouting';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
 import { createProjectSettingsManager } from './projectCode';
 import { projectMessage } from './projection';
@@ -775,6 +776,13 @@ export class SessionSupervisor {
   private approvalReviewer: SpawnModelConfig | undefined;
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
   private disabledWorkflowPresets: string[] = [];
+  /**
+   * Main 推送的统一模型目录。revision 与自定义 provider 语义都没变时不再注册。
+   * 当前消费者是自定义 provider 预注册；快照本体由后续的全局 web_search
+   * 候选链（按目录派生可原生搜索的模型）消费——不要当死代码删。
+   */
+  private modelDirectory: ModelDirectorySnapshot | undefined;
+  private modelDirectoryPush: ModelDirectoryPushState | undefined;
   /** 父会话通知(合并投递):闲则注入合成提示唤醒,忙则挂 pending 搭下次工具结果 */
   private readonly notifier = new ParentNotifier((sessionId, text) => {
     this.deliverNotification(sessionId, text);
@@ -1109,6 +1117,41 @@ export class SessionSupervisor {
       this.disabledWorkflowPresets = command.ids;
       return;
     }
+    if (command.type === 'set-model-directory') {
+      const previous: ModelDirectoryPushState | undefined = this.modelDirectory
+        ? {
+            snapshot: this.modelDirectory,
+            providers: this.modelDirectoryPush?.providers ?? [],
+          }
+        : undefined;
+      const preview = previewModelDirectoryPush(
+        previous,
+        command.snapshot,
+        command.customProviders
+      );
+      if (preview.status === 'ignored') {
+        console.warn(`[model-directory] ignored push: ${preview.reason}`);
+        return;
+      }
+      if (preview.status === 'unchanged') return;
+      const parsed = preview.parsed;
+      this.modelDirectory = parsed.snapshot;
+      this.modelDirectoryPush = parsed;
+      void this.getRuntime()
+        .then((runtime) => {
+          installPushedCustomProviders(runtime, parsed.providers);
+        })
+        .catch((error) => {
+          // 回滚只覆盖簿记：累积语义下中途已注册的 provider 留在注册表无害
+          // （枚举/鉴权可用），下次推送会补齐剩余部分
+          if (this.modelDirectoryPush === parsed) {
+            this.modelDirectory = previous?.snapshot;
+            this.modelDirectoryPush = previous;
+          }
+          console.error('[model-directory] register failed:', toErrorMessage(error));
+        });
+      return;
+    }
     const identity =
       command.type === 'capability-result'
         ? command.child
@@ -1183,7 +1226,7 @@ export class SessionSupervisor {
   }
 
   private async execute(
-    command: Exclude<AgentCommand, { type: 'snapshot' | 'reload-session' }>
+    command: Exclude<AgentCommand, { type: 'snapshot' | 'reload-session' | 'set-model-directory' }>
   ): Promise<void> {
     switch (command.type) {
       case 'spawn-parent':
@@ -2067,9 +2110,11 @@ export class SessionSupervisor {
       }) => {
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
         const base = await resolveSessionModel(runtime, selectedModel);
-        // 派发 thinking > 类型预设 > 模型条目预设 > 父会话
+        // 派发 thinking > 类型预设 > 模型条目预设 > 父会话。
+        // 类型预设来源：typed-spawn 用 resolved（Main 组装的类型配置），
+        // coworker 直雇用 agentType（worker 侧快照）——此前 typed-spawn 不传，类型档被静默丢弃。
         const childReasoning = resolveChildReasoning(
-          pickChildReasoningOverride(thinkingOverride, agentType, selectedModel),
+          pickChildReasoningOverride(thinkingOverride, resolved ?? agentType, selectedModel),
           reasoningEnabled,
           thinkingLevel
         );
@@ -4668,67 +4713,22 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
     return registered;
   }
   const providerId = providerKeyFor(model);
-  const models = runtime.getModels();
-  const catalog = findCatalogModelById(models, model.modelId);
-  const resolved = resolveCustomModelCapabilities(catalog, model);
-  const contextWindow = resolved.contextWindow ?? 128_000;
-  const maxTokens = resolved.maxTokens ?? 32_000;
-  const piBaseUrl = resolvePiProviderBaseUrl(model.api, model.baseUrl);
-  const compat = resolveCustomModelCompat(
-    model.api,
-    piBaseUrl,
-    selectCatalogEntryForCompat(models, model.api, piBaseUrl, model.modelId)
-  );
-  const definition: CustomModelDefinition = {
-    id: model.modelId,
-    name: model.modelId,
-    reasoning: resolved.reasoning,
-    ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
-    input: ['text', 'image'],
-    ...(catalog?.api === model.api && catalog.inputLimits
-      ? { inputLimits: catalog.inputLimits }
-      : {}),
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    // applyExtension 原样展开定义，不填默认值；缺 contextWindow 时 pi 会把 max_tokens 钳成 NaN
-    contextWindow,
-    // 太小会把 high/max 的思考预算压扁（预算被限制在 maxTokens-1024 内）
-    maxTokens,
-    ...(compat ? { compat } : {}),
-  };
+  const entry: ModelEntry = { id: model.modelId };
+  if (model.reasoning !== undefined) entry.reasoning = model.reasoning;
+  if (model.thinkingLevel !== undefined) entry.thinkingLevel = model.thinkingLevel;
+  if (model.contextWindow !== undefined) entry.contextWindow = model.contextWindow;
+  if (model.maxTokens !== undefined) entry.maxTokens = model.maxTokens;
   // registerProvider 整体替换 models：同一端点+key 的多个模型要累积，否则虚拟模型的同 provider
-  // 成员会互相挤出目录（pi 路由时按目录重新取模型）
-  const known = registeredCustomModels.get(providerId) ?? new Map<string, CustomModelDefinition>();
-  known.set(model.modelId, definition);
-  registeredCustomModels.set(providerId, known);
-  runtime.registerProvider(providerId, {
-    baseUrl: piBaseUrl,
-    api: model.api,
-    apiKey: model.apiKey,
-    // 统一伪装为 enso-code 客户端（覆盖 pi 默认的 "pi (darwin ...)"）
-    headers: { 'User-Agent': ENSO_USER_AGENT },
-    models: [...known.values()],
-  });
-  const provider = runtime.getProvider(providerId);
-  if (!provider) throw new Error(`provider not found after register: ${providerId}`);
-  // 保留鉴权与 raw/simple；预算在 caller / routing payload hook 后检查最终请求。
-  runtime.registerNativeProvider(
-    model.api === 'openai-responses'
-      ? withOpenAIResponsesRouting(withRequestBodyBudget(provider))
-      : withRequestBodyBudget(provider)
+  // 成员会互相挤出目录（pi 路由时按目录重新取模型）。同 id 仍覆盖，保持 spawn 重解析。
+  registerCustomProviderModels(
+    runtime,
+    { api: model.api, baseUrl: model.baseUrl, apiKey: model.apiKey },
+    [entry]
   );
   const registered = runtime.getModel(providerId, model.modelId);
   if (!registered) throw new Error(`model not found after register: ${model.modelId}`);
   return registered;
 }
-
-/** 每个自定义 provider 键已注册过的模型定义（worker 进程内） */
-type CustomModelDefinition = NonNullable<
-  Parameters<ModelRuntime['registerProvider']>[1]['models']
->[number];
-const registeredCustomModels = new Map<string, Map<string, CustomModelDefinition>>();
-
-/** 统一的客户端标识，格式对齐 pi-coding-agent 的 getPiUserAgent（<name>/<ver> (<platform>; <runtime>; <arch>)） */
-const ENSO_USER_AGENT = `enso-code/${version} (${process.platform}; node/${process.version}; ${process.arch})`;
 
 /**
  * adaptive thinking（output_config.effort）的判定：乐观默认支持——未来新模型都支持，

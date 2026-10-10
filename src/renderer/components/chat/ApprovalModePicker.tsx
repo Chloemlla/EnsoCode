@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { Popover, PopoverPopup, PopoverTrigger } from '@/components/ui/popover';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 export const APPROVAL_MODE_META: Record<
@@ -43,7 +44,7 @@ interface ApprovalModePickerProps {
 /** 助手代审档位可用：设置里选了启用中的代审模型 */
 export function useApprovalReviewerReady(): boolean {
   const reviewer = useSettingsStore((state) => state.approvalReviewer);
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   return useMemo(() => {
     if (!reviewer) return false;
     const provider = providers.find(

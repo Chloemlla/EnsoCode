@@ -11,12 +11,16 @@ const harness = vi.hoisted(() => ({
   formProps: {} as Record<string, unknown>,
   updateProvider: vi.fn(),
   oauthRevision: 0,
+  defaultModel: null as { providerId: string; modelId: string } | null,
 }));
 
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores/settings', () => ({
-  useSettingsStore: (selector: (state: unknown) => unknown) =>
-    selector({ providers: harness.providers, updateProvider: harness.updateProvider }),
+  useSettingsStore: Object.assign(
+    (selector: (state: unknown) => unknown) =>
+      selector({ providers: harness.providers, updateProvider: harness.updateProvider }),
+    { getState: () => ({ defaultModel: harness.defaultModel }) }
+  ),
 }));
 vi.mock('@/stores/oauthCredentials', () => ({
   useOauthCredentialStore: (selector: (state: unknown) => unknown) =>
@@ -58,6 +62,7 @@ beforeEach(() => {
   harness.formProps = {};
   harness.updateProvider.mockClear();
   harness.oauthRevision = 0;
+  harness.defaultModel = null;
 });
 
 let root: Root | undefined;
@@ -219,8 +224,15 @@ describe('ChatGPT 池编辑边界', () => {
     );
     expect(harness.formProps.saveDisabled).toBe(false);
     (harness.formProps.onSave as (value: unknown) => void)({ models: fixed.models });
+    // 稀疏契约：thinkingLevel 是用户意图保留；enabled:true 与缺省等价被剥离
     expect(harness.updateProvider.mock.calls).toEqual([
-      ['pool', { models: fixed.models, oauthAccountPool: { accountKeys: ['openai-codex'] } }],
+      [
+        'pool',
+        {
+          models: [{ id: 'gpt-model', thinkingLevel: 'high' }],
+          oauthAccountPool: { accountKeys: ['openai-codex'] },
+        },
+      ],
     ]);
     expect(onClose).toHaveBeenCalledOnce();
   });

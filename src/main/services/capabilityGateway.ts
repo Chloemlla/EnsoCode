@@ -26,6 +26,7 @@ import type {
 import { modelUsability } from '@shared/defaultModel';
 import { normalizeLocale, translate } from '@shared/i18n';
 import { DEFAULT_TRAY_TOGGLE_BINDING } from '@shared/keybindingAccelerator';
+import { materializeProviders } from '@shared/modelDirectory';
 import { TERMINAL_SHELLS } from '@shared/terminalShell';
 import {
   type AgentTypeEntry,
@@ -49,6 +50,7 @@ import type { ListModelsResult, TestProviderResult } from '@shared/types/provide
 import { parseVirtualModels } from '@shared/virtualModels';
 import { isAbsolutePathLike } from '@shared/worktreeRoot';
 import type { AgentSessionIndex } from './agentSessionIndex';
+import { getModelDirectorySnapshot } from './modelDirectory';
 import { createSecretSet, type SecretSet } from './secretRedactor';
 
 export type CapabilityResponseResult = CapabilityAskDecisionAck;
@@ -203,15 +205,20 @@ function settingsState(settings: Record<string, unknown> | null): Record<string,
 }
 
 function providersOf(services: CapabilityDomainServices): ModelProvider[] {
-  const providers = settingsState(services.readSettings()).providers;
-  return Array.isArray(providers)
-    ? providers.filter(
+  return materializeSettingsProviders(settingsState(services.readSettings()).providers);
+}
+
+/** 校验/枚举用的 providers：OAuth models 换成目录 + 稀疏覆盖，自定义条目原样。 */
+function materializeSettingsProviders(value: unknown): ModelProvider[] {
+  const providers = Array.isArray(value)
+    ? value.filter(
         (provider): provider is ModelProvider =>
           Boolean(provider) &&
           typeof provider === 'object' &&
           typeof (provider as ModelProvider).id === 'string'
       )
     : [];
+  return materializeProviders(providers, getModelDirectorySnapshot());
 }
 
 function providerConfig(provider: ModelProvider) {
@@ -426,10 +433,11 @@ function referencedIds(
     }
   }
   if (params.providerId !== undefined || params.modelId !== undefined) {
-    const providers = Array.isArray(state.providers) ? state.providers : [];
-    const provider = providers.map(asRecord).find((entry) => entry?.id === params.providerId);
+    const provider = materializeSettingsProviders(state.providers).find(
+      (entry) => entry.id === params.providerId
+    );
     const models = Array.isArray(provider?.models) ? provider.models : [];
-    if (!models.some((model) => asRecord(model)?.id === params.modelId)) {
+    if (!models.some((model) => model?.id === params.modelId)) {
       return invalid('Unknown provider or model id');
     }
   }

@@ -25,6 +25,12 @@ vi.mock('electron', () => ({
 vi.mock('./proxyConfig', () => ({
   getProxyConfig: () => ({ whenReady: async () => true }),
 }));
+// 登录完成会后台触发目录刷新；不 mock 的话，动态 import('./modelDirectory') 会经
+// settings.ts → oauthProviders.ts 的静态链把本模块重新拉回模块注册表，时机不定，
+// 会踩掉下文 resetModules + doMock 搭建的 fake runtime（“unknown oauth provider”）。
+vi.mock('./modelDirectory', () => ({
+  refreshModelDirectory: async () => {},
+}));
 
 /** 造一个可解码的 JWT（只有 payload 有意义，签名不校验） */
 function fakeJwt(payload: Record<string, unknown>): string {
@@ -1435,6 +1441,9 @@ describe('OAuth 登录的安装级 deviceId', () => {
     const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
       '@earendil-works/pi-coding-agent'
     );
+    // 实际模块加载期间可能完成旧的后台 import；切 fake runtime 前先排空并清缓存。
+    await vi.dynamicImportSettled();
+    vi.resetModules();
     let getDeviceId: (() => string) | undefined;
     interface FakeProvider {
       id: string;
@@ -1485,7 +1494,10 @@ describe('OAuth 登录的安装级 deviceId', () => {
     try {
       const { sender, events } = fakeSender();
       await completeOauthLogin('device-oauth', sender);
-      expect(events.at(-1)).toMatchObject({ type: 'done', providerId: 'device-oauth' });
+      expect(events.at(-1), JSON.stringify(events)).toMatchObject({
+        type: 'done',
+        providerId: 'device-oauth',
+      });
 
       const first = getDeviceId?.();
       expect(first).toMatch(
@@ -1499,6 +1511,7 @@ describe('OAuth 登录的安装级 deviceId', () => {
         expect(saved.deviceId).toBe(first);
       });
     } finally {
+      await vi.dynamicImportSettled();
       vi.doUnmock('@earendil-works/pi-coding-agent');
       vi.resetModules();
     }
@@ -1652,7 +1665,10 @@ describe('从 Codex 本地登录态导入', () => {
       const codex = (await listOauthProviders()).find((p) => p.id === 'openai-codex');
       expect(codex?.accounts.map((a) => a.key)).toEqual(['openai-codex', 'openai-codex#2']);
       expect(otherSend).toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
-      expect(source.send).not.toHaveBeenCalled();
+      // 导入成功后目录会刷新并向所有窗口（含发起窗口）广播 modelDirectory:changed；
+      // 这里断言的是旧语义「不向发起窗口发 credentials-changed」，按通道过滤
+      const sourceChannels = source.send.mock.calls.map(([channel]) => channel);
+      expect(sourceChannels).not.toContain(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
 
       // 同一 ChatGPT 账号再导一次：拒绝，不产生 #3
       const again = await importCodexOauthCredential(undefined, codexAuth);

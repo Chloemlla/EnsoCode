@@ -30,6 +30,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import { DetailRows, PickList, setFilteredIds } from './PresetsSettings';
 
@@ -131,7 +132,7 @@ export function AgentTypeList({ hasSubagentModels = true }: { hasSubagentModels?
   const removeAgentType = useSettingsStore((state) => state.removeAgentType);
   const disabledBuiltins = useSettingsStore((state) => state.disabledBuiltinAgentTypes);
   const toggleBuiltin = useSettingsStore((state) => state.toggleBuiltinAgentType);
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const [editing, setEditing] = React.useState<
     AgentTypeEntry | 'new' | { defaults: Omit<AgentTypeEntry, 'id'> } | null
   >(null);
@@ -301,7 +302,7 @@ export function AgentTypeEditDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const addAgentType = useSettingsStore((state) => state.addAgentType);
   const updateAgentType = useSettingsStore((state) => state.updateAgentType);
 

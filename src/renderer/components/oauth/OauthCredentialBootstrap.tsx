@@ -1,8 +1,10 @@
 import * as React from 'react';
+import { bootstrapModelDirectory, useModelDirectoryStore } from '@/stores/modelDirectory';
 import {
   beginOauthCredentialRefresh,
   type OauthCredentialSnapshot,
   setOauthCredentialState,
+  useOauthCredentialStore,
 } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
 import { runOauthCredentialRefresh } from './oauthCredentialRefresh';
@@ -22,9 +24,24 @@ export function refreshOauthCredentialState(): Promise<OauthCredentialSnapshot> 
 export function OauthCredentialBootstrap() {
   React.useEffect(() => {
     void refreshOauthCredentialState();
-    return window.electronAPI.providers.onOauthCredentialsChanged(() => {
+    bootstrapModelDirectory();
+    // 目录冷启动期间默认模型重验会 defer（不写回）；分区到达后补一次重验闭环
+    let lastRevision = useModelDirectoryStore.getState().snapshot?.revision;
+    const unsubscribeDirectory = useModelDirectoryStore.subscribe((state) => {
+      const revision = state.snapshot?.revision;
+      if (revision === undefined || revision === lastRevision) return;
+      lastRevision = revision;
+      useSettingsStore
+        .getState()
+        .revalidateDefaultModel(useOauthCredentialStore.getState().snapshot);
+    });
+    const unsubscribeCredentials = window.electronAPI.providers.onOauthCredentialsChanged(() => {
       void refreshOauthCredentialState();
     });
+    return () => {
+      unsubscribeDirectory();
+      unsubscribeCredentials();
+    };
   }, []);
 
   return null;

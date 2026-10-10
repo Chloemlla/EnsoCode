@@ -16,6 +16,7 @@ import { registerFilesWorkspaceHandlers } from './filesWorkspace';
 import { registerGitHandlers } from './git';
 import { registerMcpHandlers } from './mcp';
 import { registerMemoryHandlers } from './memory';
+import { registerModelDirectoryHandlers } from './modelDirectory';
 import { registerNodesHandlers } from './nodes';
 import { registerPairHandlers } from './pair';
 import { registerPairBotHandlers } from './pairBots';
@@ -35,6 +36,7 @@ import { registerWorktreeHandlers } from './worktree';
 
 export function registerIpcHandlers(): void {
   registerSettingsHandlers();
+  registerModelDirectoryHandlers();
   registerWindowHandlers();
   registerProviderHandlers();
   registerAssetHandlers();

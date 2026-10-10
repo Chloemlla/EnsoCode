@@ -418,12 +418,22 @@ function scheduleWrite(
 
     void import('../services/agentHost')
       .then(
-        async ({ pushApprovalReviewer, pushMaxActiveCoworkers, pushDisabledWorkflowPresets }) => {
+        async ({
+          pushApprovalReviewer,
+          pushMaxActiveCoworkers,
+          pushDisabledWorkflowPresets,
+          pushModelDirectory,
+        }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
           pushDisabledWorkflowPresets();
+          pushModelDirectory();
         }
       )
+      .catch(() => {});
+    // 目录只重合成自定义分区；动态 import 避免 settings ↔ modelDirectory 静态环。
+    void import('../services/modelDirectory')
+      .then(({ notifyModelDirectorySettingsChanged }) => notifyModelDirectorySettingsChanged())
       .catch(() => {});
     return true;
   } catch {
@@ -528,11 +538,19 @@ export function commitSettingsTransaction(
     // Durable write already succeeded; a dead renderer must not fail the import.
   }
   void import('../services/agentHost')
-    .then(async ({ pushApprovalReviewer, pushMaxActiveCoworkers, pushDisabledWorkflowPresets }) => {
-      pushApprovalReviewer(await readStoredOauthCredentialKeys());
-      pushMaxActiveCoworkers();
-      pushDisabledWorkflowPresets();
-    })
+    .then(
+      async ({
+        pushApprovalReviewer,
+        pushMaxActiveCoworkers,
+        pushDisabledWorkflowPresets,
+        pushModelDirectory,
+      }) => {
+        pushApprovalReviewer(await readStoredOauthCredentialKeys());
+        pushMaxActiveCoworkers();
+        pushDisabledWorkflowPresets();
+        pushModelDirectory();
+      }
+    )
     .catch(() => {});
   return { ok: true, backupPath };
 }

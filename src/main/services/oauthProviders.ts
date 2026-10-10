@@ -202,8 +202,18 @@ export async function ensureProviderModelsRefreshed(
         onlineCatalogRefreshes.delete(providerId);
       }
     });
+    void refresh.finally(() => {
+      refreshModelDirectoryInBackground();
+    });
   }
   await refresh;
+}
+
+/** 动态 import：oauthProviders 被 modelDirectory 经 settings 静态引用，不能反向静态依赖。 */
+function refreshModelDirectoryInBackground(): void {
+  void import('./modelDirectory')
+    .then(({ refreshModelDirectory }) => refreshModelDirectory())
+    .catch(() => {});
 }
 
 // ---- 账号身份缓存 ----
@@ -648,6 +658,7 @@ async function runOauthLogin(
       providerId,
       account: { key: accountKey, providerId, ...accountIdentity },
     });
+    refreshModelDirectoryInBackground();
     broadcastOauthCredentialsChanged(sender);
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);

@@ -31,10 +31,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import { type JobKind, toJobRows } from './memoryJobRows';
 import {
@@ -192,7 +189,6 @@ function SwitchRow({
 export function MemorySettings({ onLibraryChanged }: { onLibraryChanged?: () => void } = {}) {
   const { t } = useI18n();
   const disabledBuiltinTools = useSettingsStore((state) => state.disabledBuiltinTools);
-  const providers = useSettingsStore((state) => state.providers);
   const embeddingModel = useSettingsStore((state) => state.memoryEmbeddingModel);
   const setEmbeddingModel = useSettingsStore((state) => state.setMemoryEmbeddingModel);
   const autoDownload = useSettingsStore((state) => state.memoryEmbeddingAutoDownload);
@@ -211,11 +207,7 @@ export function MemorySettings({ onLibraryChanged }: { onLibraryChanged?: () => 
   const setChatModel = useSettingsStore((state) => state.setMemoryChatModel);
   const memoryLanguage = useSettingsStore((state) => state.memoryLanguage);
   const setMemoryLanguage = useSettingsStore((state) => state.setMemoryLanguage);
-  const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
-  const modelCandidates = React.useMemo(
-    () => usableProvidersForOauthSnapshot(providers, oauthSnapshot),
-    [providers, oauthSnapshot]
-  );
+  const modelCandidates = useUsableProviders();
   const distillProvider = distillModel
     ? modelCandidates.find((entry) => entry.id === distillModel.providerId)
     : undefined;

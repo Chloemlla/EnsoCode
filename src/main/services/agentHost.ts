@@ -28,6 +28,7 @@ import {
 import { normalizeMaxActiveCoworkers } from '@shared/maxActiveCoworkers';
 import { mcpTimeoutsForSpawn } from '@shared/mcpTimeout';
 import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
+import { materializeProviders } from '@shared/modelDirectory';
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
@@ -58,6 +59,7 @@ import type {
   TitleSummaryInput,
   VirtualClassifierCredentials,
   VirtualSpawnClassifier,
+  WorkerCustomProvider,
 } from '@shared/types/agent';
 import { parseAgentWorkerEvent } from '@shared/types/agent';
 import type { SubagentModelEntry } from '@shared/types/assets';
@@ -103,6 +105,7 @@ import { isComputerPlatformSupported } from './computer/support';
 import { resolveGlobalInstruction } from './instructionStore';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
+import { getModelDirectorySnapshot, onModelDirectoryChanged } from './modelDirectory';
 import { OAUTH_POOL_EXHAUSTED } from './oauthAccountPool';
 import { getOauthQuotaCoordinator, getRuntime as getOauthRuntime } from './oauthProviders';
 import { PendingReloadRegistry } from './pendingReloads';
@@ -318,6 +321,7 @@ export function startAgentWorker(): void {
     pushApprovalReviewer();
     pushMaxActiveCoworkers();
     pushDisabledWorkflowPresets();
+    pushModelDirectory();
   });
   child.on('message', (raw) => {
     const event = parseAgentWorkerEvent(raw);
@@ -765,6 +769,16 @@ export function resolveAgentTypeSpawnConfig(
       systemPrompt: definition.systemPrompt,
       model: selectedModel.config,
       tools: definition.tools,
+      // 类型级推理预设透传（与 configuredAgentTypes 同口径：非法值不透传）。
+      // 此前只在 coworker 直雇路径生效，typed-spawn 静默丢弃导致子会话回落 medium。
+      ...(MODEL_REASONING_OVERRIDES.includes(definition.reasoning as ModelReasoningOverride)
+        ? { reasoning: definition.reasoning as ModelReasoningOverride }
+        : {}),
+      ...(MODEL_THINKING_LEVEL_OVERRIDES.includes(
+        definition.thinkingLevel as ModelThinkingLevelOverride
+      )
+        ? { thinkingLevel: definition.thinkingLevel as ModelThinkingLevelOverride }
+        : {}),
       allowedToolIds: expectedToolIds,
       skillPaths: resources.skillPaths,
       skillBindingIds: resources.skillPaths.map(() => randomUUID()),
@@ -1590,8 +1604,15 @@ export function configuredAgentTypes(
           ? { mcpServers: [...resources.mcpServers] }
           : {}),
         ...(bound?.ok ? { model: bound.selection.config } : {}),
-        ...(entry.reasoning ? { reasoning: entry.reasoning } : {}),
-        ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+        // 与 custom 分支/resolveAgentTypeSpawnConfig 同口径：白名单过滤，非法不透传
+        ...(MODEL_REASONING_OVERRIDES.includes(entry.reasoning as ModelReasoningOverride)
+          ? { reasoning: entry.reasoning as ModelReasoningOverride }
+          : {}),
+        ...(MODEL_THINKING_LEVEL_OVERRIDES.includes(
+          entry.thinkingLevel as ModelThinkingLevelOverride
+        )
+          ? { thinkingLevel: entry.thinkingLevel as ModelThinkingLevelOverride }
+          : {}),
       };
     }
   );
@@ -1793,6 +1814,55 @@ export function pushDisabledWorkflowPresets(): void {
   } satisfies AgentCommand);
 }
 
+let modelDirectoryListenerBound = false;
+
+function bindModelDirectoryListener(): void {
+  if (modelDirectoryListenerBound) return;
+  modelDirectoryListenerBound = true;
+  onModelDirectoryChanged(() => pushModelDirectory());
+}
+
+function customProvidersForWorker(): WorkerCustomProvider[] {
+  const providers = readSettingsState()?.providers;
+  if (!Array.isArray(providers)) return [];
+  const out: WorkerCustomProvider[] = [];
+  for (const item of providers) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const provider = item as Partial<ModelProvider>;
+    if (provider.oauthAccountKey) continue;
+    if (typeof provider.id !== 'string' || provider.id.length === 0) continue;
+    if (typeof provider.name !== 'string') continue;
+    if (
+      typeof provider.api !== 'string' ||
+      typeof provider.baseUrl !== 'string' ||
+      typeof provider.apiKey !== 'string'
+    ) {
+      continue;
+    }
+    if (!Array.isArray(provider.models)) continue;
+    out.push({
+      settingsId: provider.id,
+      name: provider.name,
+      api: provider.api,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      models: provider.models,
+    });
+  }
+  return out;
+}
+
+/** 把目录快照和自定义 provider 注册信息推给 worker。worker 未就绪时丢掉，ready 时会再推一次。 */
+export function pushModelDirectory(): void {
+  bindModelDirectoryListener();
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-model-directory',
+    snapshot: getModelDirectorySnapshot(),
+    customProviders: customProvidersForWorker(),
+  } satisfies AgentCommand);
+}
+
 export function readSettingsState(): Record<string, unknown> | undefined {
   return persistedSettingsState(readSettings()?.['enso-settings']);
 }
@@ -1803,7 +1873,7 @@ function virtualModelsFromSettings(): VirtualModelEntry[] {
 
 function providersFromSettings(): ModelProvider[] {
   const providers = readSettingsState()?.providers;
-  return Array.isArray(providers)
+  const raw = Array.isArray(providers)
     ? providers.filter(
         (provider): provider is ModelProvider =>
           Boolean(provider) &&
@@ -1811,6 +1881,8 @@ function providersFromSettings(): ModelProvider[] {
           typeof (provider as ModelProvider).id === 'string'
       )
     : [];
+  // OAuth 条目的 models 只是稀疏覆盖；存在性、enabled 与凭证校验都看目录物化后的清单。
+  return materializeProviders(raw, getModelDirectorySnapshot());
 }
 
 export function modelRefForSpawnConfig(config: SpawnModelConfig): ModelRef {
@@ -1839,7 +1911,11 @@ function spawnModelConfig(
     settingsProviderId: provider.id,
     ...(provider.oauthAccountKey ? { oauthAccountKey: provider.oauthAccountKey } : {}),
     ...(isOauthAccountPool(provider) ? { oauthAccountPool: provider.oauthAccountPool } : {}),
-    ...(!provider.oauthAccountKey ? pickModelCapabilityOverrides(entry) : {}),
+    // 统一目录后 OAuth 条目 models 只承载稀疏用户覆盖（enabled/别名/能力/档位），
+    // 行覆盖对 OAuth 同样生效；旧守卫丢弃它们是因为那时行是 catalog 冻结拷贝。
+    // 已知过渡窗口：renderer 水合才执行 v16 稀疏化，Main 先读（bot 自启/tray）时
+    // v15 稠密行的 catalog 能力字段会被当覆盖透传——只影响子会话档位且水合后自愈，接受。
+    ...pickModelCapabilityOverrides(entry),
   };
 }
 

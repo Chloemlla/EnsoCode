@@ -16,6 +16,22 @@ vi.mock('../ipc/settings', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../ipc/settings')>()),
   readSettings: () => settingsMock.value,
 }));
+const directoryMock = vi.hoisted(() => ({
+  snapshot: {
+    revision: 0,
+    generatedAt: 0,
+    providers: [] as Array<{
+      key: string;
+      kind: 'oauth' | 'custom';
+      label: string;
+      models: Array<{ id: string; label?: string }>;
+    }>,
+  },
+}));
+vi.mock('./modelDirectory', () => ({
+  getModelDirectorySnapshot: () => directoryMock.snapshot,
+  onModelDirectoryChanged: () => () => {},
+}));
 
 import {
   agentTypeRegistrySnapshot,
@@ -26,6 +42,7 @@ import {
   resolveAgentTypeSpawnConfig,
   resolveModelSelection,
   resolvePresetSystemPrompt,
+  resolveSubagentModelSelection,
   setMemberAgentTypeSource,
   toSessionMcpConfig,
 } from './agentHost';
@@ -487,5 +504,183 @@ describe('agentHost 成员 agent type', () => {
     } finally {
       setMemberAgentTypeSource(() => []);
     }
+  });
+});
+
+describe('resolveModelSelection OAuth 目录物化', () => {
+  const keys = new Set(['google-antigravity']);
+  const provider = (models: Array<{ id: string; enabled?: boolean }>) => ({
+    id: 'ga',
+    name: 'Antigravity',
+    api: 'google-generative-ai',
+    apiKey: '',
+    baseUrl: '',
+    enabled: true,
+    oauthAccountKey: 'google-antigravity',
+    models,
+  });
+  const entry = {
+    id: 'e1',
+    providerId: 'ga',
+    modelId: 'gemini-3.8-flash',
+    description: '新静态模型',
+  };
+
+  const useDirectory = (models: Array<{ id: string; enabled?: boolean }>) => {
+    directoryMock.snapshot = {
+      revision: 1,
+      generatedAt: 1,
+      providers: [
+        {
+          key: 'google-antigravity',
+          kind: 'oauth',
+          label: 'Antigravity',
+          models: [{ id: 'gemini-3.8-flash', label: 'Flash' }],
+        },
+      ],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          subagentModelsEnabled: true,
+          subagentModels: [entry],
+          providers: [provider(models)],
+        },
+      },
+    };
+  };
+
+  it('稀疏覆盖为空时，目录里的新模型仍能通过选型与子代理校验', () => {
+    useDirectory([]);
+    try {
+      const selected = resolveModelSelection('ga', 'gemini-3.8-flash', keys);
+      expect(selected.ok).toBe(true);
+      if (selected.ok) {
+        expect(selected.selection.ref).toEqual({
+          providerId: 'ga',
+          modelId: 'gemini-3.8-flash',
+        });
+      }
+      const subagent = resolveSubagentModelSelection('Antigravity/gemini-3.8-flash', keys);
+      expect(subagent.ok).toBe(true);
+      if (subagent.ok) expect(subagent.selection.config.modelId).toBe('gemini-3.8-flash');
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+
+  it('物化视图保留 enabled:false 覆盖，停用的目录模型不能通过校验', () => {
+    useDirectory([{ id: 'gemini-3.8-flash', enabled: false }]);
+    try {
+      expect(resolveModelSelection('ga', 'gemini-3.8-flash', keys)).toEqual({
+        ok: false,
+        error: 'Model is unavailable: model-disabled',
+      });
+      expect(resolveSubagentModelSelection('Antigravity/gemini-3.8-flash', keys).ok).toBe(false);
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+
+  it('OAuth 稀疏行上的用户覆盖（thinkingLevel）进入 spawn 配置', () => {
+    // 统一目录后 OAuth 行只承载用户意图；spawnModelConfig 不能再按 oauthAccountKey 丢弃行覆盖
+    directoryMock.snapshot = {
+      revision: 1,
+      generatedAt: 1,
+      providers: [
+        {
+          key: 'google-antigravity',
+          kind: 'oauth',
+          label: 'Antigravity',
+          models: [{ id: 'gemini-3.8-flash', label: 'Flash' }],
+        },
+      ],
+    };
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            {
+              id: 'ga',
+              name: 'Antigravity',
+              api: 'google-generative-ai',
+              apiKey: '',
+              baseUrl: '',
+              enabled: true,
+              oauthAccountKey: 'google-antigravity',
+              models: [{ id: 'gemini-3.8-flash', thinkingLevel: 'high' }],
+            },
+          ],
+        },
+      },
+    };
+    try {
+      const selected = resolveModelSelection('ga', 'gemini-3.8-flash', keys);
+      expect(selected.ok).toBe(true);
+      if (selected.ok) {
+        expect(selected.selection.config).toMatchObject({ thinkingLevel: 'high' });
+      }
+    } finally {
+      directoryMock.snapshot = { revision: 0, generatedAt: 0, providers: [] };
+    }
+  });
+});
+
+describe('resolveAgentTypeSpawnConfig 类型级推理预设', () => {
+  const TYPE_ID = '66666666-6666-4666-8666-666666666666';
+  const setTypeSettings = (extra: Record<string, unknown>) => {
+    settingsMock.value = {
+      'enso-settings': {
+        version: 99,
+        state: {
+          providers: [
+            {
+              id: 'p1',
+              name: 'p1',
+              api: 'anthropic-messages',
+              apiKey: 'key-p1',
+              baseUrl: 'https://p1.test',
+              enabled: true,
+              models: [{ id: 'strong' }],
+            },
+          ],
+          agentTypes: [
+            {
+              id: TYPE_ID,
+              name: 'deep-scout',
+              description: 'Deep scout',
+              systemPrompt: 'Be thorough.',
+              tools: 'readonly',
+              providerId: 'p1',
+              modelId: 'strong',
+              ...extra,
+            },
+          ],
+        },
+      },
+    };
+  };
+
+  it('fixed 模型类型的 reasoning/thinkingLevel 透传进 resolved config', () => {
+    setTypeSettings({ reasoning: 'on', thinkingLevel: 'xhigh' });
+    const parent = resolveModelSelection('p1', 'strong', new Set());
+    if (!parent.ok) throw new Error(parent.error);
+    const resolved = resolveAgentTypeSpawnConfig(`custom:${TYPE_ID}`, parent.selection, new Set());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.config).toMatchObject({ reasoning: 'on', thinkingLevel: 'xhigh' });
+  });
+
+  it('非法取值不透传（与 configuredAgentTypes 同口径）', () => {
+    setTypeSettings({ reasoning: 'auto', thinkingLevel: 'extreme' });
+    const parent = resolveModelSelection('p1', 'strong', new Set());
+    if (!parent.ok) throw new Error(parent.error);
+    const resolved = resolveAgentTypeSpawnConfig(`custom:${TYPE_ID}`, parent.selection, new Set());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.config).not.toHaveProperty('reasoning');
+    expect(resolved.config).not.toHaveProperty('thinkingLevel');
   });
 });

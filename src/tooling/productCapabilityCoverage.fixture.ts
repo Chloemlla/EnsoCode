@@ -407,6 +407,12 @@ export const IPC_PRODUCT_COVERAGE = {
   PROVIDERS_CLASSIFIER_MODELS: excluded(
     'classifier models are listed only by the virtual model settings UI'
   ),
+  MODEL_DIRECTORY_GET: excluded(
+    'Renderer bootstrap for the derived model directory snapshot; settings keep sparse overrides only.'
+  ),
+  MODEL_DIRECTORY_CHANGED: excluded(
+    'Cross-window model directory snapshot transport; not a standalone product capability.'
+  ),
   OAUTH_PROVIDERS_LIST: surfaces('providers.oauth.list'),
   OAUTH_LOGIN: surfaces('providers.oauth.login'),
   OAUTH_LOGIN_RESPOND: excluded(

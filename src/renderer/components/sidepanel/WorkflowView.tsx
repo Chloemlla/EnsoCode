@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
@@ -53,7 +54,7 @@ function runPreset(
     ...scopedDefaultModels(project, settings.projectGroups),
     lastProviderId: conversation.lastProviderId,
     lastModelId: conversation.lastModelId,
-    providers: settings.providers,
+    providers: readMaterializedProviders(),
     credentials: oauthCredentialContext(useOauthCredentialStore.getState().snapshot),
     virtualModels: settings.virtualModels,
   });

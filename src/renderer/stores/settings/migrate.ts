@@ -1,7 +1,8 @@
 import { type AccentColor, resolveAccentColor } from '@shared/accentColor';
 import { resolveCompactStrategy } from '@shared/compactStrategy';
+import { extractModelOverrides, referencedModelIds } from '@shared/modelDirectory';
 import { STATUS_LINE_PRESETS, STATUS_LINE_SEGMENT_IDS } from '@shared/statusLine';
-import { type EditMode, resolveEditMode } from '@shared/types';
+import { type EditMode, type ModelEntry, resolveEditMode } from '@shared/types';
 import {
   addComputerDefaultOff,
   COMPUTER_DEFAULT_OFF_SETTINGS_VERSION,
@@ -21,7 +22,7 @@ import { isSpeechModelId } from '@shared/types/speech';
  */
 
 /** 当前持久化数据版本；改数据形状时 +1 并在 `migrateSettings` 里加一段 */
-export const SETTINGS_VERSION = 15;
+export const SETTINGS_VERSION = 16;
 
 export function mergeSettingsState<T extends { editMode: EditMode; accentColor: AccentColor }>(
   persisted: unknown,
@@ -57,6 +58,10 @@ export function mergeSettingsState<T extends { editMode: EditMode; accentColor: 
  * v10 → v11：移除 Hashline 与 bash 拦截；hashline 回落 replace。
  * v11 → v12：默认编辑模式改为 apply_patch，已有 replace 一并切过去。
  * v12 → v13：subagent/coworker 合并；旧开关迁为 mode 掩码。
+ * v15 → v16：OAuth 条目的 models 从登录时冻结的全量拷贝收缩为稀疏覆盖表
+ * （只留禁用/别名/能力覆盖及选型引用行）；清单改由 Main 侧统一模型目录派生，
+ * 老账号不再错过新版本静态表里的新模型（gemini-3.8-flash 事故的根修）。
+ * 幂等：对已是稀疏表的条目重跑 extractModelOverrides 结果不变。
  */
 export function migrateSettings(persisted: unknown, version: number): unknown {
   if (version >= SETTINGS_VERSION) return persisted;
@@ -151,6 +156,25 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
       state = { ...state, statusLineSegments: [...STATUS_LINE_PRESETS.default] };
     else if (matches(oldFull))
       state = { ...state, statusLineSegments: [...STATUS_LINE_PRESETS.full] };
+  }
+  if (version < 16 && Array.isArray(state.providers)) {
+    state = {
+      ...state,
+      providers: state.providers.map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+        const provider = entry as Record<string, unknown>;
+        if (typeof provider.oauthAccountKey !== 'string') return provider;
+        if (!Array.isArray(provider.models)) return provider;
+        return {
+          ...provider,
+          models: extractModelOverrides(
+            provider.models as ModelEntry[],
+            undefined,
+            referencedModelIds(state, provider.id)
+          ),
+        };
+      }),
+    };
   }
   return state;
 }

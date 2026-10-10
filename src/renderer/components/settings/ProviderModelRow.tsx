@@ -56,6 +56,8 @@ interface ProviderModelRowProps {
   catalogMeta?: ModelMeta;
   onToggleExpand: () => void;
   onToggleEnabled: () => void;
+  /** 缺省 true。OAuth 条目置 false：清单归目录管，删除行保存后会“复活” */
+  canRemove?: boolean;
   onRemove: () => void;
   onChange: (next: ModelEntry) => void;
   selected?: boolean;
@@ -69,6 +71,7 @@ export function ProviderModelRow({
   catalogMeta,
   onToggleExpand,
   onToggleEnabled,
+  canRemove = true,
   onRemove,
   onChange,
   selected,
@@ -136,15 +139,17 @@ export function ProviderModelRow({
             {model.id}
           </span>
         )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-          onClick={onRemove}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
+        {canRemove && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+            onClick={onRemove}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
 
       {showEditors && (

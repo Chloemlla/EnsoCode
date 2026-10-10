@@ -1,24 +1,15 @@
-import { useMemo } from 'react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/i18n';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 /** 助手代审模型：未选则该档不可用，不回退会话模型。 */
 export function ApprovalReviewerPicker() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
   const model = useSettingsStore((state) => state.approvalReviewer);
   const setModel = useSettingsStore((state) => state.setApprovalReviewer);
-  const snapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, snapshot),
-    [providers, snapshot]
-  );
+  const candidates = useUsableProviders();
   const selectedProvider = model
     ? candidates.find((entry) => entry.id === model.providerId)
     : undefined;

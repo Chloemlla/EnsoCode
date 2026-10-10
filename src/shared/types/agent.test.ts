@@ -676,6 +676,24 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ type: 'set-disabled-workflow-presets' })).toBeNull();
   });
 
+  it('set-model-directory 只校验键，载荷留给 worker 收窄', () => {
+    const command = {
+      type: 'set-model-directory',
+      snapshot: { revision: 1 },
+      customProviders: [],
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(parseAgentCommand({ type: 'set-model-directory', snapshot: null })).toBeNull();
+    expect(
+      parseAgentCommand({
+        type: 'set-model-directory',
+        snapshot: null,
+        customProviders: [],
+        extra: 1,
+      })
+    ).toBeNull();
+  });
+
   it('spawn-parent 携 editMode:仅接受三个互斥模式', () => {
     const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
     for (const editMode of ['replace', 'apply_patch'] as const) {
@@ -1005,6 +1023,73 @@ describe('parent/child commands', () => {
         ...command,
         identity: { ...child, profileId: 'other' },
       })
+    ).toBeNull();
+  });
+
+  it('spawn-child 透传类型级 reasoning/thinkingLevel；非法值拒绝', () => {
+    const { profileId: _omit, ...nonEnsoChild } = { ...child, typeKey: 'builtin:scout' };
+    const baseConfig = {
+      typeKey: 'builtin:scout',
+      spawnSpecId: SPAWN_SPEC_ID,
+      displayName: 'Scout',
+      description: 'Read-only scout',
+      systemPrompt: 'scout role',
+      model,
+      tools: 'readonly',
+      skillBindingIds: [],
+      skillPaths: [],
+      mcpBindingIds: [],
+      systemPromptHash: proof.systemPromptHash,
+      mcpServers: [],
+    };
+    const command = {
+      type: 'spawn-child',
+      identity: nonEnsoChild,
+      cwd: '/repo',
+      config: { ...baseConfig, reasoning: 'on', thinkingLevel: 'xhigh' },
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    // 缺省不带 → 合法（字段可选）
+    expect(parseAgentCommand({ ...command, config: baseConfig })).toEqual({
+      ...command,
+      config: baseConfig,
+    });
+    // 白名单外的取值一律拒收（协议是 Main→worker 的信任边界）
+    for (const bad of [
+      { ...baseConfig, reasoning: 'auto' },
+      { ...baseConfig, thinkingLevel: 'extreme' },
+      { ...baseConfig, thinkingLevel: 3 },
+    ]) {
+      expect(parseAgentCommand({ ...command, config: bad })).toBeNull();
+    }
+  });
+
+  it('spawn-child Enso locked profile 拒收类型级推理预设', () => {
+    const command = {
+      type: 'spawn-child',
+      identity: child,
+      cwd: '/repo',
+      config: {
+        typeKey: 'agent:enso',
+        spawnSpecId: SPAWN_SPEC_ID,
+        displayName: 'Enso',
+        description: 'System agent',
+        systemPrompt: 'Locked prompt',
+        model,
+        tools: 'enso-locked',
+        skillBindingIds: [],
+        skillPaths: [],
+        mcpBindingIds: [],
+        systemPromptHash: proof.systemPromptHash,
+        mcpServers: [],
+        lockedProfileId: 'enso-locked-v1',
+      },
+    };
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, reasoning: 'on' } })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ ...command, config: { ...command.config, thinkingLevel: 'high' } })
     ).toBeNull();
   });
 

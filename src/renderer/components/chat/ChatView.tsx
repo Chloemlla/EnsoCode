@@ -15,11 +15,8 @@ import { toChatMentionCandidates } from '@/hooks/useMentionSearch';
 import { useSpeechStatus } from '@/hooks/useSpeechStatus';
 import { useI18n } from '@/i18n';
 import { startDesktopVoiceSession } from '@/lib/voiceSession';
-import {
-  oauthCredentialContext,
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useMaterializedProviders, useUsableProviders } from '@/stores/modelDirectory/useProviders';
+import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSessionsStore } from '@/stores/sessions';
 import { selectChatChrome } from '@/stores/sessions/chatChrome';
 import { selectChatCandidateConversations } from '@/stores/sessions/sidebarDirectory';
@@ -73,7 +70,7 @@ const pickSuggestion = (prompt: string) => {
 
 export function ChatView() {
   const { t } = useI18n();
-  const providers = useSettingsStore((state) => state.providers);
+  const providers = useMaterializedProviders();
   const virtualModels = useSettingsStore((state) => state.virtualModels);
   const customAgentTypes = useSettingsStore((state) => state.agentTypes);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
@@ -90,6 +87,7 @@ export function ChatView() {
   const chrome = useSessionsStore(useShallow(selectChatChrome));
   const memberName = useMemberName(chrome?.displayedParentId ? chrome.agentType : undefined);
   const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
+  const enabledProviders = useUsableProviders();
   const candidateConversations = useSessionsStore((state) =>
     selectChatCandidateConversations(state.conversations)
   );
@@ -101,10 +99,6 @@ export function ChatView() {
         ? toChatMentionCandidates(candidateConversations, parentProjectId, parentId)
         : [],
     [candidateConversations, parentId, parentProjectId]
-  );
-  const enabledProviders = useMemo(
-    () => usableProvidersForOauthSnapshot(providers, oauthSnapshot),
-    [providers, oauthSnapshot]
   );
   // 会话显式选择优先；新草稿沿 项目默认 → 分组默认 → 全局默认，不再退化到 providers 第一项。
   const conversationProject = useMemo(

@@ -17,10 +17,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { useSpeechStatus } from '@/hooks/useSpeechStatus';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import {
-  usableProvidersForOauthSnapshot,
-  useOauthCredentialStore,
-} from '@/stores/oauthCredentials';
+import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 import { formatBytes } from './MemorySettings';
 
@@ -270,12 +267,7 @@ export function VoiceCorrectionSettings() {
   const setModelId = useSettingsStore((state) => state.setVoiceCorrectionModel);
   const remoteModel = useSettingsStore((state) => state.voiceCorrectionRemoteModel);
   const setRemoteModel = useSettingsStore((state) => state.setVoiceCorrectionRemoteModel);
-  const providers = useSettingsStore((state) => state.providers);
-  const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
-  const candidates = React.useMemo(
-    () => usableProvidersForOauthSnapshot(providers, oauthSnapshot),
-    [providers, oauthSnapshot]
-  );
+  const candidates = useUsableProviders();
   const [models, setModels] = React.useState<ChatModelDto[]>([]);
   const [progress, setProgress] = React.useState<EmbeddingDownloadProgressDto | null>(null);
   const refresh = React.useCallback(() => {

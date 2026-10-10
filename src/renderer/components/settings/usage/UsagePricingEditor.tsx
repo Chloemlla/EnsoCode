@@ -11,6 +11,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Input } from '@/components/ui/input';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { useMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
 
 const EMPTY: ModelPricing = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -144,7 +145,7 @@ export function UsagePricingEditor({
 }) {
   const { t } = useI18n();
   const overrides = useSettingsStore((s) => s.usageModelPricing);
-  const providers = useSettingsStore((s) => s.providers);
+  const providers = useMaterializedProviders();
   const setPricing = useSettingsStore((s) => s.setUsageModelPricing);
   const [open, setOpen] = React.useState(false);
   const [showAll, setShowAll] = React.useState(false);

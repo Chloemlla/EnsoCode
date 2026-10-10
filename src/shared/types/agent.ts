@@ -51,8 +51,11 @@ import {
 } from './fileChanges';
 import {
   MODEL_API_KINDS,
+  MODEL_REASONING_OVERRIDES,
+  MODEL_THINKING_LEVEL_OVERRIDES,
   type ModelApiKind,
   type ModelCapabilityOverrides,
+  type ModelEntry,
   type ModelReasoningOverride,
   type ModelThinkingLevelOverride,
 } from './llm';
@@ -67,6 +70,19 @@ import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot 
 
 export type { ChildSessionIdentity, SessionIdentity } from '../builtinAgents';
 export { parseChildSessionIdentity, parseSessionIdentity } from '../builtinAgents';
+
+/**
+ * Main → worker 的自定义 provider 注册信息。api 在 shared 侧保持 string，
+ * worker 再用 MODEL_API_KINDS 收窄。
+ */
+export interface WorkerCustomProvider {
+  settingsId: string;
+  name: string;
+  api: string;
+  baseUrl: string;
+  apiKey: string;
+  models: ModelEntry[];
+}
 
 /** 会话状态。waiting/done 属权限门与 subagent 刀，M1 不引入 */
 export type NodeStatus = 'idle' | 'running' | 'failed';
@@ -865,6 +881,12 @@ export interface ResolvedAgentTypeSpawnConfig {
   systemPrompt: string;
   model: SpawnModelConfig;
   tools: 'all' | 'readonly' | 'enso-locked';
+  /**
+   * 类型级推理预设（子代理类型上配置的档位）：优先级 派发 thinking > 类型预设 >
+   * 模型条目预设 > 父会话。缺省 = 跟随模型条目/父会话。与 AgentTypeSpawnConfig 同语义。
+   */
+  reasoning?: ModelReasoningOverride;
+  thinkingLevel?: ModelThinkingLevelOverride;
   /** Main-authorized exact node/profile intersection; absent keeps the profile tool set. */
   allowedToolIds?: readonly string[];
   skillPaths: readonly string[];
@@ -1167,6 +1189,8 @@ export type AgentCommand =
   | { type: 'set-max-active-coworkers'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
+  /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
+  | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
   | { type: 'ask-respond'; identity: SessionIdentity; requestId: string; answer: string }
   | {
@@ -2718,6 +2742,8 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
       'systemPrompt',
       'model',
       'tools',
+      'reasoning',
+      'thinkingLevel',
       'allowedToolIds',
       'skillPaths',
       'skillBindingIds',
@@ -2760,10 +2786,21 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
   ) {
     return null;
   }
+  // 类型级推理预设：白名单取值，非法一律拒收（Main→worker 信任边界）
+  if (
+    (value.reasoning !== undefined &&
+      !MODEL_REASONING_OVERRIDES.includes(value.reasoning as ModelReasoningOverride)) ||
+    (value.thinkingLevel !== undefined &&
+      !MODEL_THINKING_LEVEL_OVERRIDES.includes(value.thinkingLevel as ModelThinkingLevelOverride))
+  ) {
+    return null;
+  }
   if (
     (typeKey === 'agent:enso' &&
       (value.lockedProfileId !== ENSO_LOCKED_PROFILE_ID ||
         value.tools !== 'enso-locked' ||
+        value.reasoning !== undefined ||
+        value.thinkingLevel !== undefined ||
         value.allowedToolIds !== undefined ||
         skillPaths.length !== 0 ||
         skillBindingIds.length !== 0 ||
@@ -3187,6 +3224,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         Array.isArray(value.ids) &&
         value.ids.length <= 64 &&
         value.ids.every((id) => typeof id === 'string' && isWorkflowPresetId(id))
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-model-directory':
+      return hasExactKeys(value, ['type', 'snapshot', 'customProviders'])
         ? (value as unknown as AgentCommand)
         : null;
     case 'ask-respond':

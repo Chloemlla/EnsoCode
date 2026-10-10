@@ -701,6 +701,108 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     expect(parentSession.prompt).toHaveBeenCalledWith(expect.stringContaining('explicit handoff'));
   });
 
+  it('spawn-child 的类型级 reasoning/thinkingLevel 作为类型预设进入子会话', async () => {
+    const supervisor = new SessionSupervisor({
+      emit: vi.fn(),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
+    });
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+      editMode: 'apply_patch',
+    });
+    await settleUntil(() => mocks.sessions.length > 0);
+    const scout = {
+      sessionId: 'parent::cw-scout',
+      generation: '44444444-4444-4444-8444-444444444444',
+      parent,
+      instanceId: '55555555-5555-4555-8555-555555555555',
+      instanceName: 'Scout-55555555',
+      typeKey: 'builtin:scout' as const,
+    };
+    supervisor.handleCommand({
+      type: 'spawn-child',
+      identity: scout,
+      cwd: '/workspace',
+      config: {
+        typeKey: 'builtin:scout',
+        displayName: 'Scout',
+        description: 'Read-only scout',
+        spawnSpecId: 'spawn-scout',
+        systemPrompt: 'scout role',
+        model,
+        tools: 'readonly',
+        skillPaths: [],
+        skillBindingIds: [],
+        mcpServers: [],
+        mcpBindingIds: [],
+        systemPromptHash: 'scout-hash',
+        reasoning: 'on' as const,
+        thinkingLevel: 'xhigh' as const,
+      },
+    });
+    await settleUntil(() => mocks.createAgentSession.mock.calls.length > 1);
+    const childOptions = mocks.createAgentSession.mock.calls[1][0] as {
+      thinkingLevel?: string;
+      model: { reasoning?: boolean };
+    };
+    // 类型预设 xhigh 生效（此前被静默丢弃，沿兜底链落到 medium）
+    expect(childOptions.thinkingLevel).toBe('xhigh');
+    expect(childOptions.model.reasoning).toBe(true);
+  });
+
+  it('spawn-child 不带类型级预设时不设置 thinkingLevel（跟随父会话）', async () => {
+    const supervisor = new SessionSupervisor({
+      emit: vi.fn(),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
+    });
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+      editMode: 'apply_patch',
+    });
+    await settleUntil(() => mocks.sessions.length > 0);
+    const scout = {
+      sessionId: 'parent::cw-scout',
+      generation: '44444444-4444-4444-8444-444444444444',
+      parent,
+      instanceId: '55555555-5555-4555-8555-555555555555',
+      instanceName: 'Scout-55555555',
+      typeKey: 'builtin:scout' as const,
+    };
+    supervisor.handleCommand({
+      type: 'spawn-child',
+      identity: scout,
+      cwd: '/workspace',
+      config: {
+        typeKey: 'builtin:scout',
+        displayName: 'Scout',
+        description: 'Read-only scout',
+        spawnSpecId: 'spawn-scout',
+        systemPrompt: 'scout role',
+        model,
+        tools: 'readonly',
+        skillPaths: [],
+        skillBindingIds: [],
+        mcpServers: [],
+        mcpBindingIds: [],
+        systemPromptHash: 'scout-hash',
+      },
+    });
+    await settleUntil(() => mocks.createAgentSession.mock.calls.length > 1);
+    const childOptions = mocks.createAgentSession.mock.calls[1][0] as {
+      thinkingLevel?: string;
+    };
+    // 无预设 → 跟随父会话：父 spawn 未开推理 → reasoningEnabled=false → 档位恒 'off'
+    expect(childOptions.thinkingLevel).toBe('off');
+  });
+
   it.each(
     [
       {
