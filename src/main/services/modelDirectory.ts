@@ -46,10 +46,6 @@ function directoryModel(id: string, name?: string): DirectoryModel {
   return model;
 }
 
-function cloneModels(models: readonly DirectoryModel[]): DirectoryModel[] {
-  return models.map((model) => ({ ...model }));
-}
-
 /**
  * 把 runtime OAuth 清单、settings 自定义条目和离线缓存合成一份快照。
  * revision / now 由调用方决定；本函数不比较新旧、不自行 bump。
@@ -75,31 +71,22 @@ export function synthesizeModelDirectory(input: {
       .filter((model) => typeof model.id === 'string' && model.id.length > 0)
       .map((model) => directoryModel(model.id, model.name));
     const cached = cachedByKey.get(source.id);
-    const extras = input.extraOauthModels?.get(source.id);
-    const withExtras = (models: DirectoryModel[]): DirectoryModel[] => {
-      if (!extras?.length) return models;
-      const known = new Set(models.map((model) => model.id));
-      const missing = extras.filter((model) => !known.has(model.id)).map((model) => ({ ...model }));
-      return missing.length > 0 ? [...models, ...missing] : models;
-    };
-    if (live.length === 0 && cached) {
-      const section: DirectoryProvider = {
-        key: source.id,
-        kind: 'oauth',
-        label: source.label,
-        models: withExtras(cloneModels(cached.models)),
-      };
-      if (cached.discoveredAt !== undefined) section.discoveredAt = cached.discoveredAt;
-      providers.push(section);
-      continue;
+    // runtime 可能只是静态 fallback；缺席不是动态模型已下线的证据。
+    const models = new Map(live.map((model) => [model.id, model]));
+    for (const model of [
+      ...(cached?.models ?? []),
+      ...(input.extraOauthModels?.get(source.id) ?? []),
+    ]) {
+      if (!models.has(model.id)) models.set(model.id, { ...model });
     }
     const section: DirectoryProvider = {
       key: source.id,
       kind: 'oauth',
       label: source.label,
-      models: withExtras(live),
+      models: [...models.values()],
     };
     if (live.length > 0) section.discoveredAt = input.now;
+    else if (cached?.discoveredAt !== undefined) section.discoveredAt = cached.discoveredAt;
     providers.push(section);
   }
 

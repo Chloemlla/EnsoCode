@@ -1,6 +1,6 @@
 import { type AccentColor, resolveAccentColor } from '@shared/accentColor';
 import { resolveCompactStrategy } from '@shared/compactStrategy';
-import { extractModelOverrides } from '@shared/modelDirectory';
+import { extractModelOverrides, referencedModelIds } from '@shared/modelDirectory';
 import { STATUS_LINE_PRESETS, STATUS_LINE_SEGMENT_IDS } from '@shared/statusLine';
 import { type EditMode, type ModelEntry, resolveEditMode } from '@shared/types';
 import {
@@ -59,7 +59,7 @@ export function mergeSettingsState<T extends { editMode: EditMode; accentColor: 
  * v11 → v12：默认编辑模式改为 apply_patch，已有 replace 一并切过去。
  * v12 → v13：subagent/coworker 合并；旧开关迁为 mode 掩码。
  * v15 → v16：OAuth 条目的 models 从登录时冻结的全量拷贝收缩为稀疏覆盖表
- * （只留禁用/别名/能力覆盖行）；清单改由 Main 侧统一模型目录派生，
+ * （只留禁用/别名/能力覆盖及选型引用行）；清单改由 Main 侧统一模型目录派生，
  * 老账号不再错过新版本静态表里的新模型（gemini-3.8-flash 事故的根修）。
  * 幂等：对已是稀疏表的条目重跑 extractModelOverrides 结果不变。
  */
@@ -165,7 +165,14 @@ export function migrateSettings(persisted: unknown, version: number): unknown {
         const provider = entry as Record<string, unknown>;
         if (typeof provider.oauthAccountKey !== 'string') return provider;
         if (!Array.isArray(provider.models)) return provider;
-        return { ...provider, models: extractModelOverrides(provider.models as ModelEntry[]) };
+        return {
+          ...provider,
+          models: extractModelOverrides(
+            provider.models as ModelEntry[],
+            undefined,
+            referencedModelIds(state, provider.id)
+          ),
+        };
       }),
     };
   }

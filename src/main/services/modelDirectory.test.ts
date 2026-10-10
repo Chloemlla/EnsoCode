@@ -177,17 +177,20 @@ describe('synthesizeModelDirectory', () => {
     });
   });
 
-  it('live 非空覆盖缓存，discoveredAt 用本次 now', () => {
+  it('live 非空仍保留缓存独有 ID，同 ID 使用 live 标签', () => {
     const snapshot = synthesizeModelDirectory({
       oauthProviders: [
         {
           id: 'google-antigravity',
           label: 'Google Antigravity',
-          models: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }],
+          models: [
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+            { id: 'shared', name: 'Live label' },
+          ],
         },
       ],
       customProviders: [],
-      cached: [cachedOAuth],
+      cached: [{ ...cachedOAuth, models: [...cachedOAuth.models, { id: 'shared', label: 'Old' }] }],
       revision: 3,
       now,
     });
@@ -195,7 +198,11 @@ describe('synthesizeModelDirectory', () => {
       key: 'google-antigravity',
       kind: 'oauth',
       label: 'Google Antigravity',
-      models: [{ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' }],
+      models: [
+        { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+        { id: 'shared', label: 'Live label' },
+        ...cachedOAuth.models,
+      ],
       discoveredAt: now,
     });
   });
@@ -284,7 +291,12 @@ describe('model directory service', () => {
     await mod.refreshModelDirectory();
     const next = mod.getModelDirectorySnapshot();
     expect(next.revision).toBe(2);
-    expect(next.providers[0]?.models).toEqual([{ id: 'gemini-3.8-flash', label: 'Flash' }]);
+    const merged = [
+      { id: 'gemini-3.8-flash', label: 'Flash' },
+      { id: 'gemini-3-pro', label: 'Gemini 3 Pro' },
+      { id: 'raw-id' },
+    ];
+    expect(next.providers[0]?.models).toEqual(merged);
     expect(mocks.send).toHaveBeenCalledTimes(2);
 
     await vi.waitFor(() => expect(existsSync(cachePath)).toBe(true));
@@ -292,7 +304,7 @@ describe('model directory service', () => {
       providers: DirectoryProvider[];
     };
     expect(cached.providers.map((provider) => provider.kind)).toEqual(['oauth']);
-    expect(cached.providers[0]?.models).toEqual([{ id: 'gemini-3.8-flash', label: 'Flash' }]);
+    expect(cached.providers[0]?.models).toEqual(merged);
   });
 
   it('runtime 失败时用缓存兜底，重载后 get 不打 runtime', async () => {
@@ -329,6 +341,35 @@ describe('model directory service', () => {
       'custom-1',
     ]);
     expect(offline.providers[0]?.models).toEqual(cachedOAuth.models);
+  });
+
+  it('xAI 动态发现落盘后重启，非空静态清单不能抹掉动态 ID', async () => {
+    mocks.getRuntime.mockResolvedValue({
+      getProviders: () => [
+        {
+          id: 'xai',
+          name: 'xAI',
+          auth: { oauth: { name: 'xAI' } },
+          getModels: () => [{ id: 'grok-static' }],
+        },
+      ],
+    });
+    const first = await import('./modelDirectory');
+    await first.refreshModelDirectory();
+    first.noteDiscoveredOauthModels('xai', [{ id: 'grok-dynamic', label: 'Dynamic' }]);
+    first.flushModelDirectoryCache();
+    vi.resetModules();
+    const restarted = await import('./modelDirectory');
+    await restarted.refreshModelDirectory();
+    expect(restarted.getModelDirectorySnapshot().providers[0]?.models).toEqual([
+      { id: 'grok-static' },
+      { id: 'grok-dynamic', label: 'Dynamic' },
+    ]);
+    restarted.flushModelDirectoryCache();
+    expect(JSON.parse(readFileSync(cachePath, 'utf8')).providers[0].models).toEqual([
+      { id: 'grok-static' },
+      { id: 'grok-dynamic', label: 'Dynamic' },
+    ]);
   });
 
   it('settings 通知只替换自定义分区，不打 runtime', async () => {

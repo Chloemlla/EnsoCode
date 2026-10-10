@@ -78,6 +78,16 @@ export function ProviderApiForm({
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const [catalogMeta, setCatalogMeta] = React.useState<Record<string, ModelMeta>>({});
 
+  React.useEffect(() => {
+    if (!oauth) return;
+    // 目录可能晚于弹窗到达；只补新行，已有行保留用户尚未保存的编辑。
+    setModels((current) => {
+      const known = new Set(current.map((model) => model.id));
+      const added = initialValue.models.filter((model) => !known.has(model.id));
+      return added.length > 0 ? [...current, ...added] : current;
+    });
+  }, [oauth, initialValue.models]);
+
   const modelIdKey = models.map((model) => model.id).join('\0');
   React.useEffect(() => {
     if (!oauthAccountKey && (oauth || !modelIdKey)) return;

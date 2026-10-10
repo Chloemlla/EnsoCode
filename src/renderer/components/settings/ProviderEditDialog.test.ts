@@ -11,12 +11,16 @@ const harness = vi.hoisted(() => ({
   formProps: {} as Record<string, unknown>,
   updateProvider: vi.fn(),
   oauthRevision: 0,
+  defaultModel: null as { providerId: string; modelId: string } | null,
 }));
 
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores/settings', () => ({
-  useSettingsStore: (selector: (state: unknown) => unknown) =>
-    selector({ providers: harness.providers, updateProvider: harness.updateProvider }),
+  useSettingsStore: Object.assign(
+    (selector: (state: unknown) => unknown) =>
+      selector({ providers: harness.providers, updateProvider: harness.updateProvider }),
+    { getState: () => ({ defaultModel: harness.defaultModel }) }
+  ),
 }));
 vi.mock('@/stores/oauthCredentials', () => ({
   useOauthCredentialStore: (selector: (state: unknown) => unknown) =>
@@ -58,6 +62,7 @@ beforeEach(() => {
   harness.formProps = {};
   harness.updateProvider.mockClear();
   harness.oauthRevision = 0;
+  harness.defaultModel = null;
 });
 
 let root: Root | undefined;

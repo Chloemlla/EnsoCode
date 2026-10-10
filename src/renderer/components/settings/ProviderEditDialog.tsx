@@ -2,6 +2,7 @@ import {
   directorySectionForAccount,
   extractModelOverrides,
   materializeProviders,
+  referencedModelIds,
 } from '@shared/modelDirectory';
 import type { ModelProvider, OauthProviderInfo } from '@shared/types';
 import { useEffect, useMemo, useState } from 'react';
@@ -117,7 +118,8 @@ function PoolProviderForm({ provider, onClose }: { provider: ModelProvider; onCl
           // 基线 diff：物化注入的目录 label 不是用户意图（防稀疏表重新膨胀）
           models: extractModelOverrides(
             value.models,
-            directorySectionForAccount(directory, provider.oauthAccountKey ?? '')?.models
+            directorySectionForAccount(directory, provider.oauthAccountKey ?? '')?.models,
+            referencedModelIds(useSettingsStore.getState(), provider.id)
           ),
           oauthAccountPool: { accountKeys: keys.filter((key) => selected.includes(key)) },
         });
@@ -177,7 +179,8 @@ export function ProviderEditDialog({ provider, onClose }: ProviderEditDialogProp
                         name: value.name,
                         models: extractModelOverrides(
                           value.models,
-                          directorySectionForAccount(directory, provider.oauthAccountKey)?.models
+                          directorySectionForAccount(directory, provider.oauthAccountKey)?.models,
+                          referencedModelIds(useSettingsStore.getState(), provider.id)
                         ),
                       }
                     : value

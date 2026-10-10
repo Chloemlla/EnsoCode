@@ -209,6 +209,59 @@ describe('settings default model actions', () => {
     expect(warm.status).toBe('unchanged');
   });
 
+  it.each(['before', 'after'] as const)(
+    'v15 无目录缓存升级：静态分区在水合 %s 到达，延迟发现前后均保留旧动态默认',
+    async (order) => {
+      const oauth = provider('oauth', {
+        apiKey: '',
+        oauthAccountKey: 'xai',
+        models: [{ id: 'grok-static' }, { id: 'grok-dynamic' }, { id: 'unselected-old' }],
+      });
+      const chosen = { providerId: oauth.id, modelId: 'grok-dynamic' };
+      const credentials = setSnapshot(1, {
+        status: 'ready',
+        authenticatedAccountKeys: new Set(['xai']),
+      });
+      const oldState = { providers: [oauth], defaultModel: chosen, onboarded: true };
+      readSettings.mockResolvedValueOnce({ 'enso-settings': { version: 15, state: oldState } });
+      if (order === 'before') setDirectory([{ key: 'xai', modelIds: ['grok-static'] }]);
+      await settingsModule.useSettingsStore.persist.rehydrate();
+      if (order === 'after') setDirectory([{ key: 'xai', modelIds: ['grok-static'] }]);
+      expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual(chosen);
+      // 无意图的旧完整清单不能重新冻结进设置。
+      expect(
+        settingsModule.useSettingsStore.getState().providers[0]?.models.map((model) => model.id)
+      ).not.toContain('unselected-old');
+      settingsModule.useSettingsStore.getState().setDefaultReasoningEnabled(true);
+      await Promise.resolve();
+      const persisted = writeKey.mock.calls
+        .map((call) => call as unknown[])
+        .filter(([key]) => key === 'enso-settings')
+        .map(([, value]) => value as { state: { defaultModel: unknown } });
+      expect(persisted.length).toBeGreaterThan(0);
+      expect(
+        persisted.every(
+          (value) => JSON.stringify(value.state.defaultModel) === JSON.stringify(chosen)
+        )
+      ).toBe(true);
+      // 发现尚未到达时重读已升级设置，选型意图仍在，不依赖本次迁移的内存。
+      readSettings.mockResolvedValueOnce({ 'enso-settings': persisted.at(-1) });
+      await settingsModule.useSettingsStore.persist.rehydrate();
+      expect(settingsModule.useSettingsStore.getState().defaultModel).toEqual(chosen);
+
+      // 在线发现晚一个异步阶段到达，不能靠事后用户重选修复已被清空的引用。
+      await Promise.resolve();
+      setDirectory([{ key: 'xai', modelIds: ['grok-static', 'grok-dynamic', 'brand-new'] }]);
+      expect(
+        settingsModule.useSettingsStore.getState().revalidateDefaultModel(credentials)
+      ).toMatchObject({
+        status: 'unchanged',
+        defaultModel: chosen,
+        writeback: false,
+      });
+    }
+  );
+
   it('ready logout falls back in provider order and publishes previous to next notice', () => {
     const oauth = provider('oauth', { apiKey: '', oauthAccountKey: 'anthropic' });
     const fallback = provider('fallback');

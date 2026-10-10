@@ -5,6 +5,7 @@ import {
   materializeOAuthModels,
   materializeProviders,
   parseModelDirectorySnapshot,
+  referencedModelIds,
 } from './modelDirectory';
 import type { ModelEntry, ModelProvider } from './types/llm';
 
@@ -53,7 +54,30 @@ const customProvider = (models: ModelEntry[]): ModelProvider => ({
   models,
 });
 
+describe('referencedModelIds', () => {
+  it('坏设置不崩，固定 agent 和 Bot 分类器引用按 provider 隔离', () => {
+    for (const value of [null, [], 'bad', { projects: [null], virtualModels: [{}] }]) {
+      expect([...referencedModelIds(value, 'oauth')]).toEqual([]);
+    }
+    const state = {
+      agentTypes: [{ providerId: 'oauth', modelId: 'fixed', modelMode: 'fixed' }],
+      botRouteClassifier: { model: { providerId: 'oauth', modelId: 'judge' } },
+      defaultModel: { providerId: 'other', modelId: 'wrong-account' },
+      providers: [{ id: 'oauth', models: [{ id: 'not-a-selection' }] }],
+    };
+    expect([...referencedModelIds(state, 'oauth')]).toEqual(['fixed', 'judge']);
+  });
+});
+
 describe('extractModelOverrides', () => {
+  it('选型引用是意图：再次稀疏化保留被引用裸 ID，但不冻结其它目录行', () => {
+    const entries: ModelEntry[] = [{ id: 'selected', enabled: true }, { id: 'unselected' }];
+    const selected = new Set(['selected', 'not-in-old-models']);
+    const once = extractModelOverrides(entries, undefined, selected);
+    expect(once).toEqual([{ id: 'selected' }]);
+    expect(extractModelOverrides(once, [{ id: 'selected' }], selected)).toEqual(once);
+    expect(extractModelOverrides(once, undefined, new Set())).toEqual([]);
+  });
   it('丢弃无意图行（裸 id 或 enabled:true），保留用户意图行', () => {
     const entries: ModelEntry[] = [
       { id: 'a' },

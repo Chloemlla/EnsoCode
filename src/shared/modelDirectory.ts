@@ -5,7 +5,7 @@
  * 各 provider 模块级发现缓存），快照各自腐化（典型事故：静态表新增的
  * gemini-3.8-flash 永远进不了老账号的 settings.json）。本模块把清单降级为
  * 派生数据：Main 合成快照，Renderer / Worker 订阅；settings.json 里的
- * OAuth 条目只保留**稀疏覆盖表**（用户意图：禁用、别名、能力覆盖）。
+ * OAuth 条目只保留**稀疏覆盖表**（用户意图：禁用、别名、能力覆盖、选型引用）。
  *
  * 与 ./modelCatalog 的分工：那边管「单个模型的能力分层解析」，这边管
  * 「全部模型的清单与物化」。名字相近是有意的——能力解析是本目录的消费者。
@@ -43,8 +43,9 @@ export interface ModelDirectorySnapshot {
 
 /**
  * 从（可能稠密的）models 数组提取稀疏覆盖表：只留携带用户意图的行
- * （禁用 / 别名 / 能力覆盖）。`{id}` 与 `{id, enabled: true}` 是登录时冻结
- * 拷贝的产物，无意图，丢弃。非法覆盖字段沿用 pickModelCapabilityOverrides
+ * （禁用 / 别名 / 能力覆盖 / referencedIds 中的选型引用）。没有选型引用的
+ * `{id}` 与 `{id, enabled: true}` 是登录时冻结拷贝的产物，丢弃。
+ * 非法覆盖字段沿用 pickModelCapabilityOverrides
  * 口径，不构成意图。
  *
  * 传入 `baseline`（目录分区）时，与目录 label 相同的 label 不算意图——
@@ -53,7 +54,8 @@ export interface ModelDirectorySnapshot {
  */
 export function extractModelOverrides(
   entries: readonly ModelEntry[],
-  baseline?: readonly DirectoryModel[]
+  baseline?: readonly DirectoryModel[],
+  referencedIds?: ReadonlySet<string>
 ): ModelEntry[] {
   const baselineLabels = baseline
     ? new Map(baseline.map((model) => [model.id, model.label]))
@@ -65,6 +67,8 @@ export function extractModelOverrides(
       entry.label.length > 0 &&
       baselineLabels?.get(entry.id) !== entry.label;
     const hasIntent =
+      // 被选型引用的 {id} 是用户选择，不是冻结目录；编辑再次保存也不能丢。
+      referencedIds?.has(entry.id) ||
       entry.enabled === false ||
       labelIsIntent ||
       Object.keys(pickModelCapabilityOverrides(entry)).length > 0;
@@ -78,6 +82,50 @@ export function extractModelOverrides(
     }
   }
   return kept;
+}
+
+/** 只读设置中的选型位；按条目 id 隔离账号，不把 provider 全量 models 当引用。 */
+export function referencedModelIds(settings: unknown, providerId: unknown): Set<string> {
+  const ids = new Set<string>();
+  const record = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const add = (value: unknown) => {
+    const ref = record(value);
+    if (
+      typeof providerId === 'string' &&
+      ref.providerId === providerId &&
+      typeof ref.modelId === 'string' &&
+      ref.modelId
+    ) {
+      ids.add(ref.modelId);
+    }
+  };
+  const state = record(settings);
+  for (const key of [
+    'defaultModel',
+    'titleSummaryModel',
+    'approvalReviewer',
+    'smartCompactModel',
+    'memoryDistillModel',
+    'voiceCorrectionRemoteModel',
+    'botAssistantModel',
+  ])
+    add(state[key]);
+  for (const item of [...list(state.projects), ...list(state.projectGroups)])
+    add(record(item).defaultModel);
+  for (const item of [...list(state.subagentModels), ...list(state.agentTypes)]) add(item);
+  for (const item of list(state.virtualModels)) {
+    const model = record(item);
+    add(model.primary);
+    add(model.fast);
+    for (const fallback of list(model.fallbacks)) add(fallback);
+    add(record(model.classifier).model);
+  }
+  add(record(state.botRouteClassifier).model);
+  return ids;
 }
 
 /**

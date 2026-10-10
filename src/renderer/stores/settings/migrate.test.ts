@@ -55,6 +55,54 @@ const legacyProvider = {
 };
 
 describe('设置持久化迁移', () => {
+  it('v16 保留默认、虚拟成员、项目及辅助模型的旧选型，不跨 provider 保留同名行', () => {
+    const ref = (modelId: string) => ({ providerId: 'oauth', modelId });
+    const ids = [
+      'default',
+      'primary',
+      'fast',
+      'fallback',
+      'project',
+      'group',
+      'title',
+      'reviewer',
+      'compact',
+      'memory',
+      'voice',
+      'bot',
+      'subagent',
+      'classifier',
+    ];
+    const state = {
+      defaultModel: ref('default'),
+      virtualModels: [
+        {
+          primary: ref('primary'),
+          fast: ref('fast'),
+          fallbacks: [ref('fallback')],
+          classifier: { model: ref('classifier') },
+        },
+      ],
+      projects: [{ defaultModel: ref('project') }],
+      projectGroups: [{ defaultModel: ref('group') }],
+      titleSummaryModel: ref('title'),
+      approvalReviewer: ref('reviewer'),
+      smartCompactModel: ref('compact'),
+      memoryDistillModel: ref('memory'),
+      voiceCorrectionRemoteModel: ref('voice'),
+      botAssistantModel: ref('bot'),
+      subagentModels: [ref('subagent')],
+      providers: ['oauth', 'other'].map((id) => ({
+        id,
+        oauthAccountKey: 'xai',
+        models: [...ids, 'unused'].map((id) => ({ id })),
+      })),
+    };
+    const migrated = migrateSettings(state, 15) as typeof state;
+    expect(migrated.providers[0].models).toEqual(ids.map((id) => ({ id })));
+    expect(migrated.providers[1].models).toEqual([]);
+    expect(migrateSettings(migrated, 15)).toEqual(migrated);
+  });
   it('旧的 oauthProviderId 搬到 oauthAccountKey，值不变（首个账号 key 即裸 providerId）', () => {
     const migrated = migrateSettings({ providers: [legacyProvider] }, 0) as {
       providers: Record<string, unknown>[];

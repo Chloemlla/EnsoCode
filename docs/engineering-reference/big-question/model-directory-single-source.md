@@ -18,13 +18,18 @@ provider 模块级发现缓存（main/worker 各一份）、settings store。典
   （runtime catalog + 动态发现缓存 + xAI 旁路探测 + settings 自定义 provider 合成），
   Renderer 经 `modelDirectory:get/changed` 订阅，worker 经 `set-model-directory` 命令拿快照。
 - **settings.json 的 OAuth 条目 models 只存稀疏覆盖表**：`enabled:false` / 用户别名 /
-  能力覆盖。物化统一走 `materializeProviders`（`src/shared/modelDirectory.ts`），
+  能力覆盖，以及已被选型引用的旧模型 ID。物化统一走 `materializeProviders`（`src/shared/modelDirectory.ts`），
   目录缺失时原样兜底。自定义 provider 的 models 仍是用户数据，不收缩。
 - **写回陷阱**：物化会往每行注入目录 label，保存时必须用
-  `extractModelOverrides(models, baseline)` 带基线 diff，否则稀疏表被重新膨胀成稠密拷贝。
+  `extractModelOverrides(models, baseline, referencedModelIds(settings, providerId))`，
+  既剥离目录 label，又保留用户选型；否则可能膨胀全量清单或丢失旧动态默认模型。
 - **冷态守卫**：目录分区缺失或 0 模型时，`revalidateDefaultModel` 必须 defer 绝不写回
   （虚拟默认模型要解析全部成员引用逐个查）。否则升级首启会把 OAuth 默认模型误判
   `model-missing` 写没。
+- **非空静态表不代表发现完成**：重启时按 ID 合并 live 与缓存，live 元数据优先，
+  不因静态 fallback 缺席就删缓存动态 ID。首次升级没有缓存时，迁移保留已引用裸 ID，
+  不等在线发现来挽救已经被写没的默认选择。回归覆盖 `modelDirectory.test.ts` 的重启、
+  `defaultModel.test.ts` 的 v15 无缓存水合及 `ProviderEditDialog.directory.test.ts` 的目录晚到。
 
 ## 测试配套（重要）
 
