@@ -405,6 +405,158 @@ describe('OAuth 凭证跨窗口失效通知', () => {
   });
 });
 
+describe('kimi-coding 用量探测', () => {
+  const reset5h = '2026-09-01T00:00:00.000Z';
+  const reset7d = '2026-09-08T00:00:00.000Z';
+  const usageUrl = 'https://api.kimi.com/coding/v1/usages';
+
+  function withKimiAccount(): () => void {
+    return withAuthJson((parsed) => {
+      parsed['kimi-coding'] = {
+        type: 'oauth',
+        access: 'kimi-access-token',
+        refresh: 'kimi-refresh',
+        expires,
+      };
+    });
+  }
+
+  it('probeAccount 把 kimi-coding 分派到用量端点，带 Bearer 与 Accept', async () => {
+    const restore = withKimiAccount();
+    const seen: Array<{
+      url: string;
+      method: string;
+      auth: string | null;
+      accept: string | null;
+    }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const headers = new Headers(init?.headers);
+      seen.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        auth: headers.get('authorization'),
+        accept: headers.get('accept'),
+      });
+      return jsonOk({ usages: {} });
+    });
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      const usage = await getOauthAccountUsage('kimi-coding');
+      expect(seen).toContainEqual({
+        url: usageUrl,
+        method: 'GET',
+        auth: 'Bearer kimi-access-token',
+        accept: 'application/json',
+      });
+      expect(usage.error).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('成功响应映射 5h/7d/mo，忽略 month_code，非法 reset 省略', async () => {
+    const restore = withKimiAccount();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      expect(String(input)).toBe(usageUrl);
+      return jsonOk({
+        usages: {
+          limit_5h: { used_ratio: 0.2, reset_time: reset5h },
+          limit_7d: { used_ratio: '0.005', reset_time: 'not-a-date' },
+          limit_month_total: { used_ratio: 1.2 },
+          limit_month_code: { used_ratio: 0.9, reset_time: reset7d },
+        },
+        boosterWallet: null,
+      });
+    });
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      const usage = await getOauthAccountUsage('kimi-coding');
+      expect(usage).toEqual({
+        key: 'kimi-coding',
+        windows: [
+          { label: '5h', usedPercent: 20, resetsAt: Date.parse(reset5h) },
+          { label: '7d', usedPercent: 1 },
+          { label: 'mo', usedPercent: 100 },
+        ],
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('401 表示 token 失效，返回 error 而不是空的健康窗口', async () => {
+    const restore = withKimiAccount();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('', { status: 401 }));
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      await expect(getOauthAccountUsage('kimi-coding')).resolves.toMatchObject({
+        key: 'kimi-coding',
+        windows: [],
+        error: expect.stringMatching(/401|失效|unauthorized/i),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('404 表示账号不支持用量，返回 error', async () => {
+    const restore = withKimiAccount();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('', { status: 404 }));
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      await expect(getOauthAccountUsage('kimi-coding')).resolves.toMatchObject({
+        key: 'kimi-coding',
+        windows: [],
+        error: expect.stringMatching(/404|不支持|not support/i),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('fetch 抛异常时返回 error 且不向外抛', async () => {
+    const restore = withKimiAccount();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'));
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      await expect(getOauthAccountUsage('kimi-coding')).resolves.toMatchObject({
+        key: 'kimi-coding',
+        windows: [],
+        error: expect.stringMatching(/network down/),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('超时中止映射为「查询超时」而不是原始 AbortError 文案', async () => {
+    const restore = withKimiAccount();
+    const abort = new Error('This operation was aborted');
+    abort.name = 'AbortError';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(abort);
+    try {
+      const { getOauthAccountUsage } = await import('./oauthProviders');
+      await expect(getOauthAccountUsage('kimi-coding')).resolves.toMatchObject({
+        key: 'kimi-coding',
+        windows: [],
+        error: expect.stringMatching(/超时/),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      restore();
+    }
+  });
+});
+
 // 渲染层可以往这三个通道传任意字符串，而它们最终都会被当成 auth.json 的键使用。
 // 安全评审 P1：不收窄的话「登录」能覆盖已登录账号的凭证。
 describe('IPC 入参收窄', () => {
