@@ -53,6 +53,19 @@ function initOf(fetch: { mock: { calls: unknown[] } }, index: number): RequestIn
 }
 
 describe('webSearch', () => {
+  it('显式空候选表示配置链全失效，直接 Exa，不回退会话模型', async () => {
+    const fetch = vi.fn(async () => exaReply());
+    const resolveAuth = vi.fn(auth);
+    const { outcome } = await webSearch(
+      'node',
+      { model: anthropicModel, candidates: [], auth: resolveAuth },
+      { fetch, unsupported: new Set() }
+    );
+    expect(outcome.source).toBe('exa');
+    expect(resolveAuth).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(urlOf(fetch.mock.calls[0])).toMatch(/^https:\/\/mcp\.exa\.ai/);
+  });
   it('Anthropic 原生搜索：带 server tool 请求并解析结果', async () => {
     const fetch = vi.fn(async () => json(anthropicHit));
     const { outcome } = await webSearch(
@@ -517,7 +530,7 @@ describe('webSearch 候选链', () => {
     const fetch = vi.fn(async () => json(anthropicHit));
     const { outcome } = await webSearch(
       'node',
-      { model: anthropicModel, candidates: [], auth },
+      { model: anthropicModel, candidates: undefined, auth },
       { fetch, unsupported: new Set() }
     );
     expect(outcome.source).toBe('anthropic');

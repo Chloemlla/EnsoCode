@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { providerKeyFor } from '@shared/providers/providerKey';
 import type { SpawnModelConfig } from '@shared/types/agent';
 import { createCodexCompactFactory } from './codexCompact';
 import {
@@ -6,15 +6,7 @@ import {
   ensoCompactInlineExtension as defaultEnsoCompactInlineExtension,
 } from './ensoCompact/extension';
 
-/** provider 注册 id：掺 api/baseUrl/apiKey 指纹。不含斜杠，扩展才能按 provider/id 解析。 */
-export function providerKeyFor(model: { api: string; baseUrl: string; apiKey: string }): string {
-  const keyFp = createHash('sha256').update(model.apiKey).digest('hex').slice(0, 8);
-  const host = createHash('sha256')
-    .update(`${model.api}\0${model.baseUrl}`)
-    .digest('hex')
-    .slice(0, 12);
-  return `enso-${host}-${keyFp}`;
-}
+export { providerKeyFor } from '@shared/providers/providerKey';
 
 export function formatSmartCompactSummaryModel(model: SpawnModelConfig): string {
   const provider = model.oauthAccountKey ?? providerKeyFor(model);

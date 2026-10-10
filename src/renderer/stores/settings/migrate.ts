@@ -9,6 +9,7 @@ import {
   effectiveSubagentAllowedModes,
 } from '@shared/types/builtinTools';
 import { isSpeechModelId } from '@shared/types/speech';
+import { parseWebSearchChain } from '@shared/webSearchChain';
 
 /**
  * 持久化数据的版本迁移。
@@ -40,8 +41,12 @@ export function mergeSettingsState<T extends { editMode: EditMode; accentColor: 
     'accentColor' in source ? resolveAccentColor(source.accentColor) : current.accentColor;
   // 已下架的识别模型（如 enso-asr）保留当前值，与 Main 的回落一致
   const voice = isSpeechModelId(voiceModel) ? { voiceModel } : {};
+  const search =
+    'webSearchChain' in source
+      ? { webSearchChain: parseWebSearchChain(source.webSearchChain) }
+      : {};
   void bashInterceptEnabled;
-  return { ...current, ...rest, ...voice, editMode, accentColor } as T;
+  return { ...current, ...rest, ...voice, ...search, editMode, accentColor } as T;
 }
 
 /**

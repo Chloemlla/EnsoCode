@@ -777,8 +777,8 @@ export class SessionSupervisor {
   private approvalReviewer: SpawnModelConfig | undefined;
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
   private disabledWorkflowPresets: string[] = [];
-  /** Main 推送的 web_search 候选链（引用，调用时经 modelRegistry 现取凭证）。空链 = 现行行为。 */
-  private webSearchChain: readonly WebSearchChainEntry[] = [];
+  /** undefined 跟随会话；空数组表示已配置但全部不可用，直接走 Exa。 */
+  private webSearchChain: readonly WebSearchChainEntry[] | undefined;
   /**
    * Main 推送的统一模型目录。revision 与自定义 provider 语义都没变时不再注册。
    * 当前消费者是自定义 provider 预注册；快照本体由后续的全局 web_search
@@ -1121,7 +1121,8 @@ export class SessionSupervisor {
       return;
     }
     if (command.type === 'set-web-search-config') {
-      this.webSearchChain = command.chain;
+      this.webSearchChain =
+        (command.configured ?? command.chain.length > 0) ? command.chain : undefined;
       // OAuth 第二账号克隆在 worker runtime 里按需注册，否则链物化时 find 取不到
       void this.getRuntime()
         .then((runtime) => {

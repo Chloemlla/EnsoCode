@@ -436,7 +436,7 @@ export async function webSearch(
   context: {
     /** 会话模型：链为空时的唯一候选（现行行为） */
     model?: SearchModel;
-    /** 全局候选链（已物化）：非空时严格按链依序尝试，不自动插入会话模型 */
+    /** 全局候选链（已物化）：undefined 才跟随会话；空数组表示配置链全失效 */
     candidates?: readonly SearchModel[];
     auth: (model: SearchModel) => Promise<SearchAuth>;
   },
@@ -448,11 +448,8 @@ export async function webSearch(
     signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
   const notes: string[] = [];
   const failures: string[] = [];
-  const candidates = context.candidates?.length
-    ? context.candidates
-    : context.model
-      ? [context.model]
-      : [];
+  const candidates =
+    context.candidates !== undefined ? context.candidates : context.model ? [context.model] : [];
   for (const model of candidates) {
     const kind = nativeKind(model);
     if (!kind) {

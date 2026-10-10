@@ -991,6 +991,9 @@ describe('parent/child commands', () => {
   });
 
   it('set-web-search-config 链收窄：合法透传，非法/超限拒收', () => {
+    const exhausted = { type: 'set-web-search-config', chain: [], configured: true };
+    expect(parseAgentCommand(exhausted)).toEqual(exhausted);
+    expect(parseAgentCommand({ ...exhausted, configured: 'yes' })).toBeNull();
     const chain = [{ providerId: 'ga', modelId: 'gemini-3.8-flash' }];
     const command = { type: 'set-web-search-config', chain };
     expect(parseAgentCommand(command)).toEqual(command);

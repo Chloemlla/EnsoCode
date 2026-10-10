@@ -38,8 +38,8 @@ const text = (value: string) => [{ type: 'text' as const, text: value }];
 /** 联网搜索与抓取。unsupported 按会话隔离：每个会话各自记住哪些模型端点不支持原生搜索 */
 export function createWebTools(
   deps: Pick<WebFetchDeps, 'fetch' | 'lookup'> & {
-    /** 全局 web_search 候选链（Main 推送的引用）；空 = 现行行为（只用会话模型） */
-    chain?: () => readonly WebSearchChainEntry[];
+    /** undefined 跟随会话；空数组为已耗尽的配置链。 */
+    chain?: () => readonly WebSearchChainEntry[] | undefined;
   } = {}
 ): ToolDefinition[] {
   const unsupported = new Set<string>();
@@ -58,21 +58,15 @@ export function createWebTools(
       const query = normalizeSearch(params).query;
       if (typeof query !== 'string' || !query) throw new Error('query must be a non-empty string');
       // 链物化在调用时进行：modelRegistry 现取模型与凭证，auth.json 刷新即时生效
-      const chainRefs = deps.chain?.() ?? [];
+      const chainRefs = deps.chain?.();
       const chainNotes: string[] = [];
       let candidates: SearchModel[] | undefined;
-      if (chainRefs.length > 0) {
+      if (chainRefs !== undefined) {
         candidates = [];
         for (const ref of chainRefs) {
-          let found = ctx?.modelRegistry?.find(ref.providerId, ref.modelId) as
+          const found = ctx?.modelRegistry?.find(ref.providerId, ref.modelId) as
             | SearchModel
             | undefined;
-          if (!found) {
-            // 容错：若 providerId 仍是 settings UUID 或别名，按 modelId 在注册表内兜底查找
-            found = ctx?.modelRegistry?.getAll?.()?.find((m) => m.id === ref.modelId) as
-              | SearchModel
-              | undefined;
-          }
           if (found) candidates.push(found);
           else chainNotes.push(`Candidate ${ref.providerId}/${ref.modelId} unavailable; skipped.`);
         }

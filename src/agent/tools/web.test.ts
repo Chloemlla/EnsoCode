@@ -21,6 +21,53 @@ const ctx = (model?: unknown, auth: unknown = { ok: true, apiKey: 'k' }) =>
   }) as unknown as ExtensionToolContext;
 
 describe('createWebTools', () => {
+  it('an explicitly exhausted configuration never inserts the session model', async () => {
+    const fetch = vi.fn(async () => exaReply());
+    const [search] = createWebTools({ fetch, chain: () => [] });
+    if (!search) throw new Error('missing tool');
+    const result = await search.execute(
+      'c1',
+      { query: 'isolation' },
+      undefined,
+      undefined,
+      ctx({
+        provider: 'session',
+        api: 'anthropic-messages',
+        baseUrl: 'https://session.example',
+        id: 'm',
+      })
+    );
+    expect(result.details).toMatchObject({ source: 'exa' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String((fetch.mock.calls[0] as unknown[])[0])).toMatch(/^https:\/\/mcp\.exa\.ai/);
+  });
+  it('失效链不切到同名的其他 provider，也不插入会话模型', async () => {
+    const fetch = vi.fn(async () => exaReply());
+    const other = {
+      provider: 'other-account',
+      api: 'anthropic-messages',
+      baseUrl: 'https://other.example',
+      id: 'shared-model',
+    };
+    const registry = {
+      find: vi.fn(() => undefined),
+      getAll: vi.fn(() => [other]),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: 'other-secret' })),
+    };
+    const [search] = createWebTools({
+      fetch,
+      chain: () => [{ providerId: 'missing-account', modelId: other.id }],
+    });
+    if (!search) throw new Error('missing tool');
+    const result = await search.execute('c1', { query: 'private query' }, undefined, undefined, {
+      model: other,
+      modelRegistry: registry,
+    } as never);
+    expect(result.details).toMatchObject({ source: 'exa' });
+    expect(registry.getApiKeyAndHeaders).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String((fetch.mock.calls[0] as unknown[])[0])).toMatch(/^https:\/\/mcp\.exa\.ai/);
+  });
   it('声明 web_search / web_fetch 且 schema 类型完整', () => {
     const { search, fetchTool } = tools();
     expect(search.name).toBe('web_search');
