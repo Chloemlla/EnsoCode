@@ -1,6 +1,6 @@
 import type { AskRequestInfo } from '@shared/types/agent';
 import { MessageCircleQuestion, Send } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useI18n } from '@/i18n';
 import { RequestCountdown, useRemainingMs } from './RequestCountdown';
 
@@ -9,15 +9,23 @@ interface AskBarProps {
   onAnswer: (requestId: string, answer: string) => void;
   /** 本机时钟 − host 时钟（手机伴侣显示剩余时间用） */
   clockOffset?: number;
+  /** 桌面端提问出现时聚焦输入；手机传 false，避免立刻弹键盘挡住消息 */
+  autoFocus?: boolean;
 }
 
 /** composer 上方的提问条(与审批条同构):agent 经 ask_user 提问,选项一键答或自由输入 */
-export function AskBar({ asks, onAnswer, clockOffset }: AskBarProps) {
+export function AskBar({ asks, onAnswer, clockOffset, autoFocus = true }: AskBarProps) {
   const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
   const [responding, setResponding] = useState<string | null>(null);
   const active = asks[0];
+  const requestId = active?.requestId;
   const remainingMs = useRemainingMs(active?.expiresAt, clockOffset);
+  useEffect(() => {
+    if (!autoFocus || !requestId) return;
+    inputRef.current?.focus();
+  }, [autoFocus, requestId]);
   if (!active) return null;
   const disabled =
     responding === active.requestId || (remainingMs !== undefined && remainingMs <= 0);
@@ -59,6 +67,7 @@ export function AskBar({ asks, onAnswer, clockOffset }: AskBarProps) {
       )}
       <div className="mt-2 flex items-center gap-1.5">
         <input
+          ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {

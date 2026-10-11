@@ -1,6 +1,11 @@
 import { useDndContext, useDroppable } from '@dnd-kit/core';
 import { horizontalListSortingStrategy, SortableContext, useSortable } from '@dnd-kit/sortable';
-import { ALL_GROUP_ID, type ProjectGroup, UNGROUPED_GROUP_ID } from '@shared/projectGroups';
+import {
+  ALL_GROUP_ID,
+  type ProjectGroup,
+  RECENT_GROUP_ID,
+  UNGROUPED_GROUP_ID,
+} from '@shared/projectGroups';
 import { Check, ChevronDown, Pencil, Plus, TextSearch, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { type DragPayload, selectorGroupDropId } from '@/components/chat/dragDrop';
@@ -48,8 +53,7 @@ export function GroupChips({
   const ordered = groups.slice().sort((a, b) => a.order - b.order);
   const hasGroups = ordered.length > 0;
   const [searchOpen, setSearchOpen] = useState(false);
-  // 没有分组时标签条无事可做，搜索框常驻（与改版前一致）
-  const showSearch = !hasGroups || searchOpen || query.length > 0;
+  const showSearch = searchOpen || query.length > 0;
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false, overflow: false });
@@ -80,18 +84,18 @@ export function GroupChips({
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!hasGroups || !el) return;
+    if (!el) return;
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     if (el.firstElementChild) observer.observe(el.firstElementChild);
     return () => observer.disconnect();
-  }, [hasGroups, measure]);
+  }, [measure]);
 
   // 竖向滚轮转横滑：React 的 onWheel 是 passive，拦不住默认滚动
   useEffect(() => {
     const el = scrollRef.current;
-    if (!hasGroups || !el) return;
+    if (!el) return;
     const onWheel = (event: WheelEvent) => {
       if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
       if (el.scrollWidth <= el.clientWidth) return;
@@ -100,7 +104,7 @@ export function GroupChips({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [hasGroups]);
+  }, []);
 
   // 选中的标签滚进可见区（从 ⌄ 里选了被藏住的分组时）
   const scrolledOnce = useRef(false);
@@ -143,92 +147,98 @@ export function GroupChips({
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key !== 'Escape' || !hasGroups) return;
+              if (event.key !== 'Escape') return;
               event.stopPropagation();
               closeSearch();
             }}
             onBlur={() => {
               // 切走窗口也会失焦，此时不收起
-              if (hasGroups && !query && document.hasFocus()) setSearchOpen(false);
+              if (!query && document.hasFocus()) setSearchOpen(false);
             }}
             placeholder={placeholder}
             className="h-full min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
           />
-          {hasGroups && (
-            <button
-              type="button"
-              onClick={closeSearch}
-              className="flex size-5 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-muted hover:text-foreground"
-              title={t('Close')}
-              aria-label={t('Close')}
-            >
-              <X className="size-3" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={closeSearch}
+            className="flex size-5 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-muted hover:text-foreground"
+            title={t('Close')}
+            aria-label={t('Close')}
+          >
+            <X className="size-3" />
+          </button>
         </label>
       )}
-      {hasGroups && (
-        <div className={cn('flex min-w-0 flex-1 items-center gap-1', showSearch && 'hidden')}>
-          <div
-            ref={scrollRef}
-            onScroll={measure}
-            style={{ maskImage }}
-            className="relative -my-1 min-w-0 flex-1 overflow-x-auto py-1 [scrollbar-width:none]"
-          >
-            <div className="flex w-max gap-1">
-              <button
-                type="button"
-                data-selected={selectedId === ALL_GROUP_ID || undefined}
-                onClick={() => onSelect(ALL_GROUP_ID)}
-                className={chipClass(selectedId === ALL_GROUP_ID, false)}
-              >
-                <ChipContent label={t('All')} count={totalCount} />
-              </button>
-              <SortableContext
-                items={ordered.map((group) => selectorGroupDropId(group.id))}
-                strategy={horizontalListSortingStrategy}
-              >
-                {ordered.map((group) => (
-                  <SortableGroupChip
-                    key={group.id}
-                    group={group}
-                    count={counts[group.id] ?? 0}
-                    selected={selectedId === group.id}
-                    onSelect={() => onSelect(group.id)}
-                  />
-                ))}
-              </SortableContext>
+      <div className={cn('flex min-w-0 flex-1 items-center gap-1', showSearch && 'hidden')}>
+        <div
+          ref={scrollRef}
+          onScroll={measure}
+          style={{ maskImage }}
+          className="relative -my-1 min-w-0 flex-1 overflow-x-auto py-1 [scrollbar-width:none]"
+        >
+          <div className="flex w-max gap-1">
+            <button
+              type="button"
+              data-selected={selectedId === ALL_GROUP_ID || undefined}
+              onClick={() => onSelect(ALL_GROUP_ID)}
+              className={chipClass(selectedId === ALL_GROUP_ID, false)}
+            >
+              <ChipContent label={t('All')} count={totalCount} />
+            </button>
+            <button
+              type="button"
+              data-selected={selectedId === RECENT_GROUP_ID || undefined}
+              onClick={() => onSelect(RECENT_GROUP_ID)}
+              className={chipClass(selectedId === RECENT_GROUP_ID, false)}
+            >
+              <ChipContent label={t('Recent')} count={totalCount} />
+            </button>
+            <SortableContext
+              items={ordered.map((group) => selectorGroupDropId(group.id))}
+              strategy={horizontalListSortingStrategy}
+            >
+              {ordered.map((group) => (
+                <SortableGroupChip
+                  key={group.id}
+                  group={group}
+                  count={counts[group.id] ?? 0}
+                  selected={selectedId === group.id}
+                  onSelect={() => onSelect(group.id)}
+                />
+              ))}
+            </SortableContext>
+            {hasGroups && (
               <UngroupedChip
                 label={t('Ungrouped')}
                 count={ungroupedCount}
                 selected={selectedId === UNGROUPED_GROUP_ID}
                 onSelect={() => onSelect(UNGROUPED_GROUP_ID)}
               />
-            </div>
+            )}
           </div>
-          {edges.overflow && (
-            <GroupMenu
-              groups={ordered}
-              selectedId={selectedId}
-              counts={counts}
-              totalCount={totalCount}
-              ungroupedCount={ungroupedCount}
-              onSelect={onSelect}
-              onAddGroup={onAddGroup}
-              onEditGroup={onEditGroup}
-            />
-          )}
-          <button
-            type="button"
-            onClick={() => setSearchOpen(true)}
-            className={CHIP_ICON_CLASS}
-            title={t('Search conversations...')}
-            aria-label={t('Search conversations...')}
-          >
-            <TextSearch className="size-3.5" />
-          </button>
         </div>
-      )}
+        {edges.overflow && (
+          <GroupMenu
+            groups={ordered}
+            selectedId={selectedId}
+            counts={counts}
+            totalCount={totalCount}
+            ungroupedCount={ungroupedCount}
+            onSelect={onSelect}
+            onAddGroup={onAddGroup}
+            onEditGroup={onEditGroup}
+          />
+        )}
+        <button
+          type="button"
+          onClick={() => setSearchOpen(true)}
+          className={CHIP_ICON_CLASS}
+          title={t('Search conversations...')}
+          aria-label={t('Search conversations...')}
+        >
+          <TextSearch className="size-3.5" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -386,6 +396,12 @@ function GroupMenu({
           selected={selectedId === ALL_GROUP_ID}
           onSelect={closeAnd(() => onSelect(ALL_GROUP_ID))}
         />
+        <GroupMenuRow
+          label={t('Recent')}
+          count={totalCount}
+          selected={selectedId === RECENT_GROUP_ID}
+          onSelect={closeAnd(() => onSelect(RECENT_GROUP_ID))}
+        />
         {groups.map((group) => (
           <GroupMenuRow
             key={group.id}
@@ -398,12 +414,14 @@ function GroupMenu({
             onEdit={closeAnd(() => onEditGroup(group.id))}
           />
         ))}
-        <GroupMenuRow
-          label={t('Ungrouped')}
-          count={ungroupedCount}
-          selected={selectedId === UNGROUPED_GROUP_ID}
-          onSelect={closeAnd(() => onSelect(UNGROUPED_GROUP_ID))}
-        />
+        {groups.length > 0 && (
+          <GroupMenuRow
+            label={t('Ungrouped')}
+            count={ungroupedCount}
+            selected={selectedId === UNGROUPED_GROUP_ID}
+            onSelect={closeAnd(() => onSelect(UNGROUPED_GROUP_ID))}
+          />
+        )}
         <div className="my-1 border-t" />
         <button
           type="button"

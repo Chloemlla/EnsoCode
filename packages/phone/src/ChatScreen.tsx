@@ -471,6 +471,7 @@ export function ChatScreen(props: Props) {
                     asks={view?.asks ?? []}
                     onAnswer={props.onAsk}
                     clockOffset={props.clockOffset}
+                    autoFocus={false}
                   />
                 </>
               )}

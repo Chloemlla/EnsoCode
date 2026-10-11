@@ -12,6 +12,7 @@ import { conversationDotTone } from '@shared/conversationDotTone';
 import {
   ALL_GROUP_ID,
   filterProjectsByGroup,
+  RECENT_GROUP_ID,
   sectionsForAllView,
   UNGROUPED_GROUP_ID,
 } from '@shared/projectGroups';
@@ -119,6 +120,7 @@ import {
   archivedConversationGroups,
   pinnedConversationIds,
   projectConversationIds,
+  sortProjectsByActivity,
   staleArchivedConversationIds,
 } from '@/stores/sessions/pinned';
 import {
@@ -271,10 +273,13 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
   };
   const resolvedGroupId =
     selectedGroupId === ALL_GROUP_ID ||
+    selectedGroupId === RECENT_GROUP_ID ||
     selectedGroupId === UNGROUPED_GROUP_ID ||
     projectGroups.some((group) => group.id === selectedGroupId)
       ? selectedGroupId
       : ALL_GROUP_ID;
+  const recentView = resolvedGroupId === RECENT_GROUP_ID;
+  const defaultGroupId = projectGroups.find((group) => group.id === resolvedGroupId)?.id;
 
   const slicedProjects = filterProjectsByGroup(
     orderedProjects,
@@ -282,10 +287,9 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
     archivedProjectIds,
     resolvedGroupId
   );
-  const { pinned: pinnedProjects, rest: unpinnedProjects } = partitionPinnedProjects(
-    slicedProjects,
-    pinnedProjectIds
-  );
+  const { pinned: pinnedProjects, rest: unpinnedProjects } = recentView
+    ? { pinned: [], rest: sortProjectsByActivity(slicedProjects, order, conversations) }
+    : partitionPinnedProjects(slicedProjects, pinnedProjectIds);
   const groupSections = sectionsForAllView(unpinnedProjects, projectGroups, []);
   const activeProjects = [...pinnedProjects, ...unpinnedProjects];
   const activeProjectIds = activeProjects.map((project) => project.id);
@@ -312,6 +316,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
       if (!action) return;
       switch (action.kind) {
         case 'move-project-to-group': {
+          if (recentView && action.beforeProjectId) break;
           setProjectGroupId(action.projectId, action.groupId);
           if (action.beforeProjectId) {
             const next = moveProject(
@@ -329,6 +334,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
           reorderProjectGroups(action.activeId, action.overId);
           break;
         case 'reorder-projects': {
+          if (recentView) break;
           const scope = projectReorderScope(action.activeId, action.overId, pinnedProjectIds);
           if (scope === 'pinned') {
             const next = moveProject(
@@ -405,10 +411,6 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
         sshHost: request.sshHost,
       });
     }
-    const defaultGroupId =
-      resolvedGroupId !== ALL_GROUP_ID && resolvedGroupId !== UNGROUPED_GROUP_ID
-        ? resolvedGroupId
-        : undefined;
     void addProject(
       request.path,
       request.sshConnectionId ? { sshConnectionId: request.sshConnectionId } : undefined,
@@ -552,7 +554,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
         .filter((group) => group.ids.length > 0)
     : archivedGroups;
   const archivedInSlice = (group: (typeof archivedGroups)[number]) => {
-    if (resolvedGroupId === ALL_GROUP_ID) return true;
+    if (resolvedGroupId === ALL_GROUP_ID || recentView) return true;
     const project = projects.find((item) => item.id === group.projectId);
     if (!project) return resolvedGroupId === UNGROUPED_GROUP_ID;
     if (resolvedGroupId === UNGROUPED_GROUP_ID) {
@@ -1103,7 +1105,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                   },
                 ];
                 return (
-                  <SortableProject key={project.id} project={project}>
+                  <SortableProject key={project.id} project={project} activitySorted={recentView}>
                     {(drag) => (
                       <ContextMenu>
                         <ContextMenuTrigger
@@ -1134,6 +1136,13 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                                       {project.kind === 'ssh' && (
                                         <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground">
                                           {project.sshConnectionName ?? project.sshHost}
+                                        </span>
+                                      )}
+                                      {recentView && (
+                                        <span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">
+                                          {projectGroups.find(
+                                            (group) => group.id === project.groupId
+                                          )?.name ?? t('Ungrouped')}
                                         </span>
                                       )}
                                     </span>
@@ -1549,11 +1558,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
         onOpenChange={setAddOpen}
         onAdd={handleAddProject}
         groups={projectGroups}
-        defaultGroupId={
-          resolvedGroupId !== ALL_GROUP_ID && resolvedGroupId !== UNGROUPED_GROUP_ID
-            ? resolvedGroupId
-            : undefined
-        }
+        defaultGroupId={defaultGroupId}
       />
       <GroupEditorDialog
         open={groupEditor !== null}
@@ -1907,9 +1912,11 @@ function ProjectDragPreview({
 
 function SortableProject({
   project,
+  activitySorted = false,
   children,
 }: {
   project: Project;
+  activitySorted?: boolean;
   children: (drag: {
     setNodeRef: (node: HTMLElement | null) => void;
     style: React.CSSProperties;
@@ -1918,6 +1925,7 @@ function SortableProject({
 }) {
   const { setNodeRef, transform, transition, listeners, isDragging } = useSortable({
     id: projectDragId(project.id),
+    disabled: { droppable: activitySorted },
     data: {
       type: 'project',
       projectId: project.id,
@@ -1928,7 +1936,7 @@ function SortableProject({
   return children({
     setNodeRef,
     style: {
-      transform: CSS.Transform.toString(transform),
+      transform: activitySorted ? undefined : CSS.Transform.toString(transform),
       transition,
       opacity: isDragging ? 0.4 : undefined,
     },

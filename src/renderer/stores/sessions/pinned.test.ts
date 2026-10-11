@@ -6,6 +6,7 @@ import {
   archivedConversationIds,
   pinnedConversationIds,
   projectConversationIds,
+  sortProjectsByActivity,
   staleArchivedConversationIds,
   waitingConversationCount,
 } from './pinned';
@@ -75,6 +76,46 @@ const conversations: Record<string, Minimal> = {
 
 // order 新的在前(创建序)
 const order = ['e', 'd', 'c', 'b', 'a'];
+
+describe('sortProjectsByActivity', () => {
+  it('跨项目取最新会话时间，不按会话置顶抢排序，不改输入', () => {
+    const projects = [{ id: 'p2' }, { id: 'p1' }, { id: 'empty' }];
+    expect(sortProjectsByActivity(projects, order, conversations)).toEqual([
+      projects[1],
+      projects[0],
+      projects[2],
+    ]);
+    expect(projects.map((project) => project.id)).toEqual(['p2', 'p1', 'empty']);
+  });
+
+  it('忽略归档会话、目录外子会话及失效会话 id', () => {
+    const projects = [{ id: 'p1' }, { id: 'p2' }];
+    const sessions = {
+      old: conv('p1', 1, 10),
+      archived: conv('p1', 1, 999, { archived: true }),
+      child: conv('p1', 1, 999),
+      latest: conv('p2', 1, 20),
+    };
+    expect(
+      sortProjectsByActivity(projects, ['missing', 'archived', 'old', 'latest'], sessions)
+    ).toEqual([projects[1], projects[0]]);
+  });
+
+  it('冷会话按持久化活跃时间，空会话回落创建时间，同时间保持项目原序', () => {
+    const projects = [{ id: 'empty' }, { id: 'p1' }, { id: 'p2' }, { id: 'p3' }];
+    const sessions = {
+      cold: conv('p1', 1, undefined, { lastActiveAt: 50 }),
+      live: conv('p2', 2, 50, { lastActiveAt: 999 }),
+      fresh: conv('p3', 30),
+    };
+    expect(sortProjectsByActivity(projects, ['fresh', 'live', 'cold'], sessions)).toEqual([
+      projects[1],
+      projects[2],
+      projects[3],
+      projects[0],
+    ]);
+  });
+});
 
 const withArchived: Record<string, Minimal> = {
   ...conversations,

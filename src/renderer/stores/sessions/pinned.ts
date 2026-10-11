@@ -44,6 +44,23 @@ export function lastActiveAt(conversation: SidebarConversation): number {
 }
 
 /** 按最后活跃时间倒序;时间相同保持传入顺序(sort 稳定) */
+export function sortProjectsByActivity<T extends { id: string }>(
+  projects: readonly T[],
+  order: readonly string[],
+  conversations: Conversations
+): T[] {
+  const activity = new Map<string, number>();
+  for (const id of order) {
+    const conversation = conversations[id];
+    if (!conversation || conversation.archived === true) continue;
+    activity.set(
+      conversation.projectId,
+      Math.max(activity.get(conversation.projectId) ?? 0, lastActiveAt(conversation))
+    );
+  }
+  return [...projects].sort((a, b) => (activity.get(b.id) ?? 0) - (activity.get(a.id) ?? 0));
+}
+
 function sortByActivity(ids: string[], conversations: Conversations): string[] {
   return ids.sort((left, right) => {
     const a = conversations[left];

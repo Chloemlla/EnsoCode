@@ -515,6 +515,7 @@ export function GroupChatScreen(props: Props) {
                   asks={view.asks}
                   clockOffset={props.clockOffset}
                   onAnswer={(requestId, answer) => props.onAsk(sessionId, requestId, answer)}
+                  autoFocus={false}
                 />
               </div>
             ) : null
