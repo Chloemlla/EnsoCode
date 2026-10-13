@@ -30,6 +30,8 @@ export interface ComposerRefsDeps {
   /** 私聊成员会话的投影（当前分支） */
   sessionMessages: (conversationId: string) => Promise<readonly ProjectedMessage[]>;
   workspacePath: (chatId: string) => string | undefined;
+  /** 看板任务的历次执行摘要（<previous-runs>），没有则空串 */
+  taskBrief?: (chatId: string, taskId: string) => string;
 }
 
 const GROUP_EXCERPT_SCAN = 120;
@@ -164,7 +166,12 @@ export function createComposerRefs(deps: ComposerRefsDeps) {
       const seen = new Set<string>();
       for (const entry of entries) {
         if (entry.kind !== 'human' || !entry.refs) continue;
-        const { skill, chats = [] } = entry.refs;
+        const { skill, chats = [], task } = entry.refs;
+        if (task && entry.mentions.includes(botId) && !seen.has(task)) {
+          seen.add(task);
+          const brief = deps.taskBrief?.(chat.id, task);
+          if (brief) parts.push(brief);
+        }
         if (skill)
           parts.push(
             skillBlock(botId, skill) ?? skillUnavailableNote(skillEntry(skill)?.name ?? skill)

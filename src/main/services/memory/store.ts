@@ -640,7 +640,8 @@ export function updateMemory(
 ): Memory | null {
   const current = getMemory(db, id);
   if (!current) return null;
-  const title = patch.title?.trim() || current.title;
+  const nextTitle = patch.title?.trim();
+  const title = nextTitle ? clampTitle(nextTitle) : current.title;
   const content = patch.content?.trim() || current.content;
   const contentChanged = title !== current.title || content !== current.content;
   const sets: string[] = ['updated_at = @updated_at'];

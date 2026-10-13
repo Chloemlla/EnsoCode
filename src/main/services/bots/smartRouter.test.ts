@@ -111,6 +111,60 @@ describe('createSmartRouter', () => {
     for (const [config] of calls) expect(config.timeoutMs).toBe(30_000);
   });
 
+  it('judge 选中忙碌成员且判为新任务时标 separate；延续任务或选中空闲成员时不标', async () => {
+    const busy: SmartRouteInput = {
+      ...input,
+      candidates: input.candidates.map((c) =>
+        c.id === 'b' ? { ...c, busy: { task: 'migrate db' } } : c
+      ),
+    };
+    judge.mockResolvedValueOnce('INTENT: build\nBob\nTASK: new');
+    expect(await router().select(busy, signal)).toEqual({
+      ids: ['b'],
+      intent: 'build',
+      separate: true,
+    });
+    expect(judge.mock.calls[0][0].userText).toMatch(/TASK: continue/);
+    judge.mockResolvedValueOnce('INTENT: build\nBob\nTASK: continue');
+    expect(await router().select(busy, signal)).toEqual({ ids: ['b'], intent: 'build' });
+    judge.mockResolvedValueOnce('INTENT: build\nCarol\nTASK: new');
+    expect(await router().select(busy, signal)).toEqual({ ids: ['c'], intent: 'build' });
+  });
+
+  it('pi-classifier 选中忙碌成员时再问一次延续还是新任务；未选中忙碌成员不多问', async () => {
+    settings = {
+      botRouteClassifier: {
+        source: 'pi-classifier',
+        model: { providerId: 'or', modelId: 'cls' },
+        timeoutMs: 3000,
+      },
+    };
+    const busy: SmartRouteInput = {
+      ...input,
+      candidates: input.candidates.map((c) =>
+        c.id === 'b' ? { ...c, busy: { task: 'migrate db' } } : c
+      ),
+    };
+    let route: Record<string, number> = { b: 0.9 };
+    let task: Record<string, number> = { new: 0.8, continue: 0.2 };
+    classify.mockImplementation(async (_config, question) =>
+      'build' in question.criteria ? { answer: 0.9 } : 'new' in question.criteria ? task : route
+    );
+    expect(await router().select(busy, signal)).toEqual({
+      ids: ['b'],
+      intent: 'answer',
+      separate: true,
+    });
+    expect(classify).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(classify.mock.calls[2][1])).toContain('migrate db');
+    task = { new: 0.3, continue: 0.7 };
+    expect(await router().select(busy, signal)).toEqual({ ids: ['b'], intent: 'answer' });
+    classify.mockClear();
+    route = { c: 0.9 };
+    expect(await router().select(busy, signal)).toEqual({ ids: ['c'], intent: 'answer' });
+    expect(classify).toHaveBeenCalledTimes(2);
+  });
+
   it('judge 回复多名时按顺序返回名单', async () => {
     judge.mockResolvedValueOnce('INTENT: discuss\nCarol\nBob');
     expect(await router().select(input, signal)).toEqual({ ids: ['c', 'b'], intent: 'discuss' });

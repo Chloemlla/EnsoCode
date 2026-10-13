@@ -18,6 +18,7 @@ export const IPC_CHANNELS = {
   WINDOW_CLOSE: 'window:close',
   WINDOW_IS_MAXIMIZED: 'window:is-maximized',
   WINDOW_IS_FULLSCREEN: 'window:is-fullscreen',
+  WINDOW_SET_TITLE_BAR_APPEARANCE: 'window:set-title-bar-appearance',
   WINDOW_MAXIMIZED_CHANGED: 'window:maximized-changed',
   WINDOW_FULLSCREEN_CHANGED: 'window:fullscreen-changed',
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: 'window:set-traffic-lights-visible',
@@ -64,6 +65,7 @@ export const IPC_CHANNELS = {
   MEMORY_ARCHIVE: 'memory:archive',
   MEMORY_RESTORE: 'memory:restore',
   MEMORY_DELETE: 'memory:delete',
+  MEMORY_UPDATE: 'memory:update',
   MEMORY_STATS: 'memory:stats',
   MEMORY_JOBS: 'memory:jobs',
   MEMORY_JOBS_CLEAR: 'memory:jobs-clear',
@@ -179,6 +181,8 @@ export const IPC_CHANNELS = {
   AGENT_TASK_STOP: 'agent:task-stop',
   /** 把运行中的前台命令移交为后台任务 */
   AGENT_TOOL_BACKGROUND: 'agent:tool-background',
+  /** 会话名下在跑子代理的进度（等待行展开） */
+  AGENT_SUBAGENT_PROGRESS: 'agent:subagent-progress',
   AGENT_SUBAGENT_STOP: 'agent:subagent-stop',
   AGENT_WORKFLOW_STOP: 'agent:workflow-stop',
   AGENT_REWIND: 'agent:rewind',
@@ -252,6 +256,7 @@ export const IPC_CHANNELS = {
   FILES_READ: 'files:read',
   // 目录媒体文件枚举（背景图文件夹随机模式）
   FILES_LIST_MEDIA: 'files:list-media',
+  FILES_SAVE_PASTED_TEXT: 'files:save-pasted-text',
   FILES_LIST_DIR: 'files:list-dir',
   FILES_READ_REL: 'files:read-rel',
   /** Markdown 预览相对图片：返回 data URL，不开放任意文件读取 */
@@ -423,6 +428,7 @@ export const IPC_CHANNELS = {
   BOT_TASK_CANCEL: 'bots:task-cancel',
   BOT_TASK_DELETE: 'bots:task-delete',
   BOT_TASK_REVIEW: 'bots:task-review',
+  BOT_TASK_REPLY: 'bots:task-reply',
   /** 「自动设置能力」：便宜模型按成员描述推荐能力，只返回建议不落盘 */
   BOT_SUGGEST_ABILITIES: 'bots:suggest-abilities',
   BOT_SUGGEST_PERSONA: 'bots:suggest-persona',
@@ -447,6 +453,7 @@ export const IPC_CHANNELS = {
   BOT_ARTIFACT_OPEN: 'bots:artifact-open',
   /** 输入框 @文件补全：只收 chatId + 查询词，工作区根由 Main 推导 */
   BOT_FILE_SEARCH: 'bots:file-search',
+  BOT_CHAT_SAVE_PASTED_TEXT: 'bots:chat-save-pasted-text',
   /** 回退 / 重试：只收 chatId（群重试加失败 entryId），会话由 Main 按聊天推导 */
   BOT_REWIND: 'bots:rewind',
   BOT_RETRY: 'bots:retry',

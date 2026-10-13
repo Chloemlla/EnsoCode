@@ -85,8 +85,10 @@ export type TimelineItem =
       sandbox?: SandboxView | null;
       /** RTK 对本次工具调用的真实处理结果；无元数据时缺省 */
       rtk?: RtkToolStats;
-      /** 运行中的 bash/powershell 调用 id（转后台用）；其它缺省 */
+      /** 运行中的 bash/powershell 调用 id（转后台用），或阻塞等待的调用 id（不等了）；其它缺省 */
       callId?: string;
+      /** 运行中的阻塞等待（子代理 wait / wait:true、task_output 带时限）：可「不等了」；其它缺省 */
+      waiting?: 'subagent' | 'task';
       /** 前台命令被移交为后台任务时的任务 id；其它缺省 */
       backgroundTaskId?: string;
       /** submit_plan 提交的计划；其它工具缺省 */
@@ -142,7 +144,9 @@ export type TimelineItem =
   /** 后台任务完成的合成注入消息（<background-task-update>），渲染为系统通知行 */
   | { kind: 'task-note'; key: string; summary: string; detail: string }
   /** 不进入 LLM context 的 parent/child SessionManager custom entry。 */
-  | { kind: 'session-custom'; key: string; entry: AgentSessionCustomEntry };
+  | { kind: 'session-custom'; key: string; entry: AgentSessionCustomEntry }
+  /** 带字分隔线（委派子会话的「第 N 次执行」） */
+  | { kind: 'divider'; key: string; text: string };
 
 export function formatApplyPatchOutcome(outcome: ProjectedApplyPatchOutcome): string {
   const list = (label: string, paths: string[]): string =>
@@ -510,6 +514,20 @@ function recordSubagent(
 
 export type SubagentOp = 'report' | 'wait' | 'stop' | 'dismiss' | 'list';
 const SUBAGENT_OPS = new Set<unknown>(['report', 'wait', 'stop', 'dismiss', 'list']);
+
+/** 会阻塞到对方结束的调用：子代理 wait、spawn / send 带 wait:true、task_output 带正时限 */
+function blockingWaitKind(name: string, args: unknown): 'subagent' | 'task' | null {
+  if (!args || typeof args !== 'object') return null;
+  const record = args as Record<string, unknown>;
+  if (name === 'task_output') {
+    return typeof record.timeout_ms === 'number' && record.timeout_ms > 0 ? 'task' : null;
+  }
+  if (name !== 'subagent') return null;
+  return record.operation === 'wait' ||
+    ((record.operation === 'spawn' || record.operation === 'send') && record.wait === true)
+    ? 'subagent'
+    : null;
+}
 
 /**
  * 子代理行头：spawn 起了名字时带上名字（后续行的标题就是它）；
@@ -1085,11 +1103,9 @@ function buildMessageTimeline(
               : result?.fileChanges?.length
                 ? result.fileChanges.map((change) => change.path)
                 : patchPathsFromArgs(part.arguments);
-          const liveCommand =
-            !result &&
-            running &&
-            messageIndex === lastTurnIndex &&
-            (part.name === 'bash' || part.name === 'powershell');
+          const live = !result && running && messageIndex === lastTurnIndex;
+          const liveCommand = live && (part.name === 'bash' || part.name === 'powershell');
+          const waiting = live ? blockingWaitKind(part.name, part.arguments) : null;
           items.push({
             kind: 'tool',
             key,
@@ -1132,7 +1148,8 @@ function buildMessageTimeline(
             durationMs: result?.durationMs ?? null,
             agentMeta: result?.agentMeta ?? null,
             ...(result?.rtk ? { rtk: result.rtk } : {}),
-            ...(liveCommand ? { callId: part.id } : {}),
+            ...(liveCommand || waiting ? { callId: part.id } : {}),
+            ...(waiting ? { waiting } : {}),
             ...(result?.backgroundTaskId ? { backgroundTaskId: result.backgroundTaskId } : {}),
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
@@ -1350,6 +1367,8 @@ export function buildTimeline(
     toolOutputs?: Record<string, string>;
     pendingApprovals?: readonly ApprovalRequestInfo[];
     toolStartedAt?: Record<string, number>;
+    /** 按时间插入的分隔线，at 升序 */
+    runDividers?: readonly { key: string; at: number; text: string }[];
   }
 ): TimelineItem[] {
   const historyBaseIndex = options?.historyBaseIndex ?? 0;
@@ -1408,7 +1427,46 @@ export function buildTimeline(
         : -1;
     ordered.splice(before < 0 ? ordered.length : before, 0, local);
   }
-  return appendCompactionChrome(ordered, options?.compaction, options?.compactionNoticeAt);
+  const withDividers = options?.runDividers?.length
+    ? insertDividers(
+        ordered,
+        options.runDividers,
+        (item) =>
+          item.kind === 'session-custom'
+            ? customEntryTime(item.entry)
+            : messageItemTime(item, messages, historyBaseIndex),
+        historyBaseIndex === 0
+      )
+    : ordered;
+  return appendCompactionChrome(withDividers, options?.compaction, options?.compactionNoticeAt);
+}
+
+const DIVIDER_LEAD_MS = 10_000;
+
+/**
+ * 分隔线放在 at 之后的第一行前；紧挨着、开工前 10 秒内的任务消息若在上一条分隔线之后，也归入本段
+ * （任务消息比开工时间早落盘）。尾窗没加载到 at 之前的行时，开工点在更早的页里，不画。
+ */
+function insertDividers(
+  items: TimelineItem[],
+  dividers: readonly { key: string; at: number; text: string }[],
+  timeOf: (item: TimelineItem) => number,
+  complete: boolean
+): TimelineItem[] {
+  const result = [...items];
+  // 上一条分隔线之后的首行下标；该行已归上一段
+  let floor = -1;
+  for (const divider of dividers) {
+    let index = result.findIndex((item, i) => i > floor && timeOf(item) >= divider.at);
+    if (index < 0) index = result.length;
+    if (!complete && !result.slice(0, index).some((item) => timeOf(item) < divider.at)) continue;
+    const prev = result[index - 1];
+    if (index - 1 > floor && prev.kind === 'user' && divider.at - timeOf(prev) <= DIVIDER_LEAD_MS)
+      index -= 1;
+    result.splice(index, 0, { kind: 'divider', key: divider.key, text: divider.text });
+    floor = index + 1;
+  }
+  return result;
 }
 
 /** 折叠门槛：段内非 edit 工具数达到该值才收拢 */
@@ -1421,6 +1479,7 @@ function isTurnSwallowable(item: TimelineItem): boolean {
     case 'compaction-notice':
     case 'compaction-progress':
     case 'error':
+    case 'divider':
       return false;
     default:
       return true;

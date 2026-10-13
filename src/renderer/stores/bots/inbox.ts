@@ -10,6 +10,8 @@ export interface InboxSections {
   routines: RoutineAlert[];
   silences: BotInboxItem[];
   interrupted: { item: BotInboxItem; record: Delegation }[];
+  /** 缺信息卡住的任务（text = 缺什么） */
+  blocked: { item: BotInboxItem; record: Delegation }[];
   count: number;
 }
 
@@ -24,6 +26,7 @@ export function inboxSections(
     routines: [],
     silences: [],
     interrupted: [],
+    blocked: [],
     count: 0,
   };
   for (const item of visibleInbox(items)) {
@@ -59,9 +62,10 @@ export function inboxSections(
           kind: item.kind === 'routine-draft' ? 'approval' : 'blocked',
           routine,
         });
-    } else if (item.kind === 'delegation-interrupted') {
+    } else if (item.kind === 'delegation-interrupted' || item.kind === 'task-blocked') {
       const record = ctx.delegations.find((entry) => entry.id === item.delegationId);
-      if (record) sections.interrupted.push({ item, record });
+      if (record)
+        sections[item.kind === 'task-blocked' ? 'blocked' : 'interrupted'].push({ item, record });
     }
   }
   sections.count =
@@ -69,6 +73,7 @@ export function inboxSections(
     sections.budgets.length +
     sections.routines.length +
     sections.silences.length +
-    sections.interrupted.length;
+    sections.interrupted.length +
+    sections.blocked.length;
   return sections;
 }

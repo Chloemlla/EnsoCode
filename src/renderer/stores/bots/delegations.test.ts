@@ -7,6 +7,7 @@ import {
   delegationActions,
   delegationLiveTarget,
   delegationOwners,
+  delegationRunMarks,
   formatElapsed,
   isRetried,
   openTarget,
@@ -149,5 +150,36 @@ describe('formatElapsed', () => {
     expect(formatElapsed(3 * 60_000 + 5_000)).toBe('3m');
     expect(formatElapsed(65 * 60_000)).toBe('1h 5m');
     expect(formatElapsed(-1)).toBe('0s');
+  });
+});
+
+describe('delegationRunMarks', () => {
+  it('同一子会话有两次以上开工的执行才给分隔：按开工时间编号，带来源', () => {
+    const marks = delegationRunMarks(
+      [
+        record({ id: 'r2', trigger: 'rework', createdAt: 50, startedAt: 60, state: 'running' }),
+        record({ id: 'r1', createdAt: 10, startedAt: 12, state: 'completed' }),
+        record({ id: 'q', trigger: 'retry', createdAt: 70, state: 'queued' }),
+        record({ id: 'other', childConversationId: 'k2', createdAt: 5, startedAt: 6 }),
+      ],
+      'k1'
+    );
+    expect(marks).toEqual([
+      { key: 'run:r1', at: 12, n: 1, trigger: 'delegate' },
+      { key: 'run:r2', at: 60, n: 2, trigger: 'rework' },
+    ]);
+  });
+
+  it('旧记录没有开工时间时按发起时间；只有一次执行不分隔', () => {
+    expect(
+      delegationRunMarks(
+        [
+          record({ id: 'a', createdAt: 10, state: 'failed' }),
+          record({ id: 'b', trigger: 'retry', createdAt: 30, state: 'completed' }),
+        ],
+        'k1'
+      ).map((mark) => mark.at)
+    ).toEqual([10, 30]);
+    expect(delegationRunMarks([record({ startedAt: 12 })], 'k1')).toEqual([]);
   });
 });

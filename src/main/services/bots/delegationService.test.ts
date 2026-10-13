@@ -615,10 +615,12 @@ it('links a board task: gate rejects before any record, sync sees every save, re
   const tasks = {
     gate: vi.fn((_chatId: string | null, ref: string) =>
       (ref === '#1' || ref === TASK) && free
-        ? ({ ok: true, taskId: TASK } as const)
+        ? ({ ok: true, taskId: TASK, seq: 1 } as const)
         : ({ ok: false, error: 'Task #1 is already done.' } as const)
     ),
     sync: vi.fn(),
+    open: vi.fn(),
+    discard: vi.fn(),
   };
   const service = new DelegationService({ ...f.deps, tasks });
   expect(service.delegate(f.parent, { to: 'Bob', task: 'x', taskId: '#2' })).toEqual({
@@ -626,9 +628,16 @@ it('links a board task: gate rejects before any record, sync sees every save, re
     error: 'Task #1 is already done.',
   });
   expect(f.store.list()).toEqual([]);
+  // 私聊不自动建卡
+  const plain = service.delegate(f.parent, { to: 'Bob', task: 'y' });
+  if (!plain.ok) throw new Error(plain.error);
+  expect(plain).not.toHaveProperty('taskId');
+  expect(tasks.open).not.toHaveBeenCalled();
+  service.cancel(plain.delegationId);
   const sent = service.delegate(f.parent, { to: 'Bob', task: 'x', taskId: '#1' });
   if (!sent.ok) throw new Error(sent.error);
-  expect(f.store.get(sent.delegationId)?.taskId).toBe(TASK);
+  expect(sent.taskId).toBe('#1');
+  expect(f.store.get(sent.delegationId)).toMatchObject({ taskId: TASK, trigger: 'delegate' });
   expect(tasks.sync).toHaveBeenCalledWith(
     expect.objectContaining({ id: sent.delegationId, taskId: TASK })
   );
@@ -639,7 +648,8 @@ it('links a board task: gate rejects before any record, sync sees every save, re
   free = true;
   const retried = await service.retry(sent.delegationId, 'restart');
   if (!retried.ok) throw new Error(retried.error);
-  expect(f.store.get(retried.delegationId)?.taskId).toBe(TASK);
+  expect(retried.taskId).toBe('#1');
+  expect(f.store.get(retried.delegationId)).toMatchObject({ taskId: TASK, trigger: 'retry' });
   service.cancel(retried.delegationId);
   free = false;
   const again = await service.retry(retried.delegationId, 'restart');
@@ -732,7 +742,12 @@ describe('acceptance check', () => {
     const service = new DelegationService({
       ...f.deps,
       sessionMessages: read,
-      tasks: { gate: () => ({ ok: true, taskId: TASK, check }), sync: vi.fn() },
+      tasks: {
+        gate: () => ({ ok: true, taskId: TASK, seq: 1, check }),
+        sync: vi.fn(),
+        open: vi.fn(),
+        discard: vi.fn(),
+      },
     });
     const sent = service.delegate(f.parent, { to: 'Bob', task: 'x', taskId: '#1' });
     if (!sent.ok) throw new Error(sent.error);
@@ -823,7 +838,12 @@ describe('retry resumes from the breakpoint', () => {
     const f = fixture();
     f.service.dispose();
     const TASK = '55555555-5555-4555-8555-555555555555';
-    const board = { gate: vi.fn(() => ({ ok: true, taskId: TASK }) as const), sync: vi.fn() };
+    const board = {
+      gate: vi.fn(() => ({ ok: true, taskId: TASK, seq: 1 }) as const),
+      sync: vi.fn(),
+      open: vi.fn(),
+      discard: vi.fn(),
+    };
     const service = new DelegationService({ ...f.deps, tasks: board });
     const sent = service.delegate(f.parent, {
       to: 'Bob',
@@ -1158,7 +1178,7 @@ describe('stopping the parent turn', () => {
   it('returns cascaded board tasks to todo while kept ones stay assigned', async () => {
     const f = fixture();
     f.service.dispose();
-    const tasks = { gate: vi.fn(), sync: vi.fn() };
+    const tasks = { gate: vi.fn(), sync: vi.fn(), open: vi.fn(), discard: vi.fn() };
     const service = new DelegationService({ ...f.deps, tasks });
     await f.host.deliverConversation(f.parent, 'go');
     await vi.advanceTimersByTimeAsync(0);

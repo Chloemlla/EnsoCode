@@ -1,6 +1,6 @@
 import { detailOf } from '@shared/bots/liveActivity';
 import type { ProjectedMessage } from '@shared/types/agent';
-import type { Delegation, GroupEntry } from '@shared/types/bot';
+import type { Delegation, DelegationAppend, GroupEntry } from '@shared/types/bot';
 
 const CONTINUE_WINDOW_MS = 5 * 60_000;
 /** 渲染上限：群时间线不虚拟化，已加载条目超过即从远离视口的一端裁掉 */
@@ -75,13 +75,41 @@ export function buildRows(entries: readonly GroupEntry[]): TimelineRow[] {
   return rows;
 }
 
+export interface TimelineDelegation {
+  key: string;
+  record: Delegation;
+  /** 并入这次执行的追加：单独一张卡，标「已并入」 */
+  append?: DelegationAppend;
+  createdAt: number;
+  parentConversationId: string;
+}
+
+/** 进行中的委派各一张卡；并入的追加按追加时间各一张卡 */
+export function timelineDelegations(active: readonly Delegation[]): TimelineDelegation[] {
+  return active.flatMap((record) => [
+    {
+      key: record.id,
+      record,
+      createdAt: record.createdAt,
+      parentConversationId: record.parentConversationId,
+    },
+    ...(record.appends ?? []).map((append) => ({
+      key: `${record.id}:${append.deliveryId}`,
+      record,
+      append,
+      createdAt: append.at,
+      parentConversationId: record.parentConversationId,
+    })),
+  ]);
+}
+
 /** 进行中的委派按时间插进时间线：优先挂在发起者那一轮的群回复后，其次挂在创建前最后一条后 */
-export function anchorDelegations(
+export function anchorDelegations<T extends Pick<Delegation, 'createdAt' | 'parentConversationId'>>(
   entries: readonly GroupEntry[],
-  active: readonly Delegation[]
-): { head: Delegation[]; after: Map<string, Delegation[]> } {
-  const head: Delegation[] = [];
-  const after = new Map<string, Delegation[]>();
+  active: readonly T[]
+): { head: T[]; after: Map<string, T[]> } {
+  const head: T[] = [];
+  const after = new Map<string, T[]>();
   for (const item of [...active].sort((a, b) => a.createdAt - b.createdAt)) {
     const anchor =
       entries.find(

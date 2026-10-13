@@ -24,6 +24,7 @@ import type {
   EmbeddingModelDto,
   EvolvesEdgeDto,
   MemoryDetail,
+  MemoryEditPatch,
   MemoryJobsSnapshot,
   MemoryListQuery,
   MemoryListResult,
@@ -43,6 +44,7 @@ import type {
   TreeNodeDto,
   TreeQuery,
 } from '@shared/memory/graphDto';
+import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
 import type {
   ResourceSnapshot,
@@ -102,6 +104,7 @@ import type {
 import { IPC_CHANNELS } from '@shared/types';
 import type {
   AgentActionResult,
+  AgentRunProgress,
   AgentSpawnRequest,
   ApprovalDecision,
   ApprovalMode,
@@ -229,6 +232,7 @@ import type {
 } from '@shared/types/worktree';
 import type { BotUsageOverviewResult, BotUsageSummaryResult } from '@shared/usage/botUsage';
 import type { UsageRangeDays, UsageSummaryResult } from '@shared/usage/types';
+import type { TitleBarAppearance } from '@shared/windowControls';
 import type {
   WorkspaceSearchQueryRequest,
   WorkspaceSearchQueryResult,
@@ -354,6 +358,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.MEMORY_RESTORE, id),
     delete: (id: string): Promise<MemoryMutationResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.MEMORY_DELETE, id),
+    update: (id: string, patch: MemoryEditPatch): Promise<MemoryMutationResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MEMORY_UPDATE, id, patch),
     stats: (): Promise<MemoryStats> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_STATS),
     jobs: (): Promise<MemoryJobsSnapshot> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_JOBS),
     clearJobs: (): Promise<number> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_JOBS_CLEAR),
@@ -704,6 +710,12 @@ const electronAPI = {
     /** 枚举目录下的媒体文件（背景图文件夹随机模式），返回绝对路径 */
     listMedia: (dir: string): Promise<string[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.FILES_LIST_MEDIA, dir),
+    /** 超长粘贴存成 txt：只传会话 id 与文本，路径由 Main 推导 */
+    savePastedText: (request: {
+      conversationId: string;
+      text: string;
+    }): Promise<PastedTextFileResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.FILES_SAVE_PASTED_TEXT, request),
   },
 
   sessionImport: {
@@ -826,6 +838,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_TASK_STOP, sessionId, taskId),
     backgroundTool: (sessionId: string, toolCallId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_TOOL_BACKGROUND, sessionId, toolCallId),
+    subagentProgress: (sessionId: string): Promise<AgentRunProgress[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS, sessionId),
     stopSubagent: (sessionId: string, agentId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_STOP, sessionId, agentId),
     stopWorkflow: (sessionId: string, runId: string): Promise<AgentActionResult> =>
@@ -1127,6 +1141,10 @@ const electronAPI = {
     close: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CLOSE),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_MAXIMIZED),
     isFullScreen: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_FULLSCREEN),
+    setTitleBarAppearance: (
+      appearance: TitleBarAppearance
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SET_TITLE_BAR_APPEARANCE, appearance),
     setTrafficLightsVisible: (visible: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE, visible),
     openSettings: (link?: SettingsDeepLink): Promise<void> =>
@@ -1229,13 +1247,16 @@ const electronAPI = {
         ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_CANCEL, request),
       remove: (request: { chatId: string; id: string }): Promise<BotActionResult> =>
         ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_DELETE, request),
-      /** 验收：通过 → done；退回需 reason → todo */
+      /** 验收：通过 → done；退回需 reason → todo，rework 时原执行人在原会话返工 */
       review: (
         request: { chatId: string; id: string } & (
           | { accept: true }
-          | { accept: false; reason: string }
+          | { accept: false; reason: string; rework?: boolean }
         )
       ): Promise<BotTaskWriteResult> => ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_REVIEW, request),
+      /** 任务卡回复：缺信息卡住时解除并让原执行人接着做；执行中插入当前执行；其他状态记评论 */
+      reply: (request: { chatId: string; id: string; text: string }): Promise<BotTaskWriteResult> =>
+        ipcRenderer.invoke(IPC_CHANNELS.BOT_TASK_REPLY, request),
     },
     list: (): Promise<BotsListResult> => ipcRenderer.invoke(IPC_CHANNELS.BOTS_LIST),
     get: (botId: string): Promise<BotGetResult> =>
@@ -1313,6 +1334,9 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.BOT_SEARCH, request),
     searchFiles: (request: BotFileSearchRequest): Promise<BotFileSearchResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.BOT_FILE_SEARCH, request),
+    /** 超长粘贴存成 txt：存放目录由 Main 按 chatId 推导 */
+    savePastedText: (request: { chatId: string; text: string }): Promise<PastedTextFileResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.BOT_CHAT_SAVE_PASTED_TEXT, request),
     /** 私聊回退到持久化 user entry；结果经 AGENT_EVENT 的 rewind-done 回来 */
     rewind: (request: {
       chatId: string;

@@ -241,4 +241,11 @@ describe('listMemories / updateMemory', () => {
     expect(hit.n).toBe(1);
     expect(updateMemory(db, 'missing', { title: 'x' })).toBeNull();
   });
+
+  it('clamps an edited title to the same limit as new memories', async () => {
+    const r = await createMemory(db, { content: 'body', spaceId: 'global' }, { now: NOW });
+    if (r.status !== 'inserted') throw new Error();
+    const u = updateMemory(db, r.memory.id, { title: `  ${'标'.repeat(100)}  ` });
+    expect(Array.from(u?.title ?? '')).toHaveLength(80);
+  });
 });

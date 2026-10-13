@@ -71,6 +71,19 @@ describe('parseBotInjectedMessage', () => {
     ).toEqual({ kind: 'delegation-task', from: '林', task: '检查', context: '' });
   });
 
+  it('委派任务尾部的验收条件与 <previous-runs> 不进正文；续做的增量投递没有 context', () => {
+    expect(
+      parseBotInjectedMessage(
+        '<delegation-task id="d" from="林">\n返工\n<context></context>\n<acceptance-check>Passes only if X</acceptance-check>\n<previous-runs>\n<run n="1" member="侯" trigger="delegate" state="completed">\n<request>做</request>\n</run>\n</previous-runs>\n</delegation-task>'
+      )
+    ).toEqual({ kind: 'delegation-task', from: '林', task: '返工', context: '' });
+    expect(
+      parseBotInjectedMessage(
+        '<delegation-task id="d" from="林" task="#3" run="2" trigger="rework">\n补单测\n<acceptance-check>Passes only if X</acceptance-check>\n</delegation-task>'
+      )
+    ).toEqual({ kind: 'delegation-task', from: '林', task: '补单测', context: '' });
+  });
+
   it('委派结果包含来源、状态和正文，兼容无状态历史', () => {
     expect(
       parseBotInjectedMessage(

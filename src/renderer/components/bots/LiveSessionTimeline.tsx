@@ -7,10 +7,33 @@ import {
 } from '@/components/chat/MessageTimeline';
 import { RetryBar } from '@/components/chat/RetryBar';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useBotsStore } from '@/stores/bots';
+import { delegationRunMarks } from '@/stores/bots/delegations';
 import { focusStep, messageItemKey } from '@/stores/bots/focus';
 import { buildTimeline } from '@/stores/sessions/timeline';
+import { triggerText } from './TaskRuns';
+
+export type RunDividers = { key: string; at: number; text: string }[];
+
+/** 委派子会话里多次执行的「第 N 次执行 · 来源」分隔线；内容不变时引用稳定 */
+export function useRunDividers(conversationId: string | null): RunDividers {
+  const { t } = useI18n();
+  const delegations = useBotsStore((s) => s.delegations);
+  const marks = conversationId ? delegationRunMarks(delegations, conversationId) : [];
+  const signature = marks.map((mark) => `${mark.key}:${mark.at}:${mark.trigger}`).join('|');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: signature 涵盖 marks 内容
+  return useMemo(
+    () =>
+      marks.map((mark) => ({
+        key: mark.key,
+        at: mark.at,
+        text: t('Run {{n}} · {{source}}', { n: mark.n, source: triggerText(mark.trigger, t) }),
+      })),
+    [signature, t]
+  );
+}
 
 /** 搜索跳转：滚到该消息并用查询词短暂高亮 */
 export interface MessageFocus {
@@ -91,6 +114,8 @@ interface LiveSessionTimelineProps {
   turnFooter?: (messageIndex: number) => ReactNode;
   /** 私聊当前会话：开启回退 / 重试（须稳定引用） */
   controls?: ChatHost['botControls'];
+  /** 委派子会话多次执行的分隔线（须稳定引用） */
+  runDividers?: RunDividers;
 }
 
 /** 成员会话的实时投影（私聊正文、群里正在回复的成员） */
@@ -104,6 +129,7 @@ export function LiveSessionTimeline({
   onFocusDone,
   turnFooter,
   controls,
+  runDividers,
 }: LiveSessionTimelineProps) {
   const projection = useBotsStore((s) => s.sessions[conversationId]);
   const historyLoading = useBotsStore((s) => Boolean(s.sessionHistoryLoading[conversationId]));
@@ -117,9 +143,10 @@ export function LiveSessionTimeline({
             toolOutputs: projection.toolOutputs,
             pendingApprovals: projection.pendingApprovals,
             toolStartedAt: projection.toolStartedAt,
+            runDividers,
           })
         : [],
-    [projection, running]
+    [projection, running, runDividers]
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: items 是触发信号
   useEffect(() => {
@@ -215,6 +242,7 @@ export function LiveSessionDialog({
   footer,
   onClose,
 }: LiveSessionDialogProps) {
+  const runDividers = useRunDividers(conversationId);
   return (
     <Dialog open={conversationId !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="flex h-[80vh] max-w-3xl flex-col">
@@ -228,6 +256,7 @@ export function LiveSessionDialog({
             speaker={speaker}
             emptyTitle={emptyTitle ?? title}
             emptyDescription={emptyDescription}
+            runDividers={runDividers}
           />
         )}
         {footer && <div className={CHAT_COL}>{footer}</div>}

@@ -44,7 +44,11 @@ export function summarizeBotChat(
     sessions[botId] = { conversationId: session.conversationId };
   }
   const botId =
-    last?.kind === 'bot' ? last.botId : last?.kind === 'delegation' ? last.from : undefined;
+    last?.kind === 'bot' || last?.kind === 'progress'
+      ? last.botId
+      : last?.kind === 'delegation'
+        ? last.from
+        : undefined;
   return {
     id: chat.id,
     kind: chat.kind,

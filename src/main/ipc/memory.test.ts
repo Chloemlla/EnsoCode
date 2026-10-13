@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   approvePendingMemoryWrite: vi.fn(
     async (): Promise<{ ok: boolean; error?: string }> => ({ ok: false, error: 'x' })
   ),
+  editMemory: vi.fn((): unknown => null),
   registry: null as { projection: () => unknown } | null,
   settings: null as Record<string, unknown> | null,
   send: vi.fn(),
@@ -81,6 +82,7 @@ vi.mock('../services/memoryHost', () => ({
   getMemoryEmbeddingError: vi.fn(() => null),
   setMemoryChangeListener: vi.fn(),
   approvePendingMemoryWrite: mocks.approvePendingMemoryWrite,
+  editMemory: mocks.editMemory,
 }));
 vi.mock('../services/memory/pending', () => ({
   listPendingWrites: mocks.listPendingWrites,
@@ -235,6 +237,41 @@ describe('memory IPC', () => {
     mocks.deleteMemoryPermanently.mockReturnValue(false);
     await handler(IPC_CHANNELS.MEMORY_DELETE)(event, 'ghost');
     expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('edits a memory only with a trusted window and a well-formed patch', async () => {
+    const update = handler(IPC_CHANNELS.MEMORY_UPDATE);
+    for (const patch of [
+      null,
+      { title: 'x' },
+      { title: 'x', content: '   ' },
+      { title: 1, content: 'x' },
+      { title: 'x', content: 'y', importance: 1 },
+    ]) {
+      expect(await update(event, 'm1', patch)).toMatchObject({ ok: false });
+    }
+    expect(await update(event, '', { title: '', content: 'y' })).toMatchObject({ ok: false });
+    expect(await update({ sender: { id: 99 } }, 'm1', { title: '', content: 'y' })).toMatchObject({
+      ok: false,
+    });
+    expect(mocks.editMemory).not.toHaveBeenCalled();
+
+    mocks.editMemory.mockReturnValueOnce(null);
+    expect(await update(event, 'ghost', { title: '', content: 'y' })).toMatchObject({ ok: false });
+    expect(mocks.send).not.toHaveBeenCalled();
+
+    mocks.editMemory.mockImplementationOnce(() => {
+      throw new Error('Refused to write memory: prompt-injection');
+    });
+    expect(await update(event, 'm1', { title: '', content: 'bad' })).toEqual({
+      ok: false,
+      error: 'Refused to write memory: prompt-injection',
+    });
+
+    mocks.editMemory.mockReturnValueOnce({ id: 'm1' });
+    expect(await update(event, 'm1', { title: 'T', content: 'y' })).toEqual({ ok: true });
+    expect(mocks.editMemory).toHaveBeenLastCalledWith('m1', { title: 'T', content: 'y' });
+    expect(mocks.send).toHaveBeenCalledWith(IPC_CHANNELS.MEMORY_CHANGED, undefined);
   });
 
   it('rejects invalid list input before reaching the service', async () => {

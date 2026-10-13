@@ -137,14 +137,17 @@
   }
 
   /*
-   * Windows 无框窗口没有系统圆角和 1px 外框。只在 win32 挂 enso-win，
-   * 最大化/全屏时再挂 enso-win-flush 贴齐屏幕。html 保持透明，圆角外露桌面。
+   * Windows 原生窗口按钮模式挂 enso-win-native，圆角和外框由 DWM 绘制。
+   * 工作区 HTML 保持透明，以便内嵌浏览器视图从下方透出。
+   *
+   * Native Windows controls use enso-win-native and DWM supplies the frame and
+   * corners. Keep workbench HTML transparent for embedded browser views below it.
    */
   html.enso-main-shell.enso-win #root {
     height: 100vh;
   }
 
-  html.enso-main-shell.enso-win:not(.enso-win-pending):not(.enso-win-flush) #root {
+  html.enso-main-shell.enso-win:not(.enso-win-native):not(.enso-win-pending):not(.enso-win-flush) #root {
     border-radius: 8px;
     overflow: hidden;
   }
@@ -153,7 +156,7 @@
    * 描边必须离开客户区最外 1px。Windows DWM + 分数 DPI 会把贴边 1px
    * 的右/下裁掉（上/左仍在）；overlay 内缩后再画内侧描边。
    */
-  html.enso-main-shell.enso-win:not(.enso-win-pending):not(.enso-win-flush) #root::after {
+  html.enso-main-shell.enso-win:not(.enso-win-native):not(.enso-win-pending):not(.enso-win-flush) #root::after {
     content: '';
     position: fixed;
     inset: 1px;

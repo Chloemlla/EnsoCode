@@ -8,6 +8,7 @@ import {
   mergeLatest,
   mergeNewer,
   mergeOlder,
+  timelineDelegations,
   trimTimeline,
   turnSteps,
 } from './groupTimeline';
@@ -194,5 +195,35 @@ describe('anchorDelegations', () => {
     const { head, after } = anchorDelegations([human(5, 9000)], [del('d1', 100, 'z')]);
     expect(head.map((d) => d.id)).toEqual(['d1']);
     expect(after.size).toBe(0);
+  });
+});
+
+describe('timelineDelegations', () => {
+  it('进行中的委派一张卡，并入的追加按追加时间各一张卡', () => {
+    const record = {
+      id: 'd1',
+      createdAt: 1000,
+      parentConversationId: 'p',
+      appends: [
+        { at: 4000, text: 'a', deliveryId: 'x1', ok: true },
+        { at: 6000, text: 'b', deliveryId: 'x2' },
+      ],
+    } as Delegation;
+    const items = timelineDelegations([record]);
+    expect(items.map((item) => [item.key, item.createdAt, item.append?.text])).toEqual([
+      ['d1', 1000, undefined],
+      ['d1:x1', 4000, 'a'],
+      ['d1:x2', 6000, 'b'],
+    ]);
+    expect(items.every((item) => item.record === record)).toBe(true);
+    const entries = [
+      human(1, 500),
+      { ...bot(2, 'x', 2000), conversationId: 'p' } as GroupEntry,
+      { ...bot(3, 'x', 5000), conversationId: 'p' } as GroupEntry,
+    ];
+    const { after } = anchorDelegations(entries, items);
+    expect(after.get('b2')?.map((item) => item.key)).toEqual(['d1']);
+    expect(after.get('b3')?.map((item) => item.key)).toEqual(['d1:x1', 'd1:x2']);
+    expect(after.get('h1')).toBeUndefined();
   });
 });

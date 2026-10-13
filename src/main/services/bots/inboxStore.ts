@@ -12,6 +12,7 @@ const KINDS: readonly BotInboxKind[] = [
   'routine-draft',
   'routine-blocked',
   'silence',
+  'task-blocked',
 ];
 const OPTIONAL_TEXT = ['botId', 'conversationId', 'delegationId', 'ownerBotId', 'text'] as const;
 const OPTIONAL_TIME = ['since', 'dismissedAt', 'resolvedAt'] as const;

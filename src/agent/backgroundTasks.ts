@@ -97,14 +97,33 @@ const fmtDuration = (ms: number): string => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`;
 };
 
+/** 可被插话 / 用户「转后台」解除的在跑工具调用：前台命令移交后台，阻塞等待提前返回 */
+interface DetachableCall {
+  detach(reason: DetachReason): string | null;
+}
+
+export interface BlockingWait {
+  signal: AbortSignal;
+  /** 被解除的原因；未解除为 undefined */
+  reason(): DetachReason | undefined;
+  untrack(): void;
+}
+
+/** 阻塞等待被解除后给模型的说明：被等的对象继续跑，结束会自动通知 */
+export function detachedWaitNote(reason: DetachReason, subject: string): string {
+  return reason === 'steer'
+    ? `Stopped waiting because the user sent a new message. The ${subject} keeps running and you will be notified automatically when it finishes — read and answer the user's message first.`
+    : `The user chose to stop waiting. The ${subject} keeps running and you will be notified automatically when it finishes; do not wait for it again unless the user asks.`;
+}
+
 /**
  * 后台任务管理（grok-build 对齐）：detached 进程组、内存环形+磁盘全量双写、
  * 结束自动通知（幂等抑制）、阻塞等待、配额与护栏。
  */
 export class BackgroundTaskManager {
   private tasks = new Map<string, Task>();
-  /** sessionId → toolCallId → 在跑的前台命令（可移交后台） */
-  private foreground = new Map<string, Map<string, ForegroundCommand>>();
+  /** sessionId → toolCallId → 在跑的前台命令（可移交后台）或阻塞等待（可提前结束） */
+  private foreground = new Map<string, Map<string, DetachableCall>>();
   private counter = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -187,8 +206,8 @@ export class BackgroundTaskManager {
     void finalize?.().catch(() => {});
   }
 
-  trackForeground(sessionId: string, toolCallId: string, command: ForegroundCommand): () => void {
-    const byCall = this.foreground.get(sessionId) ?? new Map<string, ForegroundCommand>();
+  trackForeground(sessionId: string, toolCallId: string, command: DetachableCall): () => void {
+    const byCall = this.foreground.get(sessionId) ?? new Map<string, DetachableCall>();
     this.foreground.set(sessionId, byCall);
     byCall.set(toolCallId, command);
     return () => {
@@ -197,6 +216,22 @@ export class BackgroundTaskManager {
         this.foreground.delete(sessionId);
       }
     };
+  }
+
+  /** 登记一次阻塞等待：插话或用户「不等了」时 abort 其 signal，被等的任务 / 子代理不受影响 */
+  trackBlockingWait(sessionId: string, toolCallId: string): BlockingWait {
+    const controller = new AbortController();
+    let detachedBy: DetachReason | undefined;
+    const untrack = this.trackForeground(sessionId, toolCallId, {
+      detach: (reason) => {
+        if (!controller.signal.aborted) {
+          detachedBy = reason;
+          controller.abort();
+        }
+        return null;
+      },
+    });
+    return { signal: controller.signal, reason: () => detachedBy, untrack };
   }
 
   /** 把指定前台命令移交后台；命令不在跑或配额满时返回 null */
@@ -355,7 +390,8 @@ export class BackgroundTaskManager {
   /** task_output：快照或阻塞等待（等到结束视为模型已知情） */
   async read(
     taskId: string,
-    timeoutMs = 0
+    timeoutMs = 0,
+    signal?: AbortSignal
   ): Promise<{
     status: string;
     output: string;
@@ -365,14 +401,22 @@ export class BackgroundTaskManager {
   } | null> {
     const task = this.tasks.get(taskId);
     if (!task) return null;
-    if (timeoutMs > 0 && task.info.status === 'running') {
+    if (timeoutMs > 0 && task.info.status === 'running' && !signal?.aborted) {
       const wait = Math.min(timeoutMs, MAX_WAIT_MS);
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, wait);
-        task.waiters.push(() => {
+        const wake = () => {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
           resolve();
-        });
+        };
+        // 提前结束等待：撤下等待者，任务结束时照常通知
+        const onAbort = () => {
+          task.waiters = task.waiters.filter((waiter) => waiter !== wake);
+          wake();
+        };
+        const timer = setTimeout(onAbort, wait);
+        task.waiters.push(wake);
+        signal?.addEventListener('abort', onAbort, { once: true });
       });
     }
     if (task.info.status !== 'running') task.consumed = true;
@@ -427,7 +471,7 @@ export class BackgroundTaskManager {
 const TRAILING_AMP = /(?:^|[^&])&\s*$/;
 
 /** 前台 bash 默认超时（秒）。background=true 不限。 */
-export const DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC = 10 * 60;
+export const DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC = 120;
 
 function spawnBackground(
   command: string,
@@ -521,7 +565,9 @@ export function withBackground(
   sessionId: string,
   cwd: string,
   /** 远程会话：把远端命令变换成本地可 spawn 的 ssh 命令(manager 本体始终本地 spawn) */
-  transform?: (command: string, cwd: string) => { command: string; cwd: string }
+  transform?: (command: string, cwd: string) => { command: string; cwd: string },
+  /** 前台命令按哪个会话登记「转后台」：子代理的命令记在子会话，父会话插话不牵连它 */
+  foregroundSessionId = sessionId
 ): ToolDefinition {
   const baseParams = definition.parameters as unknown as {
     properties?: Record<string, unknown>;
@@ -619,7 +665,7 @@ export function withBackground(
         }
       );
       bindForegroundCommand(callSignal, foreground);
-      const untrack = manager.trackForeground(sessionId, toolCallId, foreground);
+      const untrack = manager.trackForeground(foregroundSessionId, toolCallId, foreground);
       try {
         return await definition.execute(
           toolCallId,
@@ -639,7 +685,10 @@ export function withBackground(
 }
 
 /** task_output / task_stop 工具（免审） */
-export function createTaskTools(manager: BackgroundTaskManager): ToolDefinition[] {
+export function createTaskTools(
+  manager: BackgroundTaskManager,
+  sessionId?: string
+): ToolDefinition[] {
   return [
     {
       name: 'task_output',
@@ -660,23 +709,38 @@ export function createTaskTools(manager: BackgroundTaskManager): ToolDefinition[
         },
         required: ['taskId'],
       } as unknown as ToolDefinition['parameters'],
-      async execute(_id, params) {
+      async execute(toolCallId, params, signal) {
         const { taskId = '', timeout_ms: timeoutMs } = params as {
           taskId?: string;
           timeout_ms?: number;
         };
         const requested = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 0;
-        const result = await manager.read(taskId, requested);
+        const blocking =
+          requested > 0 && sessionId ? manager.trackBlockingWait(sessionId, toolCallId) : null;
+        const waitSignal = blocking
+          ? signal
+            ? AbortSignal.any([signal, blocking.signal])
+            : blocking.signal
+          : signal;
+        let result: Awaited<ReturnType<BackgroundTaskManager['read']>>;
+        try {
+          result = await manager.read(taskId, requested, waitSignal);
+        } finally {
+          blocking?.untrack();
+        }
         if (!result) {
           throw new Error(
             `unknown task: ${taskId}. Known task ids: [${manager.knownIds().join(', ')}]`
           );
         }
         const suffix = result.exitCode !== undefined ? ` (exit ${result.exitCode})` : '';
+        const detachedBy = blocking?.reason();
         const hint =
-          result.status === 'running' && requested > 0
-            ? '\n[Still running after the bounded wait. You do not need to call this again — you will be notified automatically when it completes.]'
-            : '';
+          result.status !== 'running' || requested === 0
+            ? ''
+            : detachedBy
+              ? `\n[${detachedWaitNote(detachedBy, 'task')}]`
+              : '\n[Still running after the bounded wait. You do not need to call this again — you will be notified automatically when it completes.]';
         return {
           content: [
             {

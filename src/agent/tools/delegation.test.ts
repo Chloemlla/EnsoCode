@@ -64,3 +64,40 @@ it('normalizes optional nulls and boolean text before full typed schema validati
       expect(property).toHaveProperty('type');
   }
 });
+
+it('describes auto-created board tasks only for group sessions', () => {
+  const describe = (groupTasks: boolean) =>
+    createDelegationTools(new MemoryInvoker({ sessionId: 's', generation: 'g' }, () => {}), {
+      groupTasks,
+    }).find((tool) => tool.name === 'delegate')?.description ?? '';
+  expect(describe(true)).toContain('Without taskId, a new board task is created');
+  expect(describe(true)).toContain('the task becomes blocked (run failed) with the same assignee');
+  expect(describe(true)).toContain('status="blocked"');
+  expect(describe(true)).toContain('appends to that run instead of starting a new one');
+  expect(describe(true)).not.toContain('on failure/cancel it returns to todo');
+  expect(describe(false)).not.toContain('board task');
+  expect(describe(false)).not.toContain('appends to that run');
+});
+
+it('report_blocked 只挂在看板任务的委派会话，schema 带完整类型，waitFor: null 归一化掉', () => {
+  const names = (delegationTask: boolean) =>
+    createDelegationTools(new MemoryInvoker({ sessionId: 's', generation: 'g' }, () => {}), {
+      delegationTask,
+    }).map((tool) => tool.name);
+  expect(names(false)).not.toContain('report_blocked');
+  expect(names(true)).toContain('report_blocked');
+  const tool = createDelegationTools(
+    new MemoryInvoker({ sessionId: 's', generation: 'g' }, () => {}),
+    { delegationTask: true }
+  ).find((item) => item.name === 'report_blocked')!;
+  expect(tool.parameters).toMatchObject({
+    type: 'object',
+    properties: {
+      need: { type: 'string', minLength: 1, maxLength: 300 },
+      waitFor: { type: 'string', enum: ['parent', 'human'] },
+    },
+    required: ['need'],
+  });
+  expect(tool.description).toContain('does not count as blocked');
+  expect(normalizeDelegationParams({ need: 'x', waitFor: null })).toEqual({ need: 'x' });
+});

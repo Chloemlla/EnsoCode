@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BOT_SCHEMA_VERSION } from '../../../shared/bots/migrations';
+import { BOT_SCHEMA_VERSION, migrateRecord, runMigrations } from '../../../shared/bots/migrations';
 import { BotStore } from './botStore';
 import { BotChatStore } from './chatStore';
 import { DelegationStore } from './delegationStore';
@@ -106,7 +106,7 @@ describe('schemaVersion on persisted bot records', () => {
     const lines = jsonLines(file);
     expect(lines.some((line) => line.id === D2)).toBe(true);
     expect(lines.filter((line) => line.id === D1).at(-1)).toMatchObject({
-      schemaVersion: BOT_SCHEMA_VERSION.delegation,
+      schemaVersion: 1,
       context: 'c3',
     });
   });
@@ -116,7 +116,7 @@ describe('schemaVersion on persisted bot records', () => {
     const task = store.create(CHAT, { title: 'a', createdBy: 'human' }, 1);
     if (!task) throw new Error('create');
     const file = join(root, CHAT, 'tasks.jsonl');
-    expect(jsonLines(file)[0]).toMatchObject({ schemaVersion: BOT_SCHEMA_VERSION.task });
+    expect(jsonLines(file)[0]).toMatchObject({ schemaVersion: 1 });
     const { schemaVersion: _, ...legacy } = jsonLines(file)[0];
     const future = { ...legacy, id: D2, seq: 2, schemaVersion: BOT_SCHEMA_VERSION.task + 1 };
     put(file, `${JSON.stringify(legacy)}\n${JSON.stringify(future)}\n`);
@@ -125,5 +125,72 @@ describe('schemaVersion on persisted bot records', () => {
     for (let i = 0; i < 4; i++) reloaded.save(CHAT, { ...task, updatedAt: 2 + i });
     expect(jsonLines(file).some((line) => line.id === D2)).toBe(true);
     expect(reloaded.create(CHAT, { title: 'b', createdBy: 'human' }, 9)?.seq).toBe(3);
+  });
+
+  it('卡住：只有带新状态的委派 / 任务写 schemaVersion 2，旧版本当未来记录原样保留', () => {
+    const v1Steps: [] = [];
+    const file = join(root, 'delegations.jsonl');
+    const record = {
+      id: D1,
+      parentConversationId: 'p',
+      parentBotId: A,
+      targetBotId: B,
+      chatId: null,
+      task: 't',
+      context: '',
+      childConversationId: 'c',
+      state: 'running' as const,
+      depth: 1,
+      createdAt: 1,
+    };
+    const delegations = new DelegationStore(file);
+    delegations.save(record);
+    delegations.save({
+      ...record,
+      id: D2,
+      state: 'blocked',
+      blocked: { need: '数据库密码', waitFor: 'human', at: 2 },
+    });
+    const [plain, blocked] = jsonLines(file);
+    expect(plain.schemaVersion).toBe(1);
+    expect(blocked).toMatchObject({ schemaVersion: 2, state: 'blocked' });
+    expect(new DelegationStore(file).get(D2)).toMatchObject({
+      state: 'blocked',
+      blocked: { need: '数据库密码', waitFor: 'human', at: 2 },
+    });
+    // 旧版本（第 1 版，无迁移步）：带新状态的行是未来记录，不解析、不改写
+    expect(runMigrations(plain, v1Steps)).toEqual(plain);
+    expect(runMigrations(blocked, v1Steps)).toBeUndefined();
+    // 同一条记录升到第 2 版：立即压缩掉它的第 1 版旧行，免得旧版本按旧行把它当中断改写
+    delegations.save({
+      ...record,
+      state: 'blocked',
+      blocked: { need: 'x', waitFor: 'parent', at: 3 },
+    });
+    expect(jsonLines(file).map((line) => [line.id, line.schemaVersion])).toEqual([
+      [D1, 2],
+      [D2, 2],
+    ]);
+
+    const tasks = new GroupTaskStore(root);
+    const task = tasks.create(CHAT, { title: 'a', createdBy: 'human' }, 1)!;
+    tasks.save(CHAT, {
+      ...task,
+      status: 'blocked',
+      blockedReason: 'need',
+      blockedNeed: '数据库密码',
+      blockedStreak: { [B]: 1 },
+      updatedAt: 2,
+    });
+    tasks.save(CHAT, { ...task, status: 'doing', blockedStreak: { [B]: 1 }, updatedAt: 3 });
+    const taskFile = join(root, CHAT, 'tasks.jsonl');
+    expect(jsonLines(taskFile).map((line) => line.schemaVersion)).toEqual([2, 2]);
+    expect(new GroupTaskStore(root).find(CHAT, task.id)).toMatchObject({
+      status: 'doing',
+      blockedStreak: { [B]: 1 },
+    });
+    expect(BOT_SCHEMA_VERSION.delegation).toBe(2);
+    expect(BOT_SCHEMA_VERSION.task).toBe(2);
+    expect(migrateRecord('task', { ...task })).toEqual({ ...task, schemaVersion: 2 });
   });
 });

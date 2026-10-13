@@ -33,6 +33,8 @@ import { messageTokens } from './turnTokens';
 
 /** 运行中的轮次超过该时长没有任何输出（流式、工具进度、子代理）即视为静默 */
 export const BOT_SILENCE_MS = 5 * 60_000;
+/** 委派执行登记卡住后迟迟不收尾时的软停止：只中止当前回合，不算用户停止 */
+export const BOT_BLOCKED_STOP = 'blocked-stop';
 /** 进行中的回合为成员日预算预留的估算 token：本回合已用部分抵扣，回合结束即释放 */
 export const BOT_TURN_RESERVE_TOKENS = 32_000;
 
@@ -72,6 +74,8 @@ export interface BotSpawnSpec {
   routines?: boolean;
   /** 写成员：worker 内同工作区按文件占用、全局命令短独占；ancestors 为委派链祖先会话 */
   writeLock?: { label: string; ancestors: string[] };
+  /** 挂看板任务的委派会话：挂 report_blocked */
+  delegationTask?: boolean;
 }
 
 export interface BotRuntimePort {
@@ -137,6 +141,8 @@ export interface BotSessionHostDeps {
 export interface BotDelegationOrigin {
   parentConversationId: string;
   chatId: string | null;
+  /** 执行挂着看板任务（深度 1）：会话挂 report_blocked */
+  task?: true;
 }
 
 export interface BotDeliverOptions {
@@ -155,6 +161,8 @@ export type BotDeliverResult =
       queued?: boolean;
       /** 已按 steer 下发，不另建宿主轮次；不是 worker 已消费的回执。 */
       steered?: true;
+      /** 与 queued 同时出现：已作为插话交给会话，等当前步骤结束后插入，不是排到下一轮 */
+      steerPending?: true;
       turnId?: string;
       /** 同一 deliveryId 已被该会话处理过，本次没有发出 */
       duplicate?: true;
@@ -293,6 +301,33 @@ export class BotSessionHost {
     this.sentListeners.add(listener);
     return () => this.sentListeners.delete(listener);
   }
+  private readonly deferredListeners = new Set<
+    (event: { conversationId: string; deliveryId: string }) => void
+  >();
+
+  /** worker 回合收尾时没收下的插话：已改排成该会话的下一轮 */
+  onDeliveryDeferred(
+    listener: (event: { conversationId: string; deliveryId: string }) => void
+  ): () => void {
+    this.deferredListeners.add(listener);
+    return () => this.deferredListeners.delete(listener);
+  }
+
+  /** 投递在本宿主排队（未发给 worker） */
+  deliveryQueued(conversationId: string, deliveryId: string): boolean {
+    return this.queue.some(
+      (item) => item.conversationId === conversationId && item.deliveryId === deliveryId
+    );
+  }
+
+  /** 会话还有排队或等回执的投递（不看当前回合） */
+  hasPendingDeliveries(conversationId: string): boolean {
+    return (
+      [...this.pendingSteers.keys(), ...this.queue].some(
+        (item) => item.conversationId === conversationId
+      ) || [...this.preparing].some((item) => item.conversationId === conversationId)
+    );
+  }
   private readonly discardListeners = new Set<
     (scope: { chatId?: string; botId?: string; conversationId?: string }) => void
   >();
@@ -373,7 +408,9 @@ export class BotSessionHost {
         self: bot,
         kind: 'direct',
         roster: this.deps.bots.list(),
+        ...(origin?.task ? { delegationTask: true } : {}),
       }),
+      ...(origin?.task ? { delegationTask: true } : {}),
     });
     return true;
   }
@@ -437,6 +474,18 @@ export class BotSessionHost {
     } catch {
       return 'model-update-failed';
     }
+  }
+
+  /** 空闲时释放 worker 里的活实例（不推进 epoch、不走停止），下次投递按当前登记的配置与原 jsonl 重新 spawn */
+  releaseIdle(conversationId: string): Promise<boolean> {
+    return this.withLock(conversationId, async () => {
+      if (this.disposed || !this.live.has(conversationId) || this.isBusy(conversationId))
+        return false;
+      await this.deps.runtime.release(conversationId);
+      this.live.delete(conversationId);
+      this.liveProfiles.delete(conversationId);
+      return true;
+    });
   }
 
   async abortConversation(conversationId: string): Promise<void> {
@@ -598,6 +647,41 @@ export class BotSessionHost {
     );
     this.queueReasons = next;
     return changed.map(([chatId]) => chatId);
+  }
+
+  /**
+   * 只中止会话当前回合（软停止）：排队投递保留，已下发但 worker 还没收下的插话改回排队，
+   * 都作为后续回合；不按用户停止结算（不级联取消该回合发起的委派）。没有进行中的回合返回 false。
+   */
+  async interruptTurn(id: string, reason: string): Promise<boolean> {
+    if (this.disposed || !this.turnActive(id)) return false;
+    this.markStopping(id);
+    for (const [delivery] of [...this.redirects])
+      if (delivery.conversationId === id) this.settleRedirect(delivery, false);
+    // markStopping 推进了 epoch：保留下来的投递跟上新 epoch；回合结算前就回到排队，结算方能看到它们
+    const epoch = this.epochs.get(id) ?? 0;
+    for (const item of [...this.queue, ...this.preparing])
+      if (item.conversationId === id) item.epoch = epoch;
+    for (const item of [...this.pendingSteers.keys()]) {
+      if (item.conversationId !== id) continue;
+      this.pendingSteers.delete(item);
+      if (item.deliveryId) this.deliveries.get(id)?.delete(item.deliveryId);
+      item.queueIfBusy = true;
+      item.epoch = epoch;
+      this.enqueue(item);
+    }
+    await this.withLock(id, async () => {
+      this.deps.runtime.abort?.(id);
+      this.cancelActive(id, reason);
+      await this.deps.runtime.release(id);
+      this.live.delete(id);
+      this.running.delete(id);
+      this.slots.delete(id);
+      this.stopping.delete(id);
+      this.lastAssistant.delete(id);
+    });
+    this.pump();
+    return true;
   }
 
   async stopTurn(chatId: string, botId: string): Promise<void> {
@@ -1052,6 +1136,8 @@ export class BotSessionHost {
           this.deliveries.get(id)?.delete(event.deliveryId);
           delivery.queueIfBusy = true;
           this.enqueue(delivery);
+          for (const listener of this.deferredListeners)
+            listener({ conversationId: id, deliveryId: event.deliveryId });
         } else {
           this.finish(id, undefined, false, 'steer-rejected', '', event.deliveryId);
           this.pump();
@@ -1323,7 +1409,7 @@ export class BotSessionHost {
           conversationId: delivery.conversationId,
           ...(this.hasStartedDelivery(delivery.conversationId, delivery.deliveryId)
             ? { steered: true as const }
-            : { queued: true }),
+            : { queued: true, steerPending: true as const }),
         }
       : { ok: false, error: sent.error ?? 'steer-failed' };
   }
@@ -2038,6 +2124,7 @@ export class BotSessionHost {
     this.listeners.clear();
     this.discardListeners.clear();
     this.sentListeners.clear();
+    this.deferredListeners.clear();
     this.startedListeners.clear();
     this.deliveries.clear();
     this.modelNotices.clear();
@@ -2076,7 +2163,9 @@ export class BotSessionHost {
         reason,
         '',
         undefined,
-        reason !== BOT_BUDGET_ERROR && reason !== BOT_TURN_LIMIT_ERROR,
+        reason !== BOT_BUDGET_ERROR &&
+          reason !== BOT_TURN_LIMIT_ERROR &&
+          reason !== BOT_BLOCKED_STOP,
         estimated
       );
     this.running.delete(id);

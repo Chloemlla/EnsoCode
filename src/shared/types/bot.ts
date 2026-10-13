@@ -104,9 +104,41 @@ export interface BotChat {
   version: number;
 }
 
-export const DELEGATION_STATES = ['queued', 'running', 'completed', 'failed', 'canceled'] as const;
+/** blocked：执行人用 report_blocked 登记缺信息后结束本轮（schemaVersion 2） */
+export const DELEGATION_STATES = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'canceled',
+  'blocked',
+] as const;
+/** 一次执行的来源；缺省按 delegate */
+export const DELEGATION_TRIGGERS = ['delegate', 'append', 'reply', 'rework', 'retry'] as const;
+export type DelegationTrigger = (typeof DELEGATION_TRIGGERS)[number];
+export const DELEGATION_FAILURES = ['interrupted', 'timeout', 'denied', 'error', 'check'] as const;
 export const DELEGATION_TIMEOUT_MINUTES = 240;
 export const DELEGATION_TIMEOUT_MAX_MINUTES = 1440;
+/** 一次执行最多并入的追加 */
+export const DELEGATION_APPENDS_MAX = 20;
+export const DELEGATION_BLOCKED_NEED_MAX = 300;
+/** 登记卡住后这么久本轮还没收尾，就只中止当前回合（软停止） */
+export const DELEGATION_BLOCKED_STOP_MINUTES = 5;
+
+/** 执行人登记的卡住：缺什么、等谁（parent = 发起方成员，human = 人） */
+export interface DelegationBlocked {
+  need: string;
+  waitFor: 'human' | 'parent';
+  at: number;
+}
+
+/** 并入执行中的追加；ok 缺省 = 还没跑完，true = 已在本次执行里处理，false = 未送达或执行结束前没跑完 */
+export interface DelegationAppend {
+  at: number;
+  text: string;
+  deliveryId: string;
+  ok?: boolean;
+}
 
 export function isDelegationTimeoutMinutes(value: unknown): value is number {
   return (
@@ -135,7 +167,7 @@ export interface Delegation {
   context: string;
   childConversationId: string;
   state: DelegationState;
-  failure?: 'interrupted' | 'timeout' | 'denied' | 'error' | 'check';
+  failure?: (typeof DELEGATION_FAILURES)[number];
   error?: string;
   result?: string;
   deliveredAt?: number;
@@ -155,6 +187,13 @@ export interface Delegation {
   keep?: true;
   /** 验收条件；终态时记 passed，未通过为 failed + failure:'check' */
   check?: TaskCheck;
+  trigger?: DelegationTrigger;
+  /** queued → running 的时刻 */
+  startedAt?: number;
+  /** 同一发起会话对执行中的本任务追加的要求（不另开执行） */
+  appends?: DelegationAppend[];
+  /** report_blocked 登记；本轮结束时执行记为 blocked */
+  blocked?: DelegationBlocked;
 }
 
 export function parseDelegation(value: unknown): Delegation | undefined {
@@ -191,14 +230,8 @@ export function parseDelegation(value: unknown): Delegation | undefined {
     depth: Number(value.depth),
     createdAt: value.createdAt,
   };
-  if (
-    value.failure === 'interrupted' ||
-    value.failure === 'timeout' ||
-    value.failure === 'denied' ||
-    value.failure === 'error' ||
-    value.failure === 'check'
-  )
-    record.failure = value.failure;
+  if (DELEGATION_FAILURES.includes(value.failure as never))
+    record.failure = value.failure as Delegation['failure'];
   if (typeof value.error === 'string') record.error = value.error;
   if (typeof value.result === 'string') record.result = value.result;
   if (isTime(value.deliveredAt)) record.deliveredAt = value.deliveredAt;
@@ -211,6 +244,35 @@ export function parseDelegation(value: unknown): Delegation | undefined {
   if (value.keep === true) record.keep = true;
   const check = parseTaskCheck(value.check);
   if (check) record.check = check;
+  if (DELEGATION_TRIGGERS.includes(value.trigger as never))
+    record.trigger = value.trigger as DelegationTrigger;
+  if (isTime(value.startedAt)) record.startedAt = value.startedAt;
+  if (Array.isArray(value.appends)) {
+    const appends = value.appends.flatMap((item): DelegationAppend[] =>
+      isObject(item) && isTime(item.at) && typeof item.text === 'string' && isText(item.deliveryId)
+        ? [
+            {
+              at: item.at,
+              text: item.text,
+              deliveryId: item.deliveryId,
+              ...(typeof item.ok === 'boolean' ? { ok: item.ok } : {}),
+            },
+          ]
+        : []
+    );
+    if (appends.length) record.appends = appends.slice(-DELEGATION_APPENDS_MAX);
+  }
+  if (
+    isObject(value.blocked) &&
+    isText(value.blocked.need) &&
+    (value.blocked.waitFor === 'human' || value.blocked.waitFor === 'parent') &&
+    isTime(value.blocked.at)
+  )
+    record.blocked = {
+      need: value.blocked.need.slice(0, DELEGATION_BLOCKED_NEED_MAX),
+      waitFor: value.blocked.waitFor,
+      at: value.blocked.at,
+    };
   if (value.effectivePermissions !== undefined) {
     const permissions = value.effectivePermissions;
     if (
@@ -242,6 +304,8 @@ interface GroupEntryBase {
 export interface HumanEntryRefs {
   chats?: BotId[];
   skill?: string;
+  /** 看板指派的任务 id：投给被 @ 的成员时附上该任务的历次执行 */
+  task?: string;
 }
 
 function parseHumanRefs(value: unknown): { refs?: HumanEntryRefs } {
@@ -250,14 +314,18 @@ function parseHumanRefs(value: unknown): { refs?: HumanEntryRefs } {
   const refs: HumanEntryRefs = {
     ...(chats.length ? { chats } : {}),
     ...(isText(value.skill) ? { skill: value.skill } : {}),
+    ...(isText(value.task) ? { task: value.task } : {}),
   };
-  return refs.chats || refs.skill ? { refs } : {};
+  return refs.chats || refs.skill || refs.task ? { refs } : {};
 }
 
 function parseHumanImages(value: unknown): { images?: string[] } {
   const images = Array.isArray(value) ? value.filter(isMediaId).slice(0, 20) : [];
   return images.length ? { images } : {};
 }
+
+export const GROUP_PROGRESS_PHASES = ['started', 'blocked', 'delivered'] as const;
+export type GroupProgressPhase = (typeof GROUP_PROGRESS_PHASES)[number];
 
 export type GroupEntry =
   | (GroupEntryBase & {
@@ -287,6 +355,18 @@ export type GroupEntry =
       to: BotId;
       state: DelegationState;
       summary?: string;
+      /** 挂了看板任务：群里已有「交付」进度，结果卡默认折叠 */
+      taskId?: string;
+    })
+  | (GroupEntryBase & {
+      /** Main 在执行状态转换时按模板以执行人名义写；不路由、不选人、不解析 @ */
+      kind: 'progress';
+      botId: BotId;
+      taskId: string;
+      taskSeq: number;
+      delegationId: string;
+      phase: GroupProgressPhase;
+      text: string;
     })
   | (GroupEntryBase & {
       kind: 'system';
@@ -591,8 +671,27 @@ export function parseGroupEntry(value: unknown): GroupEntry | undefined {
         state: value.state as DelegationState,
       };
       if (typeof value.summary === 'string') entry.summary = value.summary;
+      if (isText(value.taskId)) entry.taskId = value.taskId;
       return entry;
     }
+    case 'progress':
+      return isBotId(value.botId) &&
+        isText(value.taskId) &&
+        isSeq(value.taskSeq) &&
+        isText(value.delegationId) &&
+        GROUP_PROGRESS_PHASES.includes(value.phase as GroupProgressPhase) &&
+        typeof value.text === 'string'
+        ? {
+            ...base,
+            kind: 'progress',
+            botId: value.botId,
+            taskId: value.taskId,
+            taskSeq: value.taskSeq,
+            delegationId: value.delegationId,
+            phase: value.phase as GroupProgressPhase,
+            text: value.text,
+          }
+        : undefined;
     case 'system':
       if (typeof value.text !== 'string') return undefined;
       return isObject(value.routine) && isBotId(value.routine.botId) && isBotId(value.routine.id)
@@ -786,11 +885,40 @@ export function parseBotRoutineRun(value: unknown): BotRoutineRun | undefined {
   return run;
 }
 
-/** review：委派交付、执行人不是创建人时待创建人或人类验收 */
-export const GROUP_TASK_STATUSES = ['todo', 'doing', 'review', 'done', 'canceled'] as const;
+/** review：委派交付、执行人不是创建人时待创建人或人类验收；blocked：卡住（缺信息 / 执行失败，schemaVersion 2） */
+export const GROUP_TASK_STATUSES = [
+  'todo',
+  'doing',
+  'review',
+  'done',
+  'canceled',
+  'blocked',
+] as const;
 export type GroupTaskStatus = (typeof GROUP_TASK_STATUSES)[number];
+export const GROUP_TASK_BLOCKED_REASONS = ['need', 'failed'] as const;
+export type GroupTaskBlockedReason = (typeof GROUP_TASK_BLOCKED_REASONS)[number];
+/** 同一「任务 × 成员」连续缺信息卡住这么多次后只接受人来解除 */
+export const GROUP_TASK_BLOCKED_STREAK_MAX = 3;
 export const GROUP_TASK_TITLE_MAX = 200;
 export const GROUP_TASK_TEXT_MAX = 4000;
+export const GROUP_TASK_RUNS_MAX = 30;
+
+/** 任务的一次执行（委派记录）摘要 */
+export interface GroupTaskRun {
+  /** 委派记录 id */
+  id: string;
+  botId: BotId;
+  trigger: DelegationTrigger;
+  state: DelegationState;
+  failure?: Delegation['failure'];
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  /** 执行人转派出去的嵌套执行（深度 2） */
+  nested?: true;
+  /** 并入这次执行的追加条数 */
+  appends?: number;
+}
 
 /** userData/bot-chats/<chatId>/tasks.jsonl 的一条快照；seq 群内自增，显示为 #N */
 export interface GroupTask {
@@ -810,8 +938,50 @@ export interface GroupTask {
   check?: TaskCheck;
   /** 成员认领 / 被指派的时间：complete 验收只看此后的工具结果 */
   claimedAt?: number;
+  /** 历次执行摘要，按发起先后，只留最近 GROUP_TASK_RUNS_MAX 条 */
+  runs?: GroupTaskRun[];
+  /** 成员 → 该任务的委派子会话 */
+  sessions?: Record<BotId, string>;
+  /** status 为 blocked 时：need = 执行人缺信息，failed = 执行失败（原因见当前执行） */
+  blockedReason?: GroupTaskBlockedReason;
+  /** 缺什么（blockedReason 为 need 时） */
+  blockedNeed?: string;
+  /** 成员 → 在本任务上连续缺信息卡住的次数；交付后清零，执行失败不计 */
+  blockedStreak?: Record<BotId, number>;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 任务卡在执行失败上：仍由执行人负责，只能重试、改派或取消（含 P2 旧数据：doing + 当前执行失败） */
+export function stalledTaskRun(task: GroupTask): GroupTaskRun | undefined {
+  if (!task.delegationId) return undefined;
+  if (task.status === 'blocked' ? task.blockedReason === 'need' : task.status !== 'doing')
+    return undefined;
+  const run = task.runs?.find((item) => item.id === task.delegationId);
+  if (run?.state === 'failed') return run;
+  return task.status === 'blocked'
+    ? {
+        id: task.delegationId,
+        botId: task.assigneeBotId ?? '',
+        trigger: 'delegate',
+        state: 'failed',
+        failure: 'error',
+        createdAt: task.updatedAt,
+      }
+    : undefined;
+}
+
+/** 任务为什么卡住；没卡住返回 undefined */
+export function taskBlock(
+  task: GroupTask
+):
+  | { reason: 'need'; need: string }
+  | { reason: 'failed'; failure: NonNullable<Delegation['failure']> }
+  | undefined {
+  if (task.status === 'blocked' && task.blockedReason === 'need')
+    return { reason: 'need', need: task.blockedNeed ?? '' };
+  const run = stalledTaskRun(task);
+  return run ? { reason: 'failed', failure: run.failure ?? 'error' } : undefined;
 }
 
 export const TASK_CHECK_TEXT_MAX = 200;
@@ -867,5 +1037,53 @@ export function parseGroupTask(value: unknown): GroupTask | undefined {
   const check = parseTaskCheck(value.check);
   if (check) task.check = check;
   if (isTime(value.claimedAt)) task.claimedAt = value.claimedAt;
+  if (Array.isArray(value.runs)) {
+    const runs = value.runs.flatMap((item) => parseGroupTaskRun(item) ?? []);
+    if (runs.length) task.runs = runs.slice(-GROUP_TASK_RUNS_MAX);
+  }
+  if (isObject(value.sessions)) {
+    const sessions = Object.entries(value.sessions).filter(
+      (entry): entry is [BotId, string] => isBotId(entry[0]) && isText(entry[1])
+    );
+    if (sessions.length) task.sessions = Object.fromEntries(sessions);
+  }
+  if (GROUP_TASK_BLOCKED_REASONS.includes(value.blockedReason as never))
+    task.blockedReason = value.blockedReason as GroupTaskBlockedReason;
+  if (isText(value.blockedNeed))
+    task.blockedNeed = value.blockedNeed.slice(0, DELEGATION_BLOCKED_NEED_MAX);
+  if (isObject(value.blockedStreak)) {
+    const streak = Object.entries(value.blockedStreak).filter(
+      (entry): entry is [BotId, number] =>
+        isBotId(entry[0]) && Number.isSafeInteger(entry[1]) && (entry[1] as number) > 0
+    );
+    if (streak.length) task.blockedStreak = Object.fromEntries(streak);
+  }
   return task;
+}
+
+function parseGroupTaskRun(value: unknown): GroupTaskRun | undefined {
+  if (
+    !isObject(value) ||
+    !isBotId(value.id) ||
+    !isBotId(value.botId) ||
+    !DELEGATION_TRIGGERS.includes(value.trigger as never) ||
+    !DELEGATION_STATES.includes(value.state as never) ||
+    !isTime(value.createdAt)
+  )
+    return undefined;
+  const run: GroupTaskRun = {
+    id: value.id,
+    botId: value.botId,
+    trigger: value.trigger as DelegationTrigger,
+    state: value.state as DelegationState,
+    createdAt: value.createdAt,
+  };
+  if (DELEGATION_FAILURES.includes(value.failure as never))
+    run.failure = value.failure as Delegation['failure'];
+  if (isTime(value.startedAt)) run.startedAt = value.startedAt;
+  if (isTime(value.finishedAt)) run.finishedAt = value.finishedAt;
+  if (value.nested === true) run.nested = true;
+  if (Number.isSafeInteger(value.appends) && Number(value.appends) > 0)
+    run.appends = Number(value.appends);
+  return run;
 }

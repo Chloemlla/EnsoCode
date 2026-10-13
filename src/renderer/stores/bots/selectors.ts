@@ -90,6 +90,7 @@ function entryPreview(entry: GroupEntry, names: Record<string, string>): string 
     case 'system':
       return plain(entry.text);
     case 'bot':
+    case 'progress':
       return `${names[entry.botId] ?? '?'}: ${plain(entry.text)}`;
     case 'delegation':
       return `${names[entry.from] ?? '?'} → ${names[entry.to] ?? '?'}${entry.summary ? ` · ${plain(entry.summary)}` : ''}`;

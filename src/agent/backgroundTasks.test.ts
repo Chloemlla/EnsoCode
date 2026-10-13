@@ -48,6 +48,7 @@ const until = (pred: () => boolean, ms = 5000) =>
 
 describe('withForegroundBashTimeout', () => {
   it('前台未指定 timeout 时填默认秒数', () => {
+    expect(DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC).toBe(120);
     expect(withForegroundBashTimeout({ command: 'sleep 1' })).toEqual({
       command: 'sleep 1',
       timeout: DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC,
@@ -338,6 +339,61 @@ describe('BackgroundTaskManager', () => {
     expect(notified).toHaveLength(1);
     expect(notified[0]).toContain('do not restart');
   });
+
+  it('task_output 阻塞时插话提前返回，任务继续跑，结束后照常通知', async () => {
+    const { manager, notified, ended } = makeManager();
+    const taskId = manager.start('s1', 'sleep 0.6 && echo late', '/tmp');
+    const tool = createTaskTools(manager, 's1').find((item) => item.name === 'task_output');
+    const t0 = Date.now();
+    const reading = tool?.execute(
+      'read-steer',
+      { taskId, timeout_ms: 60_000 },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    expect(manager.backgroundAllForeground('s1', 'steer')).toEqual([]);
+    const result = await reading;
+    expect(Date.now() - t0).toBeLessThan(500);
+    const text = (result?.content[0] as { text: string } | undefined)?.text;
+    expect(text).toContain('[running]');
+    expect(text).toContain('the user sent a new message');
+    await until(() => ended.includes(taskId));
+    expect(notified).toHaveLength(1);
+  });
+
+  it('task_output 用户「不等了」：只结束这一次等待', async () => {
+    const { manager, ended } = makeManager();
+    const taskId = manager.start('s1', 'sleep 30', '/tmp');
+    try {
+      const tool = createTaskTools(manager, 's1').find((item) => item.name === 'task_output');
+      const reading = tool?.execute(
+        'read-user',
+        { taskId, timeout_ms: 60_000 },
+        undefined,
+        undefined,
+        undefined as never
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      expect(manager.backgroundForeground('s1', 'other-call', 'user')).toBeNull();
+      manager.backgroundForeground('s1', 'read-user', 'user');
+      const text = ((await reading)?.content[0] as { text: string } | undefined)?.text;
+      expect(text).toContain('The user chose to stop waiting');
+      expect(manager.snapshot('s1')[0]?.status).toBe('running');
+    } finally {
+      manager.stop(taskId);
+      await until(() => ended.includes(taskId));
+    }
+  });
+
+  it('有界等待超时后任务结束仍会通知', async () => {
+    const { manager, notified, ended } = makeManager();
+    const taskId = manager.start('s1', 'sleep 0.4', '/tmp');
+    expect((await manager.read(taskId, 50))?.status).toBe('running');
+    await until(() => ended.includes(taskId));
+    expect(notified).toHaveLength(1);
+  });
 });
 
 describe('前台命令转后台', () => {
@@ -410,6 +466,27 @@ describe('前台命令转后台', () => {
     expect(manager.backgroundAllForeground('s1', 'steer')).toEqual([]);
     expect(manager.backgroundForeground('s2', 'b', 'user')).toMatch(/^task-/);
     await other.pending;
+    manager.stopAll();
+  });
+
+  it('子代理的前台命令按子会话登记：父会话插话不牵连，任务仍归父会话', async () => {
+    const { manager, started } = makeManager();
+    const childShell = withBackground(
+      createSessionCommandTool({ cwd: process.cwd() }) as unknown as ToolDefinition,
+      manager,
+      'parent',
+      process.cwd(),
+      undefined,
+      'parent::cw-child'
+    );
+    const child = run(childShell, 'c', 'echo child; sleep 30');
+    await until(() => child.updates.join('').includes('child'));
+    expect(manager.backgroundAllForeground('parent', 'steer')).toEqual([]);
+    const taskId = manager.backgroundForeground('parent::cw-child', 'c', 'user');
+    expect(taskId).toMatch(/^task-/);
+    await child.pending;
+    expect(manager.snapshot('parent').map((task) => task.taskId)).toEqual([taskId]);
+    expect(started).toHaveLength(1);
     manager.stopAll();
   });
 

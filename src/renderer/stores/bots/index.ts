@@ -72,6 +72,13 @@ export interface BotFocus {
   nonce: number;
 }
 
+/** 打开任务卡：根群的看板消费后清掉 */
+export interface TaskFocus {
+  chatId: string;
+  taskId: string;
+  nonce: number;
+}
+
 const TIMELINE_PAGE = 50;
 /** 跳转窗口：目标前后各取这么多条 */
 const TIMELINE_AROUND = 40;
@@ -156,6 +163,7 @@ interface BotsState {
   browserHolders: Record<string, BrowserTabHolder>;
   searchOpen: boolean;
   focus: BotFocus | null;
+  taskFocus: TaskFocus | null;
 
   /** 订阅 Bot 事件与 agent 事件流并拉一次全量；引用计数，重复 bind 共用一份订阅；返回清理函数 */
   bind: () => () => void;
@@ -187,6 +195,9 @@ interface BotsState {
   createThread: (rootId: string) => Promise<boolean>;
   togglePanel: () => void;
   setPanelTab: (tab: BotPanelTab) => void;
+  /** 打开群看板上的任务卡（chatId 可为话题，看板按根群） */
+  openTask: (chatId: string, taskId: string) => void;
+  clearTaskFocus: (nonce: number) => void;
   /** 标题按 tabId 记 */
   setBrowserTitle: (tabId: string, title: string) => void;
   /** 用户新开一个标签并切到浏览器面板 */
@@ -494,6 +505,7 @@ export const useBotsStore = create<BotsState>()((set, get) => {
     browserHolders: {},
     searchOpen: false,
     focus: null,
+    taskFocus: null,
 
     bind: () => {
       bindings += 1;
@@ -893,6 +905,19 @@ export const useBotsStore = create<BotsState>()((set, get) => {
     setPanelTab: (panelTab) => {
       localStorage.setItem(PANEL_TAB_KEY, panelTab);
       set({ panelTab });
+    },
+
+    openTask: (chatId, taskId) => {
+      const root = get().chats.find((item) => item.id === chatId)?.parentId ?? chatId;
+      const view = get().view;
+      if (view?.kind !== 'chat' || view.chatId !== root) get().setView({ kind: 'chat', chatId });
+      if (!get().panelOpen) get().togglePanel();
+      get().setPanelTab('info');
+      set({ taskFocus: { chatId: root, taskId, nonce: Date.now() } });
+    },
+
+    clearTaskFocus: (nonce) => {
+      if (get().taskFocus?.nonce === nonce) set({ taskFocus: null });
     },
 
     setBrowserTitle: (tabId, title) => {

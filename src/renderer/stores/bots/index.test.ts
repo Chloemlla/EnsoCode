@@ -550,4 +550,31 @@ describe('群话题', () => {
     expect(f.store.getState().focus?.chatId).toBe('g');
     f.off();
   });
+
+  it('打开任务卡：切到根群、展开群信息面板，并记下要定位的任务（话题里的委派也落到根群看板）', async () => {
+    const f = await fixture();
+    const root: BotChat = { ...chat, id: 'g', kind: 'group', sessions: {} };
+    const thread: BotChat = { ...root, id: 't', parentId: 'g' };
+    Object.assign(window.electronAPI.bots, { selectThread: vi.fn(async () => ({ ok: true })) });
+    f.store.setState({
+      chats: [root, thread],
+      view: { kind: 'inbox' },
+      panelOpen: false,
+      panelTab: 'browser',
+    });
+
+    f.store.getState().openTask('t', 'task-1');
+    const state = f.store.getState();
+    expect(state.view).toEqual({ kind: 'chat', chatId: 'g' });
+    expect(state.panelOpen).toBe(true);
+    expect(state.panelTab).toBe('info');
+    expect(state.taskFocus).toMatchObject({ chatId: 'g', taskId: 'task-1' });
+
+    const nonce = state.taskFocus?.nonce ?? 0;
+    f.store.getState().clearTaskFocus(nonce - 1);
+    expect(f.store.getState().taskFocus).not.toBeNull();
+    f.store.getState().clearTaskFocus(nonce);
+    expect(f.store.getState().taskFocus).toBeNull();
+    f.off();
+  });
 });

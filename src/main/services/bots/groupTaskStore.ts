@@ -88,10 +88,16 @@ export class GroupTaskStore {
     const parsed = isBotChatId(chatId) ? parseGroupTask(task) : undefined;
     if (!parsed) return undefined;
     const state = this.load(chatId);
-    this.append(chatId, withSchemaVersion('task', parsed));
+    const line = withSchemaVersion('task', parsed);
+    const previous = state.tasks.get(parsed.id);
+    this.append(chatId, line);
     state.tasks.set(parsed.id, parsed);
     state.maxSeq = Math.max(state.maxSeq, parsed.seq);
-    this.compactIfRedundant(chatId, state);
+    // 任务首次升到更高 schema：立即压缩掉旧版快照，旧版本读不到它，就不会再按旧快照改写
+    const upgraded =
+      previous !== undefined &&
+      withSchemaVersion('task', previous).schemaVersion < line.schemaVersion;
+    this.compactIfRedundant(chatId, state, upgraded);
     return { ...parsed };
   }
 
@@ -123,9 +129,9 @@ export class GroupTaskStore {
     if (state) state.lines++;
   }
 
-  private compactIfRedundant(chatId: string, state: ChatTasks): void {
+  private compactIfRedundant(chatId: string, state: ChatTasks, force = false): void {
     const kept = state.tasks.size + state.future.length;
-    if (state.lines - kept < Math.max(this.minRedundant, kept)) return;
+    if (!force && state.lines - kept < Math.max(this.minRedundant, kept)) return;
     const records: unknown[] = [...state.tasks.values()]
       .sort((a, b) => a.seq - b.seq)
       .map((task) => withSchemaVersion('task', task));

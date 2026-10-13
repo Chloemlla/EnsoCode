@@ -95,13 +95,16 @@ export function workflowChildOutcome(
     return { failed: true, text: null };
   const run = Array.isArray(receipt.runs) ? receipt.runs[0] : undefined;
   if (!isRecord(run) || run.status !== 'succeeded') return { failed: true, text: null };
+  const budgetStopped = run.requestBudgetStop === true;
+  const mark = (text: string): string =>
+    budgetStopped ? `因请求预算停止，以下是已有的部分输出。\n${text}` : text;
   if (!isRecord(reportValue)) return { failed: false, text: '' };
   if (reportValue.value !== undefined) {
-    return { failed: false, text: JSON.stringify(reportValue.value) };
+    return { failed: false, text: mark(JSON.stringify(reportValue.value)) };
   }
   return {
     failed: false,
-    text: typeof reportValue.text === 'string' ? reportValue.text : '',
+    text: mark(typeof reportValue.text === 'string' ? reportValue.text : ''),
   };
 }
 
@@ -274,9 +277,13 @@ async function runAgent(
     runId =
       isRecord(spawned.value) && typeof spawned.value.runId === 'string' ? spawned.value.runId : '';
     if (!runId) throw new Error('missing run id');
-    const waited = await deps.invoke({ operation: 'wait', runIds: [runId], until: 'all' }, signal);
-    if (signal?.aborted) throw new Error('workflow cancelled');
-    if (!waited.ok) throw new Error(waited.error);
+    // Main 的 wait 单次最多 10 分钟（给模型的上限）；编排要等到成员真正结束
+    let waited: AgentControlToolResponse;
+    do {
+      waited = await deps.invoke({ operation: 'wait', runIds: [runId], until: 'all' }, signal);
+      if (signal?.aborted) throw new Error('workflow cancelled');
+      if (!waited.ok) throw new Error(waited.error);
+    } while (isRecord(waited.value) && waited.value.timedOut === true);
     const reported = await deps.invoke({ operation: 'report', runId });
     const outcome = workflowChildOutcome(
       { report: waited.value },

@@ -70,20 +70,31 @@ describe('batchDeliveryId / batchResultText', () => {
 });
 
 describe('batchWaitingNotice', () => {
-  it('批次未齐时提示谁完成、还在等谁；齐了不提示', () => {
+  it('批次未齐时提示谁完成、这批还在等谁；齐了不提示', () => {
     const done = rec('a', { batchId: 'k' });
     const batch = [
       done,
       rec('b', { batchId: 'k', state: 'running' }),
       rec('c', { batchId: 'k', state: 'queued' }),
     ];
-    expect(batchWaitingNotice(batch, done, nameOf)).toBe('小设 已完成，等待 阿全、小王');
+    expect(batchWaitingNotice(batch, done, nameOf)).toBe('小设 已完成，这批还在等 阿全、小王');
     const canceled = rec('a', { batchId: 'k', state: 'canceled' });
     expect(batchWaitingNotice([canceled, batch[1]], canceled, nameOf)).toBe(
-      '小设 已取消，等待 阿全'
+      '小设 已取消，这批还在等 阿全'
     );
     expect(batchWaitingNotice([done, rec('b', { batchId: 'k' })], done, nameOf)).toBeNull();
     expect(batchWaitingNotice([done], done, nameOf)).toBeNull();
+  });
+
+  it('交回缺信息的成员不说「卡住」，避免读成它在等别人', () => {
+    const blocked = rec('b', { batchId: 'k', state: 'blocked' });
+    const text = batchWaitingNotice(
+      [blocked, rec('a', { batchId: 'k', state: 'running' })],
+      blocked,
+      nameOf
+    );
+    expect(text).toBe('阿全 已交回（缺信息），这批还在等 小设');
+    expect(text).not.toContain('卡住');
   });
 });
 

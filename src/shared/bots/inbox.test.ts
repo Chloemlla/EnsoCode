@@ -7,6 +7,7 @@ import {
   INBOX_DISMISSIBLE,
   routineInboxItems,
   silenceInboxItems,
+  taskBlockedInboxItems,
   visibleInbox,
 } from './inbox';
 
@@ -46,6 +47,42 @@ describe('delegationInboxItems', () => {
       delegationInboxItems([interrupted, record({ id: 'r', retryOf: 'd1', state: 'failed' })])
     ).toEqual([]);
     expect(delegationInboxItems([{ ...interrupted, chatId: null }])).toEqual([]);
+  });
+});
+
+describe('taskBlockedInboxItems', () => {
+  it('缺信息卡住且同任务同成员之后没有新执行的委派各一条，text 为缺什么；可忽略', () => {
+    const blocked = record({
+      state: 'blocked',
+      taskId: 't1',
+      blocked: { need: '数据库密码', waitFor: 'human', at: 20 },
+    });
+    expect(
+      taskBlockedInboxItems([blocked, record({ id: 'f', state: 'failed', taskId: 't1' })])
+    ).toEqual([
+      {
+        key: 'task-blocked:d1',
+        kind: 'task-blocked',
+        chatId: 'c1',
+        botId: 'ops',
+        ownerBotId: 'boss',
+        delegationId: 'd1',
+        text: '数据库密码',
+      },
+    ]);
+    expect(
+      taskBlockedInboxItems([blocked, record({ id: 'r', taskId: 't1', createdAt: 30 })])
+    ).toEqual([]);
+    expect(taskBlockedInboxItems([{ ...blocked, chatId: null }])).toEqual([]);
+    // 改派给别人 / 看板上已不卡在这次执行（人取消、完成）
+    expect(
+      taskBlockedInboxItems([
+        blocked,
+        record({ id: 'm', taskId: 't1', targetBotId: 'x', createdAt: 30 }),
+      ])
+    ).toEqual([]);
+    expect(taskBlockedInboxItems([blocked], () => false)).toEqual([]);
+    expect(INBOX_DISMISSIBLE).toContain('task-blocked');
   });
 });
 
@@ -149,6 +186,11 @@ describe('visibleInbox', () => {
         item('d', { resolvedAt: 4 }),
       ]).map((entry) => entry.key)
     ).toEqual(['b', 'a']);
-    expect(INBOX_DISMISSIBLE).toEqual(['delegation-interrupted', 'budget', 'silence']);
+    expect(INBOX_DISMISSIBLE).toEqual([
+      'delegation-interrupted',
+      'budget',
+      'silence',
+      'task-blocked',
+    ]);
   });
 });

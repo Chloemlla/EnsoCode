@@ -9,7 +9,7 @@ vi.stubGlobal('window', {
 });
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
-const setPlatform = (platform: 'darwin' | 'win32') => {
+const setPlatform = (platform: 'darwin' | 'win32' | 'linux') => {
   window.electronAPI.env.platform = platform;
 };
 const render = (props: Parameters<typeof TitleBar>[0]) =>
@@ -61,7 +61,7 @@ describe('TitleBar centered content', () => {
     expect(html).not.toContain('EnsoCode');
   });
 
-  it('default callers are unchanged: title on the left, no overlay', () => {
+  it('preserves titles and platform-specific caption controls', () => {
     setPlatform('darwin');
     const html = render({ title: 'Settings' });
     expect(html).toContain('Settings');
@@ -70,6 +70,10 @@ describe('TitleBar centered content', () => {
     expect(html).not.toContain('aria-label="Close"');
     setPlatform('win32');
     const win = render({ title: 'Settings' });
-    expect(win).toContain('aria-label="Close"');
+    expect(win).not.toContain('aria-label="Close"');
+    expect(win).not.toContain('aria-label="Maximize"');
+    expect(win).toContain('data-native-window-controls="true"');
+    setPlatform('linux');
+    expect(render({ title: 'Settings' })).toContain('aria-label="Close"');
   });
 });

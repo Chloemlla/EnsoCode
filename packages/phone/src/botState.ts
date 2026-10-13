@@ -189,6 +189,7 @@ const INBOX_LABELS: Record<Exclude<PairBotInboxItem['kind'], 'silence'>, string>
   budget: '今日预算已用完',
   'routine-draft': '例行任务待批准',
   'routine-blocked': '例行任务被阻塞',
+  'task-blocked': '任务卡住',
 };
 
 /** 收件箱条目标签；静默按 now 算已安静秒数 */

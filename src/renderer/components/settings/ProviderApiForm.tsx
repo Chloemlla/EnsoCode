@@ -1,5 +1,5 @@
 import { commitPendingModel, mergeFetchedModels } from '@shared/modelEntry';
-import { isClassifierOnlyProvider } from '@shared/providerCatalog';
+import { baseUrlAfterApiChange, isClassifierOnlyProvider } from '@shared/providerCatalog';
 import type { ModelEntry, ModelMeta, ModelProvider } from '@shared/types';
 import { MODEL_API_KINDS } from '@shared/types';
 import { CircleCheck, CircleX, Eye, EyeOff, ListPlus, Loader2, Plus, Zap } from 'lucide-react';
@@ -223,7 +223,11 @@ export function ProviderApiForm({
               <Select
                 items={API_KIND_LABELS}
                 value={api}
-                onValueChange={(value) => setApi(value as ModelProvider['api'])}
+                onValueChange={(value) => {
+                  const nextApi = value as ModelProvider['api'];
+                  setBaseUrl((current) => baseUrlAfterApiChange(nextApi, current));
+                  setApi(nextApi);
+                }}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />

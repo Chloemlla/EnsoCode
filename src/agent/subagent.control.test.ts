@@ -1,5 +1,5 @@
 import type { SpawnModelConfig } from '@shared/types';
-import type { AgentWorkerEvent } from '@shared/types/agent';
+import type { AgentControlToolResponse, AgentWorkerEvent } from '@shared/types/agent';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentControlInvoker } from './agentControl';
 import { createUnifiedSubagentTool, type UnifiedSubagentDeps } from './subagent';
@@ -373,5 +373,99 @@ describe('unified subagent tool', () => {
     const { tool } = setup({ models: [] });
     const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
     expect(properties).not.toHaveProperty('model');
+  });
+
+  it('wait 超过上限的 timeoutMs 在 schema 校验前截到 10 分钟，不报错', async () => {
+    const { tool, deps } = setup();
+    expect(
+      tool.prepareArguments?.({ operation: 'wait', runId: 'r', timeoutMs: 86_400_000 })
+    ).toEqual({ operation: 'wait', runId: 'r', timeoutMs: 600_000 });
+    await tool.execute(
+      'call-clamp',
+      { operation: 'wait', runId: 'r', timeoutMs: 3_600_000 },
+      undefined,
+      undefined,
+      {} as never
+    );
+    expect(deps.invoke).toHaveBeenCalledWith(
+      { operation: 'wait', runIds: ['r'], until: 'all', timeoutMs: 600_000 },
+      undefined
+    );
+  });
+
+  it('插话解除等待：回执带说明，子代理继续跑', async () => {
+    const detach = new AbortController();
+    let reason: 'steer' | undefined;
+    const untrack = vi.fn();
+    const { tool } = setup({
+      trackWait: () => ({ signal: detach.signal, reason: () => reason, untrack }),
+      invoke: vi.fn(
+        async (_request, _signal, detachSignal?: AbortSignal) =>
+          new Promise<AgentControlToolResponse>((resolve) => {
+            detachSignal?.addEventListener('abort', () =>
+              resolve({
+                ok: true as const,
+                value: {
+                  runs: [],
+                  timedOut: false,
+                  interrupted: true,
+                  pending: [{ agentId: 'a', runId: 'r', status: 'running', elapsedMs: 1 }],
+                },
+              })
+            );
+          })
+      ),
+    });
+    const running = tool.execute(
+      'call-steer',
+      { operation: 'wait', runId: 'r' },
+      undefined,
+      undefined,
+      {} as never
+    );
+    reason = 'steer';
+    detach.abort();
+    const result = await running;
+    expect(untrack).toHaveBeenCalledTimes(1);
+    expect(result.details).toMatchObject({
+      interrupted: true,
+      note: expect.stringContaining('the user sent a new message'),
+    });
+  });
+
+  it('等待超时回执说明不算失败；不等待的操作不登记', async () => {
+    const trackWait = vi.fn();
+    const { tool } = setup({
+      trackWait,
+      invoke: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          agentId: 'a',
+          runId: 'r',
+          report: { runs: [], timedOut: true, interrupted: false },
+        },
+      })),
+    });
+    trackWait.mockReturnValue({
+      signal: new AbortController().signal,
+      reason: () => undefined,
+      untrack: () => {},
+    });
+    const waited = await tool.execute(
+      'call-timeout',
+      { operation: 'send', agentId: 'a', message: 'go', wait: true },
+      undefined,
+      undefined,
+      {} as never
+    );
+    expect(waited.details).toMatchObject({ note: expect.stringContaining('not a failure') });
+    await tool.execute(
+      'call-async',
+      { operation: 'send', agentId: 'a', message: 'go' },
+      undefined,
+      undefined,
+      {} as never
+    );
+    expect(trackWait).toHaveBeenCalledTimes(1);
   });
 });

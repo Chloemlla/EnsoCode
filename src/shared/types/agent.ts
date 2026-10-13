@@ -444,6 +444,10 @@ export interface AgentControlWaitRequest {
   timeoutMs?: number;
 }
 
+/** 子代理阻塞等待：不写时限按默认，写了也不超过上限（与 task_output 阻塞上限一致） */
+export const AGENT_WAIT_DEFAULT_MS = 5 * 60 * 1000;
+export const AGENT_WAIT_MAX_MS = 10 * 60 * 1000;
+
 export interface AgentControlListRequest {
   context: AgentControlContext;
   requestId: string;
@@ -468,6 +472,10 @@ export interface AgentRunSnapshot {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** 因请求预算强制停止：status 仍是 succeeded，但结果是被截断的部分输出 */
+  requestBudgetStop?: true;
+  /** 预算停止时已有的部分输出，让 wait 也能直接看到，不必再查 report */
+  text?: string;
 }
 
 export interface AgentSpawnReceipt {
@@ -496,7 +504,24 @@ export interface AgentWaitReceipt {
   runs: AgentRunSnapshot[];
   timedOut: boolean;
   interrupted: boolean;
+  /** 超时或被打断时仍在跑的 Run 进度；Run 不会因此停止 */
+  pending?: AgentRunProgress[];
 }
+
+/** 未结束 Run 的进度：给模型的超时回执与界面等待行共用 */
+export interface AgentRunProgress {
+  agentId: string;
+  runId: string;
+  title?: string;
+  status: AgentRunStatus;
+  elapsedMs: number;
+  /** 子代理此刻在做的事：在跑的工具或正在写回复 */
+  activity?: AgentRunActivity;
+}
+
+export type AgentRunActivity =
+  | { phase: 'thinking' | 'writing' }
+  | { phase: 'tool'; tool: string; detail?: string };
 
 export interface AgentListItem {
   agentId: string;
@@ -635,7 +660,7 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         (value.timeoutMs === undefined ||
           (Number.isInteger(value.timeoutMs) &&
             (value.timeoutMs as number) >= 0 &&
-            (value.timeoutMs as number) <= 86_400_000))
+            (value.timeoutMs as number) <= AGENT_WAIT_MAX_MS))
         ? (value as unknown as AgentControlToolRequest)
         : null;
     case 'report':
@@ -1101,6 +1126,8 @@ export type AgentCommand =
       botGroupTasks?: boolean;
       /** Bot 私聊 / 群聊成员会话（非委派）：挂 routine_propose / send_image 工具 */
       botRoutines?: boolean;
+      /** Bot 挂看板任务的委派会话：挂 report_blocked 工具 */
+      botDelegationTask?: boolean;
       /** Bot 写成员：同工作区按文件占用、全局命令短独占；祖先会话（委派链）互不阻塞 */
       botWriteLock?: { label: string; ancestors: string[] };
       /** 受保护动作底线（Bot 会话恒开；Code 会话由设置项决定） */
@@ -1120,6 +1147,8 @@ export type AgentCommand =
       identity: ChildSessionIdentity;
       requestId: string;
       task: AgentDispatchTask;
+      /** 子代理 Run：按请求软预算计数。Bot 成员等派发不带此标记，不计数。 */
+      requestBudget?: true;
     }
   | {
       type: 'agent-control-result';
@@ -1181,6 +1210,8 @@ export type AgentCommand =
       kind: 'approval' | 'ask';
       requestId: string;
     }
+  /** Main 记录的子代理 Run 结束且模型尚未知情：投给父会话（空闲唤醒、忙时搭车） */
+  | { type: 'agent-notify'; identity: SessionIdentity; text: string; urgent: boolean }
   | { type: 'set-approval-mode'; identity: SessionIdentity; mode: ApprovalMode }
   | { type: 'set-plan-mode'; identity: SessionIdentity; active: boolean }
   | {
@@ -1612,6 +1643,10 @@ export type AgentWorkerEvent =
       turnId: string;
       /** worker 切出的本轮压缩摘要，供 renderer 决定是否滚动刷新标题；纯工具轮可缺省 */
       digest?: TurnDigest;
+      /** 子代理因请求预算被强制停止：已有部分输出随本次收口交回，不当作失败 */
+      requestBudgetStop?: true;
+      /** 预算停止后补报告那一轮出错：错误随结果交回，不丢已有输出 */
+      requestBudgetError?: string;
     }
   | {
       type: 'turn-failed';
@@ -1742,7 +1777,8 @@ export type AgentWorkerEvent =
         | 'group_tasks'
         | 'group_history'
         | 'routine_propose'
-        | 'send_image';
+        | 'send_image'
+        | 'report_blocked';
       params: unknown;
     }
   | {
@@ -1757,6 +1793,8 @@ export type AgentWorkerEvent =
       identity: SessionIdentity | ChildSessionIdentity;
       seq: number;
       requestId: string;
+      /** abort：本轮中止，worker 丢弃回执；detach：只结束等待，回执照常交给模型 */
+      kind: 'abort' | 'detach';
     }
   | {
       type: 'goal-signal';
@@ -2942,6 +2980,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'botMode',
           'botGroupTasks',
           'botRoutines',
+          'botDelegationTask',
           'botWriteLock',
           'protectedActions',
           'planMode',
@@ -2992,6 +3031,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
         (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
         (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||
+        (value.botDelegationTask !== undefined && typeof value.botDelegationTask !== 'boolean') ||
         (value.botWriteLock !== undefined &&
           (!isRecord(value.botWriteLock) ||
             !isNonEmptyString(value.botWriteLock.label) ||
@@ -3012,10 +3052,11 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ? (value as unknown as AgentCommand)
         : null;
     case 'prompt-child':
-      return hasExactKeys(value, ['type', 'identity', 'requestId', 'task']) &&
+      return hasOnlyKeys(value, ['type', 'identity', 'requestId', 'task', 'requestBudget']) &&
         parseChildSessionIdentity(value.identity) &&
         isNonEmptyString(value.requestId) &&
-        parseAgentDispatchTask(value.task)
+        parseAgentDispatchTask(value.task) &&
+        (value.requestBudget === undefined || value.requestBudget === true)
         ? (value as unknown as AgentCommand)
         : null;
     case 'agent-control-result':
@@ -3197,6 +3238,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         parseAnySessionIdentity(value.identity) &&
         (value.kind === 'approval' || value.kind === 'ask') &&
         isNonEmptyString(value.requestId)
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'agent-notify':
+      return hasExactKeys(value, ['type', 'identity', 'text', 'urgent']) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.text) &&
+        typeof value.urgent === 'boolean'
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-approval-mode':
@@ -3611,8 +3659,9 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'agent-control-cancel':
-      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
-        isNonEmptyString(value.requestId)
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'kind']) &&
+        isNonEmptyString(value.requestId) &&
+        (value.kind === 'abort' || value.kind === 'detach')
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'browser-invoke':
@@ -3636,7 +3685,8 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           value.op === 'group_tasks' ||
           value.op === 'group_history' ||
           value.op === 'routine_propose' ||
-          value.op === 'send_image')
+          value.op === 'send_image' ||
+          value.op === 'report_blocked')
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'computer-invoke':
@@ -3674,7 +3724,10 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         : null;
     case 'turn-completed':
       return isNonEmptyString(value.turnId) &&
-        (value.digest === undefined || parseTurnDigest(value.digest))
+        (value.digest === undefined || parseTurnDigest(value.digest)) &&
+        (value.requestBudgetStop === undefined || value.requestBudgetStop === true) &&
+        (value.requestBudgetError === undefined ||
+          (value.requestBudgetStop === true && isNonEmptyString(value.requestBudgetError)))
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'turn-failed':

@@ -1,10 +1,17 @@
 import { retryableGroupFailures } from '@shared/bots/groupRetry';
+import { splitTaskRef } from '@shared/bots/progress';
+import { PASTED_TEXT_FILE_NAME, splitPastedTextRefs } from '@shared/pastedText';
 import type { ProjectedMessage } from '@shared/types/agent';
 import type { BotChat, BotProfile, BotRoutedBy, Delegation, GroupEntry } from '@shared/types/bot';
 import {
   ArrowDown,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  CirclePlay,
+  CircleX,
+  FileText,
   Loader2,
   MessagesSquare,
   Sparkles,
@@ -20,6 +27,7 @@ import {
   useState,
 } from 'react';
 import { Markdown } from '@/components/chat/Markdown';
+import { mentionChipClass } from '@/components/chat/MentionChip';
 import { CHAT_COL } from '@/components/chat/MessageTimeline';
 import { USER_BUBBLE } from '@/components/chat/TimelineRow';
 import { Button } from '@/components/ui/button';
@@ -34,7 +42,9 @@ import {
   anchorDelegations,
   buildRows,
   locateTurn,
+  type TimelineDelegation,
   type TurnStep,
+  timelineDelegations,
   turnSteps,
 } from '@/stores/bots/groupTimeline';
 import { useSettingsStore } from '@/stores/settings';
@@ -155,11 +165,21 @@ export function GroupTimeline({
         .sort((a, b) => a.createdAt - b.createdAt),
     [delegations]
   );
-  const placed = useMemo(() => anchorDelegations(entries, active), [entries, active]);
-  const card = (record: Delegation) => (
+  const placed = useMemo(
+    () => anchorDelegations(entries, timelineDelegations(active)),
+    [entries, active]
+  );
+  const tasks = useBotsStore((s) => s.tasks[chat.id]);
+  const merged = active.some((record) => record.appends?.length);
+  useEffect(() => {
+    if (merged && !tasks) void useBotsStore.getState().refreshTasks(chat.id);
+  }, [merged, tasks, chat.id]);
+  const card = ({ key, record, append }: TimelineDelegation) => (
     <DelegationCard
-      key={record.id}
+      key={key}
       record={record}
+      append={append}
+      taskSeq={append && tasks?.find((task) => task.id === record.taskId)?.seq}
       bots={bots}
       onOpenConversation={onOpenConversation}
     />
@@ -528,11 +548,20 @@ const EntryRow = memo(function EntryRow({
             </div>
           )}
           {entry.images?.length ? <ArtifactCards target={{ chatId, entryId: entry.id }} /> : null}
-          {entry.refs && <HumanRefs refs={entry.refs} />}
+          {(entry.refs?.skill || entry.refs?.chats?.length) && <HumanRefs refs={entry.refs} />}
           {!continued && (
             <span className="mt-0.5 text-[11px] text-muted-foreground">{timeOf(entry.at)}</span>
           )}
         </div>
+      );
+    case 'progress':
+      return (
+        <ProgressRow
+          chatId={chatId}
+          entry={entry}
+          bots={bots}
+          failed={records.get(entry.delegationId)?.record.state === 'failed'}
+        />
       );
     case 'delegation':
       return (
@@ -597,23 +626,103 @@ const EntryRow = memo(function EntryRow({
   }
 });
 
+const PROGRESS_TONE = {
+  started: { icon: CirclePlay, className: 'border-brand/50 text-brand' },
+  blocked: { icon: CircleAlert, className: 'border-warning/60 text-warning' },
+  failed: { icon: CircleX, className: 'border-destructive/60 text-destructive' },
+  delivered: { icon: CircleCheck, className: 'border-success/60 text-success' },
+} as const;
+
+/** 开工 / 卡住 / 交付进度：一行，#N 可点打开看板上的任务卡 */
+function ProgressRow({
+  chatId,
+  entry,
+  bots,
+  failed,
+}: {
+  chatId: string;
+  entry: Extract<GroupEntry, { kind: 'progress' }>;
+  bots: Map<string, BotProfile>;
+  failed: boolean;
+}) {
+  const { t } = useI18n();
+  const openTask = useBotsStore((s) => s.openTask);
+  const bot = bots.get(entry.botId);
+  const tone = PROGRESS_TONE[entry.phase === 'blocked' && failed ? 'failed' : entry.phase];
+  const Icon = tone.icon;
+  const ref = splitTaskRef(entry.text, entry.taskSeq);
+  return (
+    <div data-slot="bot-progress" data-phase={entry.phase} className="flex w-full gap-2.5">
+      <BotAvatar bot={bot} size="sm" />
+      <div
+        className={cn(
+          'flex min-w-0 max-w-lg items-start gap-1.5 rounded-md border-l-2 bg-muted/50 px-2 py-1 text-xs',
+          tone.className
+        )}
+      >
+        <Icon aria-hidden className="mt-px size-3.5 shrink-0" />
+        <div className="line-clamp-2 min-w-0 break-words text-muted-foreground">
+          <span className="font-medium text-foreground">{bot?.name ?? t('Deleted member')}</span>{' '}
+          {ref ? (
+            <>
+              <MentionText text={ref[0]} bots={bots} />
+              <button
+                type="button"
+                aria-label={t('Open task card #{{n}}', { n: entry.taskSeq })}
+                className="rounded px-0.5 font-medium text-foreground underline decoration-dotted underline-offset-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => openTask(chatId, entry.taskId)}
+              >
+                {ref[1]}
+              </button>
+              <MentionText text={ref[2]} bots={bots} />
+            </>
+          ) : (
+            <MentionText text={entry.text} bots={bots} />
+          )}
+        </div>
+        <span className="shrink-0 text-[11px] text-muted-foreground">{timeOf(entry.at)}</span>
+      </div>
+    </div>
+  );
+}
+
 function MentionText({ text, bots }: { text: string; bots: Map<string, BotProfile> }) {
   const parts = useMemo(() => {
     const names = [...bots.values()].map((bot) => bot.name).sort((a, b) => b.length - a.length);
-    if (names.length === 0) return [text];
     const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
-    return text.split(new RegExp(`(@(?:${escaped.join('|')}|所有人|everyone|all))`, 'giu'));
+    const pattern = names.length
+      ? new RegExp(`(@(?:${escaped.join('|')}|所有人|everyone|all))`, 'giu')
+      : null;
+    // 超长粘贴附件路径可能含空格，先整体切出渲染成卡片
+    return splitPastedTextRefs(text).flatMap(
+      (segment): (string | { type: 'file'; path: string } | { type: 'mention'; part: string })[] =>
+        segment.type === 'file'
+          ? [segment]
+          : (pattern ? segment.text.split(pattern) : [segment.text]).map((part, index) =>
+              part.startsWith('@') && index % 2 === 1 ? { type: 'mention' as const, part } : part
+            )
+    );
   }, [text, bots]);
   return (
     <>
       {parts.map((part, index) =>
-        part.startsWith('@') && index % 2 === 1 ? (
-          // biome-ignore lint/suspicious/noArrayIndexKey: 拆分片段按位置稳定
-          <span key={index} className="font-medium underline underline-offset-2">
-            {part}
+        typeof part === 'string' ? (
+          part
+        ) : part.type === 'file' ? (
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: 拆分片段按位置稳定
+            key={index}
+            className={cn(mentionChipClass('file'), 'mx-0.5 leading-4')}
+            title={part.path}
+          >
+            <FileText className="h-3 w-3 shrink-0" />
+            <span className="truncate">{PASTED_TEXT_FILE_NAME}</span>
           </span>
         ) : (
-          part
+          // biome-ignore lint/suspicious/noArrayIndexKey: 拆分片段按位置稳定
+          <span key={index} className="font-medium underline underline-offset-2">
+            {part.part}
+          </span>
         )
       )}
     </>

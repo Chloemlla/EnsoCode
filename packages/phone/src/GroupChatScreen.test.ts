@@ -109,6 +109,75 @@ describe('phone group recovery and folding UI', () => {
       render({ timeline: { entries, lastSeq: 900, hasOlder: true, history: true } })
     ).toContain('回到最新消息');
   });
+  it('renders progress as one line under the member name; old phones skip unknown kinds without crashing', () => {
+    const progress = {
+      id: 'p',
+      seq: 5,
+      at: 5,
+      kind: 'progress',
+      botId: 'bot',
+      taskId: 't',
+      taskSeq: 3,
+      delegationId: 'd',
+      phase: 'started',
+      text: '开工 #3『登录页』',
+    } as PairGroupEntry;
+    const html = render({
+      bots: new Map([
+        ['bot', { id: 'bot', name: 'Bob', title: '', avatarColor: '#000000', status: 'idle' }],
+      ]),
+      timeline: { entries: [...entries, progress], lastSeq: 5, hasOlder: false },
+    });
+    expect(html).toContain('Bob');
+    expect(html.replace(/<[^>]+>/g, '')).toContain('开工 #3『登录页』');
+    const future = { ...progress, kind: 'from-the-future' } as unknown as PairGroupEntry;
+    const old = render({
+      timeline: { entries: [...entries, future], lastSeq: 5, hasOlder: false },
+    });
+    expect(old).toContain('CURRENT_TASK');
+    expect(old).not.toContain('开工 #3');
+  });
+
+  it('styles progress by phase and marks #N; task-bound delegation results start collapsed', () => {
+    const delegation = (seq: number, taskId?: string) =>
+      ({
+        id: `d${seq}`,
+        seq,
+        at: seq,
+        kind: 'delegation',
+        delegationId: `d${seq}`,
+        from: 'boss',
+        to: 'bot',
+        state: 'completed',
+        summary: `RESULT_${seq}`,
+        ...(taskId ? { taskId } : {}),
+      }) as PairGroupEntry;
+    const progress = {
+      id: 'p',
+      seq: 7,
+      at: 7,
+      kind: 'progress',
+      botId: 'bot',
+      taskId: 't',
+      taskSeq: 3,
+      delegationId: 'd5',
+      phase: 'delivered',
+      text: '交付 #3：登录页做完了',
+    } as PairGroupEntry;
+    const html = render({
+      timeline: {
+        entries: [...entries, delegation(5, 't'), delegation(6), progress],
+        lastSeq: 7,
+        hasOlder: false,
+      },
+    });
+    expect(html).toContain('data-phase="delivered"');
+    expect(html).toMatch(/<span[^>]*>#3<\/span>/);
+    expect(html).not.toContain('RESULT_5');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('RESULT_6');
+  });
+
   it('shows the mic button only when voice is provided', () => {
     expect(render()).not.toContain('aria-label="语音输入"');
     expect(render({ voice: noop as never })).toContain('aria-label="语音输入"');

@@ -7,12 +7,15 @@ export type BotRecordKind = 'bot' | 'chat' | 'routines' | 'delegation' | 'task';
 
 type Step = (value: Record<string, unknown>) => Record<string, unknown>;
 
+/** 第 2 版只新增「卡住」状态与字段，读第 1 版不用改内容 */
+const same: Step = (value) => value;
+
 const STEPS: Record<BotRecordKind, readonly Step[]> = {
   bot: [],
   chat: [],
   routines: [],
-  delegation: [],
-  task: [],
+  delegation: [same],
+  task: [same],
 };
 
 export const BOT_SCHEMA_VERSION: Record<BotRecordKind, number> = {
@@ -25,6 +28,22 @@ export const BOT_SCHEMA_VERSION: Record<BotRecordKind, number> = {
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const blockedTask = (value: Record<string, unknown>) =>
+  value.status === 'blocked' ||
+  value.blockedReason !== undefined ||
+  value.blockedNeed !== undefined ||
+  value.blockedStreak !== undefined ||
+  (Array.isArray(value.runs) && value.runs.some((run) => isObject(run) && run.state === 'blocked'));
+
+/**
+ * 委派 / 任务只有用到第 2 版内容（卡住）的记录才写 2，其余仍写 1：
+ * 旧版本照常读写普通记录，把带新状态的当未来记录原样保留，降级看不见但不丢。
+ */
+const RECORD_VERSION: Partial<Record<BotRecordKind, (value: Record<string, unknown>) => number>> = {
+  delegation: (value) => (value.state === 'blocked' || value.blocked !== undefined ? 2 : 1),
+  task: (value) => (blockedTask(value) ? 2 : 1),
+};
 
 /** 非对象原样返回交给 parse 拒绝；更新版本写出的记录返回 undefined（不做有损降级） */
 export function runMigrations(value: unknown, steps: readonly Step[]): unknown {
@@ -47,7 +66,9 @@ export function withSchemaVersion<T extends object>(
   kind: BotRecordKind,
   record: T
 ): T & { schemaVersion: number } {
-  return { schemaVersion: BOT_SCHEMA_VERSION[kind], ...record };
+  const version =
+    RECORD_VERSION[kind]?.(record as Record<string, unknown>) ?? BOT_SCHEMA_VERSION[kind];
+  return { schemaVersion: version, ...record };
 }
 
 /** 记录是否由更新版本写出（压缩重写时须原样保留，不能丢） */

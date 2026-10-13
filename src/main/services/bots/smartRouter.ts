@@ -4,15 +4,20 @@ import {
   guessSmartRouteIntent,
   parseSmartRouteIntent,
   parseSmartRouteReply,
+  parseSmartRouteTask,
   pickSmartRouteChoice,
   pickSmartRouteIntent,
+  pickSmartRouteTask,
   rankSmartRouteChoice,
   SMART_ROUTE_DEFAULT_TIMEOUT_MS,
   SMART_ROUTE_JUDGE_MAX_TOKENS,
+  type SmartRouteDecision,
   type SmartRouteInput,
+  type SmartRouteTask,
   smartRouteIntentQuestion,
   smartRouteJudgePrompt,
   smartRouteQuestion,
+  smartRouteTaskQuestion,
   smartRouteTimeoutMs,
 } from '../../../shared/bots/smartRoute';
 import type { DefaultModelRef } from '../../../shared/defaultModel';
@@ -39,10 +44,26 @@ export interface SmartRouterDeps {
   /** pi 分类器 choice 问题；分类器不可用返回 null */
   classify: (
     config: VirtualClassifierConfig,
-    question: ReturnType<typeof smartRouteQuestion> | ReturnType<typeof smartRouteIntentQuestion>,
+    question:
+      | ReturnType<typeof smartRouteQuestion>
+      | ReturnType<typeof smartRouteIntentQuestion>
+      | ReturnType<typeof smartRouteTaskQuestion>,
     signal: AbortSignal
   ) => Promise<Record<string, number> | null>;
 }
+
+/** 落定名单里有忙碌成员且消息是独立新任务：标 separate */
+function markSeparate(
+  input: SmartRouteInput,
+  decision: SmartRouteDecision,
+  task: SmartRouteTask | undefined
+): SmartRouteDecision {
+  const busy = decision.ids.some((id) => input.candidates.find((c) => c.id === id)?.busy);
+  return busy && task === 'new' ? { ...decision, separate: true } : decision;
+}
+
+const firstBusy = (input: SmartRouteInput, ids: readonly string[]) =>
+  ids.find((id) => input.candidates.find((c) => c.id === id)?.busy);
 
 /**
  * 全局「群聊选人模型」：未设置走 judge + 标题模型回退链；judge 指定快模型；pi-classifier 走 worker 分类
@@ -69,12 +90,18 @@ export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector
               .catch(() => null),
           ]);
           if (!probabilities) return { ids: [], failure: '选人模型不可用' };
-          return decideSmartRoute(
+          const decision = decideSmartRoute(
             input,
             pickSmartRouteIntent(intents) ?? guessSmartRouteIntent(input.message),
             pickSmartRouteChoice(probabilities, input),
             rankSmartRouteChoice(probabilities, input)
           );
+          const busy = firstBusy(input, decision.ids);
+          if (!busy) return decision;
+          const task = await deps
+            .classify(current, smartRouteTaskQuestion(input, busy), signal)
+            .catch(() => null);
+          return markSeparate(input, decision, pickSmartRouteTask(task));
         }
         const text = await deps.judge(
           {
@@ -89,11 +116,12 @@ export function createSmartRouter(deps: SmartRouterDeps): GroupResponderSelector
         const picked = parseSmartRouteReply(text, input);
         if (picked.length === 0)
           console.warn('[bots] smart routing reply not understood:', text.slice(0, 80));
-        return decideSmartRoute(
+        const decision = decideSmartRoute(
           input,
           parseSmartRouteIntent(text) ?? guessSmartRouteIntent(input.message),
           picked
         );
+        return markSeparate(input, decision, parseSmartRouteTask(text));
       } catch (error) {
         if (signal.aborted) return { ids: [] };
         console.warn('[bots] smart routing failed', error);

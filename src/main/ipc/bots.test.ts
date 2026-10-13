@@ -806,11 +806,23 @@ describe('群任务看板 IPC', () => {
       { chatId, id, accept: 'yes' },
       { chatId, id, accept: false },
       { chatId, id, accept: false, reason: 'x'.repeat(4001) },
+      { chatId, id, accept: false, reason: 'redo', rework: 'yes' },
+      { chatId, id, accept: true, rework: true },
     ])
       expect(await call(IPC_CHANNELS.BOT_TASK_REVIEW, bad)).toEqual({
         ok: false,
         error: 'invalid',
       });
+    // 返工交给委派服务：这里的执行记录不在委派存储里，原样报错且任务不变
+    expect(
+      await call(IPC_CHANNELS.BOT_TASK_REVIEW, {
+        chatId,
+        id,
+        accept: false,
+        reason: 'redo',
+        rework: true,
+      })
+    ).toEqual({ ok: false, error: 'Delegation not found.' });
     expect(
       await call(IPC_CHANNELS.BOT_TASK_REVIEW, { chatId, id, accept: false, reason: 'redo' })
     ).toMatchObject({ ok: true, task: { status: 'todo', returnReason: 'redo' } });
@@ -824,6 +836,22 @@ describe('群任务看板 IPC', () => {
     expect(await call(IPC_CHANNELS.BOT_TASK_REVIEW, { chatId, id, accept: true })).toMatchObject({
       ok: true,
       task: { status: 'done', result: 'ok2' },
+    });
+    // 任务卡回复：入参按 unknown 收窄；已完成的任务只记评论
+    for (const bad of [
+      { chatId, id },
+      { chatId, id, text: 3 },
+      { chatId, id, text: '  ' },
+      { chatId, id, text: 'x'.repeat(4001) },
+      { chatId: 'nope', id, text: 'hi' },
+    ])
+      expect(await call(IPC_CHANNELS.BOT_TASK_REPLY, bad)).toEqual({
+        ok: false,
+        error: 'invalid',
+      });
+    expect(await call(IPC_CHANNELS.BOT_TASK_REPLY, { chatId, id, text: '辛苦了' })).toMatchObject({
+      ok: true,
+      task: { status: 'done' },
     });
   });
 
@@ -1752,6 +1780,27 @@ describe('群话题', () => {
     expect(services.chats.get(second.id)).toBeUndefined();
     expect(services.chats.get(chatId)).not.toHaveProperty('activeThreadId');
     expect(services.chats.threadsOf(chatId).map((chat) => chat.id)).toEqual([chatId, thread.id]);
+  });
+
+  it('单独删除话题时清理该话题的粘贴文件，根群与其它话题的保留', async () => {
+    const { chatId, services } = await team();
+    const thread = services.chats.createThread(chatId)!;
+    const other = services.chats.createThread(chatId)!;
+    const text = 'x'.repeat(50_000);
+    const save = async (id: string) =>
+      (await call(IPC_CHANNELS.BOT_CHAT_SAVE_PASTED_TEXT, { chatId: id, text })) as {
+        ok: true;
+        path: string;
+      };
+    const [rootFile, threadFile, otherFile] = await Promise.all(
+      [chatId, thread.id, other.id].map(save)
+    );
+    for (const file of [rootFile, threadFile, otherFile]) expect(existsSync(file.path)).toBe(true);
+
+    expect(await call(IPC_CHANNELS.BOT_THREAD_DELETE, { chatId: thread.id })).toEqual({ ok: true });
+    expect(existsSync(threadFile.path)).toBe(false);
+    expect(existsSync(rootFile.path)).toBe(true);
+    expect(existsSync(otherFile.path)).toBe(true);
   });
 
   it('手机话题：目录声明支持并下发子话题；新建 / 切换复用桌面逻辑、按请求回执', async () => {

@@ -8,6 +8,7 @@ import {
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { describe, expect, it, vi } from 'vitest';
 import { withRequestBodyBudget } from './requestBodyBudget';
+import { runWithRequestBodyObserver } from './requestBodyTelemetry';
 
 const model: Model<'anthropic-messages'> = {
   id: 'fixture',
@@ -234,4 +235,59 @@ describe('整包预算的边界与 provider 组合', () => {
       'request_too_large'
     );
   });
+
+  it.each(['google-generative-ai', 'google-vertex'] as const)(
+    '%s 不注入自定义 fetch，默认或声明的字节上限仍由 payload hook 执行',
+    async (api) => {
+      const native = {
+        ...model,
+        api,
+        inputLimits: api === 'google-vertex' ? { maxRequestBytes: 8 } : undefined,
+      } as Model<Api>;
+      let captured: ProviderRequestOptions | undefined;
+      const stream = vi.fn((_model: unknown, _context: unknown, opts?: ProviderRequestOptions) => {
+        captured = opts;
+        return new AssistantMessageEventStream();
+      });
+      const provider = {
+        id: 'fixture',
+        models: [],
+        stream,
+        streamSimple: stream,
+      } as unknown as Provider;
+      const usages: Array<{ limitBytes: number; stage: string; blocked: boolean }> = [];
+      const callerFetch = vi.fn(async () => new Response('OK'));
+      await runWithRequestBodyObserver(
+        (usage) => usages.push(usage),
+        async () => {
+          withRequestBodyBudget(provider).stream(
+            native,
+            normalizeContext({ messages: [] }),
+            api === 'google-generative-ai' ? { timeoutMs: 9 } : undefined
+          );
+          expect(captured?.onPayload).toEqual(expect.any(Function));
+          expect(captured).not.toHaveProperty('fetch');
+          if (api === 'google-generative-ai') {
+            expect(captured?.timeoutMs).toBe(9);
+            await captured?.onPayload?.({ contents: 'ok' }, native);
+            expect(usages).toEqual([
+              expect.objectContaining({
+                limitBytes: 20 * 1024 * 1024,
+                stage: 'payload',
+                blocked: false,
+              }),
+            ]);
+            withRequestBodyBudget(provider).stream(native, normalizeContext({ messages: [] }), {
+              fetch: callerFetch,
+            });
+            expect(captured?.fetch).toBe(callerFetch);
+            return;
+          }
+          await expect(captured?.onPayload?.({ x: 'too-big' }, native)).rejects.toThrow(
+            'request_too_large'
+          );
+        }
+      );
+    }
+  );
 });

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { SmartRouteDecision } from '../../../shared/bots/smartRoute';
+import type { SmartRouteDecision, SmartRouteInput } from '../../../shared/bots/smartRoute';
 import type { AgentWorkerEvent, AttachedImage } from '../../../shared/types/agent';
 import { SourceAuthorityRegistry } from '../sourceAuthorityRegistry';
 import { BotSessionHost } from './botSessionHost';
@@ -154,6 +154,38 @@ it.each([true, false])(
   }
 );
 
+it('smart routing sees busy members with the message each is working on', async () => {
+  const busyOf = (call: number) => {
+    const [input] = select.mock.calls[call] as unknown as [SmartRouteInput];
+    return Object.fromEntries(input.candidates.map((cand) => [cand.id, cand.busy?.task]));
+  };
+  await group.send(chatId, '@Alice pull the reference projects');
+  select.mockResolvedValueOnce({ ids: [b] });
+  await group.send(chatId, 'check open issues');
+  await vi.waitFor(() => expect(runtime.prompt).toHaveBeenCalledTimes(2));
+  expect(busyOf(0)).toEqual({
+    [a]: '@Alice pull the reference projects',
+    [b]: undefined,
+    [c]: undefined,
+  });
+  select.mockResolvedValueOnce({ ids: [c] });
+  await group.send(chatId, 'and review the PRs');
+  await vi.waitFor(() => expect(runtime.prompt).toHaveBeenCalledTimes(3));
+  expect(busyOf(1)).toEqual({
+    [a]: '@Alice pull the reference projects',
+    [b]: 'check open issues',
+    [c]: undefined,
+  });
+  done(a, 'pulled');
+  done(b, 'issues');
+  done(c, 'prs');
+  await group.settled(chatId);
+  select.mockResolvedValueOnce({ ids: [a] });
+  await group.send(chatId, 'next');
+  await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(3));
+  expect(busyOf(2)).toEqual({ [a]: undefined, [b]: undefined, [c]: undefined });
+});
+
 it('completion immediately after steer does not create another turn or leave a pending reply', async () => {
   await group.send(chatId, '@Alice start');
   runtime.steer.mockImplementationOnce((id, _text, _images, deliveryId) => {
@@ -167,6 +199,39 @@ it('completion immediately after steer does not create another turn or leave a p
   expect(runtime.prompt).toHaveBeenCalledTimes(1);
   expect(runtime.steer).toHaveBeenCalledTimes(1);
   expect(settled).toHaveBeenCalledTimes(1);
+});
+
+const notices = () =>
+  chats
+    .readEntries(chatId)
+    .filter((entry) => entry.kind === 'system')
+    .map((entry) => entry.text);
+
+it('a separate task routed to a busy member waits for its own turn instead of steering', async () => {
+  await group.send(chatId, '@Alice pull the reference projects');
+  select.mockResolvedValueOnce({ ids: [a], intent: 'build', separate: true });
+  await group.send(chatId, 'check open issues');
+  await vi.waitFor(() => expect(notices()).toContain('Alice 正在忙，这条新任务排在当前任务之后'));
+  expect(runtime.steer).not.toHaveBeenCalled();
+  expect(runtime.prompt).toHaveBeenCalledTimes(1);
+  done(a, 'pulled');
+  await vi.waitFor(() => expect(runtime.prompt).toHaveBeenCalledTimes(2));
+  expect(runtime.prompt.mock.calls[1][1]).toContain('check open issues');
+  done(a, 'issues');
+  await group.settled(chatId);
+  expect(replies().map((entry) => entry.text)).toEqual(['pulled', 'issues']);
+});
+
+it('a steer waiting for the current step says it will be inserted, not queued', async () => {
+  await group.send(chatId, '@Alice start');
+  runtime.steer.mockImplementationOnce(() => ({ ok: true }));
+  select.mockResolvedValueOnce({ ids: [a] });
+  await group.send(chatId, 'also the changelog');
+  await vi.waitFor(() => expect(runtime.steer).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() =>
+    expect(notices()).toContain('Alice 正在忙，这条补充会在当前步骤结束后插入')
+  );
+  expect(notices().some((text) => text.includes('正在排队'))).toBe(false);
 });
 
 it('steers a lone parallel member after the primary has finished', async () => {

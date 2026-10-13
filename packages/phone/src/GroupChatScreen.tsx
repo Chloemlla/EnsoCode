@@ -8,10 +8,14 @@ import type {
   PairGroupEntry,
 } from '@enso/pair';
 import { retryableGroupFailures } from '@shared/bots/groupRetry';
+import { splitTaskRef } from '@shared/bots/progress';
 import type { StartVoiceSession } from '@shared/types/speech';
 import {
   ArrowUp,
   ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  CirclePlay,
   ImagePlus,
   Loader2,
   PanelLeft,
@@ -97,6 +101,7 @@ const DELEGATION_TEXT: Record<PairDelegationState, string> = {
   completed: '已完成',
   failed: '失败',
   canceled: '已取消',
+  blocked: '卡住了',
 };
 
 /** 一条群消息最多带几张图（整帧要压进中继 1MB 上限） */
@@ -104,6 +109,71 @@ const MAX_IMAGES = 4;
 
 const timeOf = (at: number): string =>
   new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const PROGRESS_TONE = {
+  started: { icon: CirclePlay, className: 'border-brand/50 text-brand' },
+  blocked: { icon: CircleAlert, className: 'border-warning/60 text-warning' },
+  delivered: { icon: CircleCheck, className: 'border-success/60 text-success' },
+} as const;
+
+type DelegationEntry = Extract<PairGroupEntry, { kind: 'delegation' }>;
+
+/** 委派结果卡；挂了任务的群里已有进度行，结果默认折叠，点开看 */
+function DelegationRow({
+  entry,
+  bots,
+}: {
+  entry: DelegationEntry;
+  bots: Map<string, PairBotMember>;
+}) {
+  const collapsible = Boolean(entry.taskId);
+  const [open, setOpen] = useState(!collapsible);
+  const head = (
+    <>
+      {collapsible && (
+        <ChevronRight
+          aria-hidden
+          className={cn('h-3 w-3 shrink-0 transition-transform', open && 'rotate-90')}
+        />
+      )}
+      <span className="font-medium">
+        {bots.get(entry.from)?.name ?? '成员'} → {bots.get(entry.to)?.name ?? '成员'}
+      </span>
+      <span
+        className={cn(
+          'rounded px-1.5 py-0.5',
+          entry.state === 'running' || entry.state === 'queued'
+            ? 'bg-brand/10 text-brand'
+            : entry.state === 'failed'
+              ? 'bg-destructive/10 text-destructive'
+              : 'bg-muted text-muted-foreground'
+        )}
+      >
+        {DELEGATION_TEXT[entry.state]}
+      </span>
+    </>
+  );
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+      {collapsible ? (
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={open ? '收起委派结果' : '展开委派结果'}
+          className="flex w-full items-center gap-1.5 text-left"
+          onClick={() => setOpen((value) => !value)}
+        >
+          {head}
+        </button>
+      ) : (
+        <p className="flex items-center gap-1.5">{head}</p>
+      )}
+      {open && entry.summary && (
+        <p className="mt-1 line-clamp-3 text-muted-foreground">{entry.summary}</p>
+      )}
+    </div>
+  );
+}
 
 /** 已知成员名的 @提及高亮 */
 function withMentions(text: string, names: readonly string[]): ReactNode[] {
@@ -311,30 +381,38 @@ export function GroupChatScreen(props: Props) {
         );
       }
       case 'delegation':
+        return <DelegationRow key={entry.seq} entry={entry} bots={bots} />;
+      case 'progress': {
+        const bot = bots.get(entry.botId);
+        const tone = PROGRESS_TONE[entry.phase];
+        const Icon = tone.icon;
+        const ref = splitTaskRef(entry.text, entry.taskSeq);
         return (
-          <div key={entry.seq} className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
-            <p className="flex items-center gap-1.5">
-              <span className="font-medium">
-                {bots.get(entry.from)?.name ?? '成员'} → {bots.get(entry.to)?.name ?? '成员'}
-              </span>
-              <span
-                className={cn(
-                  'rounded px-1.5 py-0.5',
-                  entry.state === 'running' || entry.state === 'queued'
-                    ? 'bg-brand/10 text-brand'
-                    : entry.state === 'failed'
-                      ? 'bg-destructive/10 text-destructive'
-                      : 'bg-muted text-muted-foreground'
+          <div key={entry.seq} data-phase={entry.phase} className="flex gap-2 text-xs">
+            <BotAvatar bot={bot} size="sm" />
+            <div
+              className={cn(
+                'flex min-w-0 items-start gap-1.5 rounded-md border-l-2 bg-muted/50 px-2 py-1',
+                tone.className
+              )}
+            >
+              <Icon aria-hidden className="mt-px h-3.5 w-3.5 shrink-0" />
+              <p className="line-clamp-2 min-w-0 break-words text-muted-foreground">
+                <span className="font-medium text-foreground">{bot?.name ?? '成员'}</span>{' '}
+                {ref ? (
+                  <>
+                    {withMentions(ref[0], names)}
+                    <span className="font-medium text-foreground">{ref[1]}</span>
+                    {withMentions(ref[2], names)}
+                  </>
+                ) : (
+                  withMentions(entry.text, names)
                 )}
-              >
-                {DELEGATION_TEXT[entry.state]}
-              </span>
-            </p>
-            {entry.summary && (
-              <p className="mt-1 line-clamp-3 text-muted-foreground">{entry.summary}</p>
-            )}
+              </p>
+            </div>
           </div>
         );
+      }
       case 'system':
         return (
           <p key={entry.seq} className="text-center text-muted-foreground text-xs">

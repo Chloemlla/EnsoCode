@@ -45,6 +45,7 @@ export const CODEMODE_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
   'task_stop',
   'computer',
   'send_image',
+  'report_blocked',
 ]);
 
 const SHELL_HEAD =

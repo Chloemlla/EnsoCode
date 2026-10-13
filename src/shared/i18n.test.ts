@@ -117,6 +117,7 @@ const MODEL_CENTER_ENSO_I18N_KEYS = [
   'Choose a provider first. You will select subscription or API Key next.',
   'Choose how to connect',
   'Provider subscription',
+  'ChatGPT (PI login)',
   'Authorization failed',
   'Authorizing {{provider}}',
   'Enter this code in your browser',

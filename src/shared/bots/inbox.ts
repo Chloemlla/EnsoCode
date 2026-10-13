@@ -13,6 +13,7 @@ export const INBOX_DISMISSIBLE: readonly BotInboxKind[] = [
   'delegation-interrupted',
   'budget',
   'silence',
+  'task-blocked',
 ];
 
 /** 已有委派以 retryOf 指向它，或之后出现同父会话、同目标、同任务的新委派（成员自己重新委派） */
@@ -45,6 +46,36 @@ export function delegationInboxItems(delegations: readonly Delegation[]): BotInb
       ownerBotId: item.parentBotId,
       delegationId: item.id,
       text: item.task,
+    }));
+}
+
+/**
+ * 缺信息卡住、还没人答复（同任务之后没有新执行，且任务仍卡在这次执行上）的委派；text = 缺什么。
+ * stillBlocked 回查看板：人取消 / 完成 / 改派后条目随之结束
+ */
+export function taskBlockedInboxItems(
+  delegations: readonly Delegation[],
+  stillBlocked: (record: Delegation) => boolean = () => true
+): BotInboxInput[] {
+  return delegations
+    .filter(
+      (item) =>
+        item.state === 'blocked' &&
+        item.chatId !== null &&
+        item.taskId !== undefined &&
+        !delegations.some(
+          (other) => other.createdAt > item.createdAt && other.taskId === item.taskId
+        ) &&
+        stillBlocked(item)
+    )
+    .map((item) => ({
+      key: `task-blocked:${item.id}`,
+      kind: 'task-blocked',
+      chatId: item.chatId,
+      botId: item.targetBotId,
+      ownerBotId: item.parentBotId,
+      delegationId: item.id,
+      ...(item.blocked ? { text: item.blocked.need } : {}),
     }));
 }
 

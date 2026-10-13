@@ -7,6 +7,7 @@ export const TRANSCRIPT_LABELS = {
   human: '用户',
   humanRole: '人类',
   system: '系统',
+  progress: '进度',
   deleted: '已删除成员',
   omitted: (count: number) => `（省略了 ${count} 条更早的消息）`,
   delegation: (from: string, to: string, state: string) =>
@@ -17,6 +18,7 @@ export const TRANSCRIPT_LABELS = {
     completed: '已完成',
     failed: '失败',
     canceled: '已取消',
+    blocked: '卡住了',
   } satisfies Record<DelegationState, string>,
   intro: (title: string, self: string) => `你在群聊「${title}」中，你是 ${self}。群成员：`,
 } as const;
@@ -38,6 +40,7 @@ export const GROUP_STATE_LABELS = {
     review: '待验收',
     done: '已完成',
     canceled: '已取消',
+    blocked: '卡住',
   } satisfies Record<GroupTaskStatus, string>,
   more: (count: number) => `…另有 ${count} 项`,
   footer: (seq: number) =>
@@ -164,6 +167,11 @@ function render(entry: GroupEntry, find: (id: BotId) => TranscriptMember | undef
         summary ? `${head}：${summary}` : head
       );
     }
+    case 'progress':
+      return message(
+        { from: nameOf(entry.botId), role: TRANSCRIPT_LABELS.progress, seq: entry.seq },
+        entry.text.replace(/\s+/g, ' ').trim()
+      );
     default:
       return message({ from: TRANSCRIPT_LABELS.system, seq: entry.seq }, entry.text);
   }

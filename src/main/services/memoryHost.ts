@@ -43,7 +43,9 @@ import {
 } from './memory/kg';
 import { approvePendingWrite } from './memory/pending';
 import { getReembedJob, type ReembedJob, runReembedJob } from './memory/reembed';
+import { sanitizeMemoryWrite } from './memory/safety';
 import { distillSpaces, type MemorySpaceContext } from './memory/space';
+import { getMemory, updateMemory } from './memory/store';
 import type { Embedder, Memory } from './memory/types';
 
 // electron 只出现在这层接线：services/memory/* 保持纯 Node 以便测试注入路径
@@ -467,6 +469,21 @@ function onMemoryCreated(memory: Memory): void {
   if (!kgConfig.enabled || !db) return;
   const job = ensureKgJob(db, memory.id);
   if (job) void enqueueLlmJob(() => runOneKg(job));
+}
+
+/** 用户手动改标题 / 正文：与工具写入同样过注入扫描与脱敏；正文变了重嵌并重抽实体。不存在或已删除返回 null */
+export function editMemory(id: string, patch: { title: string; content: string }): Memory | null {
+  const database = memoryDb();
+  const current = getMemory(database, id);
+  if (!current || current.lifecycleState === 'deleted') return null;
+  const safe = sanitizeMemoryWrite({ title: patch.title, content: patch.content });
+  const updated = updateMemory(database, id, { title: safe.title ?? '', content: safe.content });
+  if (!updated) return null;
+  if (updated.content !== current.content || updated.title !== current.title) {
+    scheduleReembed();
+    onMemoryCreated(updated);
+  }
+  return updated;
 }
 
 async function runOneKg(job: KgJob): Promise<void> {

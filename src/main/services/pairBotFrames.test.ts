@@ -79,6 +79,27 @@ describe('Bot 目录投影', () => {
     expect(summary).not.toHaveProperty('routing');
   });
 
+  it('进度条目摘要带执行成员', () => {
+    const entry: GroupEntry = {
+      seq: 3,
+      id: 'progress:del:delivered',
+      at: 3,
+      kind: 'progress',
+      botId: B,
+      taskId: 't',
+      taskSeq: 2,
+      delegationId: 'del',
+      phase: 'delivered',
+      text: '交付 #2：好了',
+    };
+    expect(summarizeBotChat(chat(), entry, 3, 'idle').last).toEqual({
+      kind: 'progress',
+      text: '交付 #2：好了',
+      botId: B,
+      at: 3,
+    });
+  });
+
   it('委派条目摘要带发起成员，系统条目原样', () => {
     const entry: GroupEntry = {
       seq: 2,

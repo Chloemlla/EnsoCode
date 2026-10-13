@@ -544,6 +544,26 @@ describe('shouldRoute', () => {
     ).toBe(false);
   });
 
+  it('progress 条目即使带 @ 也不触发路由', () => {
+    expect(
+      shouldRoute(
+        {
+          kind: 'progress',
+          seq: 1,
+          id: 'p',
+          at: 0,
+          botId: 'fe',
+          taskId: 't',
+          taskSeq: 1,
+          delegationId: 'x',
+          phase: 'blocked',
+          text: '#1 卡住了，缺：密码 @Backend',
+        },
+        chat()
+      )
+    ).toBe(false);
+  });
+
   it('成员在本群会话里的回复参与路由，系统以其名义代写的（委派会话）不参与', () => {
     expect(shouldRoute(bot('c-fe'), chat())).toBe(true);
     expect(shouldRoute(bot('c-delegated'), chat())).toBe(false);

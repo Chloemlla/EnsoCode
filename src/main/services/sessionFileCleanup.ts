@@ -1,5 +1,6 @@
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { removePastedTextFiles } from './pastedTextFiles';
 
 export interface RemoveConversationSessionFilesOptions {
   sessionDir: string;
@@ -55,4 +56,5 @@ export function removeConversationSessionFiles(
       rmSync(path.join(toolRoot, entry), { recursive: true, force: true });
     } catch {}
   }
+  removePastedTextFiles(root, id);
 }

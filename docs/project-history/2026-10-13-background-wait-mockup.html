@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>后台任务「一直卡着」方案对比 mockup</title>
+<style>
+  :root { --bg:#16171b; --panel:#1e2026; --line:#2c2f37; --fg:#e6e6e6; --dim:#8b8f99; --amber:#f0a23b; --green:#4cc38a; --red:#e5534b; --blue:#6aa6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"PingFang SC",sans-serif; background:#0f1013; color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; }
+  .tabs button { background:none; border:1px solid var(--line); color:var(--dim); padding:5px 12px; border-radius:6px; cursor:pointer; margin-right:6px; }
+  .tabs button.on { color:var(--fg); border-color:var(--blue); background:#1d2a3d; }
+  .note { color:var(--dim); font-size:12px; }
+  main { display:flex; gap:16px; padding:16px 20px; }
+  .app { flex:1; min-width:0; background:var(--bg); border:1px solid var(--line); border-radius:10px; display:flex; height:600px; overflow:hidden; }
+  .chat { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .tl { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { padding:8px 12px; border-radius:8px; max-width:80%; }
+  .user { align-self:flex-end; background:#2a3b55; }
+  .bot { background:var(--panel); }
+  .sys { font-size:12px; color:var(--dim); border-left:2px solid var(--line); padding-left:8px; white-space:pre-wrap; font-family:ui-monospace,monospace; }
+  .row { border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--panel); }
+  .row.wait { border-color:rgba(240,162,59,.5); background:rgba(240,162,59,.06); }
+  .row .head { display:flex; gap:8px; align-items:center; cursor:pointer; }
+  .tag { font-size:12px; padding:0 6px; border-radius:4px; background:#2c2f37; color:var(--dim); }
+  .tag.amber { color:var(--amber); } .tag.green { color:var(--green); } .tag.red { color:var(--red); }
+  .kids { margin-top:8px; display:none; gap:6px; flex-direction:column; }
+  .row.open .kids { display:flex; }
+  .kid { display:flex; gap:8px; font-size:12.5px; align-items:center; }
+  .kid .act { color:var(--dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .btn { background:#2c2f37; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; }
+  .btn:hover { border-color:var(--blue); }
+  .status { padding:6px 16px; color:var(--dim); font-size:12px; display:flex; gap:8px; align-items:center; }
+  .dot { width:7px; height:7px; border-radius:50%; background:#8a6cff; display:inline-block; }
+  .composer { border-top:1px solid var(--line); padding:10px 12px; display:flex; gap:8px; align-items:center; }
+  .composer input { flex:1; background:#121317; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:7px 10px; }
+  .badge { display:none; }
+  .badge.show { display:inline-flex; gap:6px; align-items:center; font-size:12px; border:1px solid var(--line); border-radius:12px; padding:2px 10px; cursor:pointer; }
+  .side { width:0; border-left:1px solid var(--line); overflow:hidden; transition:width .2s; background:#191a1f; }
+  .side.open { width:320px; }
+  .side .inner { width:320px; padding:12px; display:flex; flex-direction:column; gap:8px; height:100%; overflow:auto; }
+  .side h3 { font-size:12px; color:var(--dim); margin:8px 0 2px; font-weight:normal; }
+  .item { border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12.5px; }
+  .item .out { display:none; margin-top:6px; background:#0c0d10; padding:6px; border-radius:4px; font-family:ui-monospace,monospace; font-size:11.5px; color:#b9bcc4; white-space:pre-wrap; }
+  .item.open .out { display:block; }
+  aside.spec { width:300px; flex-shrink:0; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:14px; font-size:13px; height:600px; overflow:auto; }
+  aside.spec h2 { font-size:14px; margin:0 0 8px; }
+  aside.spec li { margin-bottom:6px; }
+  .hint { color:var(--amber); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>后台任务「一直卡着」· 方案对比</h1>
+  <div class="tabs" id="tabs"></div>
+  <span class="note">静态原型，仅演示交互，不是工程交付。配套文档：2026-10-13-background-wait-design.md</span>
+</header>
+<main>
+  <div class="app">
+    <div class="chat">
+      <div class="tl" id="tl"></div>
+      <div class="status" id="status"></div>
+      <div class="composer">
+        <span class="badge" id="badge"><span class="dot" style="background:var(--green)"></span><span id="badgeText"></span></span>
+        <input id="input" value="先别等了，帮我看下首页报错">
+        <button class="btn" id="send">发送</button>
+      </div>
+    </div>
+    <div class="side" id="side"><div class="inner" id="sideInner"></div></div>
+  </div>
+  <aside class="spec" id="spec"></aside>
+</main>
+<script>
+const PLANS = {
+  now: { name: '现状', spec: `<h2>现状</h2><ul>
+    <li>主代理调用「子代理 · 等待」，不写超时 = 无限等。</li>
+    <li>点「发送」插话：消息排队，等子代理做完才被模型看到。</li>
+    <li>等待行只有总时长，看不到子代理在干嘛，没有「不等了」。</li></ul>
+    <p class="hint">试：点「发送」</p>` },
+  A: { name: 'A 止血', spec: `<h2>A 止血 · 约 1 人日</h2><ul>
+    <li>插话立即结束所有阻塞等待，子代理继续跑。</li>
+    <li>等待默认 10 分钟、上限 15 分钟，到时返回状态。</li>
+    <li>界面不动。</li></ul>
+    <p>参考：pi-desktop、deepchat</p><p class="hint">试：点「发送」，或「模拟 10 分钟超时」</p>` },
+  B: { name: 'B 不阻塞为默认（推荐）', spec: `<h2>B 不阻塞为默认 · 约 2.5 人日</h2><ul>
+    <li>A 全部。</li>
+    <li>提示：子代理做完会自动通知，非必要不等。</li>
+    <li>等待行可展开：每个子代理在干什么、已用时。</li>
+    <li>「不等了」按钮：子代理继续跑，模型收到说明。</li>
+    <li>超时返回进度心跳，不算失败。</li></ul>
+    <p>参考：omp、ZCode、pi-desktop</p><p class="hint">试：点等待行展开 →「不等了」；或直接发送</p>` },
+  C: { name: 'C 统一面板', spec: `<h2>C 统一后台工作面板 · 约 5–6 人日</h2><ul>
+    <li>B 全部。</li>
+    <li>输入框旁「后台 N」角标，点开侧栏。</li>
+    <li>运行中 / 已结束两段，展开看实时输出，可停止、打开完整日志。</li>
+    <li>结束不再 5 秒消失；重启后残留标「App 退出时已停止」。</li>
+    <li>待定：现有 TaskBar 去留。</li></ul>
+    <p>参考：ZCode、deepseek-harness</p><p class="hint">试：点左下「后台」角标</p>` },
+};
+let plan = 'now', waiting = true, elapsed = 21 * 60 + 24, queued = [];
+const $ = (id) => document.getElementById(id);
+const fmt = (s) => `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+
+function kidsHtml() {
+  return `<div class="kids">
+    <div class="kid"><span class="tag amber">运行中</span><b>数据清洗</b><span class="act">bash · python clean.py --all（12m 无新输出）</span><span class="note">21m</span></div>
+    <div class="kid"><span class="tag green">已完成</span><b>接口梳理</b><span class="act">报告已就绪</span><span class="note">6m</span></div>
+    <div style="display:flex;gap:6px;margin-top:4px"><button class="btn" id="giveup">不等了</button><button class="btn" id="stopkid">停止「数据清洗」</button></div></div>`;
+}
+
+function render() {
+  const tl = $('tl');
+  let html = `<div class="msg user">把这批数据清洗一下，顺便梳理接口</div>
+    <div class="msg bot">我派两个子代理并行处理。</div>
+    <div class="row"><div class="head"><span class="tag">子代理</span>派出 · 数据清洗、接口梳理</div></div>`;
+  html += `<div class="row wait" id="waitRow"><div class="head"><span class="tag amber">子代理</span>等待 · 数据清洗、接口梳理
+    <span class="note${waiting ? ' elapsed' : ''}" style="margin-left:auto">${waiting ? fmt(elapsed) : '已结束'}</span>${plan === 'B' || plan === 'C' ? '<span class="note">▾</span>' : ''}</div>
+    ${plan === 'B' || plan === 'C' ? kidsHtml() : ''}</div>`;
+  html += queued.join('');
+  tl.innerHTML = html;
+  $('status').innerHTML = waiting ? `<span class="dot"></span>生成中… <span class="elapsed">${fmt(elapsed)}</span>${plan !== 'now' ? '　<button class="btn" id="timeout">模拟 10 分钟超时</button>' : ''}` : '';
+  $('badge').className = plan === 'C' ? 'badge show' : 'badge';
+  $('badgeText').textContent = '后台 2 · 终端 1 · 子代理 1';
+  if (plan !== 'C') $('side').classList.remove('open');
+  $('spec').innerHTML = PLANS[plan].spec;
+  const row = $('waitRow');
+  if (plan === 'B' || plan === 'C') row.querySelector('.head').onclick = () => row.classList.toggle('open');
+  if ($('giveup')) $('giveup').onclick = (e) => { e.stopPropagation(); endWait('用户点了「不等了」', '好的，不等了。「数据清洗」还在后台跑，做完我会告诉你。接口梳理的报告已就绪，要先看吗？'); };
+  if ($('stopkid')) $('stopkid').onclick = (e) => { e.stopPropagation(); endWait('用户停止了子代理「数据清洗」——不要重新启动', '已停止「数据清洗」。接口梳理已完成，需要我汇总吗？'); };
+  if ($('timeout')) $('timeout').onclick = () => plan === 'A'
+    ? endWait('等待超时（10 分钟）。数据清洗：运行中；接口梳理：已完成。子代理仍在运行，结束会通知你。', '数据清洗还没跑完，我先汇总接口梳理的结果，清洗完成后再补充。')
+    : endWait('等待超时（10 分钟）。数据清洗：运行中，bash 已 12 分钟无新输出；接口梳理：已完成。子代理仍在运行，结束会通知你。', '数据清洗跑了很久且 12 分钟没输出，可能卡在大文件上。要我停掉它换分批处理吗？');
+  renderSide();
+}
+
+function endWait(sysText, reply) {
+  if (!waiting) return;
+  waiting = false;
+  queued.push(`<div class="sys">[返回给模型] ${sysText}</div><div class="msg bot">${reply}</div>`);
+  render();
+}
+
+function renderSide() {
+  $('sideInner').innerHTML = `<div style="display:flex;justify-content:space-between"><b>后台工作</b><button class="btn" id="closeSide">×</button></div>
+    <h3>运行中</h3>
+    <div class="item" data-t><div style="display:flex;gap:6px"><span class="tag">终端</span>pnpm dev<span class="note" style="margin-left:auto">34m</span></div>
+      <div class="out">VITE v5 ready in 812 ms\n➜  Local: http://localhost:5173/\n[hmr] update /src/App.tsx</div>
+      <div style="margin-top:6px;display:flex;gap:6px"><button class="btn">停止</button><button class="btn">打开完整日志</button></div></div>
+    <div class="item" data-t><div style="display:flex;gap:6px"><span class="tag">子代理</span>数据清洗<span class="note" style="margin-left:auto">${waiting ? '21m' : '—'}</span></div>
+      <div class="out">→ read data/raw_2026.csv\n→ bash python clean.py --all\n（12m 无新输出）</div>
+      <div style="margin-top:6px;display:flex;gap:6px"><button class="btn">停止</button><button class="btn">打开子会话</button></div></div>
+    <h3>已结束</h3>
+    <div class="item" data-t><div style="display:flex;gap:6px"><span class="tag green">完成</span>接口梳理<span class="note" style="margin-left:auto">6m</span></div><div class="out">报告：共 23 个接口……</div></div>
+    <div class="item" data-t><div style="display:flex;gap:6px"><span class="tag red">exit 1</span>pnpm test<span class="note" style="margin-left:auto">2m</span></div><div class="out">FAIL src/App.test.tsx\n  ✕ renders header</div>
+      <div style="margin-top:6px"><button class="btn">打开完整日志</button> <button class="btn">清除</button></div></div>
+    <div class="item"><span class="tag">已停止</span> pnpm build:watch <span class="note">App 退出时已停止</span></div>`;
+  $('closeSide').onclick = () => $('side').classList.remove('open');
+  document.querySelectorAll('[data-t]').forEach((el) => (el.onclick = (e) => { if (e.target.tagName !== 'BUTTON') el.classList.toggle('open'); }));
+}
+
+$('badge').onclick = () => $('side').classList.toggle('open');
+$('send').onclick = () => {
+  const text = $('input').value.trim();
+  if (!text) return;
+  queued.push(`<div class="msg user">${text}</div>`);
+  if (plan === 'now' && waiting) {
+    queued.push(`<div class="sys">（消息已排队：子代理做完前模型看不到）</div>`);
+    render();
+    return;
+  }
+  if (waiting) {
+    waiting = false;
+    queued.push(`<div class="sys">[返回给模型] 用户插话，等待已结束；子代理继续运行，结束会自动通知你。</div><div class="msg bot">好，先看首页报错。「数据清洗」还在后台跑，完成后我再汇报。</div>`);
+  } else {
+    queued.push(`<div class="msg bot">好的，马上看。</div>`);
+  }
+  render();
+};
+
+$('tabs').innerHTML = Object.entries(PLANS).map(([k, p]) => `<button data-k="${k}">${p.name}</button>`).join('');
+$('tabs').querySelectorAll('button').forEach((b) => (b.onclick = () => {
+  plan = b.dataset.k; waiting = true; elapsed = 21 * 60 + 24; queued = [];
+  $('tabs').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+  render();
+}));
+$('tabs').querySelector('button').classList.add('on');
+setInterval(() => {
+  if (!waiting) return;
+  elapsed++;
+  document.querySelectorAll('.elapsed').forEach((el) => (el.textContent = fmt(elapsed)));
+}, 1000);
+render();
+</script>
+</body>
+</html>

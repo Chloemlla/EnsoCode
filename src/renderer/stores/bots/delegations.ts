@@ -1,4 +1,4 @@
-import type { BotChat, Delegation, DelegationState } from '@shared/types/bot';
+import type { BotChat, Delegation, DelegationState, DelegationTrigger } from '@shared/types/bot';
 import { type SessionOwner, sessionOwners } from './selectors';
 
 export const isActiveDelegation = (state: DelegationState) =>
@@ -47,6 +47,35 @@ export function delegationLiveTarget(
     (record) => record.childConversationId === conversationId && isActiveDelegation(record.state)
   );
   return item ? { botId: item.targetBotId } : undefined;
+}
+
+export interface DelegationRunMark {
+  key: string;
+  at: number;
+  /** 本会话内第几次执行 */
+  n: number;
+  trigger: DelegationTrigger;
+}
+
+/** 「查看过程」分隔：同一子会话有两次以上已开工的执行时，按开工时间（旧记录用发起时间）编号 */
+export function delegationRunMarks(
+  delegations: readonly Delegation[],
+  conversationId: string
+): DelegationRunMark[] {
+  const runs = delegations.flatMap((record) => {
+    if (record.childConversationId !== conversationId) return [];
+    const at = record.startedAt ?? (record.state === 'queued' ? undefined : record.createdAt);
+    return at === undefined ? [] : [{ record, at }];
+  });
+  if (runs.length < 2) return [];
+  return runs
+    .sort((a, b) => a.at - b.at)
+    .map(({ record, at }, index) => ({
+      key: `run:${record.id}`,
+      at,
+      n: index + 1,
+      trigger: record.trigger ?? 'delegate',
+    }));
 }
 
 /** 已有委派以 retryOf 指向它（Main 也据此拒绝再次重试） */

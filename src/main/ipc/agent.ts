@@ -950,6 +950,11 @@ export function registerAgentHandlers(): void {
   });
 
   agentService = new AgentService({
+    notify: (context, text, urgent) => {
+      // 投给父会话当前 generation：换代前派出的 Run 结束后照样通知接续的会话
+      const identity = rootIdentity(context.owner.ownerId);
+      if (identity) sendAgentCommand({ type: 'agent-notify', identity, text, urgent });
+    },
     allowedModes: (context) => {
       const state = readSettingsState() ?? {};
       const projects = Array.isArray(state.projects) ? state.projects : [];
@@ -981,11 +986,17 @@ export function registerAgentHandlers(): void {
           ...(input.thinking ? { thinking: input.thinking } : {}),
         }),
       prompt: async (input) =>
-        promptChildSession(input.identity, input.runId, {
-          text: input.prompt,
-          images: [],
-          fileMentions: [],
-        }),
+        promptChildSession(
+          input.identity,
+          input.runId,
+          {
+            text: input.prompt,
+            images: [],
+            fileMentions: [],
+            // 只有 AgentService 的子代理 Run 计请求预算；派发服务的 Bot 成员不带这个标记
+          },
+          true
+        ),
       steer: async (input) => steerSession(input.identity, input.prompt),
       stop: async (input) => abortSession(input.identity),
       dismiss: async (input) => dismissChildSession(input.identity.parent, input.identity, false),
@@ -1231,6 +1242,15 @@ export function registerAgentHandlers(): void {
         } else if (op === 'send_image' && conversation?.bot) {
           result = sendImageTool(services, identity.sessionId, conversation.bot, input);
         } else if (
+          op === 'report_blocked' &&
+          typeof input.need === 'string' &&
+          (input.waitFor === undefined || input.waitFor === 'parent' || input.waitFor === 'human')
+        ) {
+          result = service.reportBlocked(identity.sessionId, {
+            need: input.need,
+            ...(input.waitFor ? { waitFor: input.waitFor } : {}),
+          });
+        } else if (
           op === 'delegate' &&
           typeof input.to === 'string' &&
           typeof input.task === 'string' &&
@@ -1241,7 +1261,7 @@ export function registerAgentHandlers(): void {
           (input.check === undefined || parseTaskCheck(input.check))
         ) {
           const check = parseTaskCheck(input.check);
-          result = service.delegate(identity.sessionId, {
+          result = service.delegateAndConfirm(identity.sessionId, {
             to: input.to,
             task: input.task,
             ...(typeof input.context === 'string' ? { context: input.context } : {}),
@@ -1329,7 +1349,7 @@ export function registerAgentHandlers(): void {
       return;
     }
     if (workerEvent.type === 'agent-control-cancel') {
-      pendingAgentControl.get(workerEvent.requestId)?.abort();
+      pendingAgentControl.get(workerEvent.requestId)?.abort(workerEvent.kind);
       return;
     }
     if (workerEvent.type === 'agent-control-invoke') {
@@ -2021,6 +2041,11 @@ export function registerAgentHandlers(): void {
       return backgroundForegroundTool(identity, toolCallId);
     }
   );
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS, (_event, sessionId: unknown) => {
+    const identity = exactIdentity(sessionId);
+    return identity ? (agentService?.progress(identity.sessionId) ?? []) : [];
+  });
 
   ipcMain.handle(
     IPC_CHANNELS.AGENT_WORKFLOW_STOP,

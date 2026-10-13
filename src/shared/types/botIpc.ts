@@ -168,7 +168,8 @@ export type BotInboxKind =
   | 'budget'
   | 'routine-draft'
   | 'routine-blocked'
-  | 'silence';
+  | 'silence'
+  | 'task-blocked';
 
 /** Main 持久化的收件箱条目；key 为去重身份，同 key 重新出现时重新打开 */
 export interface BotInboxItem {

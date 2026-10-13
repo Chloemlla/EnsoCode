@@ -44,6 +44,7 @@ export const screen = {
   removeListener: () => {},
 };
 export const powerMonitor = { on: () => {} };
+export const nativeTheme = { shouldUseDarkColors: false };
 export const powerSaveBlocker = { start: () => 0, stop: () => {} };
 export const globalShortcut = {
   register: () => true,

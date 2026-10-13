@@ -130,6 +130,11 @@ import { setBotAvatarResolver } from '../services/localImageProtocol';
 import { listMemories } from '../services/memory/store';
 import { notifyBotChat } from '../services/notifications';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
+import {
+  botChatPasteOwner,
+  removePastedTextFiles,
+  savePastedTextFile,
+} from '../services/pastedTextFiles';
 import { resolveRemoteModels } from '../services/remoteModels';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import { botAssistantModelCandidates, titleModelCandidates } from '../services/titleSummary';
@@ -346,6 +351,7 @@ function createRuntime(botsRoot: string): BotRuntimePort {
             mcpServerIds: spec.bot.mcpServerIds,
             ...(spec.groupTasks ? { groupTasks: true } : {}),
             ...(spec.routines ? { routines: true } : {}),
+            ...(spec.delegationTask ? { delegationTask: true } : {}),
             ...(spec.writeLock ? { writeLock: spec.writeLock } : {}),
           },
         }
@@ -512,6 +518,7 @@ export function getBotServices(): BotServices | null {
     sessionMessages: (conversationId) =>
       readBotSessionMessages(sessionDir(), authority.conversation(conversationId)?.sessionFile),
     workspacePath: (chatId) => host.workspacePath(chatId),
+    taskBrief: (chatId, taskId) => tasks.previousRuns(chatId, taskId),
   });
   const groups = new GroupChatService({
     bots,
@@ -595,8 +602,8 @@ export function getBotServices(): BotServices | null {
     chats,
     bots,
     emit: emitBotEvent,
-    send: (chatId, text) =>
-      groups.send(chatId, text, { deliveryId: randomUUID(), source: 'human' }),
+    send: (chatId, text, refs) =>
+      groups.send(chatId, text, { deliveryId: randomUUID(), source: 'human' }, refs),
     cancelDelegation: (id) => {
       delegationsRef?.cancel(id);
     },
@@ -605,6 +612,11 @@ export function getBotServices(): BotServices | null {
       if (!conversationId) throw new Error('member session unavailable');
       return conversationMessages(conversationId);
     },
+    delegations: () => delegationStore.list(),
+    rework: (input) => delegationsRef?.rework(input) ?? { ok: false, error: 'disabled' },
+    reply: (input) => delegationsRef?.reply(input) ?? { ok: false, error: 'disabled' },
+    interject: async (input) =>
+      delegationsRef ? delegationsRef.interject(input) : { ok: false, error: 'disabled' },
   });
   host.onDiscard((scope) => {
     if (scope.botId) tasks.releaseBot(scope.botId);
@@ -689,6 +701,16 @@ export function getBotServices(): BotServices | null {
     usage: () => usage.overview(),
     silences: () => host.silences(),
     emit: emitBotEvent,
+    taskBlocked: (record) =>
+      !!record.chatId &&
+      tasks
+        .list(record.chatId)
+        .some(
+          (task) =>
+            task.id === record.taskId &&
+            task.status === 'blocked' &&
+            task.delegationId === record.id
+        ),
   });
   host.onTurnFinished((event) => inbox.turnFinished(event.conversationId));
   setBotWorkerEventObserver((event) => {
@@ -1526,11 +1548,21 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_TASK_REVIEW, 'write', (_sender, request, services) => {
     const target = taskTarget(services, request);
     if (!target || typeof target.input.accept !== 'boolean') return INVALID;
+    const rework = target.input.rework;
+    if (rework !== undefined && (typeof rework !== 'boolean' || target.input.accept))
+      return INVALID;
     if (target.input.accept) return services.tasks.accept(target.chatId, 'human', target.id);
     const reason = target.input.reason;
     if (typeof reason !== 'string' || !reason.trim() || reason.length > GROUP_TASK_TEXT_MAX)
       return INVALID;
-    return services.tasks.reject(target.chatId, 'human', target.id, reason);
+    return services.tasks.reject(target.chatId, 'human', target.id, reason, rework === true);
+  });
+  handle(IPC_CHANNELS.BOT_TASK_REPLY, 'write', (_sender, request, services) => {
+    const target = taskTarget(services, request);
+    const text = target?.input.text;
+    if (!target || typeof text !== 'string' || !text.trim() || text.length > GROUP_TASK_TEXT_MAX)
+      return INVALID;
+    return services.tasks.reply(target.chatId, target.id, text);
   });
   handle(
     IPC_CHANNELS.BOTS_LIST,
@@ -1840,6 +1872,8 @@ export function registerBotHandlers(): void {
       }
       for (const thread of threads.slice(1)) host.discardChat(thread.id);
       if (!host.discardChat(chatId)) return INVALID;
+      for (const thread of threads)
+        removePastedTextFiles(sessionDir(), botChatPasteOwner(thread.id));
       tasks.forget(chatId);
       await browserHost.closeSession(botBrowserKey(chatId));
       await removeBotMemorySpace(app.getPath('userData'), `chat:${chatId}`);
@@ -1890,6 +1924,7 @@ export function registerBotHandlers(): void {
       const stopped = await groups.stop(thread.id);
       if (!stopped.ok) return stopped;
       if (!host.discardChat(thread.id)) return INVALID;
+      removePastedTextFiles(sessionDir(), botChatPasteOwner(thread.id));
       if (root.activeThreadId === thread.id)
         chats.update(root.id, (draft) => {
           delete draft.activeThreadId;
@@ -2020,6 +2055,13 @@ export function registerBotHandlers(): void {
   handle(IPC_CHANNELS.BOT_FILE_SEARCH, 'read', (_sender, request, services) =>
     searchChatFiles(services, request)
   );
+  handle(IPC_CHANNELS.BOT_CHAT_SAVE_PASTED_TEXT, 'write', (_sender, request, { chats }) => {
+    const input = objectInput(request);
+    if (!input || !isBotId(input.chatId) || typeof input.text !== 'string')
+      return { ok: false, error: 'invalid-request' };
+    if (!chats.get(input.chatId)) return { ok: false, error: 'chat-not-found' };
+    return savePastedTextFile(sessionDir(), botChatPasteOwner(input.chatId), input.text);
+  });
   handle(IPC_CHANNELS.BOT_REWIND, 'write', (_sender, request, services) =>
     rewindBotChat(services, request)
   );

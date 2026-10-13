@@ -251,7 +251,10 @@ export function ProviderSetupWizard({ open, onOpenChange }: ProviderSetupWizardP
                           }}
                         >
                           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted text-foreground">
-                            <ProviderCatalogMark id={definition.id} label={definition.label} />
+                            <ProviderCatalogMark
+                              id={definition.oauthProviderId ?? definition.id}
+                              label={definition.label}
+                            />
                           </span>
                           <span className="min-w-0">
                             <span className="block truncate text-sm font-medium">

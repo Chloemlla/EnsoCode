@@ -3,7 +3,12 @@ import { parseBotInjectedMessage } from '@shared/bots/injectedMessage';
 import { stripBotNotesUpdate } from '@shared/bots/notes';
 import { isBtwIsolationPrompt } from '@shared/btw';
 import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
-import type { AgentSessionCustomEntry, TodoItem, TurnPerf } from '@shared/types/agent';
+import type {
+  AgentRunProgress,
+  AgentSessionCustomEntry,
+  TodoItem,
+  TurnPerf,
+} from '@shared/types/agent';
 import { parseWorkflowPresetMessage } from '@shared/workflowPresetMessage';
 import {
   ArrowDownToLine,
@@ -34,6 +39,7 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  SkipForward,
   Sparkles,
   Target,
   TerminalSquare,
@@ -193,7 +199,8 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.ask?.answer === b.ask?.answer &&
         a.ask?.autoSelected === b.ask?.autoSelected &&
         a.subagentOp === b.subagentOp &&
-        JSON.stringify(a.subagentTitles) === JSON.stringify(b.subagentTitles)
+        JSON.stringify(a.subagentTitles) === JSON.stringify(b.subagentTitles) &&
+        a.waiting === b.waiting
       );
     case 'tool-group':
       return (
@@ -228,6 +235,8 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
       return b.kind === 'compaction-progress' && a.state === b.state;
     case 'session-custom':
       return b.kind === 'session-custom' && a.entry === b.entry;
+    case 'divider':
+      return b.kind === 'divider' && a.text === b.text;
   }
 }
 
@@ -417,7 +426,7 @@ function InlineMentionText({
             // biome-ignore lint/suspicious/noArrayIndexKey: 同一文件可重复提及，分段随文本快照整体替换
             key={index}
             kind="file"
-            label={segment.path.split('/').at(-1) || segment.path}
+            label={segment.path.split(/[\\/]/).at(-1) || segment.path}
             title={segment.path}
           />
         ) : segment.type === 'chat' ? (
@@ -782,6 +791,14 @@ export const TimelineRow = memo(function TimelineRow({
       return <CompactionProgressRow state={item.state} />;
     case 'session-custom':
       return <SessionCustomRow entry={item.entry} />;
+    case 'divider':
+      return (
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span className="h-px flex-1 bg-border" />
+          {item.text}
+          <span className="h-px flex-1 bg-border" />
+        </div>
+      );
   }
 }, itemEqual);
 
@@ -1804,7 +1821,9 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
         ? summarizeSandboxCalls(sandbox.calls)
         : summary;
   const hasBody = Boolean(item.output || item.source || sentMessage || item.ask);
-  const expandable = hasDiff || hasWrite || hasFileChanges || hasBody;
+  // 子代理等待行：运行中可展开看在等的子代理各自在干什么
+  const waitProgress = item.state === 'running' && item.waiting === 'subagent' && !host;
+  const expandable = hasDiff || hasWrite || hasFileChanges || hasBody || waitProgress;
   // edit 的 diff 与 write 的内容只在本轮直播（running）且开启 expandLiveEdits 时默认展开；
   // 历史会话挂载时全部折叠——否则切会话时视口内成排 FileDiff 同步解析+高亮，
   // 主线程阻塞几秒白屏
@@ -1902,7 +1921,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
           )}
         </button>
         {item.state === 'running' && item.callId && !host && (
-          <MoveToBackgroundButton callId={item.callId} />
+          <MoveToBackgroundButton callId={item.callId} waiting={Boolean(item.waiting)} />
         )}
         {(hasDiff || hasWrite || hasFileChanges) && (item.state === 'ok' || hasFileChanges) && (
           <button
@@ -1925,6 +1944,11 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
             <div className="truncate border-b border-border/60 px-3 py-1 font-mono text-[10px] text-muted-foreground">
               {mcp.server}.{mcp.tool}
             </div>
+          )}
+          {waitProgress && (
+            <SubagentWaitProgress
+              agentIds={item.subagentTitles ? Object.keys(item.subagentTitles) : undefined}
+            />
           )}
           {hasDiff && item.edits && (
             <ToolContentScroller follow={item.state === 'running'}>
@@ -2103,8 +2127,8 @@ function TodoRow({ todos }: { todos: TodoItem[] }) {
 /** 切会话会卸载时间线，挂载时刻不能当起点。有 since 用打点；否则按会话+行 key 记住第一次出现的时刻。 */
 const elapsedStartByKey = new Map<string, number>();
 
-/** 运行中的前台命令移交为后台任务；worker 拒绝（已结束/配额满）时稍后恢复可点 */
-function MoveToBackgroundButton({ callId }: { callId: string }) {
+/** 运行中的前台命令移交为后台任务，或结束阻塞等待（被等的继续跑）；worker 拒绝时稍后恢复可点 */
+function MoveToBackgroundButton({ callId, waiting }: { callId: string; waiting: boolean }) {
   const { t } = useI18n();
   const sessionId = useSessionsStore((state) => displayedConversation(state)?.id ?? '');
   const [pending, setPending] = useState(false);
@@ -2114,7 +2138,14 @@ function MoveToBackgroundButton({ callId }: { callId: string }) {
     return () => clearTimeout(timer);
   }, [pending]);
   if (!sessionId) return null;
-  const label = pending ? t('Moving to background…') : t('Move to background');
+  const label = waiting
+    ? pending
+      ? t('Stopping wait…')
+      : t('Stop waiting')
+    : pending
+      ? t('Moving to background…')
+      : t('Move to background');
+  const Icon = waiting ? SkipForward : ArrowDownToLine;
   return (
     <button
       type="button"
@@ -2131,9 +2162,71 @@ function MoveToBackgroundButton({ callId }: { callId: string }) {
         );
       }}
     >
-      <ArrowDownToLine className="h-3 w-3" />
+      <Icon className="h-3 w-3" />
       {label}
     </button>
+  );
+}
+
+const WAIT_PROGRESS_POLL_MS = 2000;
+
+function runActivityLabel(run: AgentRunProgress, t: TFunction): string {
+  if (run.status === 'queued') return t('Queued');
+  const activity = run.activity;
+  if (activity?.phase === 'tool') return [activity.tool, activity.detail].filter(Boolean).join(' ');
+  return activity?.phase === 'writing' ? t('Writing reply…') : t('Thinking…');
+}
+
+/** 子代理等待行展开：在等的子代理各自在干什么、跑了多久（Main 进度快照，定时刷新） */
+function SubagentWaitProgress({ agentIds }: { agentIds?: string[] }) {
+  const { t } = useI18n();
+  const sessionId = useSessionsStore((state) => displayedConversation(state)?.id ?? '');
+  const [runs, setRuns] = useState<AgentRunProgress[] | null>(null);
+  useEffect(() => {
+    if (!sessionId) return;
+    let alive = true;
+    const load = () =>
+      window.electronAPI.agent.subagentProgress(sessionId).then(
+        (next) => {
+          if (alive) setRuns(next);
+        },
+        () => {}
+      );
+    void load();
+    const timer = setInterval(load, WAIT_PROGRESS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [sessionId]);
+  if (!runs) return null;
+  // wait 只列它等的子代理；spawn / send 带 wait 时行上没有 agentId，列出全部在跑的
+  const visible = agentIds?.length ? runs.filter((run) => agentIds.includes(run.agentId)) : runs;
+  return (
+    <div className="border-b border-border/60 px-3 py-2 text-xs">
+      {visible.length === 0 ? (
+        <div className="text-muted-foreground">{t('No running subagents')}</div>
+      ) : (
+        visible.map((run) => (
+          <div key={run.runId} className="flex items-center gap-2 py-0.5">
+            <span className="max-w-[40%] shrink-0 truncate font-medium">
+              {run.title ?? run.agentId.slice(0, 8)}
+            </span>
+            <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+              {runActivityLabel(run, t)}
+            </span>
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70 tabular-nums">
+              {formatDuration(run.elapsedMs)}
+            </span>
+          </div>
+        ))
+      )}
+      <div className="mt-1 text-[11px] text-muted-foreground/80">
+        {t(
+          'Stopping the wait does not stop subagents; the assistant is notified when they finish.'
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -331,7 +331,14 @@ export interface PairBotChatSummary {
   status: PairBotRunState;
 }
 
-export type PairDelegationState = 'queued' | 'running' | 'completed' | 'failed' | 'canceled';
+/** 旧手机遇到不认识的值（如 blocked）只是文案为空，不报错 */
+export type PairDelegationState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+  | 'blocked';
 
 interface PairGroupEntryBase {
   seq: number;
@@ -356,6 +363,18 @@ export type PairGroupEntry =
       to: string;
       state: PairDelegationState;
       summary?: string;
+      /** 挂了看板任务：结果卡可默认折叠 */
+      taskId?: string;
+    })
+  /** 旧手机不认识 progress：渲染 switch 无匹配，不显示、不报错 */
+  | (PairGroupEntryBase & {
+      kind: 'progress';
+      botId: string;
+      taskId: string;
+      taskSeq: number;
+      delegationId: string;
+      phase: 'started' | 'blocked' | 'delivered';
+      text: string;
     })
   | (PairGroupEntryBase & {
       kind: 'system';
@@ -381,7 +400,8 @@ export interface PairBotInboxItem {
     | 'budget'
     | 'routine-draft'
     | 'routine-blocked'
-    | 'silence';
+    | 'silence'
+    | 'task-blocked';
   chatId: string | null;
   botId?: string;
   /** 委派会话：botId 替 ownerBotId 执行 */

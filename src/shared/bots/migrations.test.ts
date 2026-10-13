@@ -39,11 +39,31 @@ describe('bot record migrations', () => {
     expect(runMigrations({ schemaVersion: 4 }, steps)).toBeUndefined();
   });
 
-  it('stamps the current version without touching the optimistic version field', () => {
+  it('stamps the version without touching the optimistic version field', () => {
     expect(withSchemaVersion('delegation', { id: 'd', version: 3 })).toEqual({
-      schemaVersion: BOT_SCHEMA_VERSION.delegation,
+      schemaVersion: 1,
       id: 'd',
       version: 3,
+    });
+    expect(withSchemaVersion('bot', { id: 'b' })).toEqual({
+      schemaVersion: BOT_SCHEMA_VERSION.bot,
+      id: 'b',
+    });
+  });
+
+  it('卡住：委派 / 任务只有用到第 2 版内容时才写 2；第 1 版记录空迁移到第 2 版', () => {
+    expect(withSchemaVersion('delegation', { state: 'blocked' }).schemaVersion).toBe(2);
+    expect(withSchemaVersion('delegation', { state: 'failed', blocked: {} }).schemaVersion).toBe(2);
+    expect(withSchemaVersion('task', { status: 'blocked' }).schemaVersion).toBe(2);
+    expect(withSchemaVersion('task', { status: 'doing', blockedStreak: {} }).schemaVersion).toBe(2);
+    expect(
+      withSchemaVersion('task', { status: 'doing', runs: [{ state: 'blocked' }] }).schemaVersion
+    ).toBe(2);
+    expect(withSchemaVersion('task', { status: 'doing', runs: [] }).schemaVersion).toBe(1);
+    expect(migrateRecord('delegation', { id: 'd' })).toEqual({ id: 'd', schemaVersion: 2 });
+    expect(migrateRecord('task', { id: 't', schemaVersion: 2 })).toEqual({
+      id: 't',
+      schemaVersion: 2,
     });
   });
 });

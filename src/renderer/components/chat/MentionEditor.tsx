@@ -41,7 +41,7 @@ export interface MentionEditorHandle {
   /** 仅移除光标处的 @token、/token 或 $token */
   consumeToken(prefix: '@' | '/' | '$'): void;
   /** 在光标处插入文件卡片(拖拽文件用,无 token 语义) */
-  insertFileChip(path: string): void;
+  insertFileChip(path: string, label?: string): void;
   /** 在光标处插入纯文本 */
   insertText(text: string): void;
   /** 活动 @ token 首字符的视口矩形，给 mention 弹窗锚点用 */
@@ -55,6 +55,8 @@ interface MentionEditorProps {
   onStateChange: (state: MentionEditorState) => void;
   onKeyDown: (event: React.KeyboardEvent) => void;
   onPaste: (event: React.ClipboardEvent) => void;
+  /** 纯文本粘贴拦截:返回 true 表示已接管,不再插入正文 */
+  onPasteText?: (text: string) => boolean;
   onCompositionStart: () => void;
   onCompositionEnd: () => void;
   onChipActivate?: (segment: MentionSegment) => void;
@@ -84,6 +86,7 @@ function buildChip(segment: Exclude<MentionSegment, { type: 'text' }>): HTMLSpan
   chip.dataset.mentionKind = segment.type;
   if (segment.type === 'file') {
     chip.dataset.path = segment.path;
+    if (segment.label) chip.dataset.label = segment.label;
     chip.title = segment.path;
   } else if (segment.type === 'chat') {
     chip.dataset.label = segment.label;
@@ -108,14 +111,19 @@ function buildChip(segment: Exclude<MentionSegment, { type: 'text' }>): HTMLSpan
   chip.appendChild(icon);
   const label = document.createElement('span');
   label.className = 'truncate';
-  label.textContent = segment.type === 'file' ? fileMentionBasename(segment.path) : segment.label;
+  label.textContent =
+    segment.type === 'file' ? (segment.label ?? fileMentionBasename(segment.path)) : segment.label;
   chip.appendChild(label);
   return chip;
 }
 
 function segmentFromChip(chip: HTMLElement): MentionSegment | null {
   if (chip.dataset.mentionKind === 'file' && chip.dataset.path) {
-    return { type: 'file', path: chip.dataset.path };
+    return {
+      type: 'file',
+      path: chip.dataset.path,
+      ...(chip.dataset.label ? { label: chip.dataset.label } : {}),
+    };
   }
   if (chip.dataset.mentionKind === 'chat' && chip.dataset.label && chip.dataset.sessionFile) {
     return { type: 'chat', label: chip.dataset.label, sessionFile: chip.dataset.sessionFile };
@@ -287,6 +295,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       onStateChange,
       onKeyDown,
       onPaste,
+      onPasteText,
       onCompositionStart,
       onCompositionEnd,
       onChipActivate,
@@ -472,8 +481,11 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           range.deleteContents();
           emitState();
         },
-        insertFileChip: (path) => {
-          insertNodeAtCaret(() => buildChip({ type: 'file', path }), false);
+        insertFileChip: (path, label) => {
+          insertNodeAtCaret(
+            () => buildChip({ type: 'file', path, ...(label ? { label } : {}) }),
+            false
+          );
         },
         insertText: (text) => {
           insertNodeAtCaret(() => document.createTextNode(text), false);
@@ -542,6 +554,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           event.preventDefault();
           const text = event.clipboardData.getData('text/plain');
           if (!text) return;
+          if (onPasteText?.(text)) return;
           document.execCommand('insertText', false, text);
         }}
         onCompositionStart={onCompositionStart}

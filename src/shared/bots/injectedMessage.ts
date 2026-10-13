@@ -126,12 +126,16 @@ function parseSource(source: string): BotInjectedMessage | null {
       text: decode(body),
     };
   }
-  const context = /\s*<context>([\s\S]*)<\/context>$/.exec(body);
-  if (!context && /<\/?context>/.test(body)) return null;
+  // 尾部的历次执行摘要与验收条件是给成员看的说明，不进正文
+  const task = body
+    .replace(/\s*<previous-runs>[\s\S]*<\/previous-runs>$/, '')
+    .replace(/\s*<acceptance-check>[\s\S]*<\/acceptance-check>$/, '');
+  const context = /\s*<context>([\s\S]*)<\/context>$/.exec(task);
+  if (!context && /<\/?context>/.test(task)) return null;
   return {
     kind: 'delegation-task',
     from: attrs.from,
-    task: decode((context ? body.slice(0, context.index) : body).trim()),
+    task: decode((context ? task.slice(0, context.index) : task).trim()),
     context: decode(context?.[1].trim() ?? ''),
   };
 }

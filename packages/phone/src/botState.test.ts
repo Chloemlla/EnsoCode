@@ -263,7 +263,13 @@ describe('inboxLabel', () => {
     const item = { key: 'k', chatId: null, createdAt: 1, dismissible: false } as const;
     expect(inboxLabel({ ...item, kind: 'approval' }, 0)).toBe('需要审批');
     expect(inboxLabel({ ...item, kind: 'routine-blocked' }, 0)).toBe('例行任务被阻塞');
+    expect(inboxLabel({ ...item, kind: 'task-blocked' }, 0)).toBe('任务卡住');
     expect(inboxLabel({ ...item, kind: 'silence', since: 1_000 }, 92_500)).toBe('已安静 91 秒');
+  });
+
+  it('旧手机遇到不认识的类型不报错（标签为空）', () => {
+    const item = { key: 'k', chatId: null, createdAt: 1, dismissible: false } as const;
+    expect(() => inboxLabel({ ...item, kind: 'future-kind' as never }, 0)).not.toThrow();
   });
 });
 

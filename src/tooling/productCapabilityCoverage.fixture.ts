@@ -387,6 +387,9 @@ export const IPC_PRODUCT_COVERAGE = {
   WINDOW_CLOSE: surfaces('window.close'),
   WINDOW_IS_MAXIMIZED: excluded('Renderer window-state query, not a user product action.'),
   WINDOW_IS_FULLSCREEN: excluded('Renderer window-state query, not a user product action.'),
+  WINDOW_SET_TITLE_BAR_APPEARANCE: excluded(
+    'Native Windows caption controls follow the renderer theme.'
+  ),
   WINDOW_MAXIMIZED_CHANGED: excluded('Renderer window-state event transport.'),
   WINDOW_FULLSCREEN_CHANGED: excluded('Renderer fullscreen-state event transport.'),
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: excluded('macOS title-bar implementation detail.'),
@@ -500,6 +503,9 @@ export const IPC_PRODUCT_COVERAGE = {
   AGENT_TOOL_BACKGROUND: excluded(
     'Desktop tool-row control that moves a running foreground shell command into a background task; renderer-only, not an Enso capability.'
   ),
+  AGENT_SUBAGENT_PROGRESS: excluded(
+    'Read-only progress of running subagents shown in the desktop wait row; renderer-only, not an Enso capability.'
+  ),
   AGENT_WORKFLOW_STOP: excluded('Side panel control to stop a running workflow run.'),
   AGENT_SUBAGENT_STOP: excluded(
     'Desktop TaskBar control to abort a stuck or running subagent; renderer-only, not an Enso capability.'
@@ -583,6 +589,7 @@ export const IPC_PRODUCT_COVERAGE = {
   UPDATER_STATUS: surfaces('updates.status'),
   DIALOG_SELECT_FILE: excluded('Native file picker; user-driven OS dialog.'),
   FILES_LIST_MEDIA: excluded('Renderer media listing for background picker.'),
+  FILES_SAVE_PASTED_TEXT: excluded('Composer long paste saved as a conversation-scoped txt.'),
   FILES_LIST_DIR: excluded('Side panel Files tree listing.'),
   FILES_READ_REL: excluded('Side panel Files read scoped to conversation cwd.'),
   FILES_READ_IMAGE: excluded('Side panel Files Markdown preview image resolved to a data URL.'),
@@ -698,6 +705,7 @@ export const IPC_PRODUCT_COVERAGE = {
   MEMORY_ARCHIVE: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_RESTORE: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_DELETE: excluded('Memory desktop UI; not an Enso capability.'),
+  MEMORY_UPDATE: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_STATS: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_JOBS: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_JOBS_CLEAR: excluded('Memory desktop UI; not an Enso capability.'),
@@ -788,6 +796,7 @@ export const IPC_PRODUCT_COVERAGE = {
   BOT_TASK_CANCEL: excluded('Bot mode group task board UI.'),
   BOT_TASK_DELETE: excluded('Bot mode group task board UI.'),
   BOT_TASK_REVIEW: excluded('Bot mode group task board UI.'),
+  BOT_TASK_REPLY: excluded('Bot mode group task board UI.'),
   BOT_SUGGEST_ABILITIES: excluded('Bot mode member editor helper; returns suggestions only.'),
   BOT_SUGGEST_PERSONA: excluded('Bot mode member editor helper; returns suggestions only.'),
   BOT_SUGGEST_GOAL: excluded('Bot mode goal onboarding helper; returns suggestions only.'),
@@ -798,6 +807,7 @@ export const IPC_PRODUCT_COVERAGE = {
   BOT_ARTIFACT_READ: excluded('Bot mode artifact preview UI.'),
   BOT_ARTIFACT_OPEN: excluded('Bot mode artifact reveal / open UI.'),
   BOT_FILE_SEARCH: excluded('Bot mode composer @file completion.'),
+  BOT_CHAT_SAVE_PASTED_TEXT: excluded('Bot mode composer long paste saved as a chat-scoped txt.'),
   BOT_REWIND: excluded('Bot mode direct chat rewind UI.'),
   BOT_RETRY: excluded('Bot mode direct chat retry UI.'),
   BOT_TEMPLATES_GET: excluded('Bot mode member / team template library settings UI.'),

@@ -20,7 +20,7 @@ describe('suggestAbilities', () => {
       ok: true,
       suggestion: { tools: { value: 'readonly', reason: 'reads' } },
     });
-    expect(complete.mock.calls[0]?.[0]).toMatchObject({ timeoutMs: 20_000 });
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ timeoutMs: 90_000 });
   });
 
   it('reports no-model when no cheap model is available', async () => {

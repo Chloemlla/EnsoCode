@@ -178,6 +178,18 @@ describe('agent control tool protocol', () => {
     expect(parseAgentWorkerEvent({ ...invoke, identity: { sessionId: 'parent' } })).toBeNull();
     expect(parseAgentWorkerEvent({ ...invoke, requestId: '' })).toBeNull();
     expect(parseAgentCommand({ ...invoke, type: 'agent-control-result' })).toBeNull();
+    const cancel = {
+      type: 'agent-control-cancel',
+      identity: parent,
+      seq: 4,
+      requestId: 'rpc-1',
+      kind: 'detach',
+    } as const;
+    expect(parseAgentWorkerEvent(cancel)).toEqual(cancel);
+    expect(parseAgentWorkerEvent({ ...cancel, kind: 'abort' })).not.toBeNull();
+    expect(parseAgentWorkerEvent({ ...cancel, kind: 'stop' })).toBeNull();
+    const { kind: _kind, ...withoutKind } = cancel;
+    expect(parseAgentWorkerEvent(withoutKind)).toBeNull();
   });
 
   it('accepts consumption only with exact session generation, sequence and operation nonce', () => {
@@ -1130,6 +1142,17 @@ describe('parent/child commands', () => {
     ).toBeNull();
   });
 
+  it('prompt-child 只接受 true 的 requestBudget 标记，其他值与未知字段拒绝', () => {
+    const command = { type: 'prompt-child', identity: child, requestId: 'dispatch-1', task };
+    expect(parseAgentCommand({ ...command, requestBudget: true })).toEqual({
+      ...command,
+      requestBudget: true,
+    });
+    expect(parseAgentCommand({ ...command, requestBudget: false })).toBeNull();
+    expect(parseAgentCommand({ ...command, requestBudget: 200 })).toBeNull();
+    expect(parseAgentCommand({ ...command, extra: true })).toBeNull();
+  });
+
   it('dismiss-coworker 绑 exact parent generation，coworkerId 必须属于该父会话', () => {
     // worker 直雇 coworker（普通身份，不在 Main sessions 索引）的遥控解雇命令；
     // 身份校验落在 parent 上，coworkerId 只做归属校验防跨会话误解雇。
@@ -1647,6 +1670,17 @@ describe('标题总结命令与事件', () => {
       turnId: 'turn-1',
     };
     expect(parseAgentWorkerEvent(event)).toEqual(event);
+  });
+
+  it('turn-completed 预算停止标记只接受 true，补报告错误必须随标记出现', () => {
+    const event = { type: 'turn-completed', identity: parent, seq: 1, turnId: 'turn-1' };
+    const stopped = { ...event, requestBudgetStop: true, requestBudgetError: '529 overloaded' };
+    expect(parseAgentWorkerEvent(stopped)).toEqual(stopped);
+    expect(parseAgentWorkerEvent({ ...event, requestBudgetStop: false })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...event, requestBudgetError: 'oops' })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...event, requestBudgetStop: true, requestBudgetError: '' })
+    ).toBeNull();
   });
 });
 
@@ -2426,6 +2460,19 @@ describe('受保护动作底线协议', () => {
 });
 
 describe('等人超时协议', () => {
+  it('agent-notify 命令只接受根会话、非空正文与布尔 urgent', () => {
+    const base = {
+      type: 'agent-notify',
+      identity: parent,
+      text: 'Subagent finished',
+      urgent: false,
+    };
+    expect(parseAgentCommand(base)).toEqual(base);
+    expect(parseAgentCommand({ ...base, text: '' })).toBeNull();
+    expect(parseAgentCommand({ ...base, urgent: 'yes' })).toBeNull();
+    expect(parseAgentCommand({ ...base, extra: 1 })).toBeNull();
+  });
+
   it('request-timeout 命令只接受 approval / ask 与非空 requestId', () => {
     const base = { type: 'request-timeout', identity: parent, requestId: 'r1' };
     expect(parseAgentCommand({ ...base, kind: 'approval' })).toEqual({ ...base, kind: 'approval' });

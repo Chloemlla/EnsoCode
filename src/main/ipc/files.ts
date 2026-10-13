@@ -1,8 +1,12 @@
 import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
 import { isMediaPath } from '@shared/localImage';
+import type { PastedTextFileResult } from '@shared/pastedText';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
+import { app, ipcMain } from 'electron';
+import { savePastedTextFile } from '../services/pastedTextFiles';
+import { isMainWebContents } from '../windows/MainWindow';
+import { getSourceAuthorityRegistry } from './agent';
 
 export function registerFileHandlers(): void {
   // 枚举目录下的媒体文件（背景图「文件夹随机」模式用），返回绝对路径数组
@@ -17,4 +21,30 @@ export function registerFileHandlers(): void {
       return [];
     }
   });
+
+  // 超长粘贴落盘：目录由 Main 按会话推导；ssh 项目的模型读不到本地文件，拒绝
+  ipcMain.handle(
+    IPC_CHANNELS.FILES_SAVE_PASTED_TEXT,
+    async (event, request: unknown): Promise<PastedTextFileResult> => {
+      if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'unavailable' };
+      const input =
+        request && typeof request === 'object' ? (request as Record<string, unknown>) : {};
+      const { conversationId, text } = input;
+      if (typeof conversationId !== 'string' || typeof text !== 'string')
+        return { ok: false, error: 'invalid-request' };
+      const registry = getSourceAuthorityRegistry();
+      const conversation = registry?.conversation(conversationId);
+      const project = conversation ? registry?.project(conversation.projectId) : undefined;
+      if (!project || project.kind === 'ssh') return { ok: false, error: 'unsupported' };
+      try {
+        return await savePastedTextFile(
+          path.join(app.getPath('userData'), 'agent', 'sessions'),
+          conversationId,
+          text
+        );
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'write-failed' };
+      }
+    }
+  );
 }

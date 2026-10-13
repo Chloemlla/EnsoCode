@@ -4,6 +4,7 @@ import {
   INBOX_DISMISSIBLE,
   routineInboxItems,
   silenceInboxItems,
+  taskBlockedInboxItems,
 } from '../../../shared/bots/inbox';
 import type { AgentWorkerEvent, ConversationAuthority } from '../../../shared/types/agent';
 import type { BotRoutine, Delegation } from '../../../shared/types/bot';
@@ -19,6 +20,8 @@ export interface BotInboxDeps {
   usage: () => Promise<{ day: string; bots: Record<string, BotUsageOverview> }>;
   silences: () => readonly BotSilence[];
   emit: (event: BotEvent) => void;
+  /** 看板上该任务是否仍卡在这次执行上（缺省视为是） */
+  taskBlocked?: (record: Delegation) => boolean;
 }
 
 const TEXT_MAX = 200;
@@ -130,10 +133,8 @@ export class BotInboxService {
     let changed = false;
     switch (event.kind) {
       case 'delegation':
-        changed = this.deps.store.sync(
-          ['delegation-interrupted'],
-          delegationInboxItems(this.deps.delegations())
-        );
+      case 'tasks':
+        changed = this.syncDelegations();
         break;
       case 'routine':
         changed = this.deps.store.sync(
@@ -155,15 +156,20 @@ export class BotInboxService {
   }
 
   private syncSources(): boolean {
-    const delegations = this.deps.store.sync(
-      ['delegation-interrupted'],
-      delegationInboxItems(this.deps.delegations())
-    );
+    const delegations = this.syncDelegations();
     const routines = this.deps.store.sync(
       ['routine-draft', 'routine-blocked'],
       routineInboxItems(this.deps.routines())
     );
     return delegations || routines;
+  }
+
+  private syncDelegations(): boolean {
+    const records = this.deps.delegations();
+    return this.deps.store.sync(
+      ['delegation-interrupted', 'task-blocked'],
+      [...delegationInboxItems(records), ...taskBlockedInboxItems(records, this.deps.taskBlocked)]
+    );
   }
 
   private syncSilences(): boolean {

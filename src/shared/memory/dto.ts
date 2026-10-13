@@ -223,6 +223,23 @@ export interface PendingMemoryWriteDto {
 
 export type PendingMemoryWriteDecision = 'approve' | 'reject';
 
+/** 手动编辑记忆；title 为空沿用原标题 */
+export interface MemoryEditPatch {
+  title: string;
+  content: string;
+}
+
+export function isMemoryEditPatch(value: unknown): value is MemoryEditPatch {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    Object.keys(row).every((key) => key === 'title' || key === 'content') &&
+    typeof row.title === 'string' &&
+    typeof row.content === 'string' &&
+    row.content.trim().length > 0
+  );
+}
+
 export function isPendingMemoryWriteDecision(value: unknown): value is PendingMemoryWriteDecision {
   return value === 'approve' || value === 'reject';
 }

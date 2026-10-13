@@ -38,6 +38,36 @@ export function withVersionSegment(base: string, segment: string): string {
   return trimmed.endsWith(`/${segment}`) ? trimmed : `${trimmed}/${segment}`;
 }
 
+const DEEPSEEK_HOST = 'api.deepseek.com';
+const DEEPSEEK_OPENAI_BASE = 'https://api.deepseek.com';
+const DEEPSEEK_ANTHROPIC_BASE = 'https://api.deepseek.com/anthropic';
+
+function deepSeekPathSegments(baseUrl: string): string[] | null {
+  try {
+    const parsed = new URL(baseUrl.trim());
+    if (parsed.hostname.toLowerCase() !== DEEPSEEK_HOST) return null;
+    return parsed.pathname.split('/').filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DeepSeek 官方 OpenAI / Anthropic 入口不同。表单切换 API 类型时只改官方默认地址，
+ * 自定义中转不动。
+ */
+export function baseUrlAfterApiChange(nextApi: ModelApiKind, baseUrl: string): string {
+  const segments = deepSeekPathSegments(baseUrl);
+  if (!segments) return baseUrl;
+  const isOpenAiPath = segments.length === 0 || (segments.length === 1 && segments[0] === 'v1');
+  const isAnthropicPath = segments[0] === 'anthropic';
+  if (nextApi === 'anthropic-messages' && isOpenAiPath) return DEEPSEEK_ANTHROPIC_BASE;
+  if ((nextApi === 'openai-completions' || nextApi === 'openai-responses') && isAnthropicPath) {
+    return DEEPSEEK_OPENAI_BASE;
+  }
+  return baseUrl;
+}
+
 /** 交给 pi registerProvider 的地址。Google 必须带 /v1beta，否则聊天 404、拉模型却成功。 */
 export function resolvePiProviderBaseUrl(api: ModelApiKind, baseUrl: string): string {
   const base = baseUrl.trim().replace(/\/+$/, '') || DEFAULT_BASE_URLS[api];
@@ -169,7 +199,13 @@ export const STATIC_PROVIDER_DEFINITIONS: readonly ProviderDefinition[] = [
   },
 ];
 
-/** 把运行时 OAuth 能力并入静态定义；自定义恒在最前，扩展 provider 接在其后。 */
+/**
+ * 把运行时 OAuth 能力并入静态定义；OpenAI 使用 Codex 登录，PI 原生登录独立展示。
+ * 卡片 ID 只用于向导导航，实际登录保留原始 provider ID，不改变已有凭证或模型绑定。
+ *
+ * Merge runtime OAuth capabilities into static definitions, routing OpenAI to Codex and showing PI login separately.
+ * Card IDs only drive wizard navigation; login keeps the original provider ID without changing existing credentials or model bindings.
+ */
 export function mergeProviderDefinitions(
   oauthProviders: readonly Pick<OauthProviderInfo, 'id' | 'name'>[]
 ): ProviderDefinition[] {
@@ -184,14 +220,21 @@ export function mergeProviderDefinitions(
 
   for (const oauth of oauthProviders) {
     if (!oauth.id) continue;
-    const existing = merged.get(oauth.id);
-    merged.set(oauth.id, {
+    const definitionId =
+      oauth.id === 'openai-codex' ? 'openai' : oauth.id === 'openai' ? 'openai-chatgpt' : oauth.id;
+    const existing = merged.get(definitionId);
+    const label =
+      oauth.id === 'openai-codex'
+        ? 'OpenAI'
+        : oauth.id === 'openai'
+          ? 'ChatGPT (PI login)'
+          : oauth.name || existing?.label || oauth.id;
+    merged.set(definitionId, {
       ...(existing ?? {
-        id: oauth.id,
-        label: oauth.name || oauth.id,
+        id: definitionId,
         supportsApiKey: false,
       }),
-      label: oauth.name || existing?.label || oauth.id,
+      label,
       oauthProviderId: oauth.id,
     });
   }

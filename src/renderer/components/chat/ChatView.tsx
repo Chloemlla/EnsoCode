@@ -469,6 +469,12 @@ export function ChatView() {
             }
             focusKey={chrome.id}
             planMode={planning}
+            savePastedText={
+              project?.kind === 'ssh'
+                ? undefined
+                : (text) =>
+                    window.electronAPI.files.savePastedText({ conversationId: chrome.id, text })
+            }
             voice={voiceReady ? startDesktopVoiceSession : undefined}
             requestMicAccess={window.electronAPI.speech.requestMicAccess}
             placeholder={planning ? t('Describe the task — a plan comes first') : undefined}

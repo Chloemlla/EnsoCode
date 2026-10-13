@@ -6,6 +6,7 @@ import {
   app,
   BrowserWindow,
   Menu,
+  nativeTheme,
   screen,
   shell,
   type WebContents,
@@ -13,6 +14,7 @@ import {
 } from 'electron';
 import { shouldReloadRenderer } from './rendererGone';
 import { attachPinnedWorkbenchBoundsSync, attachWindowsRestoreWake } from './win32Restore';
+import { windowChromeOptions } from './windowChrome';
 import {
   resolveWindowsAppUserModelId,
   shouldSetWindowIcon,
@@ -200,7 +202,11 @@ function resolveWindowIcon(): string | undefined {
 /**
  * 通用无边框窗口创建：
  * - macOS: hiddenInset 保留 traffic lights
- * - Windows/Linux: hidden 隐藏标题栏，渲染层自绘标题栏
+ * - Windows: 自定义标题栏内容与原生窗口按钮共存
+ * - Linux: 隐藏标题栏，渲染层自绘窗口按钮
+ *
+ * Create app windows with native caption controls on Windows, traffic lights on
+ * macOS, and renderer caption controls on Linux.
  */
 export function createAppWindow(options: CreateWindowOptions): BrowserWindow {
   const isMac = process.platform === 'darwin';
@@ -218,13 +224,14 @@ export function createAppWindow(options: CreateWindowOptions): BrowserWindow {
     minWidth: options.minWidth,
     minHeight: options.minHeight,
     parent: options.parent,
-    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
-    frame: isMac,
+    ...windowChromeOptions(
+      process.platform,
+      Boolean(options.pinWorkbenchView),
+      isWindows && nativeTheme.shouldUseDarkColors
+    ),
     ...(isMac && { trafficLightPosition: TRAFFIC_LIGHT_POSITION }),
-    ...(isWindows && { thickFrame: true }),
     show: false,
     ...(icon ? { icon } : {}),
-    ...(options.pinWorkbenchView ? { transparent: true, backgroundColor: '#00000000' } : {}),
     webPreferences: webPreferences(),
   });
 

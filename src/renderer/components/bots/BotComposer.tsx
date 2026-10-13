@@ -1,5 +1,6 @@
 import { CHAT_REF_MAX_PER_MESSAGE } from '@shared/bots/composerRefs';
 import { mentionCandidates, parseMentions } from '@shared/bots/mentions';
+import { pastedTextFileContent } from '@shared/pastedText';
 import type { AttachedImage } from '@shared/types/agent';
 import { BOT_MENTION_ALL, type BotProfile } from '@shared/types/bot';
 import type { StartVoiceSession } from '@shared/types/speech';
@@ -257,6 +258,27 @@ export function BotComposer({
     }
   };
 
+  /** 超长纯文本粘贴：由 Main 存成 txt，光标处插入 @路径（与 @文件 同一形态）；失败则原样插入正文 */
+  const pasteAsFile = (pasted: string) => {
+    const el = textareaRef.current;
+    const start = el?.selectionStart ?? text.length;
+    const end = el?.selectionEnd ?? text.length;
+    void window.electronAPI.bots
+      .savePastedText({ chatId, text: pasted })
+      .catch(() => ({ ok: false as const, error: 'unavailable' }))
+      .then((result) => {
+        const inserted = result.ok ? `@${result.path} ` : pasted;
+        setDraft((current) => ({
+          ...current,
+          text: current.text.slice(0, start) + inserted + current.text.slice(end),
+        }));
+        requestAnimationFrame(() => {
+          el?.focus();
+          el?.setSelectionRange(start + inserted.length, start + inserted.length);
+        });
+      });
+  };
+
   const chatById = new Map(chatOptions.map((chat) => [chat.id, chat]));
   // 回退回填的草稿只带技能名称：按 id 或名称解析
   const skill = draft.skill
@@ -457,7 +479,13 @@ export function BotComposer({
           const files = [...event.clipboardData.files].filter((file) =>
             file.type.startsWith('image/')
           );
-          if (files.length === 0) return;
+          if (files.length === 0) {
+            const pasted = event.clipboardData.getData('text/plain');
+            if (!pastedTextFileContent(pasted)) return;
+            event.preventDefault();
+            pasteAsFile(pasted);
+            return;
+          }
           event.preventDefault();
           ingest(files);
         }}

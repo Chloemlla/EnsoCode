@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh" class="dark">
+<head>
+<meta charset="utf-8" />
+<title>#40 委派改造 · 看板任务为主体的同事协作</title>
+<style>
+:root{--bg:oklch(.145 .014 285.82);--fg:oklch(.985 0 0);--muted:oklch(.269 .014 285.82);--mfg:oklch(.708 .014 285.82);--border:oklch(.32 .014 285.82);--card:oklch(.18 .014 285.82);--info:oklch(.623 .214 259.81);--warning:oklch(.769 .189 70.08);--success:oklch(.627 .154 150.07);--danger:oklch(.637 .237 25.33)}
+*{box-sizing:border-box}
+body{margin:0;font:13px/1.45 Inter,system-ui,-apple-system,"PingFang SC",sans-serif;background:#2a2a2e;color:var(--fg)}
+button,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer;background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:3px 10px}
+button:hover{filter:brightness(1.2)}
+button:disabled{opacity:.35;cursor:not-allowed;filter:none}
+button.pri{background:var(--info);border-color:var(--info)}
+button.ok{background:oklch(.45 .12 150);border-color:var(--success)}
+button.warn{background:oklch(.42 .1 60);border-color:var(--warning)}
+button.link{background:none;border:0;padding:0;color:var(--info)}
+.page{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}
+.lead{width:1120px;color:#ddd;font-size:12px}
+.lead b{color:#fff}
+.steps{width:1120px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.steps .chip{border-radius:999px;padding:3px 12px;background:#3a3a40;border-color:#4a4a52}
+.steps .chip.on{background:var(--info);border-color:var(--info)}
+.steps .sp{flex:1}
+.win{width:1120px;height:720px;background:var(--bg);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 16px 50px #0006;position:relative}
+.title{height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--border);flex:none}
+.dot{width:10px;height:10px;border-radius:50%;background:#555}
+.title .name{margin:0 auto;color:var(--mfg);font-size:12px}
+.body{flex:1;display:flex;min-height:0}
+.main{flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--border)}
+.head{height:50px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:0 16px;flex:none}
+.head .t{font-weight:600}
+.head .sub{color:var(--mfg);font-size:12px}
+.mem{display:flex;gap:10px;margin-left:auto}
+.mem .m{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--mfg)}
+.av{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:600;flex:none}
+.av.lin{background:oklch(.5 .12 300)}.av.jason{background:oklch(.5 .13 200)}.av.oy{background:oklch(.5 .12 120)}.av.me{background:oklch(.45 .02 285)}
+.badge{font-size:11px;border:1px solid var(--border);border-radius:4px;padding:0 4px;line-height:16px}
+.b-闲{color:var(--mfg)}.b-想{color:var(--info)}.b-干{color:var(--success);border-color:var(--success)}.b-做完{color:var(--success)}
+.tl{flex:1;overflow:auto;padding:14px 18px 8px;display:flex;flex-direction:column;gap:10px}
+.msg{display:flex;gap:8px;max-width:640px;align-items:flex-start}
+.who{font-size:12px;color:var(--mfg);margin-bottom:2px}
+.who b{color:var(--fg);margin-right:6px}
+.bub{background:var(--muted);border-radius:4px 12px 12px 12px;padding:7px 11px}
+.me{align-self:flex-end;flex-direction:row-reverse}
+.me .who{text-align:right}
+.me .bub{background:oklch(.32 .02 285);border-radius:12px 4px 12px 12px}
+.quote{border-left:2px solid var(--mfg);padding-left:6px;color:var(--mfg);font-size:12px;margin-bottom:4px}
+.node .bub{background:transparent;border:1px solid var(--border);padding:6px 10px}
+.tag{display:inline-block;font-size:11px;border-radius:4px;padding:0 5px;margin-right:6px;line-height:17px;font-weight:600}
+.tag.go{background:oklch(.623 .214 259.81 / .2);color:var(--info)}
+.tag.stuck{background:oklch(.769 .189 70.08 / .2);color:var(--warning)}
+.tag.done{background:oklch(.627 .154 150.07 / .2);color:var(--success)}
+.tlink{color:var(--info);cursor:pointer;text-decoration:underline dotted}
+.ops{margin-top:4px;display:flex;gap:8px;font-size:12px}
+.card{border:1px solid var(--border);border-radius:10px;background:var(--card);padding:8px 12px;max-width:520px}
+.card .h{display:flex;gap:6px;align-items:center;color:var(--mfg);font-size:12px;flex-wrap:wrap}
+.card .h .sp{flex:1}
+.card .task{margin-top:4px}
+.card .extra{margin-top:3px;color:var(--mfg);font-size:12px}
+.st{font-size:11px;border-radius:4px;padding:0 6px;line-height:18px;border:1px solid var(--border);white-space:nowrap}
+.st.todo{color:var(--mfg)}.st.doing{color:var(--info);border-color:var(--info)}.st.blocked{color:var(--warning);border-color:var(--warning);font-weight:600}.st.review{color:#c9a7ff;border-color:#9a7ad8}.st.done{color:var(--success);border-color:var(--success)}
+.sys{align-self:center;color:var(--mfg);font-size:11px}
+.composer{border-top:1px solid var(--border);padding:10px 14px;flex:none}
+.composer .q{font-size:12px;color:var(--mfg);margin-bottom:6px;display:flex;gap:6px}
+.composer .row{display:flex;gap:8px}
+.composer input{flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:7px 10px}
+.board{width:380px;display:flex;flex-direction:column;min-height:0;flex:none;position:relative}
+.board .bh{height:50px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:8px;flex:none}
+.board .bh .sub{color:var(--mfg);font-size:12px}
+.cols{flex:1;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+.col .ct{font-size:12px;color:var(--mfg);margin-bottom:4px;display:flex;gap:6px}
+.col .empty{font-size:11px;color:#666;padding:2px 0 4px}
+.tc{border:1px solid var(--border);background:var(--card);border-radius:8px;padding:7px 9px;margin-bottom:6px;cursor:pointer}
+.tc:hover{border-color:var(--mfg)}
+.tc.hl{box-shadow:0 0 0 2px var(--info)}
+.tc.stuck{border-color:var(--warning)}
+.tc .r1{display:flex;gap:6px;align-items:center}
+.tc .r1 .id{color:var(--mfg);font-size:11px}
+.tc .r1 .sp{flex:1}
+.tc .r2{font-size:11px;color:var(--mfg);margin-top:3px}
+.tc .r2.w{color:var(--warning)}
+.drawer{position:absolute;inset:0;background:var(--bg);display:flex;flex-direction:column;border-left:1px solid var(--border)}
+.drawer .dh{height:50px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 12px;gap:8px;flex:none}
+.drawer .db{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:12px}
+.sec .sl{font-size:11px;color:var(--mfg);margin-bottom:4px}
+.box{border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-size:12px}
+.box.w{border-color:var(--warning);background:oklch(.769 .189 70.08 / .07)}
+.box.r{border-color:#9a7ad8;background:oklch(.6 .12 300 / .08)}
+.run{display:grid;grid-template-columns:22px 1fr auto;gap:2px 6px;border-bottom:1px dashed var(--border);padding:6px 0;font-size:12px}
+.run .n{color:var(--mfg)}
+.run .d{color:var(--mfg);grid-column:2/4}
+.acts{display:flex;gap:6px;flex-wrap:wrap}
+.drawer textarea{width:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px 8px;resize:none;height:54px}
+.hint{font-size:11px;color:var(--mfg)}
+.modal{position:absolute;inset:0;background:#0008;display:grid;place-items:center;z-index:5}
+.modal .mb{width:560px;max-height:600px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px}
+.tr{font-size:12px;display:flex;flex-direction:column;gap:5px}
+.tr .sep{color:var(--info);text-align:center;margin:6px 0;font-size:11px}
+.tr .tool{color:var(--mfg);font-family:ui-monospace,monospace;font-size:11px}
+.below{width:1120px;display:flex;gap:16px;align-items:flex-start}
+.phone{width:360px;height:660px;border:10px solid #111;border-radius:36px;background:var(--bg);overflow:hidden;display:flex;flex-direction:column;flex:none;position:relative}
+.phone .ph{padding:24px 14px 8px;border-bottom:1px solid var(--border)}
+.phone .ph .t{font-weight:600}
+.pstrip{display:flex;gap:6px;margin-top:6px;cursor:pointer;flex-wrap:wrap}
+.phone .ptl{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px;font-size:12px}
+.phone .pm{background:var(--muted);border-radius:10px;padding:6px 9px}
+.phone .pm.me{background:oklch(.32 .02 285);align-self:flex-end;max-width:85%}
+.phone .pm .w{font-size:11px;color:var(--mfg)}
+.phone .plist{position:absolute;inset:0;top:0;background:var(--bg);padding:24px 12px;overflow:auto}
+.phone .pin{border-top:1px solid var(--border);padding:8px 10px;display:flex;gap:6px}
+.phone .pin input{flex:1;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:6px 10px;font-size:12px}
+.notes{flex:1;background:#1f1f23;border:1px solid #3a3a40;border-radius:12px;padding:14px 16px;color:#ddd;font-size:12px}
+.notes h3{margin:0 0 6px;font-size:14px;color:#fff}
+.notes ul{margin:4px 0 10px;padding-left:18px}
+.notes .k{color:var(--warning)}
+.toast{position:fixed;left:50%;top:18px;transform:translateX(-50%);background:#111;border:1px solid var(--border);border-radius:8px;padding:6px 14px;font-size:12px;z-index:9;display:none}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="lead"><b>#40 委派改造 mockup</b>：委派一律挂在看板任务上；成员以自己名义在群里发「开工 / 卡住 / 交付」；卡住释放名额，回复后同一成员接上下文继续；退回返工也接着原会话。点上方场景直接跳到该步，或点「下一步」顺序走；界面里的按钮（回复、通过、退回、查看过程、点任务卡）也都能点。<b>原型示意，非工程交付。</b></div>
+  <div class="steps" id="steps"></div>
+  <div class="win">
+    <div class="title"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="name">EnsoCode · Bot</span></div>
+    <div class="body">
+      <div class="main">
+        <div class="head"><span class="t">开发群</span><span class="sub">群主 林经理</span><div class="mem" id="mem"></div></div>
+        <div class="tl" id="tl"></div>
+        <div class="composer"><div class="q" id="quote" style="display:none"></div><div class="row"><input id="inp" placeholder="发消息…" /><button class="pri" onclick="send()">发送</button></div></div>
+      </div>
+      <div class="board" id="board"></div>
+    </div>
+    <div id="modal"></div>
+  </div>
+  <div class="below">
+    <div class="phone" id="phone"></div>
+    <div class="notes" id="notes"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const NAMES={lin:'林经理',jason:'Jason',oy:'欧阳',me:'你'};
+const BG=[
+  {id:39,title:'设置页图标对齐',status:'doing',who:'oy',sub:'执行 1 · 派活 · 已 12 分'},
+  {id:36,title:'话题下拉排序',status:'review',who:'oy',sub:'等 林经理 验收'},
+  {id:35,title:'导出日志按钮',status:'done',who:'jason',sub:'执行 2 次 · 共 18 分'},
+  {id:41,title:'委派改造技术方案',status:'todo',who:null,sub:'发起方 你'}
+];
+const COLS=[['todo','○ 待办'],['doing','▶ 进行中'],['blocked','⏸ 卡住'],['review','◎ 待验收'],['done','✓ 完成']];
+const ST_LABEL={todo:'待办',doing:'进行中',blocked:'卡住',review:'待验收',done:'完成'};
+let st,drawer=false,modal=null,quoting=false,plist=false;
+
+function init(){
+  st={status:'none',runs:[],blocked:null,returnReason:null,rework:0,steers:[],checks:null,last:null,
+    tl:[{k:'human',text:'@林经理 PWA 断网的时候给个提示，别让人以为消息发出去了。',time:'10:01'}],
+    pres:{lin:'想',jason:'闲',oy:'干'},deleg:'',stuckCount:0};
+}
+const lastRun=()=>st.runs[st.runs.length-1];
+const running=()=>st.status==='doing'&&lastRun()&&lastRun().state==='执行中';
+
+const A={
+  dispatch:{ok:()=>st.status==='none',run(){
+    st.status='doing';st.runs.push({trigger:'派活',by:'林经理',state:'排队',dur:'—',steer:0});
+    st.tl.push({k:'bot',who:'lin',time:'10:02',text:'这活交给 Jason。'});
+    st.tl.push({k:'deleg',time:'10:02'});
+    st.deleg='排队中';st.pres.lin='闲';st.pres.jason='想';
+  }},
+  start:{ok:()=>st.status==='doing'&&lastRun().state==='排队',run(){
+    lastRun().state='执行中';st.deleg='执行中 · 第 1 次';st.pres.jason='干';
+    st.tl.push({k:'node',who:'jason',tag:'go',tagt:'开工',time:'10:02',text:'开工 <a class="tlink" onclick="openTask()">#42</a>「PWA 断网提示条」，预计 20 分钟内交付。'});
+  }},
+  steer:{ok:()=>running()&&st.steers.length<2,run(){
+    const t=st.steers.length?'10:05':'10:04';
+    st.steers.push({by:'林经理',text:'顺便在提示条上加一个「重连」按钮。'});lastRun().steer++;
+    st.tl.push({k:'steer',time:t,text:'顺便在提示条上加一个「重连」按钮。'});
+  }},
+  block:{ok:()=>running()&&st.stuckCount===0&&st.rework===0,run(){
+    const r=lastRun();r.state='卡住';r.dur='4分12秒';st.status='blocked';st.stuckCount++;
+    st.blocked={short:'产品决定',missing:'断网时发送按钮要不要禁用',wait:'你',since:'10:06'};
+    st.deleg='卡住 · 缺 产品决定（等你）';st.pres.jason='闲';
+    st.tl.push({k:'node',who:'jason',tag:'stuck',tagt:'卡住',time:'10:06',stuck:true,text:'<a class="tlink" onclick="openTask()">#42</a> 卡住了，缺「断网时发送按钮要不要禁用」，<b>@你</b> 定一下。回这条或在任务里回复，我就接着做。'});
+  }},
+  reply:{ok:()=>st.status==='blocked',run(txt){
+    txt=txt||'禁用，按钮上写「离线中」。';
+    st.tl.push({k:'human',time:'10:29',text:txt,quote:'Jason：#42 卡住了，缺「断网时发送按钮要不要禁用」'});
+    st.runs.push({trigger:'回复后继续',by:'你',state:'执行中',dur:'—',steer:0,input:txt});
+    st.status='doing';st.blocked=null;st.deleg='执行中 · 第 2 次';st.pres.jason='干';quoting=false;
+    st.tl.push({k:'node',who:'jason',tag:'go',tagt:'继续',time:'10:29',text:'收到，接着做 <a class="tlink" onclick="openTask()">#42</a>。'});
+  }},
+  deliver:{ok:()=>running(),run(){
+    const r=lastRun(),rw=st.rework>0;r.state='交付';r.dur=rw?'3分20秒':(st.runs.length>1?'6分05秒':'9分40秒');
+    st.status='review';st.pres.jason='做完';st.deleg='完成 · 待验收';
+    const extra=st.steers.length?'，提示条带「重连」按钮':'';
+    st.checks=[['断网时顶部出现提示条',true],['有单测覆盖',true]];
+    if(rw)st.checks.push(['退回意见：文案「网络已断开」、恢复后自动消失',true]);
+    st.tl.push({k:'node',who:'jason',tag:'done',tagt:'交付',time:rw?'10:43':'10:35',text:rw
+      ?'交付 <a class="tlink" onclick="openTask()">#42</a>（返工 1）：文案改为「网络已断开」，恢复联网 1 秒后自动消失，补了 1 条单测。等验收。'
+      :'交付 <a class="tlink" onclick="openTask()">#42</a>：断网时顶部出现提示条'+extra+'，发送按钮置灰并显示「离线中」；加了 2 条单测。等验收。'});
+  }},
+  approve:{ok:()=>st.status==='review',run(){
+    st.status='done';st.deleg='已验收';st.pres.jason='闲';st.pres.lin='闲';
+    st.tl.push({k:'bot',who:'lin',time:st.rework?'10:44':'10:36',text:'<a class="tlink" onclick="openTask()">#42</a> 验收通过（标准 '+st.checks.length+'/'+st.checks.length+'），已完成。'});
+  }},
+  reject:{ok:()=>st.status==='review',run(txt){
+    txt=txt||'文案改成「网络已断开」，恢复联网后提示自动消失。';
+    st.returnReason=txt;st.rework++;st.checks=null;
+    st.tl.push({k:'human',time:'10:40',text:'退回 <a class="tlink" onclick="openTask()">#42</a>：'+txt});
+    st.runs.push({trigger:'退回返工',by:'你',state:'执行中',dur:'—',steer:0,input:txt});
+    st.status='doing';st.deleg='执行中 · 返工 1';st.pres.jason='干';
+    st.tl.push({k:'node',who:'jason',tag:'go',tagt:'返工',time:'10:40',text:'收到退回，接着改 <a class="tlink" onclick="openTask()">#42</a>。'});
+  }}
+};
+const SCEN=[
+  ['派活',['dispatch']],
+  ['开工',['dispatch','start']],
+  ['群主追加（插入）',['dispatch','start','steer']],
+  ['卡住',['dispatch','start','block']],
+  ['人回复后继续',['dispatch','start','block','reply']],
+  ['交付',['dispatch','start','block','reply','deliver']],
+  ['验收通过',['dispatch','start','block','reply','deliver','approve']],
+  ['退回返工',['dispatch','start','block','reply','deliver','reject']],
+  ['返工交付 → 通过',['dispatch','start','block','reply','deliver','reject','deliver','approve']]
+];
+let scen=-1;
+function act(name,arg){if(!A[name].ok())return toast('当前状态下不能做这一步');A[name].run(arg);st.last=name;scen=-1;render(true)}
+function jump(i){init();SCEN[i][1].forEach(n=>{A[n].run();st.last=n});scen=i;drawer=['block','deliver','reject'].includes(st.last);modal=null;render(true)}
+function nextKey(){
+  if(st.status==='none')return 'dispatch';
+  if(st.status==='doing'&&lastRun().state==='排队')return 'start';
+  if(running()&&st.stuckCount===0&&st.rework===0)return 'block';
+  if(st.status==='blocked')return 'reply';
+  if(running())return 'deliver';
+  if(st.status==='review')return st.rework?'approve':'reject';
+  return null;
+}
+const NEXT_LABEL={dispatch:'派活',start:'开工',block:'卡住',reply:'你回复卡住',deliver:'交付',approve:'验收通过',reject:'退回返工'};
+function next(){const k=nextKey();if(k)act(k)}
+function reset(){init();scen=-1;drawer=false;modal=null;quoting=false;plist=false;render()}
+
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function av(w){return `<div class="av ${w}">${NAMES[w][0]}</div>`}
+function taskSub(){
+  const r=lastRun(),n=st.runs.length;
+  if(st.status==='doing')return r.state==='排队'?'执行 '+n+' · 排队（计时未开始）':'执行 '+n+' · '+r.trigger+(st.rework?' · 返工 '+st.rework:'')+(r.steer?' · +'+r.steer+' 追加':'');
+  if(st.status==='blocked')return '等'+st.blocked.wait+' · 已卡 23 分 · 不占并发名额';
+  if(st.status==='review')return '等 林经理 / 你 验收'+(st.rework?' · 返工 '+st.rework:'');
+  if(st.status==='done')return '执行 '+n+' 次 · 返工 '+st.rework;
+  return '';
+}
+function tasks(){
+  const t=BG.slice();
+  if(st.status!=='none')t.unshift({id:42,title:'PWA 断网提示条',status:st.status,who:'jason',sub:taskSub(),me:true});
+  return t;
+}
+
+function renderSteps(){
+  const k=nextKey();
+  document.getElementById('steps').innerHTML=SCEN.map((s,i)=>`<button class="chip ${i===scen?'on':''}" onclick="jump(${i})">${i+1}. ${s[0]}</button>`).join('')
+   +`<span class="sp"></span><button class="pri" ${k?'':'disabled'} onclick="next()">下一步${k?'：'+NEXT_LABEL[k]:''}</button><button onclick="reset()">重置</button>`;
+}
+function renderMem(){
+  document.getElementById('mem').innerHTML=['lin','jason','oy'].map(w=>`<span class="m">${av(w)}${NAMES[w]}<span class="badge b-${st.pres[w]}">${st.pres[w]}</span></span>`).join('');
+}
+function renderTL(){
+  document.getElementById('tl').innerHTML=st.tl.map(e=>{
+    if(e.k==='human')return `<div class="msg me">${av('me')}<div><div class="who">${e.time} <b>你</b></div><div class="bub">${e.quote?`<div class="quote">${e.quote}</div>`:''}${e.text}</div></div></div>`;
+    if(e.k==='bot')return `<div class="msg">${av(e.who)}<div><div class="who"><b>${NAMES[e.who]}</b>${e.time}</div><div class="bub">${e.text}</div></div></div>`;
+    if(e.k==='node')return `<div class="msg node">${av(e.who)}<div><div class="who"><b>${NAMES[e.who]}</b>${e.time}</div><div class="bub"><span class="tag ${e.tag}">${e.tagt}</span>${e.text}</div>${e.stuck&&st.status==='blocked'?`<div class="ops"><button class="link" onclick="startQuote()">回复</button><button class="link" onclick="openTask()">打开任务</button></div>`:''}</div></div>`;
+    if(e.k==='deleg')return `<div class="card"><div class="h">${av('lin')}<span>林经理 → Jason</span><span class="st ${st.status==='none'?'todo':st.status}">${st.deleg}</span><span class="sp"></span><a class="tlink" onclick="openTask()">#42 自动建卡</a></div><div class="task">PWA 断网时顶部给提示条，别让人以为消息发出去了。</div><div class="extra">验收标准：① 断网时顶部出现提示条 ② 有单测覆盖 · 期限 20 分</div><div class="ops"><button class="link" onclick="openTrans()">查看过程</button></div></div>`;
+    if(e.k==='steer')return `<div class="card"><div class="h">${av('lin')}<span>林经理 → Jason</span><span class="st doing">已并入 #42 当前执行</span></div><div class="task">${e.text}</div><div class="extra">同一发起方追加 → 插入当前执行，不排队；结果随本次交付只回一次；期限取较长：30 分</div></div>`;
+  }).join('');
+  const tl=document.getElementById('tl');tl.scrollTop=tl.scrollHeight;
+}
+function renderBoard(){
+  const b=document.getElementById('board');
+  if(drawer&&st.status!=='none')return renderDrawer(b);
+  const ts=tasks();
+  b.innerHTML=`<div class="bh"><b>看板</b><span class="sub">根群共享 · 各话题同一块</span></div><div class="cols">`+COLS.map(([s,l])=>{
+    const cs=ts.filter(t=>t.status===s);
+    return `<div class="col"><div class="ct">${l} <span>${cs.length}</span></div>${cs.length?cs.map(t=>`<div class="tc ${t.me?'hl':''} ${s==='blocked'?'stuck':''}" onclick="${t.me?'openTask()':'toast(\'示意卡片\')'}"><div class="r1"><span class="id">#${t.id}</span><span>${t.title}</span><span class="sp"></span>${t.who?av(t.who).replace('class="av','style="width:20px;height:20px;font-size:10px" class="av'):''}</div>${s==='blocked'&&t.me?`<div class="r1" style="margin-top:4px"><span class="st blocked">卡住·缺 ${st.blocked.short}</span></div>`:''}<div class="r2 ${s==='blocked'?'w':''}">${t.sub}</div></div>`).join(''):'<div class="empty">—</div>'}</div>`;
+  }).join('')+`</div>`;
+}
+function renderDrawer(b){
+  const s=st.status,ph={doing:'插话会直接插入当前执行（Jason 下一步就能看到）',blocked:'回复后 Jason 自动接着做（同一会话）',review:'这里只记评论，不触发执行；要返工请点「退回」',done:'只记评论'}[s];
+  b.innerHTML=`<div class="drawer"><div class="dh"><button onclick="drawer=false;render()">←</button><b>#42 PWA 断网提示条</b><span class="st ${s}">${s==='blocked'?'卡住·缺 '+st.blocked.short:ST_LABEL[s]}</span></div><div class="db">
+  <div class="hint">发起方 林经理 · 执行人 Jason · 来源：开发群 · 总耗时 ${tot()}</div>
+  ${s==='blocked'?`<div class="box w"><b>卡住</b>：缺「${st.blocked.missing}」<br>等：${st.blocked.wait} · 已卡 23 分 · 本次执行已结束，并发名额已释放<br><span class="hint">只有人或发起方能解除；连续卡住 3 次后停止自动续跑</span></div>`:''}
+  ${st.returnReason&&s!=='done'?`<div class="box r"><b>退回理由</b>（返工 ${st.rework}）：${st.returnReason}</div>`:''}
+  <div class="sec"><div class="sl">验收标准</div><div class="box">${(st.checks||[['断网时顶部出现提示条',null],['有单测覆盖',null]]).map(c=>`<div>${c[1]===true?'✓':'·'} ${c[0]}</div>`).join('')}</div></div>
+  <div class="sec"><div class="sl">历次执行（同一会话，接着上下文）</div>${st.runs.map((r,i)=>`<div class="run"><span class="n">${i+1}</span><span><b>${r.trigger}</b> · 由 ${r.by} · Jason${r.steer?` · <span style="color:var(--info)">+${r.steer} 追加</span>`:''}</span><span class="st ${({'执行中':'doing','排队':'todo','卡住':'blocked','交付':'review'})[r.state]}">${r.state}</span><span class="d">耗时 ${r.dur}${r.input?' · 输入：'+r.input:''} · <button class="link" onclick="openTrans(${i})">查看过程</button></span></div>`).join('')}</div>
+  <div class="sec"><div class="sl">在任务下回复</div><textarea id="treply" placeholder="${ph}"></textarea><div class="acts" style="margin-top:6px"><button class="pri" onclick="taskReply()">回复</button>
+  ${s==='blocked'?'<button onclick="toast(\'示意：回待办并清执行人（本原型未展开改派分支）\')">改派（示意）</button>':''}
+  ${s==='review'?'<button class="ok" onclick="act(\'approve\')">通过</button><button class="warn" onclick="openReject()">退回…</button>':''}
+  ${s==='doing'?'<button onclick="toast(\'示意：取消执行 → 回待办\')">取消执行</button>':''}</div></div>
+  </div></div>`;
+}
+function tot(){const m={'4分12秒':4.2,'6分05秒':6.1,'3分20秒':3.3,'9分40秒':9.7};const v=st.runs.reduce((a,r)=>a+(m[r.dur]||0),0);return v?Math.round(v)+' 分（卡住等人不计）':'—'}
+function openTask(){if(st.status==='none')return;drawer=true;render()}
+function startQuote(){quoting=true;render();document.getElementById('inp').focus()}
+function renderComposer(){
+  const q=document.getElementById('quote');
+  q.style.display=quoting?'flex':'none';
+  q.innerHTML='回复 Jason：#42 卡住了，缺「断网时发送按钮要不要禁用」<button class="link" onclick="quoting=false;render()">取消</button>';
+  document.getElementById('inp').placeholder=quoting?'例如：禁用，按钮上写「离线中」（回车发送）':'发消息…（示意：普通发言不触发任务，保持 #28 排队/转入）';
+}
+function send(){
+  const i=document.getElementById('inp'),v=i.value.trim();
+  if(quoting){if(st.status!=='blocked')return;act('reply',v?esc(v):undefined);i.value='';return}
+  if(!v)return;st.tl.push({k:'human',time:'—',text:esc(v)});i.value='';
+  if(running())toast('Jason 正在执行：这条按 #28 进入排队，可点「转入当前执行」');
+  render();
+}
+function taskReply(){
+  const v=(document.getElementById('treply').value||'').trim(),s=st.status;
+  if(s==='blocked')return act('reply',v?esc(v):undefined);
+  if(s==='doing'&&running()){lastRun().steer++;st.steers.push({by:'你',text:v||'提示条颜色用黄色'});toast('已插入当前执行（不发群消息）');return render()}
+  toast(s==='review'?'已记为评论，不触发执行':'已记为评论');
+}
+function openReject(){modal='reject';render()}
+function openTrans(i){modal='trans';render()}
+function renderModal(){
+  const m=document.getElementById('modal');
+  if(!modal){m.innerHTML='';return}
+  if(modal==='reject'){m.innerHTML=`<div class="modal"><div class="mb"><b>退回 #42</b><div class="hint" style="margin:6px 0">理由必填。退回后进入「进行中 · 返工」，同一成员接原会话改。</div><textarea id="rr" style="width:100%;height:70px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px">文案改成「网络已断开」，恢复联网后提示自动消失。</textarea><div style="margin:8px 0;font-size:12px"><label><input type="radio" name="rt" checked> 退回给 Jason 返工（接上下文）</label><br><label><input type="radio" name="rt" onclick="toast('示意：放回待办并清执行人，新成员只拿任务描述 + 历次结论摘要')"> 退回并放回待办 / 改派</label></div><div class="acts"><button class="warn" onclick="doReject()">退回</button><button onclick="modal=null;render()">取消</button></div></div></div>`;return}
+  const runs=st.runs.map((r,i)=>{
+    let body='';
+    if(i===0)body=`<div><b>林经理</b>：PWA 断网时顶部给提示条…（验收标准 ①②）</div><div class="tool">read src/phone/… ×3 · grep "online" · write OfflineBanner.tsx</div>`+st.steers.map(s=>`<div style="color:var(--info)">↳ 追加（${s.by}）：${s.text}</div>`).join('')+(r.state==='卡住'?`<div><b>Jason</b> → 报卡住：缺「断网时发送按钮要不要禁用」，等你</div>`:'');
+    else body=`<div><b>${r.by}</b>：${r.input}</div><div class="tool">edit OfflineBanner.tsx · write offline.test.ts · run pnpm test</div>`;
+    if(r.state==='交付')body+=`<div><b>Jason</b> → 交付</div>`;
+    return `<div class="sep">── 第 ${i+1} 次执行 · ${r.trigger} · ${r.state} · ${r.dur} ──</div>${body}`;
+  }).join('');
+  m.innerHTML=`<div class="modal" onclick="if(event.target===this){modal=null;render()}"><div class="mb"><b>查看过程 · #42 · Jason</b><div class="hint">同一条会话，每次执行之间用分隔线；第 2 次起不重新读需求</div><div class="tr">${runs||'<div class="hint">还没开始</div>'}</div><div style="margin-top:10px"><button onclick="modal=null;render()">关闭</button></div></div></div>`;
+}
+function doReject(){const v=document.getElementById('rr').value.trim();if(!v)return toast('退回必须写理由');modal=null;act('reject',esc(v))}
+function renderPhone(){
+  const ts=tasks(),c=s=>ts.filter(t=>t.status===s).length;
+  const strip=`<div class="pstrip" onclick="plist=!plist;render()"><span class="st doing">进行中 ${c('doing')}</span><span class="st blocked">卡住 ${c('blocked')}</span><span class="st review">待验收 ${c('review')}</span><span class="hint">点开看任务 ›</span></div>`;
+  const items=st.tl.map(e=>{
+    if(e.k==='human')return `<div class="pm me">${e.quote?`<div class="w">↩ ${e.quote}</div>`:''}${e.text}</div>`;
+    if(e.k==='bot')return `<div class="pm"><div class="w">${NAMES[e.who]}</div>${e.text}</div>`;
+    if(e.k==='node')return `<div class="pm"><div class="w">${NAMES[e.who]}</div><span class="tag ${e.tag}">${e.tagt}</span>${e.text}${e.stuck&&st.status==='blocked'?`<div><button class="link" onclick="act('reply')">回复（示例答复）</button></div>`:''}</div>`;
+    if(e.k==='deleg')return `<div class="pm"><div class="w">林经理 → Jason · #42</div><span class="st ${st.status}">${st.deleg}</span></div>`;
+    if(e.k==='steer')return `<div class="pm"><div class="w">林经理 → Jason · 已并入 #42</div></div>`;
+  }).join('');
+  const list=plist?`<div class="plist"><button onclick="plist=false;render()">‹ 返回</button><div class="hint" style="margin:8px 0">只读：拖拽、通过 / 退回、改派请回桌面</div>${COLS.map(([s,l])=>{const cs=ts.filter(t=>t.status===s);return cs.length?`<div style="margin-bottom:8px"><div class="hint">${l}</div>${cs.map(t=>`<div class="tc ${s==='blocked'?'stuck':''}" style="cursor:default"><div class="r1"><span class="id">#${t.id}</span>${t.title}</div><div class="r2 ${s==='blocked'?'w':''}">${t.who?NAMES[t.who]+' · ':''}${s==='blocked'&&t.me?'卡住·缺 '+st.blocked.short+' · 等你':t.sub}</div></div>`).join('')}</div>`:''}).join('')}</div>`:'';
+  document.getElementById('phone').innerHTML=`<div class="ph"><div class="t">开发群</div>${strip}</div><div class="ptl" id="ptl">${items}</div><div class="pin"><input placeholder="发消息" disabled><button disabled>发送</button></div>${list}`;
+  const p=document.getElementById('ptl');p.scrollTop=p.scrollHeight;
+}
+const NOTES={
+  null:['起点','你在群里让群主安排一件事。',['点「下一步：派活」或上方场景 1']],
+  dispatch:['派活','群主委派时没给 taskId，系统自动建卡 #42 并挂上这次委派。',['看板「进行中」出现 #42，角标「排队」：#19 计时未开始','委派卡右上角链到任务卡；群主一轮到此结束（头像回闲）','这一步群里没有 Jason 的消息']],
+  start:['开工','Jason 以自己名义发一句「开工」，带任务号。',['任务卡：执行 1 · 派活','这时可试：场景 3 群主追加（插入），或在任务卡回复框插话','执行 60 秒内就结束时省掉「开工」，只发交付']],
+  steer:['群主追加（插入当前执行）','同一发起方对正在跑 #42 的 Jason 再派一句：插进当前执行，不排队、不新开执行。',['委派卡标「已并入」，执行行记「+1 追加」','结果只回一次；期限取较长','Jason 不发群消息（刷屏控制）','<span class="k">待技术确认</span>：复用 #28 转入通道、结果合并']],
+  block:['卡住','Jason 用「报卡住」出口写明缺什么、等谁；本次执行结束，并发名额释放，头像回闲。',['看板「卡住」列：卡住·缺 产品决定','群里这条卡住消息可以直接「回复」，或打开任务卡回复','林经理收到卡住结果；信息不在对话里时不代答，等你','连续卡住 3 次停止自动续跑']],
+  reply:['人回复后继续','你回复那条卡住消息（或在任务卡里回复），Jason 自动新开第 2 次执行，接着同一会话。',['执行 2 · 回复后继续 · 输入是你的回复','卡住等人的 23 分钟不计入耗时','点「查看过程」可见两次执行在同一会话里']],
+  deliver:['交付','Jason 发「交付」一句话摘要；任务进待验收。林经理照常收到结果，按 #21 对照标准验收。',['看板「待验收」，任务卡显示标准对照和「通过 / 退回」','群主不复述交付内容，只发验收结论','可选：点任务卡「通过」或「退回…」']],
+  approve:['验收通过','群主（或你）通过，任务完成；群主发一句验收结论。',['执行人 = 发起方时交付直接完成（#21 不变）','任务卡保留全部执行记录']],
+  reject:['退回返工','你退回并写理由；默认退回给 Jason，第 3 次执行接着原会话改。',['看板：进行中 · 返工 1，卡片顶部显示退回理由','也可「退回并放回待办 / 改派」：新成员不继承会话，只拿摘要','继续点「下一步」：返工交付 → 验收通过']]
+};
+function renderNotes(){
+  const n=NOTES[st.last]||NOTES.null;
+  document.getElementById('notes').innerHTML=`<h3>这一步：${n[0]}</h3><div>${n[1]}</div><ul>${n[2].map(x=>`<li>${x}</li>`).join('')}</ul><h3 style="margin-top:12px">左侧手机屏</h3><div>只读状态：顶部计数条点开是按状态分组的任务列表；时间线能看到节点消息。卡住时可以直接回复那条卡住消息（<span class="k">待技术确认</span>：群消息「回复某条」关联）。</div><h3 style="margin-top:12px">群里只发</h3><div>开工 · 卡住 · 交付（成员）+ 验收结论（群主或你）。调工具、追加、排队、重试都不进群。</div>`;
+}
+function toast(t){const e=document.getElementById('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.h);toast.h=setTimeout(()=>e.style.display='none',2200)}
+function render(fromAct){
+  if(fromAct&&['block','deliver','reject'].includes(st.last))drawer=true;
+  if(st.status==='none')drawer=false;
+  renderSteps();renderMem();renderTL();renderBoard();renderComposer();renderModal();renderPhone();renderNotes();
+}
+document.getElementById('inp').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+init();render();
+</script>
+</body>
+</html>

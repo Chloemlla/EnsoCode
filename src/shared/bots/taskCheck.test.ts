@@ -59,6 +59,74 @@ describe('parseTaskCheck', () => {
     expect(parseGroupTask({ ...task, check, claimedAt: 5 })).toMatchObject({ check, claimedAt: 5 });
     expect(parseGroupTask({ ...task, check: 'x' })?.check).toBeUndefined();
   });
+
+  it('委派记录带 trigger / startedAt，坏值丢弃', () => {
+    const base = {
+      id: '00000000-0000-4000-8000-000000000001',
+      parentConversationId: 'p',
+      parentBotId: '00000000-0000-4000-8000-000000000002',
+      targetBotId: '00000000-0000-4000-8000-000000000003',
+      chatId: null,
+      task: 't',
+      context: '',
+      childConversationId: 'c',
+      state: 'running',
+      depth: 1,
+      createdAt: 1,
+    };
+    expect(parseDelegation({ ...base, trigger: 'retry', startedAt: 5 })).toMatchObject({
+      trigger: 'retry',
+      startedAt: 5,
+    });
+    const bad = parseDelegation({ ...base, trigger: 'later', startedAt: -1 });
+    expect(bad).not.toHaveProperty('trigger');
+    expect(bad).not.toHaveProperty('startedAt');
+  });
+
+  it('看板任务带 runs 摘要（最多 30 条，坏条目丢弃）与成员子会话', () => {
+    const bot = '00000000-0000-4000-8000-000000000003';
+    const task = {
+      id: '00000000-0000-4000-8000-000000000004',
+      seq: 1,
+      title: 't',
+      status: 'doing',
+      createdBy: 'human',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const run = (n: number) => ({
+      id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+      botId: bot,
+      trigger: 'delegate',
+      state: 'completed',
+      createdAt: n,
+      startedAt: n,
+      finishedAt: n + 1,
+    });
+    const parsed = parseGroupTask({
+      ...task,
+      runs: [
+        { ...run(1), failure: 'timeout', state: 'failed', nested: true },
+        { ...run(2), state: 'blocked-ish' },
+        { ...run(3), botId: 'x' },
+        'junk',
+      ],
+      sessions: { [bot]: 'child-1', x: 'child-2', [task.id]: 3 },
+    });
+    expect(parsed?.runs).toEqual([
+      { ...run(1), failure: 'timeout', state: 'failed', nested: true },
+    ]);
+    expect(parsed?.sessions).toEqual({ [bot]: 'child-1' });
+    const many = parseGroupTask({
+      ...task,
+      runs: Array.from({ length: 35 }, (_, i) => run(i + 1)),
+    });
+    expect(many?.runs).toHaveLength(30);
+    expect(many?.runs?.[0]?.createdAt).toBe(6);
+    const empty = parseGroupTask({ ...task, runs: 'x', sessions: [] });
+    expect(empty).not.toHaveProperty('runs');
+    expect(empty).not.toHaveProperty('sessions');
+  });
 });
 
 describe('normalizeTaskCheck', () => {

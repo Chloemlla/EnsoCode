@@ -766,6 +766,7 @@ it('不把 IPC 下发当作插话成功，worker 拒绝空闲插话后按原 ID 
   sent.mockClear();
   expect(await host.deliverConversation(a, 'late', { deliveryId: 'late' })).toMatchObject({
     queued: true,
+    steerPending: true,
   });
   expect(sent).not.toHaveBeenCalled();
   done(a);
@@ -874,7 +875,9 @@ it('跨聊天不排同成员队，但全局并发上限照旧按 capacity 排队
   const a = session(bot);
   const other = chatSession(bot);
   await host.deliverConversation(a, 'long task in A');
-  expect(await host.deliverConversation(other, 'task in B')).toMatchObject({ queued: true });
+  const queued = await host.deliverConversation(other, 'task in B');
+  expect(queued).toMatchObject({ queued: true });
+  expect(queued).not.toHaveProperty('steerPending');
   await flush();
   expect(classify).not.toHaveBeenCalled();
   expect(host.queueState()).toMatchObject([{ conversationId: other, reason: 'capacity' }]);

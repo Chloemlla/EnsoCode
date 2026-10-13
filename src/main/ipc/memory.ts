@@ -4,6 +4,7 @@ import { CRYSTAL_MIN_SOURCES } from '@shared/memory/constants';
 import {
   type DistillableSessionDto,
   isEvolvesReviewState,
+  isMemoryEditPatch,
   isMemoryListQuery,
   isMemoryRetrievalMode,
   isPendingMemoryWriteDecision,
@@ -64,6 +65,7 @@ import {
 import {
   approvePendingMemoryWrite,
   distillSessionNow,
+  editMemory,
   getMemoryCompletion,
   getMemoryDistillJobs,
   getMemoryEmbedder,
@@ -230,6 +232,25 @@ export function registerMemoryHandlers(): void {
       }
     );
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_UPDATE,
+    (event, id: unknown, patch: unknown): MemoryMutationResult => {
+      if (!isTrustedWindow(event.sender.id) || typeof id !== 'string' || !id) {
+        return invalidRequest();
+      }
+      if (!isMemoryEditPatch(patch)) return invalidRequest();
+      try {
+        if (!editMemory(id, { title: patch.title, content: patch.content })) {
+          return { ok: false, error: 'Memory not found.' };
+        }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      memoryChanged();
+      return { ok: true };
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.MEMORY_STATS, async (event) => {
     if (!isTrustedWindow(event.sender.id)) return EMPTY_STATS;

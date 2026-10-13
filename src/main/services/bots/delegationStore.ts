@@ -5,7 +5,7 @@ import { type Delegation, parseDelegation } from '../../../shared/types/bot';
 import { writeAtomic } from './files';
 
 const DAY = 86_400_000;
-const TERMINAL = new Set<Delegation['state']>(['completed', 'failed', 'canceled']);
+const TERMINAL = new Set<Delegation['state']>(['completed', 'failed', 'canceled', 'blocked']);
 
 export interface DelegationStoreOptions {
   now?: () => number;
@@ -74,16 +74,18 @@ export class DelegationStore {
   save(record: Delegation): void {
     const parsed = parseDelegation(record);
     if (!parsed) throw new Error('Invalid delegation record');
+    const line = withSchemaVersion('delegation', parsed);
+    const previous = this.records.get(parsed.id);
     mkdirSync(dirname(this.file), { recursive: true });
     // Leading newline also isolates any torn last line from the next valid record.
-    appendFileSync(
-      this.file,
-      `\n${JSON.stringify(withSchemaVersion('delegation', parsed))}\n`,
-      'utf8'
-    );
+    appendFileSync(this.file, `\n${JSON.stringify(line)}\n`, 'utf8');
     this.records.set(parsed.id, parsed);
     this.lines++;
-    if (this.redundant()) this.compact([]);
+    // 记录首次升到更高 schema：立即压缩掉同 id 的旧版行，旧版本读不到它，就不会再按旧行改写
+    const upgraded =
+      previous !== undefined &&
+      withSchemaVersion('delegation', previous).schemaVersion < line.schemaVersion;
+    if (upgraded || this.redundant()) this.compact([]);
   }
 
   private redundant(): boolean {

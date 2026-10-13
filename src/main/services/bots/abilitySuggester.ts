@@ -19,8 +19,8 @@ import type {
   BotPersonaSuggestResult,
 } from '../../../shared/types/botIpc';
 
-export const ABILITY_SUGGEST_TIMEOUT_MS = 20_000;
-export const PERSONA_SUGGEST_TIMEOUT_MS = 30_000;
+export const ABILITY_SUGGEST_TIMEOUT_MS = 90_000;
+export const PERSONA_SUGGEST_TIMEOUT_MS = 90_000;
 export const GOAL_SUGGEST_TIMEOUT_MS = 45_000;
 
 /** 便宜模型一次性补全；没有可用模型返回 null */

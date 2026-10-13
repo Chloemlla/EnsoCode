@@ -1,5 +1,10 @@
 import { useDroppable } from '@dnd-kit/core';
 import { unbindImages } from '@shared/browser/designMode';
+import {
+  PASTED_TEXT_FILE_NAME,
+  type PastedTextFileResult,
+  pastedTextFileContent,
+} from '@shared/pastedText';
 import { filterSlashSubcommands, slashSubcommandQuery } from '@shared/slashSubcommands';
 import type { AttachedImage, SlashCommand } from '@shared/types/agent';
 import type {
@@ -94,6 +99,8 @@ interface ComposerProps {
   requestMicAccess?: () => Promise<boolean>;
   /** hold = 手机微信式：麦克风切出输入框下方的「按住 说话」 */
   voiceMode?: 'click' | 'hold';
+  /** 超长纯文本粘贴落盘为 txt；不传（如 ssh 项目）则保持插入正文 */
+  savePastedText?: (text: string) => Promise<PastedTextFileResult>;
 }
 
 interface ComposerDraft {
@@ -133,6 +140,7 @@ export function Composer({
   voice,
   requestMicAccess,
   voiceMode = 'click',
+  savePastedText,
 }: ComposerProps) {
   const { t } = useI18n();
   const [holdToTalk, setHoldToTalk] = useState(false);
@@ -730,6 +738,21 @@ export function Composer({
               }
             }}
             onKeyDown={handleKeyDown}
+            onPasteText={(text) => {
+              if (!savePastedText || !pastedTextFileContent(text)) return false;
+              void savePastedText(text)
+                .catch((): PastedTextFileResult => ({ ok: false, error: 'unavailable' }))
+                .then((result) => {
+                  const editor = editorRef.current;
+                  if (!result.ok) editor?.insertText(text);
+                  else
+                    editor?.insertFileChip(
+                      result.path,
+                      `${PASTED_TEXT_FILE_NAME} · ${t('{{count}} chars', { count: result.chars.toLocaleString() })}`
+                    );
+                });
+              return true;
+            }}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files);
               if (files.length === 0) return;

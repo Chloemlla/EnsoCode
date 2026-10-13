@@ -3,15 +3,47 @@ import type {
   AgentControlToolRequest,
   AgentControlToolResponse,
   AgentTypeSpawnConfig,
+  AgentWaitReceipt,
   SubagentModelOption,
 } from '@shared/types/agent';
-import { parseAgentControlToolRequest } from '@shared/types/agent';
+import {
+  AGENT_WAIT_DEFAULT_MS,
+  AGENT_WAIT_MAX_MS,
+  parseAgentControlToolRequest,
+} from '@shared/types/agent';
+import { type BlockingWait, detachedWaitNote } from './backgroundTasks';
 import { CHILD_THINKING_LEVELS, resolveChildThinkingInput } from './childReasoning';
 
 export interface UnifiedSubagentDeps {
   agentTypes: AgentTypeSpawnConfig[];
   models: SubagentModelOption[];
-  invoke(request: AgentControlToolRequest, signal?: AbortSignal): Promise<AgentControlToolResponse>;
+  invoke(
+    request: AgentControlToolRequest,
+    signal?: AbortSignal,
+    detach?: AbortSignal
+  ): Promise<AgentControlToolResponse>;
+  /** 登记阻塞等待，供插话 / 用户「不等了」提前结束 */
+  trackWait?(toolCallId: string): BlockingWait;
+}
+
+const WAIT_TIMEOUT_NOTE =
+  'The wait timed out; this is not a failure. Pending Runs keep going and you will be notified automatically when each finishes — continue other work instead of waiting again.';
+
+/** schema 校验前把超限的 timeoutMs 截到上限，不报错 */
+function clampWaitTimeout(params: unknown): unknown {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return params;
+  const record = params as Record<string, unknown>;
+  if (typeof record.timeoutMs !== 'number' || !Number.isFinite(record.timeoutMs)) return params;
+  const timeoutMs = Math.min(AGENT_WAIT_MAX_MS, Math.max(0, Math.round(record.timeoutMs)));
+  return timeoutMs === record.timeoutMs ? params : { ...record, timeoutMs };
+}
+
+function waitReceiptOf(value: unknown): AgentWaitReceipt | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as { report?: unknown; timedOut?: unknown };
+  if (typeof record.timedOut === 'boolean') return record as unknown as AgentWaitReceipt;
+  const report = record.report as { timedOut?: unknown } | undefined;
+  return typeof report?.timedOut === 'boolean' ? (report as AgentWaitReceipt) : undefined;
 }
 
 export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefinition {
@@ -126,14 +158,16 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
     description:
       'Spawn requires non-empty description and prompt parameters; omit both for every other operation. ' +
       'Create and control delegated agents. mode=task is one-shot; mode=coworker preserves context for multiple Runs. ' +
-      'All operations are Main-authorized. Spawning and sending are asynchronous unless wait:true.',
+      'All operations are Main-authorized. Spawning and sending are asynchronous unless wait:true; ' +
+      'you are notified automatically when a Run finishes.',
     promptSnippet:
       'subagent: spawn requires non-empty description and prompt. Other operations omit both. ' +
-      'Spawn task/coworker agents, list owned agents, send Runs or bound messages, wait/report/stop a Run, or dismiss an Agent. Default spawn mode=task and wait=false.',
+      'Spawn task/coworker agents, list owned agents, send Runs or bound messages, wait/report/stop a Run, or dismiss an Agent. Default spawn mode=task and wait=false; finished Runs notify you automatically.',
     promptGuidelines: [
       'spawn requires non-empty description and prompt. Omit both for every other operation.',
       'Agent and Run are different identities: use runId for wait/report/stop and agentId for send/dismiss.',
-      'wait timeout or interruption never stops execution; use stop or dismiss explicitly.',
+      'Subagents run in the background and you are notified automatically with a result summary when a Run finishes. Do not wait (wait operation or wait:true) unless your very next step cannot proceed without that result; keep working or reply to the user meanwhile.',
+      `wait defaults to ${AGENT_WAIT_DEFAULT_MS / 60_000} minutes and is capped at ${AGENT_WAIT_MAX_MS / 60_000}. A timeout or a user interruption is not a failure and never stops the Run; the receipt lists each pending Run's progress. Use stop or dismiss explicitly to end a Run.`,
       'Use send delivery=auto to steer a running Run or start an idle coworker Run; delivery=next queues a new coworker Run.',
       'Dismiss a coworker as soon as you no longer need it; an idle coworker keeps its session open until dismissed.',
       'gate.commandRef is a Main-authorized command id, not shell text or argv.',
@@ -198,7 +232,12 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
         delivery: { type: 'string', enum: ['auto', 'steer', 'next'] },
         expectedRunId: { type: 'string' },
         until: { type: 'string', enum: ['all', 'any'] },
-        timeoutMs: { type: 'integer', minimum: 0, maximum: 86_400_000 },
+        timeoutMs: {
+          type: 'integer',
+          minimum: 0,
+          maximum: AGENT_WAIT_MAX_MS,
+          description: `Wait timeout in ms. Default ${AGENT_WAIT_DEFAULT_MS}, capped at ${AGENT_WAIT_MAX_MS}.`,
+        },
         status: { type: 'string', enum: ['creating', 'ready', 'active', 'parked', 'closed'] },
         cursor: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 100 },
@@ -218,16 +257,40 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
       ],
       additionalProperties: false,
     } as unknown as ToolDefinition['parameters'],
-    async execute(_toolCallId, params, signal) {
-      const request = normalize(params as Record<string, unknown>);
+    prepareArguments: clampWaitTimeout as unknown as ToolDefinition['prepareArguments'],
+    async execute(toolCallId, params, signal) {
+      const request = normalize(clampWaitTimeout(params) as Record<string, unknown>);
       if (!request) throw new Error('invalid subagent operation parameters');
+      const waits =
+        request.operation === 'wait' ||
+        ((request.operation === 'spawn' || request.operation === 'send') && request.wait);
+      const blocking = waits ? deps.trackWait?.(toolCallId) : undefined;
       // spawn/send 被 abort 时 invoker 只让 Main 打断附带的等待，仍等权威 receipt，不丢 agentId/runId
-      const response = await deps.invoke(request, signal);
+      let response: AgentControlToolResponse;
+      try {
+        response = blocking
+          ? await deps.invoke(request, signal, blocking.signal)
+          : await deps.invoke(request, signal);
+      } finally {
+        blocking?.untrack();
+      }
       if (!response.ok) throw new Error(`${response.code}: ${response.error}`);
-      const serialized = JSON.stringify(response.value, null, 2);
+      const receipt = waits ? waitReceiptOf(response.value) : undefined;
+      const detachedBy = blocking?.reason();
+      const note =
+        receipt?.interrupted && detachedBy
+          ? detachedWaitNote(detachedBy, 'subagent')
+          : receipt?.timedOut
+            ? WAIT_TIMEOUT_NOTE
+            : undefined;
+      const value =
+        note && response.value && typeof response.value === 'object'
+          ? { ...(response.value as Record<string, unknown>), note }
+          : response.value;
+      const serialized = JSON.stringify(value, null, 2);
       return {
         content: [{ type: 'text', text: serialized ?? 'null' }],
-        details: response.value,
+        details: value,
       };
     },
   };

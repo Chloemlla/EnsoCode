@@ -24,6 +24,8 @@ export function buildBotModeInstruction(input: {
   self: BotIdentity;
   kind: BotChat['kind'];
   roster: readonly BotIdentity[];
+  /** 挂看板任务的委派会话：说明 report_blocked */
+  delegationTask?: boolean;
 }): string {
   const lines = [
     '# Bot mode',
@@ -34,6 +36,10 @@ export function buildBotModeInstruction(input: {
     '- You may still use tools to do real work in the workspace; tool activity stays in your own session and is not posted.',
     '- Use delegate({to, task, context?}) to ask another member for work. It returns a delegationId immediately; the result arrives later in <delegation-result>; results of several delegations made in one turn arrive together in one <delegation-results> message. Use check_delegation({id?, cancel?}) to inspect or cancel. Do not poll repeatedly.',
   ];
+  if (input.delegationTask)
+    lines.push(
+      '- You are working on a delegated board task. If you cannot go on without information or a decision from someone else, call report_blocked({need, waitFor?}) saying exactly what is missing, then say in one or two sentences what you have done so far and end your turn; you continue in this session once someone answers. Only report_blocked marks the task as blocked: a question asked only in your final reply does not, and the task goes to review as delivered.'
+    );
   if (input.kind === 'group') {
     lines.push(
       '- This is a group chat. Messages from others arrive as <group-message from="Name" role="Title"> blocks.',

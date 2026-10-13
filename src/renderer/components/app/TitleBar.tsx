@@ -1,5 +1,8 @@
 import { ENSO_AGENT_TYPE_KEY } from '@shared/builtinAgents';
+import { WINDOWS_CAPTION_BUTTONS_WIDTH } from '@shared/windowControls';
 import { Copy, Minus, Sparkles, Square, X } from 'lucide-react';
+import { useRef } from 'react';
+import { useNativeWindowControls } from '@/hooks/useNativeWindowControls';
 import { useWindowMaximized } from '@/hooks/useWindowMaximized';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
@@ -12,9 +15,11 @@ interface TitleBarProps {
   /** Optional no-drag content shown in place of the title. */
   leading?: React.ReactNode;
   /**
-   * Optional no-drag content centered on the whole window (absolute overlay).
-   * Unlike `leading` it does not replace the title; on macOS the title stays
-   * hidden so it does not crowd the traffic lights.
+   * 可选的居中内容使用独立覆盖层，在 Windows 上避开原生按钮区域。
+   * 它保留左侧标题；macOS 隐藏标题以免挤占系统红绿灯。
+   *
+   * Center optional content in an overlay that excludes native Windows controls.
+   * Keep the left title except on macOS, where traffic lights take precedence.
    */
   centered?: React.ReactNode;
 }
@@ -39,15 +44,26 @@ export function SummonEnsoButton({ label = true }: { label?: boolean }) {
 /**
  * 无边框窗口标题栏：
  * - macOS: 仅作为拖拽区域（traffic lights 由系统渲染，左侧预留空间）
- * - Windows/Linux: 自绘最小化/最大化/关闭按钮
+ * - Windows: 给原生窗口按钮预留空间，保留系统贴靠入口
+ * - Linux: 自绘最小化/最大化/关闭按钮
+ *
+ * Preserve native caption controls and Snap Layouts on Windows, traffic lights
+ * on macOS, and renderer caption controls on Linux.
  */
 export function TitleBar({ title, className, actions, leading, centered }: TitleBarProps) {
   const { t } = useI18n();
   const isMac = window.electronAPI.env.platform === 'darwin';
+  const isWindows = window.electronAPI.env.platform === 'win32';
+  const headerRef = useRef<HTMLElement>(null);
+  useNativeWindowControls(headerRef);
   const maximized = useWindowMaximized();
+  const nativeControlsInset = `calc(100% - env(titlebar-area-width, calc(100% - ${WINDOWS_CAPTION_BUTTONS_WIDTH}px)))`;
 
   return (
     <header
+      ref={headerRef}
+      data-native-window-controls={isWindows || undefined}
+      style={isWindows ? { paddingRight: nativeControlsInset } : undefined}
       className={cn(
         // 固定像素高度：红绿灯位置 (y:16) 按 44px 高度对齐，不随 rem 缩放
         'drag-region relative flex h-[44px] shrink-0 items-center border-b bg-background',
@@ -62,14 +78,17 @@ export function TitleBar({ title, className, actions, leading, centered }: Title
       ) : null}
 
       {centered && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div
+          className="pointer-events-none absolute inset-0 flex items-center justify-center"
+          style={isWindows ? { right: nativeControlsInset } : undefined}
+        >
           <div className="no-drag pointer-events-auto">{centered}</div>
         </div>
       )}
 
       {actions && <div className="no-drag ml-auto flex items-center gap-1">{actions}</div>}
 
-      {!isMac && (
+      {!isMac && !isWindows && (
         <div className={cn('no-drag flex h-full items-center', !actions && 'ml-auto')}>
           <button
             type="button"

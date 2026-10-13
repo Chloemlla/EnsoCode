@@ -7,6 +7,7 @@ const COORDINATION_TOOLS = new Set([
   'group_tasks',
   'group_history',
   'routine_propose',
+  'report_blocked',
 ]);
 
 interface OutputMessage {

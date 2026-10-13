@@ -13,6 +13,8 @@ export class AgentControlInvoker {
       reject(error: Error): void;
       signal?: AbortSignal;
       onAbort?: () => void;
+      detach?: AbortSignal;
+      onDetach?: () => void;
     }
   >();
   private seq = 0;
@@ -28,32 +30,45 @@ export class AgentControlInvoker {
     private readonly nextSeq: () => number = () => ++this.seq
   ) {}
 
+  /**
+   * signal：本轮被中止，wait 立即失败返回。
+   * detach：只结束附带的等待（插话 / 用户「不等了」），仍等 Main 的回执，模型拿到等待被打断的结果。
+   */
   invoke(
     request: AgentControlToolRequest,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    detach?: AbortSignal
   ): Promise<AgentControlToolResponse> {
     if (signal?.aborted) return Promise.reject(new Error('Agent control wait interrupted.'));
     const requestId = this.randomUuid();
     // spawn/send 可能已在 Main 建好 Agent/Run：abort 只让 Main 打断附带的等待，回执照常回来
     const keepReceipt = request.operation === 'spawn' || request.operation === 'send';
     return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        const pending = keepReceipt ? this.pending.get(requestId) : this.take(requestId);
-        if (!pending) return;
+      const cancel = (kind: 'abort' | 'detach') =>
         this.emit({
           type: 'agent-control-cancel',
           identity: this.identity,
           seq: this.nextSeq(),
           requestId,
+          kind,
         });
+      const onAbort = () => {
+        const pending = keepReceipt ? this.pending.get(requestId) : this.take(requestId);
+        if (!pending) return;
+        cancel('abort');
         if (!keepReceipt) reject(new Error('Agent control wait interrupted.'));
+      };
+      const onDetach = () => {
+        if (this.pending.has(requestId)) cancel('detach');
       };
       this.pending.set(requestId, {
         resolve,
         reject,
         ...(signal ? { signal, onAbort } : {}),
+        ...(detach ? { detach, onDetach } : {}),
       });
       signal?.addEventListener('abort', onAbort, { once: true });
+      detach?.addEventListener('abort', onDetach, { once: true });
       this.emit({
         type: 'agent-control-invoke',
         identity: this.identity,
@@ -61,6 +76,7 @@ export class AgentControlInvoker {
         requestId,
         request,
       });
+      if (detach?.aborted) onDetach();
     });
   }
 
@@ -83,6 +99,9 @@ export class AgentControlInvoker {
     this.pending.delete(requestId);
     if (pending.signal && pending.onAbort) {
       pending.signal.removeEventListener('abort', pending.onAbort);
+    }
+    if (pending.detach && pending.onDetach) {
+      pending.detach.removeEventListener('abort', pending.onDetach);
     }
     return pending;
   }

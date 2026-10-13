@@ -16,6 +16,9 @@ const DEFAULT_LIMITS: Readonly<Record<string, number>> = {
   'google-generative-ai': 20 * 1024 * 1024,
 };
 
+// pi-ai 这两个适配器在 fetch 不是 globalThis.fetch 时直接抛错，不能包一层传输守卫。
+const NATIVE_TRANSPORT_APIS = new Set<string>(['google-generative-ai', 'google-vertex']);
+
 function requestLimit(model: Model<Api>): number | undefined {
   const configured = model.inputLimits?.maxRequestBytes;
   if (configured === undefined)
@@ -179,12 +182,11 @@ function budgetOptions<T extends ProviderRequestOptions | undefined>(
   model: Model<Api>,
   context: Context,
   options: T
-): T | (T & { onPayload: OnPayload; fetch: typeof fetch }) {
+): T | (T & { onPayload: OnPayload }) {
   // 未知协议没有权威上限时，不以无效的 fetch 覆盖 native transport 默认值。
   if (model.inputLimits?.maxRequestBytes === undefined && !Object.hasOwn(DEFAULT_LIMITS, model.api))
     return options;
-  const delegateFetch = options?.fetch ?? globalThis.fetch.bind(globalThis);
-  return {
+  const guarded = {
     ...options,
     async onPayload(payload: unknown, requestModel: Model<Api>) {
       const replacement = await options?.onPayload?.(payload, requestModel);
@@ -198,6 +200,11 @@ function budgetOptions<T extends ProviderRequestOptions | undefined>(
       if (bytes > limit) throw tooLarge(bytes, limit);
       return body;
     },
+  };
+  if (NATIVE_TRANSPORT_APIS.has(model.api)) return guarded;
+  const delegateFetch = options?.fetch ?? globalThis.fetch.bind(globalThis);
+  return {
+    ...guarded,
     async fetch(input, init) {
       // 最后一道守卫：SDK 在 onPayload 后的序列化 / 流标记等额外处理也不能绕过。
       const limit = requestLimit(model);

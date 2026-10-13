@@ -1,8 +1,13 @@
 import { IPC_CHANNELS } from '@shared/types';
 import { parseAgentSummonRequest } from '@shared/types/mentions';
+import { parseTitleBarAppearance } from '@shared/windowControls';
 import { BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { agentTypeRegistrySnapshot } from '../services/agentHost';
-import { sendToWindow, TRAFFIC_LIGHT_POSITION } from '../windows/createAppWindow';
+import {
+  getWindowWebContents,
+  sendToWindow,
+  TRAFFIC_LIGHT_POSITION,
+} from '../windows/createAppWindow';
 import { focusMainWindow } from '../windows/MainWindow';
 import { openSettingsWindow } from '../windows/SettingsWindow';
 import { parseOpenSettingsRequest } from './searchAnything';
@@ -62,6 +67,24 @@ export function registerWindowHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_IS_FULLSCREEN, (event) => {
     return senderWindow(event)?.isFullScreen() ?? false;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WINDOW_SET_TITLE_BAR_APPEARANCE, (event, raw: unknown) => {
+    const appearance = parseTitleBarAppearance(raw);
+    const win = senderWindow(event);
+    if (!appearance || !win || process.platform !== 'win32') {
+      return { ok: false, error: 'Invalid native title bar appearance' };
+    }
+    if (getWindowWebContents(win).id !== event.sender.id) {
+      return { ok: false, error: 'Only the window renderer may update its title bar' };
+    }
+    try {
+      win.setTitleBarOverlay(appearance);
+      win.setBackgroundColor(appearance.color);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE, (event, visible: unknown) => {

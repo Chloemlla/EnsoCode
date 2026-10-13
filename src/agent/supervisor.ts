@@ -170,6 +170,7 @@ import { applyWorkerProxyEnv } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
 import { withRequestBodyBudget } from './requestBodyBudget';
 import { runWithRequestBodyObserver } from './requestBodyTelemetry';
+import { budgetWrapUpPrompt, RequestBudget } from './requestBudget';
 import { projectMessages, projectResumeTail } from './resumeSnapshots';
 import { withRtkOptimization } from './rtk';
 import { RunawayGuard } from './runawayGuard';
@@ -249,6 +250,7 @@ interface ChildSessionResult {
   ensoApp?: EnsoAppInvoker;
   safeJournal?: EnsoSafeJournal;
   runawayGuard?: RunawayGuard;
+  requestBudget?: RequestBudget;
 }
 
 /** 会话工厂：父 runtime/resource/tool 配置的唯一 child 创建入口。 */
@@ -312,6 +314,8 @@ interface ManagedSession {
   /** 本次空回复恢复的类型；post-tool 第二次仍空则失败 */
   silentTurnKind?: SilentTurnKind;
   runawayGuard?: RunawayGuard;
+  /** 子代理请求软预算；只有带 requestBudget 标记的 Run 才 arm，主会话与 Bot 成员不 arm */
+  requestBudget?: RequestBudget;
   timings: (MessageTiming | undefined)[];
   /** 最近一次 turn_start 时刻；pi 在发起每次模型请求前触发，下一条 assistant message_start 消费 */
   requestStartMs?: number;
@@ -1294,7 +1298,8 @@ export class SessionSupervisor {
           command.botGroupTasks,
           command.protectedActions,
           command.botRoutines,
-          command.botWriteLock
+          command.botWriteLock,
+          command.botDelegationTask
         );
         return;
       case 'spawn-child':
@@ -1363,6 +1368,9 @@ export class SessionSupervisor {
         }
         managed.promptedRequestIds.add(command.requestId);
         managed.currentTurnId = command.requestId;
+        // 只有子代理 Run（Main 带 requestBudget 标记）计数；Bot 成员等不 arm，不计数
+        if (command.requestBudget) managed.requestBudget?.arm();
+        else managed.requestBudget?.disarm();
         managed.safeJournal?.appendUserText(command.task.text);
         const images = command.task.images.map((image) => ({ type: 'image' as const, ...image }));
         void managed.session
@@ -1488,6 +1496,13 @@ export class SessionSupervisor {
         if (!managed || !isSameGeneration(managed.identity, command.identity)) return;
         if (command.kind === 'approval') managed.gate.expire(command.requestId);
         else managed.asks.expire(command.requestId);
+        return;
+      }
+      case 'agent-notify': {
+        const managed = this.sessions.get(command.identity.sessionId);
+        // 只挡投递途中换代的命令；Main 总按当前 generation 发，不区分 Run 派出时的 generation
+        if (!managed || !isSameGeneration(managed.identity, command.identity)) return;
+        this.notifier.notify(managed.identity.sessionId, command.text, { urgent: command.urgent });
         return;
       }
       case 'set-approval-mode':
@@ -1731,6 +1746,8 @@ export class SessionSupervisor {
         managed.memory?.cancelAll('Memory action aborted');
         managed.delegation?.cancelAll('Delegation action aborted');
         managed.currentTurnId = undefined;
+        // 用户中止：预算 Run 就此结束，不再补交报告，之后的回合也不再计数
+        managed.requestBudget?.disarm();
         managed.computer?.cancelAll('Computer action aborted');
         // 立即收口投影：不 await session.abort()（内部 waitForIdle 会一直等到工具/流
         // 真正结束，工具不响应 signal 时永远等不到，UI 就卡在 running 上）。
@@ -1787,7 +1804,8 @@ export class SessionSupervisor {
     botGroupTasks = false,
     protectedActions = false,
     botRoutines = false,
-    botWriteLock?: { label: string; ancestors: string[] }
+    botWriteLock?: { label: string; ancestors: string[] },
+    botDelegationTask = false
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -2019,7 +2037,8 @@ export class SessionSupervisor {
     const buildBaseTools = (
       toolGate: ApprovalGate,
       cp?: CheckpointManager,
-      writeScope?: readonly string[]
+      writeScope?: readonly string[],
+      foregroundSessionId = sessionId
     ): Def[] => {
       const guarded = (definition: Def): Def => (cp ? withCheckpoint(definition, cp) : definition);
       const claimContext = { owner: sessionId, cwd };
@@ -2091,7 +2110,8 @@ export class SessionSupervisor {
                 this.bgTasks,
                 sessionId,
                 cwd,
-                backgroundTransform
+                backgroundTransform,
+                foregroundSessionId
               )
             )
           )
@@ -2211,13 +2231,26 @@ export class SessionSupervisor {
               resolved?.tools === 'readonly' ||
               agentType?.tools === 'readonly'
                 ? readOnlyTools(childGate)
-                : buildBaseTools(childGate, undefined, agentType?.writeScope)),
+                : buildBaseTools(
+                    childGate,
+                    undefined,
+                    agentType?.writeScope,
+                    childIdentity?.sessionId
+                  )),
               ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
               ...(extraTools as Def[]),
               ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
             ];
         const childRunaway = new RunawayGuard();
         const childReminders = new SystemReminderRegistry();
+        const requestBudget = new RequestBudget();
+        // 到软预算时把一次性收尾提示排进下一条工具结果；锁定会话工具不装饰，提示无处可注入
+        if (!isLockedEnso) {
+          childReminders.register('request-budget', () => {
+            const notice = requestBudget.takeNotice();
+            return notice ? [notice] : [];
+          });
+        }
         const childBudget = new ToolOutputBudget({
           rootDir: path.join(
             this.options.sessionDir,
@@ -2326,6 +2359,7 @@ export class SessionSupervisor {
           ],
           ...(ensoApp ? { ensoApp } : {}),
           ...(isLockedEnso ? {} : { runawayGuard: childRunaway }),
+          requestBudget,
         };
       },
     };
@@ -2361,11 +2395,12 @@ export class SessionSupervisor {
     const unifiedSubagentTool = createUnifiedSubagentTool({
       agentTypes,
       models: subagentModels,
-      invoke: async (request, signal) => {
-        const response = await agentControl.invoke(request, signal);
+      invoke: async (request, signal, detach) => {
+        const response = await agentControl.invoke(request, signal, detach);
         coworkerIdle.observe(request, response);
         return response;
       },
+      trackWait: (toolCallId) => this.bgTasks.trackBlockingWait(sessionId, toolCallId),
     });
     const askManager = this.createAskManager(identity, gate.humanTimeoutMs);
     // 内嵌浏览器：页面活在 Main，worker 只发 browser-invoke 事件。每个父会话一张挂起表。
@@ -2452,7 +2487,12 @@ export class SessionSupervisor {
         ? createBrowserTools(browser).map((tool) => withNavigateApproval(gate, tool))
         : []),
       ...(memory ? createMemoryTools(memory, { language: memoryLanguage }) : []),
-      ...(delegation ? createDelegationTools(delegation, { groupTasks: botGroupTasks }) : []),
+      ...(delegation
+        ? createDelegationTools(delegation, {
+            groupTasks: botGroupTasks,
+            delegationTask: botDelegationTask,
+          })
+        : []),
       ...(delegation && botGroupTasks
         ? [createGroupTasksTool(delegation), createGroupHistoryTool(delegation)]
         : []),
@@ -2493,7 +2533,7 @@ export class SessionSupervisor {
           ]
         : []),
       ...(exploreFold ? createExploreFoldTools(exploreFold) : []),
-      ...(toolEnabled('background_tasks') ? createTaskTools(this.bgTasks) : []),
+      ...(toolEnabled('background_tasks') ? createTaskTools(this.bgTasks, sessionId) : []),
       ...(toolEnabled('goal')
         ? createGoalTools((kind, note) => {
             const managed = managedRef ?? this.sessions.get(sessionId);
@@ -2641,6 +2681,7 @@ export class SessionSupervisor {
       proofToolIds?: string[];
       safeJournal?: EnsoSafeJournal;
       runawayGuard?: RunawayGuard;
+      requestBudget?: RequestBudget;
     } = {}
   ): ManagedSession {
     const customEntries = session.sessionManager.getBranch().flatMap((entry) => {
@@ -2668,6 +2709,7 @@ export class SessionSupervisor {
       adaptiveDowngraded: new Set<string>(),
       silentTurnNudgeUsed: false,
       ...(opts.runawayGuard ? { runawayGuard: opts.runawayGuard } : {}),
+      ...(opts.requestBudget ? { requestBudget: opts.requestBudget } : {}),
       timings: [],
       toolStartAt: new Map(),
       toolDurations: new Map(),
@@ -2895,6 +2937,7 @@ export class SessionSupervisor {
       proofToolIds: result.proofToolIds,
       safeJournal: result.safeJournal,
       ...(result.runawayGuard ? { runawayGuard: result.runawayGuard } : {}),
+      ...(result.requestBudget ? { requestBudget: result.requestBudget } : {}),
     });
     if (!resumeFile) managedRef.pendingRole = config.systemPrompt;
     this.options.emit({
@@ -2970,22 +3013,23 @@ export class SessionSupervisor {
       parent.gate.floorOptions
     );
     const askManager = this.createAskManager(identity, gate.humanTimeoutMs);
-    const { session, modelId, toolIds, runawayGuard } = await factory.createChildSession({
-      agentType,
-      modelOverride,
-      thinkingOverride: thinking,
-      gate,
-      resumeFile,
-      extraTools: [
-        createAskTool(askManager),
-        createMessageMainTool(
-          (text, urgent) => this.notifier.notify(parentId, text, { urgent }),
-          name,
-          () => this.sessions.get(coworkerId)?.parentWaiting === true
-        ),
-        this.createPeerMessageTool(parentId, name),
-      ],
-    });
+    const { session, modelId, toolIds, runawayGuard, requestBudget } =
+      await factory.createChildSession({
+        agentType,
+        modelOverride,
+        thinkingOverride: thinking,
+        gate,
+        resumeFile,
+        extraTools: [
+          createAskTool(askManager),
+          createMessageMainTool(
+            (text, urgent) => this.notifier.notify(parentId, text, { urgent }),
+            name,
+            () => this.sessions.get(coworkerId)?.parentWaiting === true
+          ),
+          this.createPeerMessageTool(parentId, name),
+        ],
+      });
     const info: CoworkerInfo = {
       id: coworkerId,
       name,
@@ -3009,6 +3053,7 @@ export class SessionSupervisor {
       toolIds,
       ...(resumeFile ? { resumeFile } : {}),
       ...(runawayGuard ? { runawayGuard } : {}),
+      ...(requestBudget ? { requestBudget } : {}),
     });
     // 角色提示在首条消息前缀注入(无论来自主 agent send 还是用户 tab);resume 时 jsonl 已有
     if (!resumeFile && agentType?.systemPrompt) {
@@ -3308,6 +3353,7 @@ export class SessionSupervisor {
             .map((part) => part.text)
             .join('\\n');
           if (text) managed.safeJournal?.appendAssistantText(text);
+          this.noteBudgetRequest(managed, projected);
         }
         this.emitSessionMeta(managed);
         return;
@@ -3453,51 +3499,88 @@ export class SessionSupervisor {
         }
         if (!managed.settlePending) return;
         managed.settlePending = false;
+        // 请求预算到 1.5 倍：这次中止是为了强制交出，不收口、不通知父会话。
+        // 补一轮只交报告的请求，仍用原来的 turnId，父会话只看到一次收尾结果。
+        if (managed.requestBudget?.phaseNow === 'stopping') {
+          managed.requestBudget.markWrapup();
+          setImmediate(() => {
+            if (managed.requestBudget?.phaseNow !== 'wrapup') return;
+            void managed.session.prompt(budgetWrapUpPrompt()).catch((error) => {
+              if (managed.requestBudget?.phaseNow !== 'wrapup') return;
+              // 补报告发不出去也按预算停止交回已有输出，错误写进结果
+              this.completeTurn(managed, { error: toErrorMessage(error) });
+            });
+          });
+          return;
+        }
+        // 强制交出的那一轮（或宽限耗尽的硬停）按成功收口，但带上预算停止标记，不当成失败
+        const budgetStopped =
+          managed.requestBudget?.phaseNow === 'wrapup' ||
+          managed.requestBudget?.phaseNow === 'done';
+        if (budgetStopped) managed.requestBudget?.markDone();
         this.reconcileMessages(managed, this.transcript(managed));
-        if (this.tryAdaptiveDowngrade(managed)) return;
+        // 预算停止必须把已有结论交回去，不再降级或空回复续跑，否则结果被拖走
+        if (!budgetStopped && this.tryAdaptiveDowngrade(managed)) return;
         // 终态错误轮（重试耗尽或不可重试）按失败收口，不再误报「回复完成」
         const lastAssistant = [...managed.messages]
           .reverse()
           .find((message) => message.role === 'assistant');
+        if (budgetStopped) {
+          this.completeTurn(managed, {
+            ...(lastAssistant?.stopReason === 'error'
+              ? { error: lastAssistant.errorMessage ?? 'Turn failed.' }
+              : {}),
+          });
+          return;
+        }
         if (lastAssistant?.stopReason === 'error') {
           this.failTurn(managed, lastAssistant.errorMessage ?? 'Turn failed.');
           return;
         }
         if (this.trySilentTurnRecovery(managed)) return;
-        const turnId = managed.currentTurnId ?? randomUUID();
-        managed.currentTurnId = undefined;
-        managed.status = 'idle';
-        this.emitStatus(managed);
-        managed.plan?.turnSettled();
-        managed.contextUsage.setPendingSnapshot(undefined);
-        this.emitSessionMeta(managed);
-        // 本轮摘要随 turn-completed 下发：renderer 冷会话没有正文，只能由 worker 切
-        const digest = buildTurnDigest(managed.messages, managed.turnStartIndex);
-        managed.turnStartIndex = managed.messages.length;
-        this.workspaceClaims.release(managed.identity.sessionId);
-        this.options.emit({
-          type: 'turn-completed',
-          identity: managed.identity,
-          seq: ++managed.seq,
-          turnId,
-          ...(digest ? { digest } : {}),
-        });
-        if (managed.pendingCompact) {
-          const queued = managed.pendingCompact;
-          managed.pendingCompact = undefined;
-          void this.runCompaction(managed, queued.instructions);
-        }
-        if (managed.pendingTaskReminders.length > 0) {
-          setTimeout(() => {
-            if (managed.status !== 'idle' || managed.pendingTaskReminders.length === 0) return;
-            const texts = managed.pendingTaskReminders.splice(0);
-            this.deliverNotification(managed.identity.sessionId, texts.join('\\n\\n---\\n\\n'));
-          }, 150);
-        }
+        this.completeTurn(managed);
         return;
       }
       default:
         return;
+    }
+  }
+
+  /** 本轮成功收口。budget：子代理因请求预算被强制停止，带上标记（及补报告的错误）交回已有输出。 */
+  private completeTurn(managed: ManagedSession, budget?: { error?: string }): void {
+    const turnId = managed.currentTurnId ?? randomUUID();
+    managed.currentTurnId = undefined;
+    // 预算只管一次 Run：收口即清零，之后用户自己发起的回合不计数
+    managed.requestBudget?.disarm();
+    managed.status = 'idle';
+    this.emitStatus(managed);
+    managed.plan?.turnSettled();
+    managed.contextUsage.setPendingSnapshot(undefined);
+    this.emitSessionMeta(managed);
+    // 本轮摘要随 turn-completed 下发：renderer 冷会话没有正文，只能由 worker 切
+    const digest = buildTurnDigest(managed.messages, managed.turnStartIndex);
+    managed.turnStartIndex = managed.messages.length;
+    this.workspaceClaims.release(managed.identity.sessionId);
+    this.options.emit({
+      type: 'turn-completed',
+      identity: managed.identity,
+      seq: ++managed.seq,
+      turnId,
+      ...(digest ? { digest } : {}),
+      ...(budget ? { requestBudgetStop: true } : {}),
+      ...(budget?.error ? { requestBudgetError: budget.error } : {}),
+    });
+    if (managed.pendingCompact) {
+      const queued = managed.pendingCompact;
+      managed.pendingCompact = undefined;
+      void this.runCompaction(managed, queued.instructions);
+    }
+    if (managed.pendingTaskReminders.length > 0) {
+      setTimeout(() => {
+        if (managed.status !== 'idle' || managed.pendingTaskReminders.length === 0) return;
+        const texts = managed.pendingTaskReminders.splice(0);
+        this.deliverNotification(managed.identity.sessionId, texts.join('\\n\\n---\\n\\n'));
+      }, 150);
     }
   }
 
@@ -3857,10 +3940,24 @@ export class SessionSupervisor {
     return slot?.id ?? null;
   }
 
+  /** 子代理预算 Run 每完成一次模型请求记一笔：到软预算提示一次，到 1.5 倍中止并强制交出。 */
+  private noteBudgetRequest(managed: ManagedSession, message: ProjectedMessage): void {
+    // 不带工具调用的正常收尾就是最终回答：哪怕正好踩线也不打断
+    const final =
+      message.stopReason === 'stop' && !message.content.some((part) => part.type === 'toolCall');
+    const action = managed.requestBudget?.observe(final);
+    if (action === 'notice') managed.requestBudget?.queueNotice();
+    else if (action === 'stop' || action === 'hard') {
+      // observe() 已切阶段；abort 结束后 agent_settled 按阶段决定是补交报告还是收口
+      void managed.session.abort().catch(() => {});
+    }
+  }
+
   private failTurn(managed: ManagedSession, error: string, undelivered = false): void {
     const turnId = managed.currentTurnId ?? randomUUID();
     managed.currentTurnId = undefined;
     managed.settlePending = false;
+    managed.requestBudget?.disarm();
     managed.contextUsage.setPendingSnapshot(undefined);
     managed.status = 'failed';
     // 失败轮不总结，但下一轮的起点仍要往前推，否则失败轮的消息会混进下一轮摘要

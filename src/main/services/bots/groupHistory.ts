@@ -75,6 +75,8 @@ function describe(entry: GroupEntry, nameOf: (id: BotId) => string | undefined) 
       const summary = entry.summary?.replace(/\s+/g, ' ').trim();
       return { from: TRANSCRIPT_LABELS.system, text: summary ? `${head}：${summary}` : head };
     }
+    case 'progress':
+      return { from: name(entry.botId), text: entry.text };
     default:
       return { from: TRANSCRIPT_LABELS.system, text: entry.text };
   }

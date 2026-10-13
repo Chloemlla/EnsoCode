@@ -27,20 +27,34 @@ input: {
 ```ts
 titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
 frame: isMac,
+...(isWindows && {
+  transparent: false,
+  thickFrame: true,
+  titleBarOverlay: { color, symbolColor, height: 44 },
+}),
 ...(isMac && { trafficLightPosition: TRAFFIC_LIGHT_POSITION }),
 ```
 
-macOS 保留系统红绿灯，Windows/Linux 由渲染层自绘（`components/app/TitleBar.tsx`）。
-最大化后中间按钮改成还原图标（重叠方块），不要一直画单个方块。
+macOS 保留系统红绿灯；Windows 通过 Window Controls Overlay 保留原生窗口按钮，
+让系统识别最大化按钮并提供 Windows 11 贴靠布局；Linux 由 `TitleBar.tsx` 自绘。
+Windows 的标题栏内容为原生按钮预留区域，优先使用 `titlebar-area-width`，独立
+`WebContentsView` 没有该几何信息时按 138 DIP 预留。`useNativeWindowControls` 把实际
+标题栏配色转换成 RGB，经 `window:set-title-bar-appearance` 同步；Main 只接受经过校验的
+两种颜色，并且只允许该窗口的工作区 renderer 更新。
 
-Windows 透明主窗口无框后系统不再画圆角和外框。主窗口渲染层用
-`useWindowsWindowChrome` 给 `html` 挂 `enso-win`，`globals.css` 给 `#root`
-在 `enso-main-shell.enso-win` 下画 8px 圆角和描边；最大化/全屏挂
-`enso-win-flush` 去掉这层。普通不透明窗口（如设置页）保留 Windows/DWM
-已有的圆角和边框，不要重复挂自绘 chrome。
-不要给透明主窗口开 Electron `roundedCorners`。
-描边用 `#root::after`：`inset: 1px` + `inset box-shadow`，不要用贴齐视口的 `border: 1px`。
-Windows DWM / 分数 DPI 会裁掉客户区右、下最外 1px，看起来只剩上、左边框。
+Windows 顶层 `BrowserWindow` 必须保持不透明：Electron 43 的透明窗口会强制关闭
+粗边框，并使用特殊的最大化路径。主窗口的 workbench `WebContentsView` 与其 HTML
+仍保持透明，所以 guest 网页垫底和菜单遮挡仍沿原有视图叠层处理。macOS/Linux 的
+透明主窗口配置保持原样。
+
+主窗口暂时保留 800×600 的最小尺寸。系统贴靠区域小于此尺寸时仍会受到限制；
+进一步降低限制需要同时适配聊天、侧栏和右侧面板，不能只改两个尺寸常量。
+
+Linux 最大化后中间按钮改成还原图标（重叠方块），不要一直画单个方块。
+
+`useWindowsWindowChrome` 给主窗口 `html` 挂 `enso-win` 和 `enso-win-native`，
+最大化/全屏时挂 `enso-win-flush`。原生模式不叠加 renderer 自绘圆角与描边；
+这些状态只控制 browser guest/devtools 的边缘预留。
 
 窗口状态事件可能先于初始 IPC 查询返回；初始快照不能覆盖已经收到事件的字段，
 Effect 清理后也不能让未完成的查询重新写 class。初始查询完成前挂
@@ -54,11 +68,11 @@ Browser guest/devtools 是独立原生 `WebContentsView`，提到 workbench 上�
 
 ## Windows 最小化
 
-透明主窗口 + pinned `WebContentsView` 在 Windows 上最小化一段时间后，任务栏可能点不回来。
+旧版透明主窗口 + pinned `WebContentsView` 在 Windows 上最小化一段时间后，任务栏可能点不回来。
 主窗口 `html` / `body` 全透明，UI 全靠 workbench 画，所以 occlusion、0×0 bounds、
 renderer 被杀、GPU 丢表面的观感都一样，**未在真机二分，不要把其中一条写成已证实根因**。
 
-已做的防御（`win32Restore.ts` / `rendererGone.ts`）：
+当前 Windows 顶层窗口已不透明；仍保留以下防御（`win32Restore.ts` / `rendererGone.ts`）：
 
 - win32 启动时把 `CalculateNativeWinOcclusion` 合并进 `disable-features`（未证实是否仍有效）。
 - 最小化 / 空矩形不写 workbench bounds；`restore` / `show` / `maximize` / `unmaximize` /

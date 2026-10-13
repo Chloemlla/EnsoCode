@@ -117,6 +117,12 @@ export function GroupInfoPanel({
   const [hops, setHops] = useState(String(chat.routing.maxHops));
   const [turns, setTurns] = useState(String(chat.routing.maxTurnsPerBot));
   const [adding, setAdding] = useState(false);
+  const [tab, setTab] = useState('info');
+  const taskFocus = useBotsStore((s) => s.taskFocus);
+
+  useEffect(() => {
+    if (taskFocus?.chatId === chat.id) setTab('board');
+  }, [taskFocus, chat.id]);
 
   useEffect(() => {
     setTitle(chat.title);
@@ -155,7 +161,11 @@ export function GroupInfoPanel({
   ];
 
   return (
-    <Tabs defaultValue="info" className="flex min-h-0 flex-1 flex-col">
+    <Tabs
+      value={tab}
+      onValueChange={(value) => setTab(String(value))}
+      className="flex min-h-0 flex-1 flex-col"
+    >
       <TabsList variant="underline" className="shrink-0 px-2 pt-2">
         <TabsTab value="info">{t('Group info')}</TabsTab>
         <TabsTab value="board">{t('Task board')}</TabsTab>
@@ -164,7 +174,7 @@ export function GroupInfoPanel({
       </TabsList>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <TabsPanel value="board">
-          <TaskBoard chat={chat} />
+          <TaskBoard chat={chat} onOpenConversation={onOpenConversation} />
         </TabsPanel>
         <TabsPanel value="delegations">
           <GroupDelegations chat={thread} onOpenConversation={onOpenConversation} />

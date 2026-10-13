@@ -34,6 +34,19 @@ it('normalizes aliases, numeric ids and nulls before typed schema validation', (
     id: '#4',
     reason: 'no tests',
   });
+  for (const [raw, rework] of [
+    ['true', true],
+    [' TRUE ', true],
+    ['false', false],
+    [1, true],
+    [0, false],
+  ] as const)
+    expect(
+      normalizeGroupTaskParams({ action: 'reject', id: '#4', reason: 'r', rework: raw })
+    ).toEqual({ action: 'reject', id: '#4', reason: 'r', rework });
+  expect(
+    normalizeGroupTaskParams({ action: 'reject', id: '#4', reason: 'r', rework: null })
+  ).toEqual({ action: 'reject', id: '#4', reason: 'r' });
 });
 
 it('declares a fully typed schema with prepareArguments', () => {
@@ -59,6 +72,7 @@ it('declares a fully typed schema with prepareArguments', () => {
     'reject',
   ]);
   expect(schema.properties.reason).toMatchObject({ type: 'string' });
+  expect(schema.properties.rework).toMatchObject({ type: 'boolean' });
   for (const property of Object.values(schema.properties)) expect(property).toHaveProperty('type');
   expect(schema.properties.check).toMatchObject({ type: 'object' });
   expect(tool.prepareArguments).toBeDefined();

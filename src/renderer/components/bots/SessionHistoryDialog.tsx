@@ -5,7 +5,7 @@ import { MessageTimeline, type MessageTimelineHandle } from '@/components/chat/M
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useI18n } from '@/i18n';
 import { buildTimeline } from '@/stores/sessions/timeline';
-import { type MessageFocus, useMessageFocus } from './LiveSessionTimeline';
+import { type MessageFocus, useMessageFocus, useRunDividers } from './LiveSessionTimeline';
 
 interface SessionHistoryDialogProps {
   /** null = 关闭 */
@@ -74,12 +74,16 @@ export function SessionHistoryDialog({
     }
   }, [conversationId, page]);
 
+  const runDividers = useRunDividers(conversationId);
   const items = useMemo(
     () =>
       page
-        ? buildTimeline(page.messages, false, [], undefined, { historyBaseIndex: page.baseIndex })
+        ? buildTimeline(page.messages, false, [], undefined, {
+            historyBaseIndex: page.baseIndex,
+            runDividers,
+          })
         : [],
-    [page]
+    [page, runDividers]
   );
   const loadOlderPage = useCallback(() => void loadOlder(), [loadOlder]);
   const highlight = useMessageFocus({

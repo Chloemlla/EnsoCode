@@ -53,6 +53,33 @@ describe('buildGroupDelta', () => {
     );
   });
 
+  it('progress 以成员名义渲染成一行，所有成员都能看到（含本人）', () => {
+    const progress = (seq: number, botId: string, text: string): GroupEntry => ({
+      kind: 'progress',
+      seq,
+      id: `p${seq}`,
+      at: 0,
+      botId,
+      taskId: 't',
+      taskSeq: 1,
+      delegationId: 'd',
+      phase: 'delivered',
+      text,
+    });
+    const r = buildGroupDelta({
+      ...base,
+      cursor: 1,
+      entries: [progress(2, 'fe', '交付 #1：页面\n好了'), progress(3, 'me', '开工 #2『接口』')],
+    });
+    expect(r.text).toBe(
+      [
+        `<group-message from="Fe" role="${TRANSCRIPT_LABELS.progress}" seq="2">交付 #1：页面 好了</group-message>`,
+        `<group-message from="阿后" role="${TRANSCRIPT_LABELS.progress}" seq="3">开工 #2『接口』</group-message>`,
+      ].join('\n')
+    );
+    expect(TRANSCRIPT_LABELS.progress).toBe('进度');
+  });
+
   it('人类发言用固定的 from/role 常量', () => {
     const r = buildGroupDelta({ ...base, cursor: 1, entries: [human(2, '你好')] });
     expect(r.text).toBe(

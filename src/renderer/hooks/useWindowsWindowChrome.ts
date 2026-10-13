@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 const WINDOWS_CHROME_CLASS = 'enso-win';
 const WINDOWS_CHROME_FLUSH_CLASS = 'enso-win-flush';
 const WINDOWS_CHROME_PENDING_CLASS = 'enso-win-pending';
+const WINDOWS_CHROME_NATIVE_CLASS = 'enso-win-native';
 
 interface WindowsChromeState {
   maximized: boolean;
@@ -36,8 +37,11 @@ function applyWindowsChromeClasses(maximized: boolean, fullscreen: boolean): voi
 }
 
 /**
- * Windows 无框窗口自绘圆角和描边。
- * 只给 html 挂 class，样式在 globals.css；macOS / Linux 不跑。
+ * Windows 窗口由系统绘制圆角和外框；这些状态类只控制浏览器视图的边缘预留。
+ * 只给 html 挂 class，样式在 globals.css；macOS 和 Linux 不执行。
+ *
+ * Windows supplies the rounded corners and frame. These classes control browser
+ * view edge insets through globals.css and do not run on macOS or Linux.
  */
 export function useWindowsWindowChrome(): void {
   useEffect(() => {
@@ -45,6 +49,7 @@ export function useWindowsWindowChrome(): void {
 
     const root = document.documentElement;
     root.classList.add(WINDOWS_CHROME_CLASS, WINDOWS_CHROME_PENDING_CLASS);
+    root.classList.add(WINDOWS_CHROME_NATIVE_CLASS);
 
     let state: WindowsChromeState = { maximized: false, fullscreen: false };
     const eventRevision = { maximized: 0, fullscreen: 0 };
@@ -106,7 +111,8 @@ export function useWindowsWindowChrome(): void {
       root.classList.remove(
         WINDOWS_CHROME_CLASS,
         WINDOWS_CHROME_FLUSH_CLASS,
-        WINDOWS_CHROME_PENDING_CLASS
+        WINDOWS_CHROME_PENDING_CLASS,
+        WINDOWS_CHROME_NATIVE_CLASS
       );
     };
   }, []);

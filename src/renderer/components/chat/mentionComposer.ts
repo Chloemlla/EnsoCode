@@ -1,4 +1,9 @@
 import { formatUiElementRefLine, parseUiElementRefLine } from '@shared/browser/designMode';
+import {
+  PASTED_TEXT_FILE_NAME,
+  splitPastedTextRefs,
+  stripPastedTextRefs,
+} from '@shared/pastedText';
 import type { AttachedImage } from '@shared/types/agent';
 import type { AgentTypeMentionCandidate, MentionCandidate } from '@shared/types/mentions';
 import { parseWorkflowPresetMessage } from '@shared/workflowPresetMessage';
@@ -123,7 +128,7 @@ export type InlineSegment = { type: 'text'; text: string } | { type: 'file'; pat
 /** 编辑器段模型：文本 / 文件卡片 / 会话卡片 / Design Mode 选区 */
 export type MentionSegment =
   | { type: 'text'; text: string }
-  | { type: 'file'; path: string }
+  | { type: 'file'; path: string; label?: string }
   | { type: 'chat'; label: string; sessionFile: string }
   | { type: 'ui-element'; id: string; label: string; path: string; text: string; imageId: string };
 
@@ -154,7 +159,7 @@ const CONTINUATION_LINE = /^(?:从这里继续|继续|continue(?:\s+here)?)\s*[:
 
 /** 清洗送给标题总结模型的输入文本：剥离内部引用块与跳转引导词，返回纯净的用户自然语言或被引标题 */
 export function cleanTitleSummarySource(text: string): string {
-  const trimmed = text.trim();
+  const trimmed = stripPastedTextRefs(text).trim();
   if (!trimmed) return '';
 
   const chatLabels: string[] = [];
@@ -192,13 +197,14 @@ export function cleanTitleSummarySource(text: string): string {
 export function extractRepresentativeTitle(text: string): string {
   const workflow = parseWorkflowPresetMessage(text);
   if (workflow) return workflow.name.slice(0, 40);
-  const displayed = mentionDisplayText(text);
+  const withoutPasted = stripPastedTextRefs(text);
+  const displayed = mentionDisplayText(withoutPasted);
   const lines = displayed
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  if (lines.length === 0) return '[image]';
+  if (lines.length === 0) return withoutPasted === text ? '[image]' : PASTED_TEXT_FILE_NAME;
 
   let selected = lines[0];
   if (CONTINUATION_LINE.test(selected) && lines.length > 1) {
@@ -285,6 +291,12 @@ export function fileMentionBasename(relativePath: string): string {
  * token 剥掉句尾标点后末段带扩展名或尾 /。邮箱（@ 前非空白）、npm scope 不误伤。
  */
 export function splitInlineFileTokens(text: string): InlineSegment[] {
+  return splitPastedTextRefs(text).flatMap((segment) =>
+    segment.type === 'file' ? [segment] : splitHeuristicFileTokens(segment.text)
+  );
+}
+
+function splitHeuristicFileTokens(text: string): InlineSegment[] {
   const segments: InlineSegment[] = [];
   let plain = '';
   let index = 0;

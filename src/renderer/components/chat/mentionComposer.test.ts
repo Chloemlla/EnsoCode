@@ -454,6 +454,16 @@ describe('typed multi-entity mentions', () => {
     ]);
   });
 
+  it('超长粘贴附件的绝对路径含空格时整体渲染成一个文件卡片', () => {
+    const pasted =
+      '/Users/me/Library/Application Support/enso-code/agent/sessions/pasted-text/45451c80-50eb-464e-bd55-366c66d49bff/d76184b6/pasted-text.txt';
+    expect(splitInlineFileTokens(`@${pasted}\u00a0总结一下 @src/a.ts`)).toEqual([
+      { type: 'file', path: pasted },
+      { type: 'text', text: '\u00a0总结一下 ' },
+      { type: 'file', path: 'src/a.ts' },
+    ]);
+  });
+
   it('round-trips editor segments through wire text: files and chats keep inline positions', () => {
     const segments = [
       { type: 'text' as const, text: 'compare ' },
@@ -741,6 +751,13 @@ describe('mentionPopupLayout', () => {
         '[Referenced past chat "用户登录模块" — transcript file: /s/1.jsonl (pi session jsonl; read it if relevant)]';
       expect(cleanTitleSummarySource(raw)).toBe('用户登录模块');
     });
+
+    it('剥掉超长粘贴附件路径；只剩附件时为空（不送总结）', () => {
+      const pasted =
+        '@/Users/me/Library/Application Support/enso-code/agent/sessions/pasted-text/45451c80-50eb-464e-bd55-366c66d49bff/d76184b6/pasted-text.txt';
+      expect(cleanTitleSummarySource(`${pasted}\u00a0帮我总结这份日志`)).toBe('帮我总结这份日志');
+      expect(cleanTitleSummarySource(`${pasted}\u00a0`)).toBe('');
+    });
   });
 
   describe('extractRepresentativeTitle：提取首条消息的代表行作为暂存标题', () => {
@@ -780,6 +797,15 @@ describe('mentionPopupLayout', () => {
     it('空消息回退到 [image]', () => {
       expect(extractRepresentativeTitle('')).toBe('[image]');
       expect(extractRepresentativeTitle('   \n  ')).toBe('[image]');
+    });
+
+    it('超长粘贴附件路径不进标题；只剩附件时用固定标题', () => {
+      const pasted =
+        '@/Users/me/Library/Application Support/enso-code/agent/sessions/pasted-text/45451c80-50eb-464e-bd55-366c66d49bff/d76184b6/pasted-text.txt';
+      expect(extractRepresentativeTitle(`${pasted}\u00a0帮我总结这份日志`)).toBe(
+        '帮我总结这份日志'
+      );
+      expect(extractRepresentativeTitle(`${pasted}\u00a0`)).toBe('pasted-text.txt');
     });
   });
 });
