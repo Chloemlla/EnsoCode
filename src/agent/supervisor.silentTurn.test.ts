@@ -510,4 +510,59 @@ describe('SessionSupervisor terminal turn handling', () => {
     expect(upserts().at(-1)).toBe('abcdefg');
     await supervisor.shutdown();
   });
+
+  describe('前台中止后的子代理完成通知', () => {
+    const notified = (parentSession: ReturnType<typeof session>, text: string) =>
+      parentSession.prompt.mock.calls.filter((call: unknown[]) => String(call[0]).includes(text));
+    const until = async (predicate: () => boolean) => {
+      for (let i = 0; i < 100 && !predicate(); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const abortSettlesAsError = (parentSession: ReturnType<typeof session>) => {
+      parentSession.messages.push({
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: 'This operation was aborted',
+      });
+      parentSession.emit({ type: 'agent_end', willRetry: false });
+      parentSession.emit({ type: 'agent_settled' });
+    };
+    const notify = (supervisor: SessionSupervisor, text: string) =>
+      supervisor.handleCommand({ type: 'agent-notify', identity: parent, text, urgent: false });
+
+    it('中止后 pi 仍在收尾时到达的通知，收尾结束后自动投递且只投一次', async () => {
+      const { supervisor, parentSession } = await spawn();
+      parentSession.emit({ type: 'agent_start' });
+      supervisor.handleCommand({ type: 'abort', identity: parent });
+      parentSession.prompt.mockRejectedValueOnce(new Error('Agent is already processing.'));
+      notify(supervisor, 'run-fast finished');
+      await until(() => notified(parentSession, 'run-fast finished').length === 1);
+      expect(notified(parentSession, 'run-fast finished')).toHaveLength(1);
+
+      abortSettlesAsError(parentSession);
+      await until(() => notified(parentSession, 'run-fast finished').length > 1);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(notified(parentSession, 'run-fast finished')).toHaveLength(2);
+      await supervisor.shutdown();
+    });
+
+    it('中止收口为失败后，再完成的子代理通知直接唤起一轮', async () => {
+      const { events, supervisor, parentSession } = await spawn();
+      parentSession.emit({ type: 'agent_start' });
+      supervisor.handleCommand({ type: 'abort', identity: parent });
+      abortSettlesAsError(parentSession);
+      await settle();
+      expect(events.filter((event) => event.type === 'status').at(-1)).toMatchObject({
+        status: 'failed',
+      });
+
+      notify(supervisor, 'run-bg finished');
+      await until(() => notified(parentSession, 'run-bg finished').length > 0);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(notified(parentSession, 'run-bg finished')).toHaveLength(1);
+      await supervisor.shutdown();
+    });
+  });
 });

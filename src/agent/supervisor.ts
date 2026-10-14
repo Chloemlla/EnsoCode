@@ -817,7 +817,8 @@ export class SessionSupervisor {
     if (!managed) return;
     if (this.workspaceSwitch.defer(sessionId, () => this.deliverNotification(sessionId, text)))
       return;
-    if (managed.status === 'idle') {
+    // 失败（含前台中止后按错误收口）同空闲：能接新回合就立即唤起，不攒到用户下一条消息
+    if (managed.status !== 'running') {
       managed.roundPending = true;
       void managed.session
         .prompt(`<agent-notification>\n${text}\n</agent-notification>`)
@@ -831,6 +832,16 @@ export class SessionSupervisor {
     } else {
       managed.pendingTaskReminders.push(text);
     }
+  }
+
+  /** 回合收口后补投攒下的通知（中止后 pi 收尾期间被拒的 prompt 也在这里） */
+  private flushPendingReminders(managed: ManagedSession): void {
+    if (managed.pendingTaskReminders.length === 0) return;
+    setTimeout(() => {
+      if (managed.status === 'running' || managed.pendingTaskReminders.length === 0) return;
+      const texts = managed.pendingTaskReminders.splice(0);
+      this.deliverNotification(managed.identity.sessionId, texts.join('\n\n---\n\n'));
+    }, 150);
   }
 
   constructor(private readonly options: SupervisorOptions) {
@@ -3497,7 +3508,10 @@ export class SessionSupervisor {
             deliveryId: slot.id,
           });
         }
-        if (!managed.settlePending) return;
+        if (!managed.settlePending) {
+          this.flushPendingReminders(managed);
+          return;
+        }
         managed.settlePending = false;
         // 请求预算到 1.5 倍：这次中止是为了强制交出，不收口、不通知父会话。
         // 补一轮只交报告的请求，仍用原来的 turnId，父会话只看到一次收尾结果。
@@ -3575,13 +3589,7 @@ export class SessionSupervisor {
       managed.pendingCompact = undefined;
       void this.runCompaction(managed, queued.instructions);
     }
-    if (managed.pendingTaskReminders.length > 0) {
-      setTimeout(() => {
-        if (managed.status !== 'idle' || managed.pendingTaskReminders.length === 0) return;
-        const texts = managed.pendingTaskReminders.splice(0);
-        this.deliverNotification(managed.identity.sessionId, texts.join('\\n\\n---\\n\\n'));
-      }, 150);
-    }
+    this.flushPendingReminders(managed);
   }
 
   private withTiming(
@@ -3985,6 +3993,7 @@ export class SessionSupervisor {
       error,
       ...(undelivered ? { undelivered: true } : {}),
     });
+    this.flushPendingReminders(managed);
   }
 
   private emitStatus(managed: ManagedSession, error?: string): void {
