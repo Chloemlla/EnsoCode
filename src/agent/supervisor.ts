@@ -19,6 +19,7 @@ import {
   type ResourceDiagnostic,
   SessionManager,
 } from '@earendil-works/pi-coding-agent';
+import { autoRetryOverrides, DEFAULT_AUTO_RETRY_LIMIT } from '@shared/autoRetry';
 import {
   type ChildSessionIdentity,
   ENSO_LOCKED_PROFILE,
@@ -61,6 +62,7 @@ import type {
   AttachedImage,
   ChildConversationMetadata,
   CoworkerInfo,
+  McpOAuthRefreshResult,
   McpServerSpawnConfig,
   MessageTiming,
   ModelRef,
@@ -107,6 +109,7 @@ import {
 } from './backgroundTasks';
 import { CheckpointManager, withCheckpoint } from './checkpoint/manager';
 import { createRemoteCheckpointHost } from './checkpoint/remoteHost';
+import { appendSystemPromptExtension, SUBAGENT_CONTRACT_PROMPT } from './childContract';
 import {
   type ChildThinkingLevel,
   pickChildReasoningOverride,
@@ -168,6 +171,7 @@ import { createProjectSettingsManager } from './projectCode';
 import { projectMessage } from './projection';
 import { applyWorkerProxyEnv } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
+import { enqueueReminder, REMINDER_QUEUE_LIMIT } from './reminderQueue';
 import { withRequestBodyBudget } from './requestBodyBudget';
 import { runWithRequestBodyObserver } from './requestBodyTelemetry';
 import { budgetWrapUpPrompt, RequestBudget } from './requestBudget';
@@ -327,6 +331,8 @@ interface ManagedSession {
   gate: ApprovalGate;
   asks: AskManager;
   pendingTaskReminders: string[];
+  /** 通知队列溢出只报一次 */
+  reminderEvictionReported?: boolean;
   /** 忙碌时收到的手动压缩请求：本轮收束后自动执行（用户选择「排队」而非打断） */
   pendingCompact?: { instructions?: string };
   /**
@@ -367,6 +373,34 @@ interface ManagedSession {
   contextUsage: ContextUsageTracker;
   requestBody?: RequestBodyUsage;
   unsubscribe: () => void;
+}
+
+/** ManagedSession 上所有带 pendingCount 的能力字段 */
+type PendingCounterKey = {
+  [K in keyof ManagedSession]-?: NonNullable<ManagedSession[K]> extends {
+    readonly pendingCount: number;
+  }
+    ? K
+    : never;
+}[keyof ManagedSession];
+
+/**
+ * 挂起判定的探针登记表：新增带 pendingCount 的能力而不登记会编译失败，
+ * 不再靠驱逐 / 工作区锁两处手工清单各自记得补（曾漏 memory、delegation）。
+ */
+const PENDING_COUNTERS: Record<PendingCounterKey, true> = {
+  ensoApp: true,
+  browser: true,
+  memory: true,
+  delegation: true,
+  agentControl: true,
+  computer: true,
+};
+
+export function hasPendingCalls(managed: ManagedSession): boolean {
+  return (Object.keys(PENDING_COUNTERS) as PendingCounterKey[]).some(
+    (key) => (managed[key]?.pendingCount ?? 0) > 0
+  );
 }
 
 export interface SupervisorOptions {
@@ -433,6 +467,8 @@ function createSessionResourceLoader(options: {
   smartCompactMode?: SmartCompactMode;
   /** 仅普通 parent：替换 pi 默认提示词开头的角色段落；会强制整段提示词，故排在扩展最后。 */
   persona?: string;
+  /** 仅子会话：追加子代理行为合同到系统提示词（进 system prompt 才不会随压缩丢失） */
+  childContract?: boolean;
 }): DefaultResourceLoader {
   const harness = options.loadHarnessAssets && !options.remoteAgentsFiles;
   const skillPaths = harness
@@ -521,6 +557,9 @@ function createSessionResourceLoader(options: {
           ]
         : []),
       options.silentTurnRecovery,
+      ...(options.childContract
+        ? [appendSystemPromptExtension('subagent-contract', SUBAGENT_CONTRACT_PROMPT)]
+        : []),
       ...(persona
         ? [
             {
@@ -705,7 +744,35 @@ export class SessionSupervisor {
   private readonly gate = new OperationGate();
   private readonly workspaceSwitch = new WorkspaceSwitchGate(this.sessions);
   private readonly pendingCommands = new Map<string, number>();
-  private readonly mcp = new McpManager({ emit: (event) => this.options.emit(event) });
+  private readonly mcp = new McpManager({
+    emit: (event) => this.options.emit(event),
+    refreshOAuth: (serverId, rejected) => this.requestMcpOAuthRefresh(serverId, rejected),
+  });
+  private readonly mcpOAuthPending = new Map<string, (result: McpOAuthRefreshResult) => void>();
+  /** MCP access token 续期只在 Main 做（refresh_token 不进 worker）；超时按临时故障处理 */
+  private readonly requestMcpOAuthRefresh = (
+    serverId: string,
+    rejected?: string
+  ): Promise<McpOAuthRefreshResult> =>
+    new Promise((resolve) => {
+      const requestId = randomUUID();
+      const finish = (result: McpOAuthRefreshResult) => {
+        clearTimeout(timer);
+        this.mcpOAuthPending.delete(requestId);
+        resolve(result);
+      };
+      const timer = setTimeout(
+        () => finish({ ok: false, unauthorized: false, error: 'MCP OAuth refresh timed out.' }),
+        30_000
+      );
+      this.mcpOAuthPending.set(requestId, finish);
+      this.options.emit({
+        type: 'mcp-oauth-refresh',
+        requestId,
+        serverId,
+        ...(rejected ? { rejected } : {}),
+      });
+    });
   private readonly bgTasks: BackgroundTaskManager;
   /** Bot 写成员在同一工作区的文件占用 / 全局命令独占（全部会话同进程共享） */
   private readonly workspaceClaims = new WorkspaceClaims();
@@ -780,6 +847,7 @@ export class SessionSupervisor {
   private readonly evictionTimer: ReturnType<typeof setInterval>;
   private approvalReviewer: SpawnModelConfig | undefined;
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
+  private autoRetryLimit = DEFAULT_AUTO_RETRY_LIMIT;
   private disabledWorkflowPresets: string[] = [];
   /** undefined 跟随会话；空数组表示已配置但全部不可用，直接走 Exa。 */
   private webSearchChain: readonly WebSearchChainEntry[] | undefined;
@@ -827,10 +895,19 @@ export class SessionSupervisor {
         })
         .catch(() => {
           // status 是我们的投影,pi loop 可能仍在收尾拒绝 prompt——退回 pending 待搭车/轮末重投,绝不静默丢
-          managed.pendingTaskReminders.push(text);
+          this.queueReminder(managed, text);
         });
     } else {
-      managed.pendingTaskReminders.push(text);
+      this.queueReminder(managed, text);
+    }
+  }
+
+  private queueReminder(managed: ManagedSession, text: string): void {
+    if (enqueueReminder(managed.pendingTaskReminders, text) && !managed.reminderEvictionReported) {
+      managed.reminderEvictionReported = true;
+      console.warn(
+        `[notify] pending reminders exceeded ${REMINDER_QUEUE_LIMIT}; oldest dropped for ${managed.identity.sessionId}`
+      );
     }
   }
 
@@ -884,6 +961,17 @@ export class SessionSupervisor {
             });
           }
         },
+        onLevel: (sessionId, tasks) => {
+          const managed = this.sessions.get(sessionId);
+          if (managed) {
+            this.options.emit({
+              type: 'background-tasks-level',
+              identity: managed.identity,
+              seq: ++managed.seq,
+              tasks,
+            });
+          }
+        },
         // 完成通知走合并投递:多任务同时完成合并成一条,失败在 manager 文本里自带标注
         onCompletionNotify: (sessionId, text) => {
           this.notifier.notify(sessionId, text);
@@ -910,13 +998,9 @@ export class SessionSupervisor {
         managed.currentTurnId !== undefined ||
         managed.gate.snapshot().length > 0 ||
         managed.asks.snapshot().length > 0 ||
-        (managed.ensoApp?.pendingCount ?? 0) > 0 ||
-        (managed.browser?.pendingCount ?? 0) > 0 ||
-        (managed.memory?.pendingCount ?? 0) > 0 ||
-        (managed.agentControl?.pendingCount ?? 0) > 0 ||
+        hasPendingCalls(managed) ||
         (managed.workflowRuns?.size ?? 0) > 0 ||
         managed.pendingTaskReminders.length > 0 ||
-        (managed.computer?.pendingCount ?? 0) > 0 ||
         this.bgTasks.snapshot(id).some((task) => task.status === 'running'),
       hasChildren:
         managed.coworkers.size > 0 ||
@@ -1000,6 +1084,10 @@ export class SessionSupervisor {
       this.oauthPoolPending.get(command.requestId)?.(command);
       return;
     }
+    if (command.type === 'mcp-oauth-refresh-result') {
+      this.mcpOAuthPending.get(command.requestId)?.(command.result);
+      return;
+    }
     if (command.type === 'lock-workspace' || command.type === 'unlock-workspace') {
       const ok =
         command.type === 'lock-workspace'
@@ -1023,10 +1111,7 @@ export class SessionSupervisor {
                 this.gate.hasPending(managed.identity.sessionId) ||
                 managed.gate.snapshot().length > 0 ||
                 managed.asks.snapshot().length > 0 ||
-                (managed.ensoApp?.pendingCount ?? 0) > 0 ||
-                (managed.browser?.pendingCount ?? 0) > 0 ||
-                (managed.agentControl?.pendingCount ?? 0) > 0 ||
-                (managed.computer?.pendingCount ?? 0) > 0 ||
+                hasPendingCalls(managed) ||
                 this.bgTasks
                   .snapshot(managed.identity.sessionId)
                   .some((task) => task.status === 'running')
@@ -1129,6 +1214,10 @@ export class SessionSupervisor {
     }
     if (command.type === 'set-max-active-coworkers') {
       this.maxActiveCoworkers = command.limit;
+      return;
+    }
+    if (command.type === 'set-auto-retry-limit') {
+      this.autoRetryLimit = command.limit;
       return;
     }
     if (command.type === 'set-disabled-workflow-presets') {
@@ -2166,6 +2255,13 @@ export class SessionSupervisor {
         resumeFile: childResume,
         extraTools = [],
       }) => {
+        const isLockedEnso = resolved?.tools === 'enso-locked';
+        const selectedMcp = resolved?.mcpServers ?? agentType?.mcpServers ?? [];
+        // 冷连接最长 3s：与模型解析、资源加载并行，不串在首字节前的关键路径最前面
+        const mcpPending =
+          !isLockedEnso && selectedMcp.length > 0
+            ? Promise.all(selectedMcp.map((server) => this.mcp.toolsFor([server], 3000)))
+            : Promise.resolve([]);
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
         const base = await resolveSessionModel(runtime, selectedModel);
         // 派发 thinking > 类型预设 > 模型条目预设 > 父会话。
@@ -2181,53 +2277,9 @@ export class SessionSupervisor {
           childReasoning.enabled,
           selectedModel.modelId
         );
-        const isLockedEnso = resolved?.tools === 'enso-locked';
         if (isLockedEnso && (!childIdentity || !askManager)) {
           throw new Error('Locked Enso child requires exact identity and ask manager.');
         }
-        const selectedMcp = resolved?.mcpServers ?? agentType?.mcpServers ?? [];
-        const mcpToolGroups =
-          !isLockedEnso && selectedMcp.length > 0
-            ? await Promise.all(selectedMcp.map((server) => this.mcp.toolsFor([server], 3000)))
-            : [];
-        if (mcpToolGroups.some((tools) => tools.length === 0)) {
-          throw new Error('Agent profile MCP resource failed to establish.');
-        }
-        const typeMcpTools = mcpToolGroups
-          .flat()
-          .map((tool) => withApproval(childGate, 'mcp', tool));
-        const ensoApp =
-          isLockedEnso && childIdentity && askManager
-            ? new EnsoAppInvoker(
-                childIdentity,
-                () => this.sessions.get(childIdentity.sessionId)?.currentTurnId,
-                (request) => {
-                  const managed = this.sessions.get(childIdentity.sessionId);
-                  if (
-                    !managed?.childIdentity ||
-                    !isSameChildSessionIdentity(childIdentity, managed.childIdentity)
-                  ) {
-                    throw new Error('Enso child generation is no longer current.');
-                  }
-                  managed.safeJournal?.append({
-                    type: 'enso-operation',
-                    operationId: request.requestId,
-                    capabilityId: request.capabilityId,
-                    toolCallId: request.requestId,
-                    at: Date.now(),
-                  });
-                  this.options.emit({
-                    type: 'capability-invoke',
-                    child: request.child,
-                    seq: ++managed.seq,
-                    turnId: request.turnId,
-                    requestId: request.requestId,
-                    capabilityId: request.capabilityId,
-                    params: request.params,
-                  });
-                }
-              )
-            : undefined;
         const childExploreFold =
           !isLockedEnso && exploreFoldEnabled ? createExploreFoldState() : undefined;
         const typed = Boolean(resolved || agentType);
@@ -2235,49 +2287,6 @@ export class SessionSupervisor {
           codemode: !isLockedEnso && toolEnabled('isolated_sandbox'),
           deferredServers: isLockedEnso || typed ? [] : deferredMcp,
         });
-        const childTools = isLockedEnso
-          ? [createEnsoCapabilitiesTool(), createEnsoAppTool(ensoApp!), createAskTool(askManager!)]
-          : [
-              ...(!toolEnabled(WORKSPACE_WRITE_TOOL_ID) ||
-              resolved?.tools === 'readonly' ||
-              agentType?.tools === 'readonly'
-                ? readOnlyTools(childGate)
-                : buildBaseTools(
-                    childGate,
-                    undefined,
-                    agentType?.writeScope,
-                    childIdentity?.sessionId
-                  )),
-              ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
-              ...(extraTools as Def[]),
-              ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
-            ];
-        const childRunaway = new RunawayGuard();
-        const childReminders = new SystemReminderRegistry();
-        const requestBudget = new RequestBudget();
-        // 到软预算时把一次性收尾提示排进下一条工具结果；锁定会话工具不装饰，提示无处可注入
-        if (!isLockedEnso) {
-          childReminders.register('request-budget', () => {
-            const notice = requestBudget.takeNotice();
-            return notice ? [notice] : [];
-          });
-        }
-        const childBudget = new ToolOutputBudget({
-          rootDir: path.join(
-            this.options.sessionDir,
-            'tool-output',
-            childIdentity?.sessionId ?? `${sessionId}-child`
-          ),
-        });
-        const rawSubTools = childTools;
-        const decorateChild = (tools: Def[]) =>
-          decorateSessionTools(tools, {
-            reminders: childReminders,
-            runaway: childRunaway,
-            budget: childBudget,
-          });
-        const subTools = isLockedEnso ? rawSubTools : decorateChild(rawSubTools);
-        childCodemode.bindDeferredTools(deferredMcpLoader(childGate, decorateChild));
         const selectedSkillPaths = resolved?.skillPaths ?? agentType?.skillPaths ?? [];
         const branchContext = this.branchContextExtension(() =>
           [...this.sessions.values()].find((managed) => managed.session === session)
@@ -2322,8 +2331,90 @@ export class SessionSupervisor {
               },
               ...(childExploreFold ? { exploreFold: childExploreFold } : {}),
               codemode: childCodemode.extension,
+              childContract: true,
             });
-        await subLoader.reload();
+        const [mcpToolGroups] = await Promise.all([mcpPending, subLoader.reload()]);
+        if (mcpToolGroups.some((tools) => tools.length === 0)) {
+          throw new Error('Agent profile MCP resource failed to establish.');
+        }
+        const typeMcpTools = mcpToolGroups
+          .flat()
+          .map((tool) => withApproval(childGate, 'mcp', tool));
+        const ensoApp =
+          isLockedEnso && childIdentity && askManager
+            ? new EnsoAppInvoker(
+                childIdentity,
+                () => this.sessions.get(childIdentity.sessionId)?.currentTurnId,
+                (request) => {
+                  const managed = this.sessions.get(childIdentity.sessionId);
+                  if (
+                    !managed?.childIdentity ||
+                    !isSameChildSessionIdentity(childIdentity, managed.childIdentity)
+                  ) {
+                    throw new Error('Enso child generation is no longer current.');
+                  }
+                  managed.safeJournal?.append({
+                    type: 'enso-operation',
+                    operationId: request.requestId,
+                    capabilityId: request.capabilityId,
+                    toolCallId: request.requestId,
+                    at: Date.now(),
+                  });
+                  this.options.emit({
+                    type: 'capability-invoke',
+                    child: request.child,
+                    seq: ++managed.seq,
+                    turnId: request.turnId,
+                    requestId: request.requestId,
+                    capabilityId: request.capabilityId,
+                    params: request.params,
+                  });
+                }
+              )
+            : undefined;
+        const childTools = isLockedEnso
+          ? [createEnsoCapabilitiesTool(), createEnsoAppTool(ensoApp!), createAskTool(askManager!)]
+          : [
+              ...(!toolEnabled(WORKSPACE_WRITE_TOOL_ID) ||
+              resolved?.tools === 'readonly' ||
+              agentType?.tools === 'readonly'
+                ? readOnlyTools(childGate)
+                : buildBaseTools(
+                    childGate,
+                    undefined,
+                    agentType?.writeScope,
+                    childIdentity?.sessionId
+                  )),
+              ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
+              ...(extraTools as Def[]),
+              ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
+            ];
+        const childRunaway = new RunawayGuard();
+        const childReminders = new SystemReminderRegistry();
+        const requestBudget = new RequestBudget();
+        // 到软预算时把一次性收尾提示排进下一条工具结果；锁定会话工具不装饰，提示无处可注入
+        if (!isLockedEnso) {
+          childReminders.register('request-budget', () => {
+            const notice = requestBudget.takeNotice();
+            return notice ? [notice] : [];
+          });
+        }
+        const childBudget = new ToolOutputBudget({
+          rootDir: path.join(
+            this.options.sessionDir,
+            'tool-output',
+            childIdentity?.sessionId ?? `${sessionId}-child`
+          ),
+        });
+        const rawSubTools = childTools;
+        const decorateChild = (tools: Def[]) =>
+          decorateSessionTools(tools, {
+            reminders: childReminders,
+            runaway: childRunaway,
+            budget: childBudget,
+          });
+        const subTools = isLockedEnso ? rawSubTools : decorateChild(rawSubTools);
+        childCodemode.bindDeferredTools(deferredMcpLoader(childGate, decorateChild));
         const safeJournal =
           isLockedEnso && childIdentity
             ? new EnsoSafeJournal(this.options.sessionDir, childIdentity, cwd, childResume)
@@ -2673,6 +2764,15 @@ export class SessionSupervisor {
     );
   }
 
+  /** pi 的 save()/reload() 会重算 settings 冲掉 applyOverrides，故包住实例读取口，每次取当前上限 */
+  private bindAutoRetryLimit(session: AgentSession): void {
+    const settings = session.settingsManager as AgentSession['settingsManager'] | undefined;
+    if (!settings) return;
+    const base = settings.getRetrySettings.bind(settings);
+    settings.getRetrySettings = () => ({ ...base(), ...autoRetryOverrides(this.autoRetryLimit) });
+    settings.getRetryEnabled = () => autoRetryOverrides(this.autoRetryLimit).enabled;
+  }
+
   private registerManagedSession(
     identity: SessionIdentity,
     session: AgentSession,
@@ -2741,6 +2841,7 @@ export class SessionSupervisor {
       this.onSessionEvent(managed, event);
     });
     this.sessions.set(identity.sessionId, managed);
+    this.bindAutoRetryLimit(session);
     const stream = session.agent?.streamFunction;
     if (stream) {
       session.agent.streamFunction = (model, context, options) =>
@@ -3376,7 +3477,7 @@ export class SessionSupervisor {
           identity: managed.identity,
           seq: ++managed.seq,
           attempt: event.attempt,
-          maxAttempts: event.maxAttempts,
+          maxAttempts: Number.isFinite(event.maxAttempts) ? event.maxAttempts : 0,
           delayMs: event.delayMs,
           error: event.errorMessage || 'Unknown error',
         });

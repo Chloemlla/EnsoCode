@@ -1,19 +1,10 @@
-import { createHash } from 'node:crypto';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
-import {
-  extractWWWAuthenticateParams,
-  type OAuthClientProvider,
-  UnauthorizedError,
-} from '@modelcontextprotocol/sdk/client/auth.js';
+import { extractWWWAuthenticateParams } from '@modelcontextprotocol/sdk/client/auth.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type {
-  OAuthClientInformationFull,
-  OAuthClientMetadata,
-  OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js';
+import { MCP_OAUTH_REFRESH_SKEW_MS, mcpOAuthFingerprint } from '@shared/mcpOAuth';
 import {
   DEFAULT_MCP_CALL_TIMEOUT_MS,
   DEFAULT_MCP_CONNECT_TIMEOUT_MS,
@@ -21,110 +12,95 @@ import {
 } from '@shared/mcpTimeout';
 import type {
   McpConnectionState,
-  McpOAuthTokens,
+  McpOAuthAccess,
+  McpOAuthRefreshResult,
   McpScopeChallenge,
   McpServerSpawnConfig,
   McpWorkerEvent,
 } from '@shared/types/agent';
-import { parseMcpOAuthTokens } from '@shared/types/agent';
 import { assignMcpToolNames, mcpNamespaceName } from './mcpNames';
 
 interface Connection {
   client: Client;
   tools: ToolDefinition[];
-  /** http/sse 连接的凭据持有方，供 Main 下发新 token 时原地替换 */
-  provider?: WorkerOAuthProvider;
 }
 
 export interface McpManagerOptions {
   emit(event: McpWorkerEvent): void;
-}
-
-/** worker 内不做交互授权：需要跳浏览器时抛此错，由 connect 归一成 unauthorized 上报 */
-class InteractiveAuthRequiredError extends Error {
-  constructor() {
-    super('interactive authorization required');
-  }
+  /** 请 Main 续期 access token（refresh_token 只在 Main）；rejected = 被拒 token 的指纹 */
+  refreshOAuth?(serverId: string, rejected?: string): Promise<McpOAuthRefreshResult>;
 }
 
 /**
- * worker 侧 OAuth 提供方：token 由 Main 下发，只负责读用与 SDK 自动 refresh 回传。
- * DCR 结果、code verifier 只留内存——本期不做 worker 内交互授权，重启重来即可。
+ * worker 侧 OAuth 凭据：只持 access token，临期或被拒时请 Main 续期，同一 token 只续一次。
+ * 被续期淘汰的旧 token 记为 retired：spawn 时冻结的会话配置回传它时不回退。
  */
-class WorkerOAuthProvider implements OAuthClientProvider {
-  private tokenState: McpOAuthTokens | undefined;
-  private clientInfo: OAuthClientInformationFull | undefined;
-  private verifier: string | undefined;
+class OAuthAccess {
+  current: McpOAuthAccess | undefined;
+  private readonly retired = new Set<string>();
+  private renewing: { rejected: string; promise: Promise<McpOAuthAccess | undefined> } | undefined;
+  private proactiveFailed = '';
 
   constructor(
-    private readonly server: McpServerSpawnConfig,
-    private readonly emit: (event: McpWorkerEvent) => void
-  ) {
-    this.tokenState = server.oauth;
+    private readonly renewer: ((rejected: string) => Promise<McpOAuthRefreshResult>) | undefined,
+    private readonly onRenewed: (access: McpOAuthAccess) => void
+  ) {}
+
+  isRetired(access: McpOAuthAccess | undefined): boolean {
+    return Boolean(access && this.retired.has(oauthFingerprint(access)));
   }
 
-  get redirectUrl(): undefined {
-    return undefined;
+  /** Main 下发的凭据（重新授权 / 撤销）：已淘汰的旧 token 忽略 */
+  offer(access: McpOAuthAccess | undefined): void {
+    if (!this.isRetired(access)) this.current = access;
   }
 
-  get clientMetadata(): OAuthClientMetadata {
-    return {
-      client_name: 'enso-code',
-      redirect_uris: [],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'none',
-    };
-  }
-
-  clientInformation(): OAuthClientInformationFull | undefined {
-    return this.clientInfo;
-  }
-
-  saveClientInformation(info: OAuthClientInformationFull): void {
-    this.clientInfo = info;
-  }
-
-  tokens(): OAuthTokens | undefined {
-    if (!this.tokenState) return undefined;
-    return { ...this.tokenState, token_type: this.tokenState.token_type ?? 'Bearer' };
-  }
-
-  /** Main 下发了新凭据：原地换掉，避免为了换 token 重建连接 */
-  updateTokens(tokens: McpOAuthTokens): void {
-    this.tokenState = tokens;
-  }
-
-  saveTokens(tokens: OAuthTokens): void {
-    this.tokenState = tokens;
-    // 纵深防御：发出前先裁成白名单，id_token 等不出 worker
-    const trimmed = parseMcpOAuthTokens(tokens);
-    if (this.server.id && trimmed) {
-      this.emit({ type: 'mcp-tokens-refreshed', serverId: this.server.id, tokens: trimmed });
+  /** 发请求前取 token：临期先续期；续期失败仍用旧 token，交给服务端裁决 */
+  async forRequest(): Promise<McpOAuthAccess | undefined> {
+    const access = this.current;
+    if (!access?.expires_at || Date.now() < access.expires_at - MCP_OAUTH_REFRESH_SKEW_MS) {
+      return access;
     }
+    const fingerprint = oauthFingerprint(access);
+    if (this.proactiveFailed === fingerprint) return access;
+    const next = await this.renew(access);
+    if (!next) this.proactiveFailed = fingerprint;
+    return next ?? access;
   }
 
-  redirectToAuthorization(): never {
-    throw new InteractiveAuthRequiredError();
-  }
-
-  saveCodeVerifier(codeVerifier: string): void {
-    this.verifier = codeVerifier;
-  }
-
-  codeVerifier(): string {
-    if (!this.verifier) throw new InteractiveAuthRequiredError();
-    return this.verifier;
+  /** 该 token 已不可用：别处已换过就直接用新的，否则请 Main 续期 */
+  renew(stale: McpOAuthAccess): Promise<McpOAuthAccess | undefined> {
+    const rejected = oauthFingerprint(stale);
+    if (this.current && oauthFingerprint(this.current) !== rejected) {
+      return Promise.resolve(this.current);
+    }
+    if (!this.renewer) return Promise.resolve(undefined);
+    if (this.renewing?.rejected === rejected) return this.renewing.promise;
+    const promise = this.renewer(rejected)
+      .then(
+        (result) => {
+          if (!result.ok || oauthFingerprint(result.access) === rejected) return undefined;
+          this.retired.add(rejected);
+          this.current = result.access;
+          this.onRenewed(result.access);
+          return result.access;
+        },
+        () => undefined
+      )
+      .finally(() => {
+        if (this.renewing?.promise === promise) this.renewing = undefined;
+      });
+    this.renewing = { rejected, promise };
+    return promise;
   }
 }
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** 401 / SDK UnauthorizedError / 哨兵错误都归为「需要用户去设置页授权」 */
+/** 续期后仍 401（SDK 的 StreamableHTTPError / SseError 带 code）归为「需要用户去设置页授权」 */
 const isUnauthorized = (error: unknown): boolean =>
-  error instanceof UnauthorizedError ||
-  error instanceof InteractiveAuthRequiredError ||
+  (typeof error === 'object' && error !== null && 'code' in error && error.code === 401) ||
   /\b401\b|unauthorized/i.test(errorMessage(error));
 
 const RETRIABLE_CONNECTION_PATTERNS = [
@@ -140,24 +116,55 @@ const RETRIABLE_CONNECTION_PATTERNS = [
   'network error',
 ];
 
-/** 死连接 / 过期 session：值得清缓存并重试一次。业务错误和 401 不走这条。 */
-/** 401/403 带 insufficient_scope 时回报挑战（所需 scope 与资源元数据），响应原样交回 SDK */
-function scopeChallengeFetch(onChallenge: (challenge: McpScopeChallenge) => void): typeof fetch {
+/** 401/403 带 insufficient_scope：所需 scope 与资源元数据（续期拿不到新 scope，只能重新授权） */
+function scopeChallengeOf(response: Response): McpScopeChallenge | undefined {
+  if (response.status !== 401 && response.status !== 403) return undefined;
+  const { error, scope, resourceMetadataUrl } = extractWWWAuthenticateParams(response);
+  if (error !== 'insufficient_scope') return undefined;
+  return {
+    ...(scope ? { scope } : {}),
+    ...(resourceMetadataUrl ? { resourceMetadataUrl: resourceMetadataUrl.href } : {}),
+  };
+}
+
+const withBearer = (init: RequestInit | undefined, access: McpOAuthAccess): RequestInit => {
+  const headers = new Headers(init?.headers);
+  headers.set('Authorization', `Bearer ${access.access_token}`);
+  return { ...init, headers };
+};
+
+/**
+ * 远程 MCP 的 fetch：注入 access token，401 时请 Main 续期并重试一次；用户自配 Authorization 头优先。
+ * scope 挑战回报给 Main，响应原样交回 SDK。
+ */
+function remoteFetch(
+  access: OAuthAccess,
+  onChallenge: (challenge: McpScopeChallenge) => void
+): typeof fetch {
   return async (input, init) => {
-    const response = await fetch(input, init);
-    if (response.status === 401 || response.status === 403) {
-      const { error, scope, resourceMetadataUrl } = extractWWWAuthenticateParams(response);
-      if (error === 'insufficient_scope') {
-        onChallenge({
-          ...(scope ? { scope } : {}),
-          ...(resourceMetadataUrl ? { resourceMetadataUrl: resourceMetadataUrl.href } : {}),
-        });
+    let response: Response;
+    if (new Headers(init?.headers).has('authorization')) {
+      response = await fetch(input, init);
+    } else {
+      const send = (token: McpOAuthAccess | undefined) =>
+        fetch(input, token ? withBearer(init, token) : init);
+      const token = await access.forRequest();
+      response = await send(token);
+      if (response.status === 401 && token && !scopeChallengeOf(response)) {
+        const next = await access.renew(token);
+        if (next) {
+          await response.body?.cancel().catch(() => {});
+          response = await send(next);
+        }
       }
     }
+    const challenge = scopeChallengeOf(response);
+    if (challenge) onChallenge(challenge);
     return response;
   };
 }
 
+/** 死连接 / 过期 session：值得清缓存并重试一次。业务错误和 401 不走这条。 */
 export function isRetriableMcpConnectionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
@@ -176,10 +183,8 @@ const connectionKey = (server: McpServerSpawnConfig): string =>
   ]);
 
 /** token 指纹：token 明文不入内存索引，只用 hash 前缀判断「Main 是否换了下发的 token」 */
-export const oauthFingerprint = (tokens: McpOAuthTokens | undefined): string =>
-  tokens?.access_token
-    ? createHash('sha256').update(tokens.access_token).digest('hex').slice(0, 16)
-    : '';
+export const oauthFingerprint = (access: McpOAuthAccess | undefined): string =>
+  access?.access_token ? mcpOAuthFingerprint(access.access_token) : '';
 
 type McpJson = NonNullable<Awaited<ReturnType<ToolDefinition['execute']>>['structuredContent']>;
 
@@ -289,7 +294,9 @@ export class McpManager {
     { until: number; fingerprint: string; error: string; unauthorized: boolean }
   >();
   /** 最近一次下发的凭据：按需 server 的会话配置在 spawn 时冻结，连接时以它为准 */
-  private readonly latestOAuth = new Map<string, McpOAuthTokens | undefined>();
+  private readonly latestOAuth = new Map<string, McpOAuthAccess | undefined>();
+  /** 每个连接签名的凭据持有方，跨重连保留（retired 记录不能丢） */
+  private readonly oauth = new Map<string, OAuthAccess>();
   /** 最近一次 insufficient_scope 挑战：建连随后失败时据此报「需授权」而非普通错误 */
   private readonly scopeChallenges = new Map<string, McpScopeChallenge>();
 
@@ -328,8 +335,9 @@ export class McpManager {
   }
 
   /** 按需 server 的预热：记下凭据，只把换 token / 撤销同步给已建立的连接，不新连 */
-  refresh(server: McpServerSpawnConfig): void {
-    const key = connectionKey(server);
+  refresh(dispatched: McpServerSpawnConfig): void {
+    const key = connectionKey(dispatched);
+    const server = this.withoutRetired(key, dispatched);
     this.latestOAuth.set(key, server.oauth);
     if (this.connections.has(key)) void this.connectionFor(server);
   }
@@ -342,8 +350,34 @@ export class McpManager {
     return oauth ? { ...rest, oauth } : rest;
   }
 
-  private connectionFor(server: McpServerSpawnConfig): Promise<Connection | null> {
-    const key = connectionKey(server);
+  /** 冻结配置带着已被续期淘汰的 token：换成当前 token，不回退 */
+  private withoutRetired(key: string, server: McpServerSpawnConfig): McpServerSpawnConfig {
+    const access = this.oauth.get(key);
+    if (!access?.isRetired(server.oauth)) return server;
+    const { oauth: _retired, ...rest } = server;
+    return access.current ? { ...rest, oauth: access.current } : rest;
+  }
+
+  private oauthFor(key: string, server: McpServerSpawnConfig): OAuthAccess {
+    let access = this.oauth.get(key);
+    if (!access) {
+      const { id } = server;
+      const { refreshOAuth } = this.options;
+      const renewer =
+        id && refreshOAuth ? (rejected: string) => refreshOAuth(id, rejected) : undefined;
+      access = new OAuthAccess(renewer, (renewed) => {
+        this.latestOAuth.set(key, renewed);
+        this.dispatched.set(key, oauthFingerprint(renewed));
+        this.failedUntil.delete(key);
+      });
+      this.oauth.set(key, access);
+    }
+    return access;
+  }
+
+  private connectionFor(dispatched: McpServerSpawnConfig): Promise<Connection | null> {
+    const key = connectionKey(dispatched);
+    const server = this.withoutRetired(key, dispatched);
     const fingerprint = oauthFingerprint(server.oauth);
     this.latestOAuth.set(key, server.oauth);
     const failed = this.failedUntil.get(key);
@@ -404,9 +438,9 @@ export class McpManager {
   }
 
   /**
-   * Main 下发的凭据与上次不同时：换新 token 只原地更新 provider——已跑会话的工具闭包
+   * Main 下发的凭据与上次不同时：换新 token 只原地更新凭据——已跑会话的工具闭包
    * 捕获着这个 client，为换 token 重建连接等于弄坏它们；只有撤销（不再下发凭据）才下线重建。
-   * 指纹与上次相同则是回传旧凭据，忽略以免覆盖 worker 内已 refresh 的 token。
+   * 指纹与上次相同则是回传旧凭据，忽略。
    */
   private applyDispatchedTokens(
     key: string,
@@ -423,8 +457,7 @@ export class McpManager {
       return undefined;
     }
     this.failedUntil.delete(key);
-    const tokens = server.oauth;
-    void pending.then((connection) => connection?.provider?.updateTokens(tokens));
+    this.oauth.get(key)?.offer(server.oauth);
     return pending;
   }
 
@@ -454,10 +487,6 @@ export class McpManager {
   private async connect(server: McpServerSpawnConfig): Promise<Connection> {
     this.emitStatus(server, 'connecting');
     const client = new Client({ name: 'enso-code', version: '0.1.0' });
-    const provider =
-      server.transport === 'stdio'
-        ? undefined
-        : new WorkerOAuthProvider(server, (event) => this.options.emit(event));
     let tools: Awaited<ReturnType<Client['listTools']>>['tools'];
     const connectTimeoutMs = mcpTimeoutMsOrDefault(
       server.connectTimeoutMs,
@@ -466,7 +495,7 @@ export class McpManager {
     const callTimeoutMs = mcpTimeoutMsOrDefault(server.callTimeoutMs, DEFAULT_MCP_CALL_TIMEOUT_MS);
     try {
       await withTimeout(
-        client.connect(this.createTransport(server, provider), { timeout: connectTimeoutMs }),
+        client.connect(this.createTransport(server), { timeout: connectTimeoutMs }),
         connectTimeoutMs,
         `connect ${server.name}`
       );
@@ -484,7 +513,6 @@ export class McpManager {
     this.emitStatus(server, 'ready', { toolCount: tools.length });
     return {
       client,
-      provider,
       tools: (() => {
         const names = assignMcpToolNames(
           server.name,
@@ -497,7 +525,13 @@ export class McpManager {
     };
   }
 
-  private createTransport(server: McpServerSpawnConfig, provider?: WorkerOAuthProvider) {
+  private remoteFetchFor(server: McpServerSpawnConfig): typeof fetch {
+    const access = this.oauthFor(connectionKey(server), server);
+    access.offer(server.oauth);
+    return remoteFetch(access, (challenge) => this.reportScopeChallenge(server, challenge));
+  }
+
+  private createTransport(server: McpServerSpawnConfig) {
     switch (server.transport) {
       case 'stdio': {
         if (!server.command) throw new Error('stdio server missing command');
@@ -511,16 +545,14 @@ export class McpManager {
       case 'http': {
         if (!server.url) throw new Error('http server missing url');
         return new StreamableHTTPClientTransport(new URL(server.url), {
-          authProvider: provider,
-          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
+          fetch: this.remoteFetchFor(server),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }
       case 'sse': {
         if (!server.url) throw new Error('sse server missing url');
         return new SSEClientTransport(new URL(server.url), {
-          authProvider: provider,
-          fetch: scopeChallengeFetch((challenge) => this.reportScopeChallenge(server, challenge)),
+          fetch: this.remoteFetchFor(server),
           ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
         });
       }

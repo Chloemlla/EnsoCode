@@ -1,3 +1,4 @@
+import { parseAutoRetryLimit } from '../autoRetry';
 import {
   type AgentTypeKey,
   type ChildSessionIdentity,
@@ -517,6 +518,8 @@ export interface AgentRunProgress {
   elapsedMs: number;
   /** 子代理此刻在做的事：在跑的工具或正在写回复 */
   activity?: AgentRunActivity;
+  /** 最近一条回复的末尾（仅界面预览；给模型的回执不带） */
+  text?: string;
 }
 
 export type AgentRunActivity =
@@ -717,7 +720,7 @@ function parseAgentControlToolResponse(value: unknown): AgentControlToolResponse
     : null;
 }
 
-/** MCP OAuth 凭据（Main 加密持有，spawn 时下发；worker 只读用并可 refresh） */
+/** MCP OAuth 凭据（只在 Main 加密持有；refresh 也只在 Main 做） */
 export interface McpOAuthTokens {
   access_token: string;
   token_type?: string;
@@ -725,6 +728,18 @@ export interface McpOAuthTokens {
   expires_in?: number;
   scope?: string;
 }
+
+/** 下发 worker 的 MCP 访问凭据：只有 access token，refresh_token 与 client 信息不出 Main */
+export interface McpOAuthAccess {
+  access_token: string;
+  /** 绝对过期时间（ms）；worker 据此提前向 Main 续期 */
+  expires_at?: number;
+}
+
+/** Main 续期结果：unauthorized = 需要用户重新授权；否则为临时故障，凭据保留 */
+export type McpOAuthRefreshResult =
+  | { ok: true; access: McpOAuthAccess }
+  | { ok: false; unauthorized: boolean; error: string };
 
 /** MCP 连接状态：unauthorized = 需要用户在设置页完成 OAuth 授权；idle = 已授权待连接 */
 export const MCP_CONNECTION_STATES = [
@@ -751,7 +766,7 @@ export interface McpServerSpawnConfig {
   /** http/sse 请求头（Claude 插件 .mcp.json 用它传 key） */
   headers?: Record<string, string>;
   /** 已授权的 OAuth 凭据（http/sse 远程 server） */
-  oauth?: McpOAuthTokens;
+  oauth?: McpOAuthAccess;
   /** 连接 + listTools；缺省 10s */
   connectTimeoutMs?: number;
   /** 单次 callTool；缺省 120s */
@@ -1068,6 +1083,7 @@ export type AgentCommand =
       error?: string;
     }
   | { type: 'lock-workspace'; requestId: string; conversationIds: string[] }
+  | { type: 'mcp-oauth-refresh-result'; requestId: string; result: McpOAuthRefreshResult }
   | { type: 'unlock-workspace'; requestId: string; conversationIds: string[]; branch?: string }
   | {
       type: 'spawn-parent';
@@ -1223,6 +1239,8 @@ export type AgentCommand =
     }
   | { type: 'set-approval-reviewer'; model?: SpawnModelConfig }
   | { type: 'set-max-active-coworkers'; limit: number }
+  /** 自动重试次数：0 关闭，-1 无限 */
+  | { type: 'set-auto-retry-limit'; limit: number }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
   | { type: 'set-web-search-config'; chain: WebSearchChainEntry[]; configured?: boolean }
@@ -1663,6 +1681,7 @@ export type AgentWorkerEvent =
       identity: SessionIdentity;
       seq: number;
       attempt: number;
+      /** 0 表示无限重试 */
       maxAttempts: number;
       delayMs: number;
       error: string;
@@ -1859,6 +1878,13 @@ export type AgentWorkerEvent =
       exitCode?: number;
     }
   | {
+      /** 该会话后台任务全量快照（REPLACE 语义）：消费者整体替换，edge 事件丢了也能收敛 */
+      type: 'background-tasks-level';
+      identity: SessionIdentity;
+      seq: number;
+      tasks: BackgroundTaskInfo[];
+    }
+  | {
       type: 'session-custom-entry';
       identity: SessionIdentity;
       seq: number;
@@ -1883,8 +1909,8 @@ export type McpWorkerEvent =
       /** 服务器要求更多 scope（insufficient_scope）：重新授权时在已授予 scope 上追加 */
       scopeChallenge?: McpScopeChallenge;
     }
-  /** SDK 自动 refresh 后回传 Main 持久化 */
-  | { type: 'mcp-tokens-refreshed'; serverId: string; tokens: McpOAuthTokens };
+  /** access token 临期或被拒（rejected = 其指纹）：请 Main 续期，结果经 mcp-oauth-refresh-result 回来 */
+  | { type: 'mcp-oauth-refresh'; requestId: string; serverId: string; rejected?: string };
 
 export interface McpScopeChallenge {
   scope?: string;
@@ -2045,30 +2071,21 @@ function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   );
 }
 
-/**
- * worker 回传的 token：白名单外的字段（SDK 会保留 id_token）**裁掉而不是整条判负——
- * 否则服务端轮换 refresh_token 时刷新结果会被静默丢弃，本地凭据直接作废。
- * expires_in 是相对秒数，当前只原样存盘不参与判断（SDK 自己按 401 重试 refresh）。
- */
-export function parseMcpOAuthTokens(value: unknown): McpOAuthTokens | null {
-  if (
-    !isRecord(value) ||
-    !isNonEmptyString(value.access_token) ||
-    (value.token_type !== undefined && typeof value.token_type !== 'string') ||
-    (value.refresh_token !== undefined && typeof value.refresh_token !== 'string') ||
-    (value.expires_in !== undefined && typeof value.expires_in !== 'number') ||
-    (value.scope !== undefined && typeof value.scope !== 'string')
-  ) {
-    return null;
-  }
-  return {
-    access_token: value.access_token,
-    ...(value.token_type !== undefined ? { token_type: value.token_type } : {}),
-    ...(value.refresh_token !== undefined ? { refresh_token: value.refresh_token } : {}),
-    ...(value.expires_in !== undefined ? { expires_in: value.expires_in } : {}),
-    ...(value.scope !== undefined ? { scope: value.scope } : {}),
-  };
-}
+const isMcpOAuthAccess = (value: unknown): boolean =>
+  isRecord(value) &&
+  hasOnlyKeys(value, ['access_token', 'expires_at']) &&
+  isNonEmptyString(value.access_token) &&
+  (value.expires_at === undefined ||
+    (typeof value.expires_at === 'number' && Number.isFinite(value.expires_at)));
+
+const isMcpOAuthRefreshResult = (value: unknown): boolean =>
+  isRecord(value) &&
+  (value.ok === true
+    ? hasOnlyKeys(value, ['ok', 'access']) && isMcpOAuthAccess(value.access)
+    : value.ok === false &&
+      hasOnlyKeys(value, ['ok', 'unauthorized', 'error']) &&
+      typeof value.unauthorized === 'boolean' &&
+      typeof value.error === 'string');
 
 /** turn-completed.digest 的形状校验：三段必须是字符串（允许空），不允许多余键 */
 export function parseTurnDigest(value: unknown): TurnDigest | null {
@@ -2924,6 +2941,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       ? (value as unknown as AgentCommand)
       : null;
   }
+  if (value.type === 'mcp-oauth-refresh-result') {
+    return hasOnlyKeys(value, ['type', 'requestId', 'result']) &&
+      isNonEmptyString(value.requestId) &&
+      isMcpOAuthRefreshResult(value.result)
+      ? (value as unknown as AgentCommand)
+      : null;
+  }
   switch (value.type) {
     case 'lock-workspace':
     case 'unlock-workspace':
@@ -3277,6 +3301,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'limit']) && parseMaxActiveCoworkers(value.limit) !== null
         ? (value as unknown as AgentCommand)
         : null;
+    case 'set-auto-retry-limit':
+      return hasExactKeys(value, ['type', 'limit']) && parseAutoRetryLimit(value.limit) !== null
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'set-web-search-config':
       return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
         (value.configured === undefined || typeof value.configured === 'boolean') &&
@@ -3585,12 +3613,13 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       ? (value as unknown as AgentWorkerEvent)
       : null;
   }
-  if (value.type === 'mcp-tokens-refreshed') {
-    if (!hasOnlyKeys(value, ['type', 'serverId', 'tokens']) || !isNonEmptyString(value.serverId)) {
-      return null;
-    }
-    const tokens = parseMcpOAuthTokens(value.tokens);
-    return tokens ? { type: 'mcp-tokens-refreshed', serverId: value.serverId, tokens } : null;
+  if (value.type === 'mcp-oauth-refresh') {
+    return hasOnlyKeys(value, ['type', 'requestId', 'serverId', 'rejected']) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.serverId) &&
+      (value.rejected === undefined || isNonEmptyString(value.rejected))
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
   }
   if (value.type === 'title-generated') {
     return hasExactKeys(value, ['type', 'conversationId', 'title']) &&
@@ -3740,7 +3769,7 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       return Number.isInteger(value.attempt) &&
         (value.attempt as number) >= 1 &&
         Number.isInteger(value.maxAttempts) &&
-        (value.maxAttempts as number) >= 1 &&
+        (value.maxAttempts as number) >= 0 &&
         isSequence(value.delayMs) &&
         isNonEmptyString(value.error)
         ? (value as unknown as AgentWorkerEvent)
@@ -3849,6 +3878,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     case 'task-output':
     case 'task-ended':
       return isNonEmptyString(value.taskId) ? (value as unknown as AgentWorkerEvent) : null;
+    case 'background-tasks-level':
+      return Array.isArray(value.tasks) &&
+        value.tasks.every((task) => isRecord(task) && isNonEmptyString(task.taskId))
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
     case 'session-custom-entry':
       return parseAgentSessionCustomEntry(value.entry)
         ? (value as unknown as AgentWorkerEvent)

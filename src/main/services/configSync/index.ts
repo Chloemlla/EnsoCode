@@ -119,6 +119,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   chatWide: { mode: 'portable' },
   notifyMainAgentOnly: { mode: 'portable' },
   maxActiveCoworkers: { mode: 'portable' },
+  autoRetryLimit: { mode: 'portable' },
   generationStallTimeoutMin: { mode: 'portable' },
   autoArchiveIdleDays: { mode: 'portable' },
   autoArchiveMergedWorktrees: { mode: 'portable' },

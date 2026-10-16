@@ -24,6 +24,16 @@ const agent = (over: Partial<SubagentInfo> = {}): SubagentInfo => ({
 const empty: TaskState = { tasks: [], subagents: [] };
 
 describe('applyTaskEvent', () => {
+  it('background-tasks-level 整体替换任务列表；缺 tasks 视为无关', () => {
+    const state: TaskState = { ...empty, tasks: [task(), task({ taskId: 't2' })] };
+    const next = applyTaskEvent(state, {
+      type: 'background-tasks-level',
+      tasks: [task({ status: 'done' })],
+    });
+    expect(next?.tasks).toEqual([task({ status: 'done' })]);
+    expect(applyTaskEvent(state, { type: 'background-tasks-level' })).toBeNull();
+  });
+
   it('task-started 追加任务，重复 taskId 不重复追加', () => {
     const s1 = applyTaskEvent(empty, { type: 'task-started', task: task() });
     expect(s1?.tasks).toHaveLength(1);

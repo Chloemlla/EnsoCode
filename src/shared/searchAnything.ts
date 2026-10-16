@@ -192,6 +192,12 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     title: 'Stop if no output',
   },
   {
+    id: 'general.autoRetryLimit',
+    category: 'general',
+    title: 'Auto-retry on transient errors',
+    description: 'Retry count after 429, 5xx or network errors; off, fixed count or unlimited',
+  },
+  {
     id: 'general.proxy',
     category: 'general',
     title: 'Network proxy',

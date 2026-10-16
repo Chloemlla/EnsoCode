@@ -56,3 +56,10 @@ export async function openBotNotification(event: BotEvent): Promise<void> {
   }
   bots.setView(target);
 }
+
+/** Code 会话通知点击：从远程节点 / Bot 模式切回本机 Code 视图，选中会话由 sessions store 负责 */
+export function showLocalCodeView(): void {
+  if (useRemoteNodesStore.getState().activeNodeId !== 'local')
+    useRemoteNodesStore.getState().switchNode('local');
+  useAppModeStore.getState().setMode('code');
+}

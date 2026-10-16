@@ -96,6 +96,7 @@ import {
   thinkingRowExpanded,
 } from '@/stores/sessions/timeline';
 import { useSettingsStore } from '@/stores/settings';
+import { useSubagentRunsStore } from '@/stores/subagentRuns';
 import { AskUserResult } from './AskUserResult';
 import { CodeBlock } from './CodeBlock';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -2194,7 +2195,9 @@ function MoveToBackgroundButton({ callId, waiting }: { callId: string; waiting: 
   );
 }
 
-const WAIT_PROGRESS_POLL_MS = 2000;
+/** 主路径是 Main 推送；慢速轮询只做自愈兜底（推送链路任一环断了也能收敛） */
+const WAIT_PROGRESS_POLL_MS = 5000;
+const NO_RUNS: AgentRunProgress[] = [];
 
 function runActivityLabel(run: AgentRunProgress, t: TFunction): string {
   if (run.status === 'queued') return t('Queued');
@@ -2203,29 +2206,33 @@ function runActivityLabel(run: AgentRunProgress, t: TFunction): string {
   return activity?.phase === 'writing' ? t('Writing reply…') : t('Thinking…');
 }
 
-/** 子代理等待行展开：在等的子代理各自在干什么、跑了多久（Main 进度快照，定时刷新） */
+/** 子代理等待行展开：在等的子代理各自在干什么、跑了多久、最近说了什么（Main 推送 + 兜底轮询） */
 function SubagentWaitProgress({ agentIds }: { agentIds?: string[] }) {
   const { t } = useI18n();
   const sessionId = useSessionsStore((state) => displayedConversation(state)?.id ?? '');
-  const [runs, setRuns] = useState<AgentRunProgress[] | null>(null);
+  const runs = useSubagentRunsStore((state) => state.byConversation[sessionId] ?? NO_RUNS);
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (!sessionId) return;
     let alive = true;
-    const load = () =>
-      window.electronAPI.agent.subagentProgress(sessionId).then(
-        (next) => {
-          if (alive) setRuns(next);
-        },
-        () => {}
-      );
+    const replace = (next: AgentRunProgress[]) => {
+      if (!alive) return;
+      useSubagentRunsStore.getState().replace(sessionId, next);
+      setLoaded(true);
+    };
+    const load = () => window.electronAPI.agent.subagentProgress(sessionId).then(replace, () => {});
+    const unsubscribe = window.electronAPI.agent.onSubagentProgress((push) => {
+      if (push.sessionId === sessionId) replace(push.runs);
+    });
     void load();
     const timer = setInterval(load, WAIT_PROGRESS_POLL_MS);
     return () => {
       alive = false;
       clearInterval(timer);
+      unsubscribe();
     };
   }, [sessionId]);
-  if (!runs) return null;
+  if (!loaded) return null;
   // wait 只列它等的子代理；spawn / send 带 wait 时行上没有 agentId，列出全部在跑的
   const visible = agentIds?.length ? runs.filter((run) => agentIds.includes(run.agentId)) : runs;
   return (
@@ -2234,16 +2241,23 @@ function SubagentWaitProgress({ agentIds }: { agentIds?: string[] }) {
         <div className="text-muted-foreground">{t('No running subagents')}</div>
       ) : (
         visible.map((run) => (
-          <div key={run.runId} className="flex items-center gap-2 py-0.5">
-            <span className="max-w-[40%] shrink-0 truncate font-medium">
-              {run.title ?? run.agentId.slice(0, 8)}
-            </span>
-            <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
-              {runActivityLabel(run, t)}
-            </span>
-            <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70 tabular-nums">
-              {formatDuration(run.elapsedMs)}
-            </span>
+          <div key={run.runId} className="py-0.5">
+            <div className="flex items-center gap-2">
+              <span className="max-w-[40%] shrink-0 truncate font-medium">
+                {run.title ?? run.agentId.slice(0, 8)}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+                {runActivityLabel(run, t)}
+              </span>
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70 tabular-nums">
+                {formatDuration(run.elapsedMs)}
+              </span>
+            </div>
+            {run.text && (
+              <div className="line-clamp-2 break-words pl-2 text-[11px] text-muted-foreground/80">
+                {run.text.replace(/\s+/g, ' ')}
+              </div>
+            )}
           </div>
         ))
       )}

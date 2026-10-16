@@ -211,6 +211,8 @@ export interface SettingsState {
   notifyMainAgentOnly: boolean;
   /** 同一父会话同时在编 coworker 上限；缺省 5，范围 1–20 */
   maxActiveCoworkers: number;
+  /** 瞬态错误自动重试次数；0 关闭，-1 无限；缺省 3 */
+  autoRetryLimit: number;
   /** SSH 远端单次命令超时（秒）；缺省 30，范围 5–300 */
   sshTimeoutSeconds: number;
   /** 无 token/工具结果超过此时长则中止；0 = 永不；单位分钟 */
@@ -379,6 +381,7 @@ export interface SettingsState {
   setChatWide: (value: boolean) => void;
   setNotifyMainAgentOnly: (value: boolean) => void;
   setMaxActiveCoworkers: (value: number) => void;
+  setAutoRetryLimit: (value: number) => void;
   setSshTimeoutSeconds: (value: number) => void;
   setGenerationStallTimeoutMin: (minutes: number) => void;
   setAutoArchiveIdleDays: (days: number) => void;

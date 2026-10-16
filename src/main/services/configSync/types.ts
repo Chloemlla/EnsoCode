@@ -146,6 +146,7 @@ export interface ConfigSyncState {
   chatWide?: boolean;
   notifyMainAgentOnly?: boolean;
   maxActiveCoworkers?: number;
+  autoRetryLimit?: number;
   generationStallTimeoutMin?: number;
   autoArchiveIdleDays?: number;
   autoArchiveMergedWorktrees?: boolean;

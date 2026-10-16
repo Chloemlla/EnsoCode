@@ -120,7 +120,8 @@ import {
   archivedConversationGroups,
   pinnedConversationIds,
   projectConversationIds,
-  sortProjectsByActivity,
+  RECENT_PROJECT_WINDOW_DAYS,
+  recentProjects,
   staleArchivedConversationIds,
 } from '@/stores/sessions/pinned';
 import {
@@ -287,8 +288,14 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
     archivedProjectIds,
     resolvedGroupId
   );
+  const recentActiveProjects = recentProjects(
+    filterProjectsByGroup(orderedProjects, projectGroups, archivedProjectIds, ALL_GROUP_ID),
+    order,
+    conversations,
+    Date.now()
+  );
   const { pinned: pinnedProjects, rest: unpinnedProjects } = recentView
-    ? { pinned: [], rest: sortProjectsByActivity(slicedProjects, order, conversations) }
+    ? { pinned: [], rest: recentActiveProjects }
     : partitionPinnedProjects(slicedProjects, pinnedProjectIds);
   const groupSections = sectionsForAllView(unpinnedProjects, projectGroups, []);
   const activeProjects = [...pinnedProjects, ...unpinnedProjects];
@@ -554,7 +561,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
         .filter((group) => group.ids.length > 0)
     : archivedGroups;
   const archivedInSlice = (group: (typeof archivedGroups)[number]) => {
-    if (resolvedGroupId === ALL_GROUP_ID || recentView) return true;
+    if (resolvedGroupId === ALL_GROUP_ID) return true;
     const project = projects.find((item) => item.id === group.projectId);
     if (!project) return resolvedGroupId === UNGROUPED_GROUP_ID;
     if (resolvedGroupId === UNGROUPED_GROUP_ID) {
@@ -849,6 +856,7 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
             filterProjectsByGroup(orderedProjects, projectGroups, archivedProjectIds, ALL_GROUP_ID)
               .length
           }
+          recentCount={recentActiveProjects.length}
           ungroupedCount={
             filterProjectsByGroup(
               orderedProjects,
@@ -1312,6 +1320,15 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
                   </SortableProject>
                 );
               };
+              if (recentView && !searching && activeProjects.length === 0) {
+                return (
+                  <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+                    {t('No projects active in the last {{n}} days', {
+                      n: RECENT_PROJECT_WINDOW_DAYS,
+                    })}
+                  </p>
+                );
+              }
               if (resolvedGroupId === ALL_GROUP_ID && projectGroups.length > 0) {
                 return (
                   <div className="space-y-4">

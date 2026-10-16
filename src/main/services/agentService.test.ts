@@ -88,6 +88,26 @@ describe('AgentService lifecycle', () => {
     expect(result.ok && result.value.agentId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it('同一父会话并行 spawn 不互相排队：子会话初始化可同时进行', async () => {
+    const { service, runtime } = setup();
+    const original = runtime.spawn;
+    const releases: Array<() => void> = [];
+    const spawn = vi.fn(
+      (input: Parameters<AgentServiceRuntime['spawn']>[0]) =>
+        new Promise<ChildSessionIdentity>((resolve) => {
+          releases.push(() => resolve(original(input)));
+        })
+    );
+    runtime.spawn = spawn;
+    const first = service.spawn(spawnRequest());
+    const second = service.spawn(spawnRequest({ requestId: 'request-2' }));
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+    for (const release of releases) release();
+    const results = await Promise.all([first, second]);
+    expect(results.map((result) => result.ok)).toEqual([true, true]);
+    expect(new Set(results.map((result) => result.ok && result.value.agentId)).size).toBe(2);
+  });
+
   it('spawn 默认 task + 异步，Agent 与 Run 使用独立稳定身份', async () => {
     const { service, runtime } = setup();
     const result = await service.spawn(spawnRequest());
@@ -737,6 +757,92 @@ describe('AgentService wait bounds and completion notify', () => {
     });
   });
 
+  it('report 运行中的 Run：说明仍在运行、会自动通知，不要轮询', async () => {
+    const { service } = setup();
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    const reported = await service.report({ context, requestId: 'r', runId: spawned.value.runId });
+    expect(reported).toMatchObject({ ok: false, code: 'invalid-state' });
+    expect(!reported.ok && reported.error).toMatch(/still running/);
+    expect(!reported.ok && reported.error).toMatch(/notified automatically/);
+  });
+
+  it('完成通知超长时注明原长度与截断长度', async () => {
+    const notify = vi.fn();
+    const { service, children } = setup({ notify });
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 1,
+      index: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(4000) }] },
+    });
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 2,
+      turnId: spawned.value.runId,
+    });
+    const text = notify.mock.calls[0][1] as string;
+    expect(text).toContain('cut from 4000 to its first 1500 characters');
+    expect(text).not.toContain('x'.repeat(1501));
+  });
+
+  it('完成通知附 usage：token 合计、工具调用数与耗时', async () => {
+    const notify = vi.fn();
+    let clock = 1_000;
+    const { service, children } = setup({ notify, now: () => clock });
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    const toolCall = (id: string) => ({ type: 'toolCall', id, name: 'read', arguments: {} });
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 1,
+      index: 1,
+      message: {
+        role: 'assistant',
+        content: [toolCall('t1'), toolCall('t2')],
+        usage: { input: 100, output: 20 },
+      } as never,
+    });
+    // 同一条消息流式重发不重复计数
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 2,
+      index: 1,
+      message: {
+        role: 'assistant',
+        content: [toolCall('t1'), toolCall('t2')],
+        usage: { input: 100, output: 20 },
+      } as never,
+    });
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 3,
+      index: 3,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        usage: { input: 150, output: 30, cacheRead: 1000, cacheWrite: 0 },
+      } as never,
+    });
+    clock = 4_500;
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 4,
+      turnId: spawned.value.runId,
+    });
+    expect(notify.mock.calls[0][1]).toContain(
+      '<usage>subagent_tokens: 1300\ntool_uses: 2\nduration_ms: 3500</usage>'
+    );
+  });
+
   it('失败的 Run 通知为紧急；模型自己 stop 的不通知', async () => {
     const notify = vi.fn();
     const { service, children } = setup({ notify });
@@ -772,6 +878,66 @@ describe('AgentService wait bounds and completion notify', () => {
       expect.objectContaining({ runId: running.value.runId, title: 'running', status: 'running' }),
     ]);
     expect(service.progress('chat-2')).toEqual([]);
+  });
+
+  it('onProgress：Run 启动即推全量快照，消息带文本尾巴，结束推空快照', async () => {
+    const onProgress = vi.fn();
+    const { service, children } = setup({ onProgress });
+    const spawned = await service.spawn(spawnRequest({ name: '核对' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    expect(onProgress).toHaveBeenLastCalledWith('chat-1', [
+      expect.objectContaining({ runId: spawned.value.runId, title: '核对', status: 'running' }),
+    ]);
+    const text = `${'a'.repeat(300)}结论在末尾`;
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 1,
+      index: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text }] },
+    });
+    const [, runs] = onProgress.mock.calls.at(-1)!;
+    expect(runs[0].text).toHaveLength(160);
+    expect(runs[0].text.endsWith('结论在末尾')).toBe(true);
+    expect(runs[0].activity).toEqual({ phase: 'writing' });
+    const calls = onProgress.mock.calls.length;
+    // 同样的内容重发不推
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 2,
+      index: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text }] },
+    });
+    expect(onProgress).toHaveBeenCalledTimes(calls);
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 3,
+      turnId: spawned.value.runId,
+    });
+    expect(onProgress).toHaveBeenLastCalledWith('chat-1', []);
+  });
+
+  it('wait 超时回执的进度不带文本尾巴，避免模型借进度窥探中途结果', async () => {
+    const { service, children } = setup();
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({
+      type: 'message-upsert',
+      identity: children[0],
+      seq: 1,
+      index: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: '半成品' }] },
+    });
+    const waited = await service.wait({
+      context,
+      requestId: 'w',
+      runIds: [spawned.value.runId],
+      timeoutMs: 0,
+    });
+    expect(waited.ok && waited.value.pending?.[0]).not.toHaveProperty('text');
+    expect(service.progress('chat-1')[0].text).toBe('半成品');
   });
 
   it('until:all 等多个 Run：先结束的不单独通知，由 wait 回执一并交付', async () => {

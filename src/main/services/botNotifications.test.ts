@@ -6,6 +6,8 @@ const env = vi.hoisted(() => ({
   show: vi.fn(),
   focus: vi.fn(),
   send: vi.fn(),
+  loading: false,
+  onceLoad: vi.fn(),
 }));
 vi.mock('electron', () => ({
   app: { isPackaged: true },
@@ -14,8 +16,8 @@ vi.mock('electron', () => ({
     static isSupported() {
       return true;
     }
-    on(_event: string, cb: () => void) {
-      env.click = cb;
+    on(name: string, cb: () => void) {
+      if (name === 'click') env.click = cb;
     }
     show() {
       env.show();
@@ -27,9 +29,12 @@ vi.mock('../windows/MainWindow', () => ({
   getMainWindow: () => ({ isFocused: () => env.focused }),
   focusMainWindow: env.focus,
 }));
-vi.mock('../windows/createAppWindow', () => ({ sendToWindow: env.send }));
+vi.mock('../windows/createAppWindow', () => ({
+  sendToWindow: env.send,
+  getWindowWebContents: () => ({ isLoading: () => env.loading, once: env.onceLoad }),
+}));
 
-import { maybeNotifyBot, notifyBotChat } from './notifications';
+import { maybeNotify, maybeNotifyBot, notifyBotChat } from './notifications';
 
 const event = {
   type: 'ask-request' as const,
@@ -40,6 +45,31 @@ const event = {
 beforeEach(() => {
   vi.clearAllMocks();
   env.focused = false;
+  env.loading = false;
+  env.focus.mockReset();
+});
+it('code session notices focus the main window and open the session on click', async () => {
+  const win = { id: 'main' };
+  env.focus.mockReturnValueOnce(win);
+  maybeNotify({ ...event, seq: 2, ask: { ...event.ask, requestId: 'code-1' } });
+  env.click();
+  await vi.waitFor(() =>
+    expect(env.send).toHaveBeenCalledWith(win, 'notification:focus-session', 's')
+  );
+  expect(env.focus).toHaveBeenCalledOnce();
+});
+it('code session notices wait for a recreated window to load before opening the session', async () => {
+  const win = { id: 'main' };
+  env.focus.mockReturnValueOnce(win);
+  env.loading = true;
+  maybeNotify({ ...event, seq: 3, ask: { ...event.ask, requestId: 'code-2' } });
+  env.click();
+  await vi.waitFor(() => expect(env.onceLoad).toHaveBeenCalledOnce());
+  expect(env.send).not.toHaveBeenCalled();
+  const [name, onLoad] = env.onceLoad.mock.calls[0] as [string, () => void];
+  expect(name).toBe('did-finish-load');
+  onLoad();
+  expect(env.send).toHaveBeenCalledWith(win, 'notification:focus-session', 's');
 });
 it('notifies background bot questions and opens the chat on click', async () => {
   await maybeNotifyBot(event, {

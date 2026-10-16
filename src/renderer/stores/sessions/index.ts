@@ -960,14 +960,8 @@ export const useSessionsStore = create<SessionsState>()(
         const conversation = get().conversations[sessionId];
         if (!conversation) return;
         const parentId = conversation.parentId;
-        if (parentId) {
-          set((state) => ({
-            activeId: parentId,
-            conversations: patch(state, parentId, { activeTabId: sessionId }).conversations,
-          }));
-        } else {
-          set({ activeId: sessionId });
-        }
+        get().selectConversation(parentId ?? sessionId);
+        if (parentId) get().selectTab(parentId, sessionId);
       });
       window.electronAPI.capabilities.onAsk((request) => {
         set((state) => {

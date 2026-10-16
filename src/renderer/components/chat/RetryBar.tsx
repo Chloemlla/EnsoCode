@@ -30,10 +30,12 @@ export function RetryBar({ retry, onCancel }: { retry: RetryInfo; onCancel?: () 
     <div className="mb-1 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs">
       <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-500 [animation-duration:2s]" />
       <span className="min-w-0 flex-1 truncate" title={retry.error}>
-        {t('Auto-retrying ({{attempt}}/{{max}})', {
-          attempt: retry.attempt,
-          max: retry.maxAttempts,
-        })}
+        {retry.maxAttempts > 0
+          ? t('Auto-retrying ({{attempt}}/{{max}})', {
+              attempt: retry.attempt,
+              max: retry.maxAttempts,
+            })
+          : t('Auto-retrying ({{attempt}})', { attempt: retry.attempt })}
         <span className="text-muted-foreground">
           {' · '}
           {remainingSeconds > 0

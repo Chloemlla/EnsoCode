@@ -183,6 +183,8 @@ export const IPC_CHANNELS = {
   AGENT_TOOL_BACKGROUND: 'agent:tool-background',
   /** 会话名下在跑子代理的进度（等待行展开） */
   AGENT_SUBAGENT_PROGRESS: 'agent:subagent-progress',
+  /** Main → renderer：子代理进度全量快照推送（REPLACE 语义，payload 自带 sessionId） */
+  AGENT_SUBAGENT_PROGRESS_CHANGED: 'agent:subagent-progress-changed',
   AGENT_SUBAGENT_STOP: 'agent:subagent-stop',
   AGENT_WORKFLOW_STOP: 'agent:workflow-stop',
   AGENT_REWIND: 'agent:rewind',

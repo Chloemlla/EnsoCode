@@ -165,6 +165,15 @@ function session(options: Record<string, unknown>) {
     isStreaming: false,
     isIdle: true,
     isRetrying: false,
+    settingsManager: {
+      getRetrySettings: () => ({
+        enabled: true,
+        maxRetries: 3,
+        baseDelayMs: 2000,
+        maxAgentDelayMs: 60_000,
+      }),
+      getRetryEnabled: () => true,
+    },
   };
   mocks.sessions.push(value);
   return value;
@@ -410,6 +419,38 @@ describe('SessionSupervisor terminal turn handling', () => {
     await settle();
     expect(events.filter((event) => event.type === 'turn-failed')).toHaveLength(1);
     expect(events.some((event) => event.type === 'turn-completed')).toBe(false);
+
+    await supervisor.shutdown();
+  });
+
+  it('自动重试上限实时覆盖会话的 pi 重试设置；无限重试的 turn-retry 以 0 下发', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    const retry = parentSession.settingsManager;
+    expect(retry.getRetrySettings()).toMatchObject({ enabled: true, maxRetries: 3 });
+    supervisor.handleCommand({ type: 'set-auto-retry-limit', limit: -1 });
+    expect(retry.getRetrySettings()).toEqual({
+      enabled: true,
+      maxRetries: Number.POSITIVE_INFINITY,
+      baseDelayMs: 2000,
+      maxAgentDelayMs: 60_000,
+    });
+    supervisor.handleCommand({ type: 'set-auto-retry-limit', limit: 0 });
+    expect(retry.getRetrySettings()).toMatchObject({ enabled: false, maxRetries: 0 });
+    expect(retry.getRetryEnabled()).toBe(false);
+
+    parentSession.emit({ type: 'agent_start' });
+    parentSession.emit({
+      type: 'auto_retry_start',
+      attempt: 4,
+      maxAttempts: Number.POSITIVE_INFINITY,
+      delayMs: 1000,
+      errorMessage: '503',
+    });
+    await settle();
+    expect(events.filter((event) => event.type === 'turn-retry').at(-1)).toMatchObject({
+      attempt: 4,
+      maxAttempts: 0,
+    });
 
     await supervisor.shutdown();
   });

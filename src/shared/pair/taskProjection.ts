@@ -93,6 +93,10 @@ export function applyTaskEvent(state: TaskState, event: Record<string, unknown>)
         ),
       };
     }
+    case 'background-tasks-level': {
+      if (!Array.isArray(event.tasks)) return null;
+      return { ...state, tasks: event.tasks as BackgroundTaskInfo[] };
+    }
     case 'subagent-update': {
       const agent = event.agent as SubagentInfo | null | undefined;
       if (!agent || typeof agent.id !== 'string') return null;

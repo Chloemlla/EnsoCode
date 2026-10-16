@@ -427,7 +427,7 @@ export class AgentSessionIndex {
       event.type === 'text-delta'
     )
       return false;
-    if (event.type === 'mcp-status' || event.type === 'mcp-tokens-refreshed') return false;
+    if (event.type === 'mcp-status' || event.type === 'mcp-oauth-refresh') return false;
 
     const identity = identityOf(event);
     const current = this.sessions.get(identity.sessionId);

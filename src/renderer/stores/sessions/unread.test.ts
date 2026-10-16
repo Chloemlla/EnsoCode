@@ -23,8 +23,13 @@ describe('nextUnread', () => {
     expect(nextUnread({ prevStatus: 'idle', nextStatus: 'running', viewed: false })).toBe(false);
   });
 
-  it('失败不算完成未读（红点已表达）', () => {
-    expect(nextUnread({ prevStatus: 'running', nextStatus: 'failed', viewed: false })).toBe(false);
+  it('后台失败标未读，查看后清除，供活跃栏判断错误是否已读', () => {
+    expect(nextUnread({ prevStatus: 'running', nextStatus: 'failed', viewed: false })).toBe(true);
+    expect(nextUnread({ prevStatus: 'idle', nextStatus: 'failed', viewed: false })).toBe(true);
+    expect(nextUnread({ prevStatus: 'running', nextStatus: 'failed', viewed: true })).toBe(false);
+    expect(
+      nextUnread({ prevStatus: 'failed', nextStatus: 'failed', prevUnread: false, viewed: false })
+    ).toBe(false);
   });
 });
 

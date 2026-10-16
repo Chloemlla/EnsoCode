@@ -88,6 +88,8 @@ export interface TaskEvents {
     status: BackgroundTaskInfo['status'],
     exitCode?: number
   ): void;
+  /** 存活任务集合或状态变化时的全量快照（REPLACE 语义）：漏了 edge 事件或静默清理也能收敛 */
+  onLevel?(sessionId: string, tasks: BackgroundTaskInfo[]): void;
   /** 未被模型知情的任务结束时触发：supervisor 决定注入唤醒或挂 pending 搭车 */
   onCompletionNotify(sessionId: string, text: string): void;
 }
@@ -315,16 +317,24 @@ export class BackgroundTaskManager {
 
   private announce(task: Task): void {
     this.events.onStarted(task.sessionId, { ...task.info });
+    this.emitLevel(task.sessionId);
     this.ensureTimer();
   }
 
   private pruneFinished(): void {
+    const touched = new Set<string>();
     for (const [taskId, task] of this.tasks) {
       if (task.info.status !== 'running') {
         task.logStream?.end();
         this.tasks.delete(taskId);
+        touched.add(task.sessionId);
       }
     }
+    for (const sessionId of touched) this.emitLevel(sessionId);
+  }
+
+  private emitLevel(sessionId: string): void {
+    this.events.onLevel?.(sessionId, this.snapshot(sessionId));
   }
 
   private finish(task: Task, status: 'done' | 'failed', exitCode?: number): void {
@@ -338,6 +348,7 @@ export class BackgroundTaskManager {
     for (const wake of task.waiters.splice(0)) wake();
     this.events.onOutput(task.sessionId, task.info.taskId, task.info.tail, status);
     this.events.onEnded(task.sessionId, task.info.taskId, status, exitCode);
+    this.emitLevel(task.sessionId);
     // 幂等抑制：模型已知情（阻塞等到 / 自己停的且收到回执）就不再打扰
     if (!task.consumed) {
       this.events.onCompletionNotify(task.sessionId, this.completionText(task));

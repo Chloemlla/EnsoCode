@@ -844,6 +844,15 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_TOOL_BACKGROUND, sessionId, toolCallId),
     subagentProgress: (sessionId: string): Promise<AgentRunProgress[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS, sessionId),
+    onSubagentProgress: (
+      callback: (push: { sessionId: string; runs: AgentRunProgress[] }) => void
+    ): (() => void) => {
+      const listener = (_: unknown, push: { sessionId: string; runs: AgentRunProgress[] }) =>
+        callback(push);
+      ipcRenderer.on(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, listener);
+      return () =>
+        ipcRenderer.removeListener(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, listener);
+    },
     stopSubagent: (sessionId: string, agentId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_STOP, sessionId, agentId),
     stopWorkflow: (sessionId: string, runId: string): Promise<AgentActionResult> =>

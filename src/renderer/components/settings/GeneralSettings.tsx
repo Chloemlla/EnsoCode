@@ -1,3 +1,4 @@
+import { AUTO_RETRY_LIMIT_OPTIONS, UNLIMITED_AUTO_RETRY } from '@shared/autoRetry';
 import { isValidProxyUrl, type ProxyMode } from '@shared/proxy';
 import { type TerminalShell, terminalShellsForPlatform } from '@shared/terminalShell';
 import type { UpdateStatus } from '@shared/types/updater';
@@ -113,6 +114,19 @@ function SidePanelSection() {
   const setPinUnfinishedTodos = useSettingsStore((s) => s.setPinUnfinishedTodos);
   const generationStallTimeoutMin = useSettingsStore((s) => s.generationStallTimeoutMin);
   const setGenerationStallTimeoutMin = useSettingsStore((s) => s.setGenerationStallTimeoutMin);
+  const autoRetryLimit = useSettingsStore((s) => s.autoRetryLimit);
+  const setAutoRetryLimit = useSettingsStore((s) => s.setAutoRetryLimit);
+  const autoRetryOptions = AUTO_RETRY_LIMIT_OPTIONS.some((value) => value === autoRetryLimit)
+    ? [...AUTO_RETRY_LIMIT_OPTIONS]
+    : [...AUTO_RETRY_LIMIT_OPTIONS, autoRetryLimit].sort((a, b) =>
+        a === UNLIMITED_AUTO_RETRY ? 1 : b === UNLIMITED_AUTO_RETRY ? -1 : a - b
+      );
+  const autoRetryLabel = (value: number) =>
+    value === 0
+      ? t('Off')
+      : value === UNLIMITED_AUTO_RETRY
+        ? t('Unlimited')
+        : t('{{count}} times', { count: value });
   return (
     <div className="space-y-2">
       <SwitchRow
@@ -207,6 +221,37 @@ function SidePanelSection() {
             {GENERATION_STALL_TIMEOUT_MINUTES.map((value) => (
               <SelectItem key={value} value={String(value)}>
                 {value === 0 ? t('Never') : t('{{count}} min', { count: value })}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      </div>
+      <div
+        className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5"
+        data-settings-row="general.autoRetryLimit"
+      >
+        <div className="min-w-0">
+          <p className="text-sm">{t('Auto-retry on transient errors')}</p>
+          <p className="text-xs text-muted-foreground">
+            {t(
+              'Retry with backoff (up to 60s apart) after 429, 5xx or network errors. Quota and billing errors are never retried. Unlimited keeps retrying until you cancel.'
+            )}
+          </p>
+        </div>
+        <Select
+          items={Object.fromEntries(
+            autoRetryOptions.map((value) => [String(value), autoRetryLabel(value)])
+          )}
+          value={String(autoRetryLimit)}
+          onValueChange={(value) => setAutoRetryLimit(Number(value))}
+        >
+          <SelectTrigger className="w-28">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            {autoRetryOptions.map((value) => (
+              <SelectItem key={value} value={String(value)}>
+                {autoRetryLabel(value)}
               </SelectItem>
             ))}
           </SelectPopup>

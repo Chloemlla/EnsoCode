@@ -9,7 +9,7 @@ export function isPairViewed(id: string): boolean {
   return pairViewedId === id;
 }
 
-/** 完成未读标记：后台会话 running→idle 时置位,用户查看时清除(侧栏绿点) */
+/** 未读标记：后台会话 running→idle 或转为失败时置位,用户查看时清除 */
 export function nextUnread(opts: {
   prevStatus: string;
   nextStatus: string;
@@ -18,5 +18,6 @@ export function nextUnread(opts: {
 }): boolean {
   if (opts.viewed) return false;
   if (opts.prevStatus === 'running' && opts.nextStatus === 'idle') return true;
+  if (opts.prevStatus !== 'failed' && opts.nextStatus === 'failed') return true;
   return opts.prevUnread ?? false;
 }

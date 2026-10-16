@@ -80,6 +80,23 @@ describe('McpOAuthStore', () => {
     expect(store.authState()).toEqual({ s1: false, s2: true });
   });
 
+  it('按 expires_in 记下绝对过期时间；下发给 worker 的 access 不含 refresh_token', () => {
+    const store = new McpOAuthStore({
+      file: file(),
+      encryptionAvailable: () => false,
+      now: () => 1_000,
+    });
+    store.saveTokens('s1', { access_token: 'a1', refresh_token: 'r1', expires_in: 60 });
+    expect(store.access('s1')).toEqual({ access_token: 'a1', expires_at: 61_000 });
+    // 新 token 不带 expires_in：不能沿用旧的过期时间
+    store.saveTokens('s1', { access_token: 'a2', token_type: 'Bearer' });
+    expect(store.access('s1')).toEqual({ access_token: 'a2' });
+    store.saveTokens('s1', { access_token: 'a3', expires_in: 60 });
+    store.clearTokens('s1');
+    expect(store.access('s1')).toBeUndefined();
+    expect(store.record('s1')).not.toHaveProperty('expiresAt');
+  });
+
   it('文件损坏时当空库，不抛', () => {
     const store = new McpOAuthStore({
       file: path.join(dir, 'missing', 'x.bin'),

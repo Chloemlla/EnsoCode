@@ -341,6 +341,30 @@ describe('typed Agent child projection', () => {
     expect(createConversation).not.toHaveBeenCalled();
   });
 
+  it('点击系统通知按正常选中流程打开会话：激活权威选择并清未读', async () => {
+    const onFocusSession = vi.mocked(window.electronAPI.agent.onFocusSession);
+    const focus = onFocusSession.mock.calls[0]?.[0] as (sessionId: string) => void;
+    sessionsModule.useSessionsStore.setState((state) => ({
+      activeId: null,
+      conversations: {
+        ...state.conversations,
+        parent: { ...state.conversations.parent, unread: true },
+      },
+    }));
+    selectConversation.mockClear();
+
+    focus('parent');
+
+    const state = sessionsModule.useSessionsStore.getState();
+    expect(state.activeId).toBe('parent');
+    expect(state.conversations.parent.unread).toBe(false);
+    await vi.waitFor(() =>
+      expect(selectConversation).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: 'parent' })
+      )
+    );
+  });
+
   it('worker snapshot 恢复命令但会话持久化不保存命令列表', async () => {
     const commands = [{ name: 'review', description: '检查当前改动' }];
     onAgentEvent?.({

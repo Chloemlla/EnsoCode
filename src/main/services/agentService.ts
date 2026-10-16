@@ -111,7 +111,8 @@ interface RunRecord {
   text?: string;
   value?: unknown;
   error?: string;
-  usageByMessage: Map<number, { input: number; output: number }>;
+  usageByMessage: Map<number, { input: number; output: number; cache: number }>;
+  toolCallIds: Set<string>;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -136,6 +137,8 @@ export interface AgentServiceOptions {
   allowedModes?: (context: AgentControlContext) => ReadonlySet<AgentMode>;
   /** Run 结束而模型还不知情时通知其父会话 */
   notify?: (context: AgentControlContext, text: string, urgent: boolean) => void;
+  /** 某父会话名下未结束 Run 的进度变化：负载是该 owner 的全量快照（REPLACE 语义） */
+  onProgress?: (ownerId: string, runs: AgentRunProgress[]) => void;
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<AgentRunStatus> = new Set([
@@ -197,6 +200,16 @@ function projectedActivity(message: unknown): AgentRunActivity | undefined {
 }
 
 const NOTIFY_TEXT_LIMIT = 1_500;
+/** 等待行预览只要结论所在的末尾 */
+const PROGRESS_TEXT_TAIL = 160;
+
+function toolCallIdsOf(message: unknown): string[] {
+  const value = message as { role?: unknown; content?: unknown } | undefined;
+  if (value?.role !== 'assistant' || !Array.isArray(value.content)) return [];
+  return value.content.flatMap((part) =>
+    part && part.type === 'toolCall' && typeof part.id === 'string' ? [part.id] : []
+  );
+}
 
 const formatElapsed = (ms: number): string => {
   const seconds = Math.round(ms / 1000);
@@ -245,65 +258,64 @@ export class AgentService implements AgentServiceContract {
     return true;
   }
 
-  spawn(request: AgentControlSpawnRequest): Promise<AgentServiceResult<AgentSpawnReceipt>> {
-    return this.serial(request.context.owner.ownerId, async () => {
-      const invalid = this.validateContext<AgentSpawnReceipt>(request.context);
-      if (invalid) return invalid;
-      const mode = request.mode ?? 'task';
-      if (!this.allowedModes(request.context).has(mode)) {
-        return failure('mode-disabled', `Agent mode is disabled: ${mode}`);
-      }
-      if (!request.requestId || !request.description.trim() || !request.prompt.trim()) {
-        return failure('invalid-state', 'requestId, description and prompt are required.');
-      }
-      const reservationId = this.randomUuid();
-      const runId = this.randomUuid();
-      let identity: ChildSessionIdentity;
-      try {
-        identity = await this.options.runtime.spawn({
-          context: request.context,
-          agentId: reservationId,
-          mode,
-          ...(request.name?.trim() ? { name: request.name.trim() } : {}),
-          description: request.description,
-          ...(request.agentType ? { agentType: request.agentType } : {}),
-          ...(request.model ? { model: request.model } : {}),
-          ...(request.thinking ? { thinking: request.thinking } : {}),
-        });
-      } catch (error) {
-        return failure(
-          'runtime-unavailable',
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-      // Main 重启后只能按 instanceId 认领 coworker；以它为 agentId，模型手里的 id 才不会失效。
-      // spawn 途中 child-ready 已按同一个键 adopt 过的记录在这里被覆盖，不会留下第二条
-      const agentId = identity.instanceId;
-      const agent: AgentRecord = {
+  /**
+   * 不走 owner 串行：新 Agent 在返回前对其他操作不可见，身份预留与容量校验在 sessionIndex.reserveChild
+   * 同步完成。并行 spawn 因此不再互相等待对方的子会话初始化（含 MCP 建连）。
+   */
+  async spawn(request: AgentControlSpawnRequest): Promise<AgentServiceResult<AgentSpawnReceipt>> {
+    const invalid = this.validateContext<AgentSpawnReceipt>(request.context);
+    if (invalid) return invalid;
+    const mode = request.mode ?? 'task';
+    if (!this.allowedModes(request.context).has(mode)) {
+      return failure('mode-disabled', `Agent mode is disabled: ${mode}`);
+    }
+    if (!request.requestId || !request.description.trim() || !request.prompt.trim()) {
+      return failure('invalid-state', 'requestId, description and prompt are required.');
+    }
+    const reservationId = this.randomUuid();
+    const runId = this.randomUuid();
+    let identity: ChildSessionIdentity;
+    try {
+      identity = await this.options.runtime.spawn({
         context: request.context,
-        agentId,
+        agentId: reservationId,
         mode,
+        ...(request.name?.trim() ? { name: request.name.trim() } : {}),
+        description: request.description,
+        ...(request.agentType ? { agentType: request.agentType } : {}),
+        ...(request.model ? { model: request.model } : {}),
+        ...(request.thinking ? { thinking: request.thinking } : {}),
+      });
+    } catch (error) {
+      return failure('runtime-unavailable', error instanceof Error ? error.message : String(error));
+    }
+    // Main 重启后只能按 instanceId 认领 coworker；以它为 agentId，模型手里的 id 才不会失效。
+    // spawn 途中 child-ready 已按同一个键 adopt 过的记录在这里被覆盖，不会留下第二条
+    const agentId = identity.instanceId;
+    const agent: AgentRecord = {
+      context: request.context,
+      agentId,
+      mode,
+      identity,
+      status: 'ready',
+      queuedRunIds: [],
+      title: request.name?.trim() || request.description,
+    };
+    const run = this.createRun(agent, runId, request.prompt, request.schema, request.gate);
+    this.agents.set(agentId, agent);
+    this.runs.set(runId, run);
+    const started = await this.startRun(agent, run, true);
+    if (!started.ok) {
+      this.agents.delete(agentId);
+      this.runs.delete(runId);
+      await this.options.runtime.dismiss({
+        context: request.context,
         identity,
-        status: 'ready',
-        queuedRunIds: [],
-        title: request.name?.trim() || request.description,
-      };
-      const run = this.createRun(agent, runId, request.prompt, request.schema, request.gate);
-      this.agents.set(agentId, agent);
-      this.runs.set(runId, run);
-      const started = await this.startRun(agent, run, true);
-      if (!started.ok) {
-        this.agents.delete(agentId);
-        this.runs.delete(runId);
-        await this.options.runtime.dismiss({
-          context: request.context,
-          identity,
-          agentId,
-        });
-        return started;
-      }
-      return { ok: true, value: { agentId, runId, mode, status: 'running' } };
-    });
+        agentId,
+      });
+      return started;
+    }
+    return { ok: true, value: { agentId, runId, mode, status: 'running' } };
   }
 
   send(request: AgentControlSendRequest): Promise<AgentServiceResult<AgentSendReceipt>> {
@@ -357,6 +369,7 @@ export class AgentService implements AgentServiceContract {
       this.runs.set(runId, run);
       if (active) {
         agent.value.queuedRunIds.push(runId);
+        this.pushProgress(request.context.owner.ownerId);
         return {
           ok: true,
           value: {
@@ -455,7 +468,10 @@ export class AgentService implements AgentServiceContract {
     const run = this.ownedRun(request.context, request.runId);
     if (!run.ok) return run;
     if (!TERMINAL_RUN_STATUSES.has(run.value.status)) {
-      return failure('invalid-state', 'Run has not reached an immutable result.');
+      return failure(
+        'invalid-state',
+        'Run is still running and has no result yet. You will be notified automatically when it completes — do not poll report or wait to check progress; tell the user it is still running.'
+      );
     }
     run.value.delivered = true;
     return {
@@ -572,7 +588,7 @@ export class AgentService implements AgentServiceContract {
       .filter(
         (run) => run.context.owner.ownerId === ownerId && !TERMINAL_RUN_STATUSES.has(run.status)
       )
-      .map((run) => this.runProgress(run));
+      .map((run) => this.runProgress(run, true));
   }
 
   observe(event: AgentWorkerEvent | { type: 'worker-exited' }): void {
@@ -610,15 +626,22 @@ export class AgentService implements AgentServiceContract {
     if (!agent) return;
     const active = agent.activeRunId ? this.runs.get(agent.activeRunId) : undefined;
     if (event.type === 'message-upsert' && active) {
+      const before = { text: active.text, activity: JSON.stringify(active.activity) };
       const text = projectedText(event.message);
       if (text !== undefined) active.text = text;
       const activity = projectedActivity(event.message);
       if (activity) active.activity = activity;
+      for (const id of toolCallIdsOf(event.message)) active.toolCallIds.add(id);
       if (event.message.usage) {
+        const usage = event.message.usage;
         active.usageByMessage.set(event.index, {
-          input: event.message.usage.input,
-          output: event.message.usage.output,
+          input: usage.input,
+          output: usage.output,
+          cache: (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0),
         });
+      }
+      if (before.text !== active.text || before.activity !== JSON.stringify(active.activity)) {
+        this.pushProgress(active.context.owner.ownerId);
       }
       return;
     }
@@ -739,6 +762,7 @@ export class AgentService implements AgentServiceContract {
       ...(gate !== undefined ? { gate } : {}),
       createdAt: this.now(),
       usageByMessage: new Map(),
+      toolCallIds: new Set(),
       delivered: false,
     };
   }
@@ -752,6 +776,7 @@ export class AgentService implements AgentServiceContract {
     agent.status = 'active';
     run.status = 'running';
     run.startedAt = this.now();
+    this.pushProgress(agent.context.owner.ownerId);
     const prompted = await this.options.runtime.prompt({
       context: agent.context,
       identity: agent.identity,
@@ -850,6 +875,7 @@ export class AgentService implements AgentServiceContract {
     run.finishedAt = this.now();
     run.activity = undefined;
     if (error !== undefined) run.error = error;
+    this.pushProgress(run.context.owner.ownerId);
     // 在等它的 wait 同步结算并标记已知情；仍有 wait 在等它（until:all）则交给那次回执
     this.flushWaiters();
     this.notifyUndelivered(run);
@@ -864,19 +890,27 @@ export class AgentService implements AgentServiceContract {
 
   private completionText(run: RunRecord): string {
     const title = this.agents.get(run.agentId)?.title ?? run.agentId;
-    const elapsed = formatElapsed(
-      (run.finishedAt ?? this.now()) - (run.startedAt ?? run.createdAt)
-    );
+    const durationMs = (run.finishedAt ?? this.now()) - (run.startedAt ?? run.createdAt);
     const body = run.status === 'succeeded' ? run.text?.trim() : run.error;
+    // 截断要可感知：模型得知道被裁了多少，才会去 report 拿全文
     const excerpt =
       body && body.length > NOTIFY_TEXT_LIMIT
-        ? `${body.slice(0, NOTIFY_TEXT_LIMIT)}\n…(truncated)`
+        ? `${body.slice(0, NOTIFY_TEXT_LIMIT)}\n[…the subagent's report was cut from ${body.length} to its first ${NOTIFY_TEXT_LIMIT} characters]`
         : body;
+    let tokens = 0;
+    for (const usage of run.usageByMessage.values()) {
+      tokens += usage.input + usage.output + usage.cache;
+    }
     return [
-      `Subagent "${title}" (agentId ${run.agentId}, runId ${run.runId}) ${run.status} after ${elapsed}.`,
+      `Subagent "${title}" (agentId ${run.agentId}, runId ${run.runId}) ${run.status} after ${formatElapsed(durationMs)}.`,
       ...(run.requestBudgetStop ? ['因请求预算停止，以下是已有的部分输出。'] : []),
       ...(excerpt ? [excerpt] : []),
-      `Use subagent report with runId ${run.runId} for the full result.`,
+      `<usage>subagent_tokens: ${tokens}\ntool_uses: ${run.toolCallIds.size}\nduration_ms: ${durationMs}</usage>`,
+      `Use subagent report with runId ${run.runId} for the full result.${
+        run.mode === 'coworker'
+          ? ` To continue this coworker, use subagent send with agentId ${run.agentId}.`
+          : ''
+      }`,
     ].join('\n');
   }
 
@@ -938,8 +972,14 @@ export class AgentService implements AgentServiceContract {
     };
   }
 
-  private runProgress(run: RunRecord): AgentRunProgress {
+  private pushProgress(ownerId: string): void {
+    this.options.onProgress?.(ownerId, this.progress(ownerId));
+  }
+
+  /** withText 只给界面；模型的超时回执不带中途文本，结果只随完成通知交付 */
+  private runProgress(run: RunRecord, withText = false): AgentRunProgress {
     const title = this.agents.get(run.agentId)?.title;
+    const text = withText ? run.text?.trim().slice(-PROGRESS_TEXT_TAIL) : undefined;
     return {
       agentId: run.agentId,
       runId: run.runId,
@@ -947,6 +987,7 @@ export class AgentService implements AgentServiceContract {
       status: run.status,
       elapsedMs: Math.max(0, this.now() - (run.startedAt ?? run.createdAt)),
       ...(run.activity ? { activity: run.activity } : {}),
+      ...(text ? { text } : {}),
     };
   }
 

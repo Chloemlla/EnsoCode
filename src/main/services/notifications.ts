@@ -4,10 +4,14 @@ import { IPC_CHANNELS } from '@shared/types';
 import type { RendererAgentEvent } from '@shared/types/agent';
 import { app, BrowserWindow, Notification } from 'electron';
 import { readSettings } from '../ipc/settings';
-import { sendToWindow } from '../windows/createAppWindow';
+import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
 import { ApprovalNotificationGate } from './approvalNotificationGate';
 
 const approvalNotifications = new ApprovalNotificationGate();
+
+/** 持有已弹出的通知：对象被 GC 后 macOS 点击只会激活 app，不再触发 click */
+const liveNotifications = new Set<Notification>();
+const MAX_LIVE_NOTIFICATIONS = 100;
 
 // 文案本地内联：main 段引入 @shared/i18n 会触发 rollup 多入口 chunk 异常
 // （index.js 被打成 0 字节空产物），故不走共享 i18n
@@ -55,21 +59,21 @@ export function setViewedSession(sessionId: string | null): void {
   viewedSessionId = sessionId;
 }
 
-/** 点击通知：聚焦主窗口并让 renderer 切到对应会话 */
-function focusSession(sessionId: string): void {
-  const win = BrowserWindow.getAllWindows()[0];
-  if (!win) return;
-  if (win.isMinimized()) win.restore();
-  win.show();
-  win.focus();
-  sendToWindow(win, IPC_CHANNELS.NOTIFICATION_FOCUS_SESSION, sessionId);
+/** 点击通知：聚焦（托盘模式下重建）主窗口，renderer 加载完再切到对应会话 */
+async function focusSession(sessionId: string): Promise<void> {
+  const { focusMainWindow } = await import('../windows/MainWindow');
+  const win = focusMainWindow();
+  const send = () => sendToWindow(win, IPC_CHANNELS.NOTIFICATION_FOCUS_SESSION, sessionId);
+  const contents = getWindowWebContents(win);
+  if (contents.isLoading()) contents.once('did-finish-load', send);
+  else send();
 }
 
 function notify(
   sessionId: string,
   title: string,
   body: string,
-  onClick = () => focusSession(sessionId)
+  onClick = () => void focusSession(sessionId)
 ): void {
   // macOS 未打包（未签名）app 的原生通知会被 UNUserNotificationCenter 静默丢弃，
   // 且 Electron 的 'failed' 事件是 Windows-only 兜不住——直接走 osascript
@@ -82,7 +86,16 @@ function notify(
   }
   if (!Notification.isSupported()) return;
   const notification = new Notification({ title, body, silent: false });
-  notification.on('click', onClick);
+  const release = () => liveNotifications.delete(notification);
+  notification.on('click', () => {
+    release();
+    onClick();
+  });
+  notification.on('close', release);
+  liveNotifications.add(notification);
+  if (liveNotifications.size > MAX_LIVE_NOTIFICATIONS) {
+    liveNotifications.delete(liveNotifications.values().next().value as Notification);
+  }
   notification.show();
 }
 

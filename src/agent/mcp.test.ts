@@ -1,6 +1,10 @@
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
-import type { McpServerSpawnConfig, McpWorkerEvent } from '@shared/types/agent';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  McpOAuthRefreshResult,
+  McpServerSpawnConfig,
+  McpWorkerEvent,
+} from '@shared/types/agent';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const clientState = {
   instances: 0,
@@ -69,19 +73,50 @@ const httpServer: McpServerSpawnConfig = {
   url: 'https://mcp.notion.com/mcp',
 };
 
-const makeManager = () => {
+const makeManager = (
+  refreshOAuth?: (serverId: string, rejected?: string) => Promise<McpOAuthRefreshResult>
+) => {
   const events: McpWorkerEvent[] = [];
-  const manager = new McpManager({ emit: (event) => events.push(event) });
+  const manager = new McpManager({
+    emit: (event) => events.push(event),
+    ...(refreshOAuth ? { refreshOAuth } : {}),
+  });
   return { manager, events };
 };
 
-const authProviderOf = (index = 0) =>
-  transportState.http[index]?.options?.authProvider as {
-    tokens(): unknown;
-    saveTokens(tokens: unknown): void | Promise<void>;
-    redirectToAuthorization(url: URL): void | Promise<void>;
-    redirectUrl: unknown;
-  };
+const originalFetch = globalThis.fetch;
+
+/** 上游 MCP server：按序返回状态码，记下每次请求带的 Authorization */
+function stubUpstream(...statuses: number[]) {
+  const seen: (string | null)[] = [];
+  globalThis.fetch = vi.fn(async (_input: unknown, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get('authorization'));
+    return new Response('', { status: statuses.shift() ?? 200 });
+  }) as never;
+  return seen;
+}
+
+/** 经 transport 拿到的 fetch 发一次请求（SDK 实际发请求的入口） */
+const send = (
+  index = 0,
+  init: RequestInit = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  }
+) => {
+  const fetchFn = (transportState.http[index]?.options as { fetch?: typeof fetch } | undefined)
+    ?.fetch;
+  if (!fetchFn) throw new Error('transport has no fetch');
+  return fetchFn('https://mcp.notion.com/mcp', init);
+};
+
+const refreshed = (access_token: string) =>
+  vi.fn(async () => ({ ok: true as const, access: { access_token } }));
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 beforeEach(() => {
   clientState.instances = 0;
@@ -136,9 +171,11 @@ describe('McpManager status reporting', () => {
     expect(events.at(-1)).toMatchObject({ state: 'unauthorized', serverId: 'srv-1' });
   });
 
-  it('reports unauthorized when the provider asks for interactive authorization', async () => {
+  it('传输层 401（StreamableHTTPError.code）归为需授权', async () => {
     clientState.connect = vi.fn(async () => {
-      await authProviderOf().redirectToAuthorization(new URL('https://example.com/auth'));
+      throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: '), {
+        code: 401,
+      });
     });
     const { manager, events } = makeManager();
     await manager.toolsFor([httpServer]);
@@ -146,46 +183,101 @@ describe('McpManager status reporting', () => {
   });
 });
 
-describe('McpManager oauth provider', () => {
-  it('exposes configured tokens and emits refreshed tokens on save', async () => {
-    const { manager, events } = makeManager();
+describe('McpManager OAuth access', () => {
+  it('transport 不持有 OAuth provider，请求带 Main 下发的 access token', async () => {
+    const { manager } = makeManager();
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    expect(transportState.http[0]?.options).not.toHaveProperty('authProvider');
+    const seen = stubUpstream(200);
+    await send();
+    expect(seen).toEqual(['Bearer a']);
+  });
+
+  it('401 后带被拒 token 指纹请求 Main 刷新，用新 token 重试一次', async () => {
+    const refreshOAuth = refreshed('b');
+    const { manager } = makeManager(refreshOAuth);
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    const seen = stubUpstream(401, 200, 200);
+    expect((await send()).status).toBe(200);
+    expect(refreshOAuth).toHaveBeenCalledWith('srv-1', oauthFingerprint({ access_token: 'a' }));
+    expect(seen).toEqual(['Bearer a', 'Bearer b']);
+    await send();
+    expect(seen.at(-1)).toBe('Bearer b');
+  });
+
+  it('Main 判定需重新授权时原样交回 401，不重试', async () => {
+    const refreshOAuth = vi.fn(async () => ({
+      ok: false as const,
+      unauthorized: true,
+      error: 'invalid_grant',
+    }));
+    const { manager } = makeManager(refreshOAuth);
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    const seen = stubUpstream(401);
+    expect((await send()).status).toBe(401);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('并发 401 只向 Main 请求一次刷新', async () => {
+    const refreshOAuth = refreshed('b');
+    const { manager } = makeManager(refreshOAuth);
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    stubUpstream(401, 401, 200, 200);
+    const responses = await Promise.all([send(), send()]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(refreshOAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('临期 token 先向 Main 续期再发请求', async () => {
+    const refreshOAuth = refreshed('b');
+    const { manager } = makeManager(refreshOAuth);
     await manager.toolsFor([
-      { ...httpServer, oauth: { access_token: 'old', refresh_token: 'r1' } },
+      { ...httpServer, oauth: { access_token: 'a', expires_at: Date.now() + 10_000 } },
     ]);
-    const provider = authProviderOf();
-    expect(provider.tokens()).toMatchObject({ access_token: 'old', token_type: 'Bearer' });
-    expect(provider.redirectUrl).toBeUndefined();
-
-    await provider.saveTokens({ access_token: 'new', token_type: 'Bearer', refresh_token: 'r2' });
-    expect(events.at(-1)).toEqual({
-      type: 'mcp-tokens-refreshed',
-      serverId: 'srv-1',
-      tokens: { access_token: 'new', token_type: 'Bearer', refresh_token: 'r2' },
-    });
-    expect(provider.tokens()).toMatchObject({ access_token: 'new' });
+    const seen = stubUpstream(200);
+    await send();
+    expect(refreshOAuth).toHaveBeenCalledWith('srv-1', oauthFingerprint({ access_token: 'a' }));
+    expect(seen).toEqual(['Bearer b']);
   });
 
-  it('回传前先裁剪：id_token 等非白名单字段不出 worker', async () => {
-    const { manager, events } = makeManager();
-    await manager.toolsFor([httpServer]);
-    await authProviderOf().saveTokens({
-      access_token: 'new',
-      token_type: 'Bearer',
-      refresh_token: 'r2',
-      id_token: 'jwt',
-    });
-    expect(events.at(-1)).toEqual({
-      type: 'mcp-tokens-refreshed',
-      serverId: 'srv-1',
-      tokens: { access_token: 'new', token_type: 'Bearer', refresh_token: 'r2' },
-    });
+  it('主动续期失败不阻断请求，同一 token 不反复续期', async () => {
+    const refreshOAuth = vi.fn(async () => ({
+      ok: false as const,
+      unauthorized: false,
+      error: 'down',
+    }));
+    const { manager } = makeManager(refreshOAuth);
+    await manager.toolsFor([
+      { ...httpServer, oauth: { access_token: 'a', expires_at: Date.now() + 10_000 } },
+    ]);
+    const seen = stubUpstream(200, 200);
+    await send();
+    await send();
+    expect(seen).toEqual(['Bearer a', 'Bearer a']);
+    expect(refreshOAuth).toHaveBeenCalledTimes(1);
   });
 
-  it('does not emit refreshed tokens without a server id', async () => {
-    const { manager, events } = makeManager();
-    await manager.toolsFor([{ name: 'anon', transport: 'http', url: 'https://x.test/mcp' }]);
-    await authProviderOf().saveTokens({ access_token: 'a', token_type: 'Bearer' });
-    expect(events.some((event) => event.type === 'mcp-tokens-refreshed')).toBe(false);
+  it('刷新后旧会话配置回传被淘汰的 token，不回退也不重建', async () => {
+    const { manager } = makeManager(refreshed('b'));
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    const seen = stubUpstream(401, 200, 200, 200);
+    await send();
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    await send();
+    await manager.resolve({ ...httpServer, oauth: { access_token: 'a' } });
+    await send();
+    expect(seen.slice(-2)).toEqual(['Bearer b', 'Bearer b']);
+    expect(clientState.instances).toBe(1);
+  });
+
+  it('用户自配的 Authorization 头优先，不注入也不刷新', async () => {
+    const refreshOAuth = refreshed('b');
+    const { manager } = makeManager(refreshOAuth);
+    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
+    const seen = stubUpstream(401);
+    await send(0, { headers: { Authorization: 'Bearer custom' } });
+    expect(seen).toEqual(['Bearer custom']);
+    expect(refreshOAuth).not.toHaveBeenCalled();
   });
 });
 
@@ -208,23 +300,16 @@ describe('McpManager connection cache', () => {
     expect(clientState.instances).toBe(1);
   });
 
-  it('token 变化时原地更新 provider，不重建也不关正在用的连接', async () => {
+  it('Main 下发新 token（重新授权）时原地更新，不重建也不关正在用的连接', async () => {
     const { manager } = makeManager();
     await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
     await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'b' } }]);
     // 已跑会话的工具闭包捕获着这个 client，关了它等于弄坏它们
     expect(clientState.instances).toBe(1);
     expect(clientState.closed).toBe(0);
-    expect((authProviderOf(0).tokens() as { access_token: string }).access_token).toBe('b');
-  });
-
-  it('worker 自己 refresh 后主进程回传同一 token，不回退也不重建', async () => {
-    const { manager } = makeManager();
-    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
-    await authProviderOf(0).saveTokens({ access_token: 'refreshed', token_type: 'Bearer' });
-    await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'a' } }]);
-    expect(clientState.instances).toBe(1);
-    expect((authProviderOf(0).tokens() as { access_token: string }).access_token).toBe('refreshed');
+    const seen = stubUpstream(200);
+    await send();
+    expect(seen).toEqual(['Bearer b']);
   });
 
   it('主进程不再下发凭据（撤销）时下线旧连接并重建', async () => {
@@ -233,7 +318,9 @@ describe('McpManager connection cache', () => {
     await manager.toolsFor([httpServer]);
     expect(clientState.instances).toBe(2);
     await vi.waitFor(() => expect(clientState.closed).toBe(1));
-    expect(authProviderOf(1).tokens()).toBeUndefined();
+    const seen = stubUpstream(200);
+    await send(1);
+    expect(seen).toEqual([null]);
   });
 
   it('listTools 失败时关闭 client，不泄漏子进程', async () => {
@@ -254,9 +341,9 @@ describe('McpManager connection cache', () => {
     clientState.connect = vi.fn(async () => {});
     await manager.toolsFor([{ ...httpServer, oauth: { access_token: 'fresh' } }]);
     expect(clientState.instances).toBe(2);
-    expect((authProviderOf(1).tokens() as { access_token: string } | undefined)?.access_token).toBe(
-      'fresh'
-    );
+    const seen = stubUpstream(200);
+    await send(1);
+    expect(seen).toEqual(['Bearer fresh']);
   });
 
   it('失败后短时不重连，TTL 过后再试', async () => {
@@ -340,7 +427,9 @@ describe('McpManager deferred servers', () => {
     manager.refresh({ ...httpServer, oauth: { access_token: 'b' } });
     expect(clientState.instances).toBe(0);
     await manager.resolve(httpServer);
-    expect((authProviderOf(0).tokens() as { access_token: string }).access_token).toBe('b');
+    const seen = stubUpstream(200);
+    await send();
+    expect(seen).toEqual(['Bearer b']);
   });
 
   it('refresh 把撤销同步给已建立的连接', async () => {

@@ -111,8 +111,6 @@ import {
   resolveChatModelSpec,
   voiceCorrectionModelIdFromSettings,
 } from '../services/llama/chatModels';
-import { toStoredTokens } from '../services/mcpOAuth';
-import { getMcpOAuthStore } from '../services/mcpOAuthStore';
 import { clearMcpStatuses, recordMcpStatus } from '../services/mcpStatusCache';
 import type { Complete } from '../services/memory/distill';
 import { memorySpaceContext } from '../services/memory/space';
@@ -145,6 +143,7 @@ import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
 import { setSpeechCorrector } from '../services/speech/service';
 import { buildCorrectionRequest } from '../services/speech/text';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
+import { SubagentProgressPush } from '../services/subagentProgressPush';
 import { titleModelCandidates } from '../services/titleSummary';
 import { ingestSessionJsonl } from '../services/usage/ledgerStore';
 import { sendToAllWindows } from '../windows/createAppWindow';
@@ -277,6 +276,14 @@ export function pushMcpStatus(push: McpStatusPush): void {
     // renderer 已崩但 webContents 对象还在
   }
 }
+
+const subagentProgressPush = new SubagentProgressPush((sessionId, runs) => {
+  try {
+    sendToAllWindows(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, { sessionId, runs });
+  } catch {
+    // renderer 已崩但 webContents 对象还在
+  }
+});
 
 function exactIdentity(sessionId: unknown): SessionIdentity | ChildSessionIdentity | undefined {
   return isNonEmptyString(sessionId) ? agentSessionIndex.currentIdentity(sessionId) : undefined;
@@ -955,6 +962,7 @@ export function registerAgentHandlers(): void {
       const identity = rootIdentity(context.owner.ownerId);
       if (identity) sendAgentCommand({ type: 'agent-notify', identity, text, urgent });
     },
+    onProgress: (ownerId, runs) => subagentProgressPush.update(ownerId, runs),
     allowedModes: (context) => {
       const state = readSettingsState() ?? {};
       const projects = Array.isArray(state.projects) ? state.projects : [];
@@ -1041,17 +1049,13 @@ export function registerAgentHandlers(): void {
       clearMcpStatuses();
       pushMcpStatus({ type: 'mcp-status-cleared' });
     }
-    if (workerEvent.type === 'mcp-tokens-refreshed') {
-      // worker 回传的 token 同样过一道白名单，不直接落盘
-      getMcpOAuthStore().saveTokens(workerEvent.serverId, toStoredTokens(workerEvent.tokens));
-      return;
-    }
     // 手动重读结果按 requestId 在 agentHost 结算给 invoke 等待者；无主的迟到结果直接丢弃，
     // 绝不进普通事件流（renderer 的 snapshot 分支有 started / 审批副作用）
     if (
       workerEvent.type === 'session-reloaded' ||
       workerEvent.type === 'workspace-lock-result' ||
       workerEvent.type === 'oauth-pool-select' ||
+      workerEvent.type === 'mcp-oauth-refresh' ||
       workerEvent.type === 'workspace-unlock-result'
     )
       return;

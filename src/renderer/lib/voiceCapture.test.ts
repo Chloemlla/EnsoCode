@@ -5,6 +5,8 @@ import {
   ensureMicPermission,
   LIVE_TIMEOUT_MS,
   levelFromSamples,
+  primeVoiceAudio,
+  releaseVoiceAudio,
   SPEECH_END_SILENCE_MS,
   startVoiceRecording,
 } from './voiceCapture';
@@ -269,5 +271,41 @@ describe('startVoiceRecording live', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await settled(recording.live)).toBe(true);
     recording.cancel();
+  });
+
+  it('closes the shared context when recording ends, and leaves a caller-owned one running', async () => {
+    const closed: string[] = [];
+    let nextId = 0;
+    class FakeAudioContext {
+      id = `ctx-${nextId++}`;
+      state = 'running';
+      sampleRate = 16_000;
+      destination = {};
+      resume = async () => {};
+      close = async () => {
+        this.state = 'closed';
+        closed.push(this.id);
+      };
+      createMediaStreamSource() {
+        return { connect() {}, disconnect() {} };
+      }
+      createScriptProcessor() {
+        return { onaudioprocess: null as unknown, connect() {}, disconnect() {} };
+      }
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+    });
+
+    const shared = primeVoiceAudio() as unknown as FakeAudioContext;
+    (await startVoiceRecording(() => {}, { context: shared as unknown as AudioContext })).cancel();
+    expect(closed).toEqual([shared.id]);
+    expect(primeVoiceAudio()).not.toBe(shared);
+
+    const owned = new FakeAudioContext();
+    (await startVoiceRecording(() => {}, { context: owned as unknown as AudioContext })).cancel();
+    expect(closed).toEqual([shared.id]);
+    releaseVoiceAudio();
   });
 });

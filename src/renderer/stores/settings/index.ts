@@ -1,4 +1,5 @@
 import { type AccentColor, DEFAULT_ACCENT_COLOR, resolveAccentColor } from '@shared/accentColor';
+import { DEFAULT_AUTO_RETRY_LIMIT, normalizeAutoRetryLimit } from '@shared/autoRetry';
 import {
   DEFAULT_BOT_MAX_RUNNING_TURNS,
   normalizeBotMaxRunningTurns,
@@ -189,6 +190,7 @@ const initialState = {
   chatWide: false,
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
+  autoRetryLimit: DEFAULT_AUTO_RETRY_LIMIT,
   sshTimeoutSeconds: DEFAULT_SSH_TIMEOUT_SECONDS,
   generationStallTimeoutMin: 0,
   autoArchiveIdleDays: DEFAULT_AUTO_ARCHIVE_IDLE_DAYS,
@@ -371,6 +373,7 @@ export const useSettingsStore = create<SettingsState>()(
       setNotifyMainAgentOnly: (notifyMainAgentOnly) => set({ notifyMainAgentOnly }),
       setMaxActiveCoworkers: (value) =>
         set({ maxActiveCoworkers: normalizeMaxActiveCoworkers(value) }),
+      setAutoRetryLimit: (value) => set({ autoRetryLimit: normalizeAutoRetryLimit(value) }),
       setSshTimeoutSeconds: (value) =>
         set({ sshTimeoutSeconds: normalizeSshTimeoutSeconds(value) }),
       setGenerationStallTimeoutMin: (minutes) =>
@@ -1116,6 +1119,10 @@ export const useSettingsStore = create<SettingsState>()(
         const maxActiveCoworkers = normalizeMaxActiveCoworkers(s.maxActiveCoworkers);
         if (maxActiveCoworkers !== s.maxActiveCoworkers) {
           useSettingsStore.setState({ maxActiveCoworkers });
+        }
+        const autoRetryLimit = normalizeAutoRetryLimit(s.autoRetryLimit);
+        if (autoRetryLimit !== s.autoRetryLimit) {
+          useSettingsStore.setState({ autoRetryLimit });
         }
         const botMaxRunningTurns = normalizeBotMaxRunningTurns(s.botMaxRunningTurns);
         if (botMaxRunningTurns !== s.botMaxRunningTurns) {

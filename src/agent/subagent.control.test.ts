@@ -42,15 +42,22 @@ describe('unified subagent tool', () => {
     expect(`${tool.description}\n${tool.promptSnippet}`).toMatch(
       /spawn requires non-empty description and prompt/i
     );
-    const fields = (
-      tool.parameters as {
-        properties: { description: { description?: string }; prompt: { description?: string } };
-        allOf?: Array<{ then?: { required?: string[] } }>;
-      }
-    ).properties;
-    const conditional = (tool.parameters as { allOf?: Array<{ then?: { required?: string[] } }> })
-      .allOf;
-    expect(conditional?.[0]?.then?.required).toEqual(['description', 'prompt']);
+    const parameters = tool.parameters as {
+      oneOf?: unknown;
+      anyOf?: unknown;
+      allOf?: unknown;
+      properties: {
+        description: { description?: string };
+        prompt: { description?: string };
+        runIds: { description?: string; uniqueItems?: boolean };
+      };
+    };
+    const fields = parameters.properties;
+    expect(parameters.oneOf).toBeUndefined();
+    expect(parameters.anyOf).toBeUndefined();
+    expect(parameters.allOf).toBeUndefined();
+    expect(JSON.stringify(parameters)).not.toMatch(/"uniqueItems"/);
+    expect(fields.runIds.description).toMatch(/duplicate/i);
     expect(`${fields.description.description}\n${fields.prompt.description}`).toMatch(/spawn/i);
     expect(fields.description.description).toMatch(/required/i);
     expect(fields.prompt.description).toMatch(/required/i);

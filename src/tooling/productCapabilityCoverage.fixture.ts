@@ -96,6 +96,7 @@ export const SETTINGS_DATA_COVERAGE = {
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
   maxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
+  autoRetryLimit: excluded('Desktop transient-error retry preference; not an Enso capability.'),
   sshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   generationStallTimeoutMin: excluded('Renderer stall-abort preference; not an Enso capability.'),
   autoArchiveIdleDays: excluded('Renderer sidebar archive preference; not an Enso capability.'),
@@ -238,6 +239,7 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
   setMaxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
+  setAutoRetryLimit: excluded('Desktop transient-error retry preference; not an Enso capability.'),
   setSshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   setGenerationStallTimeoutMin: excluded(
     'Renderer stall-abort preference; not an Enso capability.'
@@ -507,6 +509,9 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   AGENT_SUBAGENT_PROGRESS: excluded(
     'Read-only progress of running subagents shown in the desktop wait row; renderer-only, not an Enso capability.'
+  ),
+  AGENT_SUBAGENT_PROGRESS_CHANGED: excluded(
+    'Main-to-renderer push of running subagent progress snapshots for the desktop wait row.'
   ),
   AGENT_WORKFLOW_STOP: excluded('Side panel control to stop a running workflow run.'),
   AGENT_SUBAGENT_STOP: excluded(

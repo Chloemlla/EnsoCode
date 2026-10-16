@@ -1,12 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { McpOAuthTokens } from '@shared/types/agent';
+import type { McpOAuthAccess, McpOAuthTokens } from '@shared/types/agent';
 import { app, safeStorage } from 'electron';
 
 /** 单个 MCP server 的授权状态：DCR 注册信息与 token 都按 McpServerEntry.id 归属 */
 export interface McpOAuthRecord {
   serverUrl?: string;
   tokens?: McpOAuthTokens;
+  /** access token 绝对过期时间（ms），保存 tokens 时按 expires_in 换算 */
+  expiresAt?: number;
   /** SDK 动态注册（DCR）返回的 client 信息，换 token 与 refresh 都要用 */
   clientInformation?: Record<string, unknown>;
 }
@@ -16,6 +18,7 @@ export interface McpOAuthStoreOptions {
   encryptionAvailable?: () => boolean;
   encrypt?: (text: string) => Buffer;
   decrypt?: (buf: Buffer) => string;
+  now?: () => number;
 }
 
 interface Persisted {
@@ -27,6 +30,7 @@ export class McpOAuthStore {
   private readonly encryptionAvailable: () => boolean;
   private readonly encrypt: (text: string) => Buffer;
   private readonly decrypt: (buf: Buffer) => string;
+  private readonly now: () => number;
   private cache: Record<string, McpOAuthRecord> | null = null;
   /** 钥匙串不可用时降级明文；留痕供设置页/日志提示 */
   encryptionDegraded = false;
@@ -44,6 +48,7 @@ export class McpOAuthStore {
       });
     this.encrypt = options.encrypt ?? ((text) => safeStorage.encryptString(text));
     this.decrypt = options.decrypt ?? ((buf) => safeStorage.decryptString(buf));
+    this.now = options.now ?? Date.now;
   }
 
   record(serverId: string): McpOAuthRecord | undefined {
@@ -54,8 +59,20 @@ export class McpOAuthStore {
     return this.load()[serverId]?.tokens;
   }
 
+  /** 下发 worker 的子集：不含 refresh_token */
+  access(serverId: string): McpOAuthAccess | undefined {
+    const row = this.load()[serverId];
+    if (!row?.tokens?.access_token) return undefined;
+    return {
+      access_token: row.tokens.access_token,
+      ...(row.expiresAt !== undefined ? { expires_at: row.expiresAt } : {}),
+    };
+  }
+
   saveTokens(serverId: string, tokens: McpOAuthTokens, serverUrl?: string): void {
-    this.merge(serverId, { tokens, ...(serverUrl ? { serverUrl } : {}) });
+    const expiresAt =
+      typeof tokens.expires_in === 'number' ? this.now() + tokens.expires_in * 1000 : undefined;
+    this.merge(serverId, { tokens, expiresAt, ...(serverUrl ? { serverUrl } : {}) });
   }
 
   saveClientInformation(
@@ -71,7 +88,7 @@ export class McpOAuthStore {
     const rows = this.load();
     const row = rows[serverId];
     if (!row?.tokens) return;
-    const { tokens: _tokens, ...rest } = row;
+    const { tokens: _tokens, expiresAt: _expiresAt, ...rest } = row;
     this.save({ ...rows, [serverId]: rest });
   }
 

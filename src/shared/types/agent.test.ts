@@ -678,6 +678,17 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ type: 'set-max-active-coworkers' })).toBeNull();
   });
 
+  it('set-auto-retry-limit 接受 -1（无限）到 100 的整数', () => {
+    expect(parseAgentCommand({ type: 'set-auto-retry-limit', limit: -1 })).toEqual({
+      type: 'set-auto-retry-limit',
+      limit: -1,
+    });
+    expect(parseAgentCommand({ type: 'set-auto-retry-limit', limit: 0 })).not.toBeNull();
+    expect(parseAgentCommand({ type: 'set-auto-retry-limit', limit: 101 })).toBeNull();
+    expect(parseAgentCommand({ type: 'set-auto-retry-limit', limit: 1.5 })).toBeNull();
+    expect(parseAgentCommand({ type: 'set-auto-retry-limit' })).toBeNull();
+  });
+
   it('set-disabled-workflow-presets 只接受合法 id 数组', () => {
     expect(
       parseAgentCommand({ type: 'set-disabled-workflow-presets', ids: ['parallel-review'] })
@@ -1738,6 +1749,11 @@ describe('generation lifecycle/events', () => {
     expect(parseAgentWorkerEvent(retry)).toEqual(retry);
     expect(parseAgentWorkerEvent({ ...retry, attempt: 0 })).toBeNull();
     expect(parseAgentWorkerEvent({ ...retry, maxAttempts: '3' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...retry, maxAttempts: 0 })).toEqual({
+      ...retry,
+      maxAttempts: 0,
+    });
+    expect(parseAgentWorkerEvent({ ...retry, maxAttempts: -1 })).toBeNull();
     expect(parseAgentWorkerEvent({ ...retry, delayMs: -1 })).toBeNull();
     expect(parseAgentWorkerEvent({ ...retry, error: '' })).toBeNull();
     const { error: _dropped, ...withoutError } = retry;
@@ -2292,29 +2308,54 @@ describe('MCP 旁路事件收窄', () => {
     expect(parseAgentWorkerEvent({ ...status, scopeChallenge: { scope: 'a', x: 1 } })).toBeNull();
   });
 
-  it('mcp-tokens-refreshed 裁剪白名单外的 token 字段，不丢整条事件', () => {
-    const event = {
-      type: 'mcp-tokens-refreshed',
-      serverId: 'srv-1',
-      tokens: { access_token: 'a', token_type: 'Bearer', refresh_token: 'r', expires_in: 60 },
-    };
+  it('mcp-oauth-refresh 只带 server 与被拒 token 指纹，不带凭据', () => {
+    const event = { type: 'mcp-oauth-refresh', requestId: 'r1', serverId: 'srv-1' };
     expect(parseAgentWorkerEvent(event)).toEqual(event);
-    // SDK 会保留 id_token：裁掉它，但 refresh 结果必须能落盘（否则轮换的 refresh_token 会丢）
+    expect(parseAgentWorkerEvent({ ...event, rejected: 'abcd' })).toEqual({
+      ...event,
+      rejected: 'abcd',
+    });
+    expect(parseAgentWorkerEvent({ ...event, serverId: '' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...event, requestId: 1 })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...event, refresh_token: 'r' })).toBeNull();
+    // worker 不再自行 refresh：旧的回传事件一律拒收
     expect(
       parseAgentWorkerEvent({
-        ...event,
-        tokens: { access_token: 'a', refresh_token: 'r2', id_token: 'jwt' },
+        type: 'mcp-tokens-refreshed',
+        serverId: 'srv-1',
+        tokens: { access_token: 'a' },
       })
-    ).toEqual({
-      type: 'mcp-tokens-refreshed',
-      serverId: 'srv-1',
-      tokens: { access_token: 'a', refresh_token: 'r2' },
-    });
-    expect(parseAgentWorkerEvent({ ...event, tokens: { token_type: 'Bearer' } })).toBeNull();
-    expect(
-      parseAgentWorkerEvent({ ...event, tokens: { access_token: 'a', expires_in: 'x' } })
     ).toBeNull();
-    expect(parseAgentWorkerEvent({ ...event, extra: 1 })).toBeNull();
+  });
+
+  it('mcp-oauth-refresh-result 只放行 access token，refresh_token 不进 worker', () => {
+    const ok = {
+      type: 'mcp-oauth-refresh-result',
+      requestId: 'r1',
+      result: { ok: true, access: { access_token: 'a', expires_at: 1 } },
+    };
+    expect(parseAgentCommand(ok)).toEqual(ok);
+    const failed = {
+      type: 'mcp-oauth-refresh-result',
+      requestId: 'r1',
+      result: { ok: false, unauthorized: true, error: 'invalid_grant' },
+    };
+    expect(parseAgentCommand(failed)).toEqual(failed);
+    expect(
+      parseAgentCommand({
+        ...ok,
+        result: { ok: true, access: { access_token: 'a', refresh_token: 'r' } },
+      })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...ok, result: { ok: true, access: {} } })).toBeNull();
+    expect(
+      parseAgentCommand({
+        ...ok,
+        result: { ok: true, access: { access_token: 'a', expires_at: 'x' } },
+      })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...failed, result: { ok: false, error: 'x' } })).toBeNull();
+    expect(parseAgentCommand({ ...ok, requestId: '' })).toBeNull();
   });
 });
 

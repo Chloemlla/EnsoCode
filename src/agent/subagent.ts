@@ -29,6 +29,13 @@ export interface UnifiedSubagentDeps {
 const WAIT_TIMEOUT_NOTE =
   'The wait timed out; this is not a failure. Pending Runs keep going and you will be notified automatically when each finishes — continue other work instead of waiting again.';
 
+/** 后台回执的知识边界：通知到达前模型对结果一无所知 */
+const BACKGROUND_RECEIPT_NOTE =
+  'The subagent is working in the background. You will be notified automatically when the Run completes. ' +
+  'You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime. ' +
+  'If the user asks for progress, say it is still running. Do not duplicate its work on the same files or topics. ' +
+  'agentId and runId are internal ids — do not mention them to the user.';
+
 /** schema 校验前把超限的 timeoutMs 截到上限，不报错 */
 function clampWaitTimeout(params: unknown): unknown {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return params;
@@ -166,7 +173,11 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
     promptGuidelines: [
       'spawn requires non-empty description and prompt. Omit both for every other operation.',
       'Agent and Run are different identities: use runId for wait/report/stop and agentId for send/dismiss.',
-      'Subagents run in the background and you are notified automatically with a result summary when a Run finishes. Do not wait (wait operation or wait:true) unless your very next step cannot proceed without that result; keep working or reply to the user meanwhile.',
+      "When not to use: if the target is already known, use the direct tool (read for a known path, grep for a specific symbol). Reserve subagents for open-ended work that spans many files, independent work that can run in parallel, or tasks matching an agent type. Once you've delegated a search, don't also run it yourself.",
+      'Brief a subagent like a smart colleague who just walked into the room: it has not seen this conversation. State the goal and why, what you already learned or ruled out, and the expected answer shape and length (e.g. "report in under 200 words").',
+      'Subagents run in the background and you are notified automatically with a result summary when a Run finishes. Do not wait (wait operation or wait:true) unless your very next step cannot proceed without that result; keep working or reply to the user meanwhile. Do not sleep, poll, or call report/wait on a running Run just to check progress.',
+      "Don't race: after launching a background Run you know nothing about its results. Never fabricate or predict them in any form — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the subagent is still running — give status, not a guess.",
+      'The user may not see the subagent result in full — relay what matters in your own reply.',
       `wait defaults to ${AGENT_WAIT_DEFAULT_MS / 60_000} minutes and is capped at ${AGENT_WAIT_MAX_MS / 60_000}. A timeout or a user interruption is not a failure and never stops the Run; the receipt lists each pending Run's progress. Use stop or dismiss explicitly to end a Run.`,
       'Use send delivery=auto to steer a running Run or start an idle coworker Run; delivery=next queues a new coworker Run.',
       'Dismiss a coworker as soon as you no longer need it; an idle coworker keeps its session open until dismissed.',
@@ -227,7 +238,12 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
         },
         agentId: { type: 'string' },
         runId: { type: 'string' },
-        runIds: { type: 'array', items: { type: 'string' }, minItems: 1, uniqueItems: true },
+        runIds: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          description: 'Distinct run ids. Duplicates are rejected.',
+        },
         message: { type: 'string' },
         delivery: { type: 'string', enum: ['auto', 'steer', 'next'] },
         expectedRunId: { type: 'string' },
@@ -245,16 +261,6 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
         text: { type: 'string' },
       },
       required: ['operation'],
-      allOf: [
-        {
-          if: {
-            properties: { operation: { const: 'spawn' } },
-            required: ['operation'],
-          },
-          // biome-ignore lint/suspicious/noThenProperty: JSON Schema 的 if/then 关键字
-          then: { required: ['description', 'prompt'] },
-        },
-      ],
       additionalProperties: false,
     } as unknown as ToolDefinition['parameters'],
     prepareArguments: clampWaitTimeout as unknown as ToolDefinition['prepareArguments'],
@@ -277,12 +283,18 @@ export function createUnifiedSubagentTool(deps: UnifiedSubagentDeps): ToolDefini
       if (!response.ok) throw new Error(`${response.code}: ${response.error}`);
       const receipt = waits ? waitReceiptOf(response.value) : undefined;
       const detachedBy = blocking?.reason();
+      const background =
+        !waits &&
+        (request.operation === 'spawn' || request.operation === 'send') &&
+        (response.value as { status?: unknown } | undefined)?.status !== undefined;
       const note =
         receipt?.interrupted && detachedBy
           ? detachedWaitNote(detachedBy, 'subagent')
           : receipt?.timedOut
             ? WAIT_TIMEOUT_NOTE
-            : undefined;
+            : background
+              ? BACKGROUND_RECEIPT_NOTE
+              : undefined;
       const value =
         note && response.value && typeof response.value === 'object'
           ? { ...(response.value as Record<string, unknown>), note }

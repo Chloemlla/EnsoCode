@@ -28,6 +28,7 @@ interface GroupChipsProps {
   selectedId: string;
   counts: Record<string, number>;
   totalCount: number;
+  recentCount: number;
   ungroupedCount: number;
   query: string;
   onQueryChange: (query: string) => void;
@@ -42,6 +43,7 @@ export function GroupChips({
   selectedId,
   counts,
   totalCount,
+  recentCount,
   ungroupedCount,
   query,
   onQueryChange,
@@ -191,7 +193,7 @@ export function GroupChips({
               onClick={() => onSelect(RECENT_GROUP_ID)}
               className={chipClass(selectedId === RECENT_GROUP_ID, false)}
             >
-              <ChipContent label={t('Recent')} count={totalCount} />
+              <ChipContent label={t('Recent')} count={recentCount} />
             </button>
             <SortableContext
               items={ordered.map((group) => selectorGroupDropId(group.id))}
@@ -223,6 +225,7 @@ export function GroupChips({
             selectedId={selectedId}
             counts={counts}
             totalCount={totalCount}
+            recentCount={recentCount}
             ungroupedCount={ungroupedCount}
             onSelect={onSelect}
             onAddGroup={onAddGroup}
@@ -360,6 +363,7 @@ function GroupMenu({
   selectedId,
   counts,
   totalCount,
+  recentCount,
   ungroupedCount,
   onSelect,
   onAddGroup,
@@ -369,6 +373,7 @@ function GroupMenu({
   selectedId: string;
   counts: Record<string, number>;
   totalCount: number;
+  recentCount: number;
   ungroupedCount: number;
   onSelect: (id: string) => void;
   onAddGroup: () => void;
@@ -398,7 +403,7 @@ function GroupMenu({
         />
         <GroupMenuRow
           label={t('Recent')}
-          count={totalCount}
+          count={recentCount}
           selected={selectedId === RECENT_GROUP_ID}
           onSelect={closeAnd(() => onSelect(RECENT_GROUP_ID))}
         />

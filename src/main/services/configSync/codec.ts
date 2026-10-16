@@ -107,6 +107,7 @@ const STATE_KEYS = [
   'chatWide',
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
+  'autoRetryLimit',
   'generationStallTimeoutMin',
   'autoArchiveIdleDays',
   'autoArchiveMergedWorktrees',
@@ -981,6 +982,7 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
   ])
     booleanField(state, key, 'state', false);
   numberField(state, 'maxActiveCoworkers', 'state', 1, 20, true);
+  numberField(state, 'autoRetryLimit', 'state', -1, 100, true);
   numberField(state, 'generationStallTimeoutMin', 'state', 0, 120, true);
   numberField(state, 'autoArchiveIdleDays', 'state', 0, 90, true);
   numberField(state, 'autoDeleteArchivedDays', 'state', 0, 90, true);

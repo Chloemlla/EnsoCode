@@ -641,6 +641,8 @@ export function applyAgentEvent(
         ),
         lastSeq: event.seq,
       };
+    case 'background-tasks-level':
+      return { ...current, backgroundTasks: event.tasks, lastSeq: event.seq };
     case 'tool-output': {
       const startedAt = current.toolStartedAt?.[event.toolCallId] ?? event.startedAt;
       return {

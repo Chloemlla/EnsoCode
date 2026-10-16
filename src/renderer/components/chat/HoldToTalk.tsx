@@ -156,8 +156,6 @@ export function HoldToTalk({
     pressRef.current = null;
     setHeld(false);
     setCancelling(false);
-    // 松手算用户激活：把被系统挂起的共享音频拉起来，下次按下即可录
-    primeVoiceAudio();
     const action = releaseAction({
       phase,
       heldMs: performance.now() - current.at,
@@ -165,6 +163,10 @@ export function HoldToTalk({
     });
     if (action === 'finish') void finish();
     else if (action !== 'none') cancel();
+    // 松手才算用户激活。stop/cancel 已停掉麦克风并关掉这次用过的共享上下文；
+    // 这里再丢掉尚未开录的那只，并建一个新的，下次按下才能录。
+    releaseVoiceAudio();
+    primeVoiceAudio();
     if (action === 'too-short') setError(t('Speech was too short.'));
   };
 

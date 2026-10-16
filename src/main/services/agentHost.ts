@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { normalizeAutoRetryLimit } from '@shared/autoRetry';
 import {
   type AgentTypeKey,
   type AgentTypeRegistrySnapshot,
@@ -50,6 +51,7 @@ import type {
   ApprovalDecision,
   ApprovalMode,
   AttachedImage,
+  McpOAuthRefreshResult,
   McpServerSpawnConfig,
   ModelRef,
   ResolvedAgentTypeSpawnConfig,
@@ -105,6 +107,7 @@ import { type MemberAgentType, memberSpawnDescription } from './bots/botAgentTyp
 import type { ResolvedPlugins } from './claudePlugins';
 import { isComputerPlatformSupported } from './computer/support';
 import { resolveGlobalInstruction } from './instructionStore';
+import { refreshMcpOAuthAccess } from './mcpOAuthRefresh';
 import { getMcpOAuthStore } from './mcpOAuthStore';
 import { getMcpToolCatalog } from './mcpToolCatalog';
 import { getModelDirectorySnapshot, onModelDirectoryChanged } from './modelDirectory';
@@ -322,6 +325,7 @@ export function startAgentWorker(): void {
     for (const command of queued) child.postMessage(command);
     pushApprovalReviewer();
     pushMaxActiveCoworkers();
+    pushAutoRetryLimit();
     pushDisabledWorkflowPresets();
     pushModelDirectory();
     pushWebSearchConfig();
@@ -333,6 +337,27 @@ export function startAgentWorker(): void {
         void selectOauthPoolAccount(event).then((result) => {
           if (worker === child) child.postMessage(result);
         });
+        return;
+      }
+      if (event.type === 'mcp-oauth-refresh') {
+        const { requestId } = event;
+        void refreshMcpOAuthAccess(event.serverId, event.rejected)
+          .catch(
+            (error: unknown): McpOAuthRefreshResult => ({
+              ok: false,
+              unauthorized: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          )
+          .then((result) => {
+            if (worker === child) {
+              child.postMessage({
+                type: 'mcp-oauth-refresh-result',
+                requestId,
+                result,
+              } satisfies AgentCommand);
+            }
+          });
         return;
       }
       resolveReleaseWaiters(event);
@@ -1758,7 +1783,7 @@ function mcpServerById(serverId: string): McpServerSpawnConfig[] {
 }
 
 function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
-  const oauth = server.transport === 'stdio' ? undefined : getMcpOAuthStore().tokens(server.id);
+  const oauth = server.transport === 'stdio' ? undefined : getMcpOAuthStore().access(server.id);
   return {
     ...(server.id ? { id: server.id } : {}),
     name: server.name,
@@ -1819,6 +1844,14 @@ export function pushMaxActiveCoworkers(): void {
   worker.postMessage({
     type: 'set-max-active-coworkers',
     limit: normalizeMaxActiveCoworkers(readSettingsState()?.maxActiveCoworkers),
+  } satisfies AgentCommand);
+}
+
+export function pushAutoRetryLimit(): void {
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-auto-retry-limit',
+    limit: normalizeAutoRetryLimit(readSettingsState()?.autoRetryLimit),
   } satisfies AgentCommand);
 }
 

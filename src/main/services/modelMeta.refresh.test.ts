@@ -76,6 +76,17 @@ describe('queryModelMeta extension catalog refresh', () => {
         },
       ],
     });
+    expect(state.ensureProviderModelsRefreshed).toHaveBeenCalledWith(expect.anything(), 'cursor', {
+      force: false,
+    });
+  });
+
+  it('全量拉取订阅清单时强制联网刷新扩展 catalog', async () => {
+    state.ensureProviderModelsRefreshed.mockResolvedValue(undefined);
+    await queryModelMeta({ oauthAccountKey: 'cursor', modelIds: [] });
+    expect(state.ensureProviderModelsRefreshed).toHaveBeenCalledWith(expect.anything(), 'cursor', {
+      force: true,
+    });
   });
 
   it('xAI 拉取空清单时打上游，把新 id 并进 catalog', async () => {

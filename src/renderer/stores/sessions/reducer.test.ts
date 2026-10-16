@@ -1745,3 +1745,45 @@ describe('Plan 模式投影', () => {
     expect(next.messages[0]?.optimistic).toBeUndefined();
   });
 });
+
+describe('background-tasks-level', () => {
+  const task = (taskId: string, value: 'running' | 'done' | 'failed') => ({
+    taskId,
+    command: `cmd ${taskId}`,
+    status: value,
+    tail: '',
+    startedAt: 1,
+  });
+
+  it('漏掉 task-ended 后，level 快照整体替换收敛到真实状态', () => {
+    let state = applyAgentEvent(base, 's1', {
+      type: 'task-started',
+      identity: identity(),
+      seq: 1,
+      task: task('t1', 'running'),
+    });
+    state = applyAgentEvent(state, 's1', {
+      type: 'task-started',
+      identity: identity(),
+      seq: 2,
+      task: task('t2', 'running'),
+    });
+    // t1 的 task-ended 丢了，之后 t2 被清理；level 只含 t1 的终态
+    state = applyAgentEvent(state, 's1', {
+      type: 'background-tasks-level',
+      identity: identity(),
+      seq: 4,
+      tasks: [task('t1', 'done')],
+    });
+    expect(state.backgroundTasks).toEqual([task('t1', 'done')]);
+  });
+
+  it('过期 seq 的 level 被丢弃', () => {
+    const state = applyAgentEvent(
+      { ...base, lastSeq: 5, backgroundTasks: [task('t1', 'running')] },
+      's1',
+      { type: 'background-tasks-level', identity: identity(), seq: 3, tasks: [] }
+    );
+    expect(state.backgroundTasks).toEqual([task('t1', 'running')]);
+  });
+});

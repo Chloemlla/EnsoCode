@@ -22,7 +22,7 @@ interface GroupSection {
 const asSections = (x: unknown) => x as GroupSection[];
 
 describe('filterProjectsByGroup', () => {
-  it('最近活跃跨分组返回未归档项目，包括失效分组和无分组项目', () => {
+  it('最近视图的候选仍是全部未归档项目，时间窗口由调用方再筛', () => {
     const projects = [p('a', 'work'), p('b', 'play'), p('c'), p('d', 'ghost')];
     expect(
       filterProjectsByGroup(projects, [g('work', 1), g('play', 2)], ['b'], RECENT_GROUP_ID).map(

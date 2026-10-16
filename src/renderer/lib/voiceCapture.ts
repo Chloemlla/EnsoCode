@@ -95,7 +95,7 @@ export function releaseVoiceAudio(): void {
 }
 
 export interface VoiceCaptureOptions {
-  /** 已启动的 AudioContext（见 primeVoiceAudio），录完不关闭 */
+  /** 已启动的 AudioContext（见 primeVoiceAudio）。共享的那只在录完关闭，调用方另给的不关 */
   context?: AudioContext;
   /** 录音设备；缺省或 SYSTEM_MICROPHONE 跟随系统 */
   deviceId?: string;
@@ -145,7 +145,14 @@ export async function startVoiceRecording(
   const owned = !options.context;
   // 先同步建并 resume：等完 getUserMedia 再建，iOS 会判定手势已过期而一直 suspended
   const context = options.context ?? new AudioContext();
+  // 按住说话复用的是这只：它连过麦克风还不关的话，iOS 会一直占着音频会话，下次开麦没有真声音
+  const shared = options.context != null && options.context === primed;
   const resumed = context.resume();
+  const closeContext = () => {
+    if (!owned && !shared) return;
+    if (primed === context) primed = null;
+    void context.close().catch(() => {});
+  };
   let stream: MediaStream | undefined;
   try {
     stream = await openMicrophone(options.deviceId);
@@ -158,10 +165,14 @@ export async function startVoiceRecording(
     ]);
   } catch (error) {
     for (const track of stream?.getTracks() ?? []) track.stop();
-    if (owned) void context.close();
+    closeContext();
     throw error;
   }
   const tracks = stream.getTracks();
+  if (context.state === 'closed') {
+    for (const track of tracks) track.stop();
+    throw new Error('audio context closed');
+  }
   const source = context.createMediaStreamSource(stream);
   // ScriptProcessor 已弃用但 Safari/Electron 都可用，免去 AudioWorklet 的模块加载与 CSP
   const processor = context.createScriptProcessor(4096, 1, 1);
@@ -195,7 +206,7 @@ export async function startVoiceRecording(
     processor.disconnect();
     source.disconnect();
     for (const track of tracks) track.stop();
-    if (owned) void context.close();
+    closeContext();
   };
   return {
     live,

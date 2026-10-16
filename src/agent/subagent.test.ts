@@ -36,6 +36,46 @@ describe('subagent unified control', () => {
       undefined
     );
   });
+
+  it('后台 spawn / send 回执带知识边界 note；wait 拿到结果时不带', async () => {
+    const invoke = vi.fn(async (request: AgentControlToolRequest) => ({
+      ok: true as const,
+      value:
+        request.operation === 'spawn' && request.wait
+          ? {
+              agentId: 'a1',
+              runId: 'r1',
+              mode: 'task',
+              status: 'running',
+              report: { runs: [], timedOut: false, interrupted: false },
+            }
+          : { agentId: 'a1', runId: 'r1', mode: 'task', status: 'running' },
+    }));
+    const tool = createUnifiedSubagentTool({ agentTypes: [], models: [], invoke });
+    const run = (params: Record<string, unknown>) =>
+      tool.execute('call', params, undefined, undefined, {} as never);
+    const spawned = await run({ operation: 'spawn', description: 'd', prompt: 'p' });
+    expect(spawned.details).toMatchObject({
+      agentId: 'a1',
+      note: expect.stringContaining('You know nothing about its results'),
+    });
+    expect(JSON.stringify(spawned.content)).toContain('do not mention them to the user');
+    const sent = await run({ operation: 'send', agentId: 'a1', message: 'more' });
+    expect(sent.details).toMatchObject({
+      note: expect.stringContaining('You know nothing about its results'),
+    });
+    const waited = await run({ operation: 'spawn', description: 'd', prompt: 'p', wait: true });
+    expect(JSON.stringify(waited.details)).not.toContain('You know nothing');
+  });
+
+  it('工具指引写明不得编造结果、用户追问时报状态、不要重复委派的工作', () => {
+    const tool = createUnifiedSubagentTool({ agentTypes: [], models: [], invoke: vi.fn() });
+    const guidelines = (tool.promptGuidelines ?? []).join('\n');
+    expect(guidelines).toMatch(/Never fabricate or predict/);
+    expect(guidelines).toMatch(/still running/);
+    expect(guidelines).toMatch(/Once you've delegated/);
+    expect(guidelines).toMatch(/smart colleague/);
+  });
 });
 
 describe('CoworkerIdleReminder', () => {

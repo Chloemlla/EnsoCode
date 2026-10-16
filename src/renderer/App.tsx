@@ -52,6 +52,7 @@ import { useBotsStore } from '@/stores/bots';
 import {
   isBotModeActive,
   openBotNotification,
+  showLocalCodeView,
   useAppModeStore,
   useBotModeActive,
 } from '@/stores/bots/mode';
@@ -189,6 +190,15 @@ export default function App() {
       offOpen();
     };
   }, [botModeEnabled]);
+
+  // Code 会话通知点击：当前在远程节点或 Bot 模式时先切回本机 Code，会话由 sessions store 选中
+  useEffect(
+    () =>
+      window.electronAPI.agent.onFocusSession((sessionId) => {
+        if (useSessionsStore.getState().conversations[sessionId]) showLocalCodeView();
+      }),
+    []
+  );
 
   const handleResize = useCallback((deltaX: number) => {
     setWidth((w) => Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w + deltaX)));

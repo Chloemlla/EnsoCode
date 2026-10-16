@@ -76,6 +76,7 @@ export const SETTINGS_STATE_FIELDS = [
   'chatWide',
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
+  'autoRetryLimit',
   'sshTimeoutSeconds',
   'generationStallTimeoutMin',
   'autoArchiveIdleDays',
@@ -434,12 +435,14 @@ function scheduleWrite(
         async ({
           pushApprovalReviewer,
           pushMaxActiveCoworkers,
+          pushAutoRetryLimit,
           pushDisabledWorkflowPresets,
           pushModelDirectory,
           pushWebSearchConfig,
         }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
+          pushAutoRetryLimit();
           pushDisabledWorkflowPresets();
           pushModelDirectory();
           pushWebSearchConfig();
@@ -557,12 +560,14 @@ export function commitSettingsTransaction(
       async ({
         pushApprovalReviewer,
         pushMaxActiveCoworkers,
+        pushAutoRetryLimit,
         pushDisabledWorkflowPresets,
         pushModelDirectory,
         pushWebSearchConfig,
       }) => {
         pushApprovalReviewer(await readStoredOauthCredentialKeys());
         pushMaxActiveCoworkers();
+        pushAutoRetryLimit();
         pushDisabledWorkflowPresets();
         pushModelDirectory();
         pushWebSearchConfig();

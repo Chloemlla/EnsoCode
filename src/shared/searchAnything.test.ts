@@ -206,6 +206,7 @@ describe('buildSettingsCatalog', () => {
     'general.notifyMainAgentOnly',
     'general.smartCompactEnabled',
     'general.generationStallTimeout',
+    'general.autoRetryLimit',
     'general.proxy',
     'general.updates',
     'experimental.botMode',

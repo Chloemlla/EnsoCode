@@ -99,4 +99,32 @@ describe('extension model catalog refresh', () => {
     expect(callsFor(ANTIGRAVITY_PROVIDER_ID)).toBe(2);
     expect(callsFor('cursor')).toBe(1);
   });
+
+  it('bypasses provider freshness, expires cached success, and lets an explicit pull refetch', async () => {
+    mocks.refresh.mockReset();
+    mocks.refresh.mockResolvedValue({ aborted: false, errors: new Map() });
+    const { ensureProviderModelsRefreshed, getRuntime } = await import('./oauthProviders');
+    const runtime = (await getRuntime()) as ModelRuntime;
+
+    await ensureProviderModelsRefreshed(runtime, 'cursor');
+    expect(callsFor('cursor')).toBe(0);
+
+    await ensureProviderModelsRefreshed(runtime, 'cursor', { force: true });
+    expect(callsFor('cursor')).toBe(1);
+    expect(mocks.refresh).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providers: ['cursor'], allowNetwork: true, force: true })
+    );
+
+    await ensureProviderModelsRefreshed(runtime, 'cursor');
+    expect(callsFor('cursor')).toBe(1);
+
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 7 * 60 * 60 * 1000);
+    try {
+      await ensureProviderModelsRefreshed(runtime, 'cursor');
+      expect(callsFor('cursor')).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
 });

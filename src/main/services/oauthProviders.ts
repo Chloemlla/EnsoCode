@@ -120,7 +120,12 @@ function invalidateOauthQuota(accountKey: string): void {
   if (isCodexAccountKey(accountKey)) getOauthQuotaCoordinator().invalidate(accountKey);
 }
 const onlineCatalogProviderIds = new Set<string>([ANTIGRAVITY_PROVIDER_ID, DEVIN_PROVIDER_ID]);
-const onlineCatalogRefreshes = new Map<string, Promise<boolean>>();
+/** 与 pi-cursor 自身的 catalog freshness 对齐：成功结果在本进程内只留用这么久 */
+const ONLINE_CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
+const onlineCatalogRefreshes = new Map<
+  string,
+  { promise: Promise<boolean>; refreshedAt?: number }
+>();
 
 /** 订阅设置与模型元数据查询共用同一份 Main 侧 runtime（catalog + auth.json） */
 export function getRuntime(): Promise<ModelRuntimeType> {
@@ -164,13 +169,20 @@ export function getRuntime(): Promise<ModelRuntimeType> {
  * 不补这一次联网拉取，用户选到的 id 可能后端并不存在，推理时回 404。
  *
  * 拉取失败不抛：清单退化成兜底表仍可用，不该因此让登录或启动失败。
+ *
+ * 传 `force`：留用时机由 ensureProviderModelsRefreshed 的 TTL 决定；不传时 Cursor 会在
+ * 磁盘缓存未满 6h 时直接返回旧清单，新上线模型要等到缓存过期且进程重启才可见。
  */
 async function refreshProviderModels(
   runtime: ModelRuntimeType,
   providerId: string
 ): Promise<boolean> {
   try {
-    const result = await runtime.refresh({ providers: [providerId], allowNetwork: true });
+    const result = await runtime.refresh({
+      providers: [providerId],
+      allowNetwork: true,
+      force: true,
+    });
     return !result.aborted && result.errors.size === 0;
   } catch {
     // 保持兜底清单；调用方可在下一次元数据查询时重试
@@ -179,34 +191,42 @@ async function refreshProviderModels(
 }
 
 /**
- * 等待扩展 provider 本进程第一次联网 catalog 刷新；内置 provider 无需额外刷新。
+ * 等待扩展 provider 的联网 catalog 刷新；内置 provider 无需额外刷新。
  *
- * promise 按基础 provider id 常驻复用：冷启动预热与元数据查询不会重复发请求。登录成功
- * 仍会直接调用 refreshProviderModels，因为新凭证必须强制刷新，不能复用登录前的尝试。
+ * 按基础 provider id 复用：进行中的请求总是共享；成功结果留用 ONLINE_CATALOG_TTL_MS，
+ * `force`（用户显式拉取）跳过已成功的留用。登录成功仍直接调用 refreshProviderModels，
+ * 因为新凭证必须重新拉取，不能复用登录前的尝试。
  */
 export async function ensureProviderModelsRefreshed(
   runtime: ModelRuntimeType,
-  accountKey: string
+  accountKey: string,
+  options: { force?: boolean } = {}
 ): Promise<void> {
   const providerId = providerIdOfAccountKey(accountKey);
   if (!onlineCatalogProviderIds.has(providerId)) return;
-  let refresh = onlineCatalogRefreshes.get(providerId);
-  if (!refresh) {
-    refresh = refreshProviderModels(runtime, providerId);
-    onlineCatalogRefreshes.set(providerId, refresh);
-    void refresh.then((succeeded) => {
-      // 成功结果常驻；失败只去重本轮并发，后续查询可重试。这里不另加定时退避：
-      // renderer 没有轮询；同波请求已由 promise 去重；provider 自己维护 freshness/backoff，
-      // 且这里没有传 force；应用层再延迟会在网络恢复后继续人为留用兜底清单。
-      if (!succeeded && onlineCatalogRefreshes.get(providerId) === refresh) {
-        onlineCatalogRefreshes.delete(providerId);
-      }
-    });
-    void refresh.finally(() => {
-      refreshModelDirectoryInBackground();
-    });
+  const cached = onlineCatalogRefreshes.get(providerId);
+  const reusable =
+    cached &&
+    (cached.refreshedAt === undefined ||
+      (!options.force && Date.now() - cached.refreshedAt < ONLINE_CATALOG_TTL_MS));
+  if (reusable) {
+    await cached.promise;
+    return;
   }
-  await refresh;
+  const entry: { promise: Promise<boolean>; refreshedAt?: number } = {
+    promise: refreshProviderModels(runtime, providerId),
+  };
+  onlineCatalogRefreshes.set(providerId, entry);
+  void entry.promise.then((succeeded) => {
+    // 失败只去重本轮并发，后续查询可重试；renderer 没有轮询，不另加退避
+    if (onlineCatalogRefreshes.get(providerId) !== entry) return;
+    if (succeeded) entry.refreshedAt = Date.now();
+    else onlineCatalogRefreshes.delete(providerId);
+  });
+  void entry.promise.finally(() => {
+    refreshModelDirectoryInBackground();
+  });
+  await entry.promise;
 }
 
 /** 动态 import：oauthProviders 被 modelDirectory 经 settings 静态引用，不能反向静态依赖。 */

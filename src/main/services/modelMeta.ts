@@ -83,8 +83,10 @@ export async function queryModelMeta(query: ModelMetaQuery): Promise<ModelMetaRe
       }
       ensureAccountProvider(runtime, query.oauthAccountKey);
       // getRuntime 在后台预热扩展 catalog；这里 await 同一份 promise，保证冷启动首查
-      // 不会抢先把 unknown 写进 renderer 的无 TTL 缓存。
-      await ensureProviderModelsRefreshed(runtime, query.oauthAccountKey);
+      // 不会抢先把 unknown 写进 renderer 的无 TTL 缓存。空 modelIds 即用户「拉取模型」，强制重拉。
+      await ensureProviderModelsRefreshed(runtime, query.oauthAccountKey, {
+        force: query.modelIds.length === 0,
+      });
       const providerId = providerIdOfAccountKey(query.oauthAccountKey);
       let catalog = expandOauthCatalog(
         providerId,

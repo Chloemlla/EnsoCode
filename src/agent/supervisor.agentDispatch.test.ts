@@ -1659,6 +1659,48 @@ describe('SessionSupervisor idle eviction', () => {
     await supervisor.shutdown();
     vi.useRealTimers();
   });
+
+  it('子会话存活期间父会话不被闲置回收（子代理 Run 的保活不依赖额外登记）', async () => {
+    const events: AgentWorkerEvent[] = [];
+    const supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
+    });
+    supervisor.handleCommand({ type: 'spawn-parent', identity: parent, cwd: '/w', model });
+    await waitFor(events, 'parent-ready');
+    supervisor.handleCommand({
+      type: 'spawn-child',
+      identity: { ...child, typeKey: 'builtin:scout', profileId: undefined },
+      cwd: '/w',
+      config: {
+        typeKey: 'builtin:scout',
+        displayName: 'Scout',
+        description: 'Read-only scout',
+        spawnSpecId: 'spawn-scout',
+        systemPrompt: 'scout role',
+        model,
+        tools: 'readonly',
+        skillPaths: [],
+        skillBindingIds: [],
+        mcpServers: [],
+        mcpBindingIds: [],
+        systemPromptHash: 'scout-hash',
+      },
+    });
+    await waitFor(events, 'child-ready');
+
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    await settle();
+
+    expect(
+      events.filter(
+        (event) => event.type === 'parent-ended' && event.identity.sessionId === 'parent'
+      )
+    ).toEqual([]);
+    await supervisor.shutdown();
+    vi.useRealTimers();
+  });
 });
 
 describe('SessionSupervisor custom parent system prompt', () => {

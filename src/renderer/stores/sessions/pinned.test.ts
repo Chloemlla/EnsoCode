@@ -117,6 +117,39 @@ describe('sortProjectsByActivity', () => {
   });
 });
 
+describe('recentProjects', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = 20 * DAY;
+
+  it('只保留 7 天内有未归档会话的项目，空项目和更早的项目不出现', () => {
+    const projects = [{ id: 'old' }, { id: 'new' }, { id: 'empty' }, { id: 'edge' }];
+    const sessions = {
+      stale: conv('old', 1, now - 8 * DAY),
+      latest: conv('new', 1, now - DAY),
+      boundary: conv('edge', 1, now - 7 * DAY),
+    };
+    expect(
+      pinned
+        .recentProjects(projects, ['stale', 'latest', 'boundary'], sessions, now)
+        .map((project) => project.id)
+    ).toEqual(['new', 'edge']);
+  });
+
+  it('归档会话和会话置顶不能把过期项目留在最近', () => {
+    const projects = [{ id: 'old' }, { id: 'live' }];
+    const sessions = {
+      archived: conv('old', 1, now, { archived: true, pinned: true }),
+      stale: conv('old', 1, now - 8 * DAY),
+      current: conv('live', 1, now - 2 * DAY),
+    };
+    expect(
+      pinned
+        .recentProjects(projects, ['archived', 'stale', 'current'], sessions, now)
+        .map((project) => project.id)
+    ).toEqual(['live']);
+  });
+});
+
 const withArchived: Record<string, Minimal> = {
   ...conversations,
   b: conv('p1', 2, 20, { pinned: true, archived: true }),
@@ -467,6 +500,12 @@ describe('activeConversationIds', () => {
       ...conv('p2', 3, 50),
       status: 'failed',
       spawning: false,
+      unread: true,
+    },
+    readFail: {
+      ...conv('p1', 9, 60),
+      status: 'failed',
+      spawning: false,
     },
     idle: {
       ...conv('p1', 4, 80),
@@ -497,9 +536,18 @@ describe('activeConversationIds', () => {
       archived: true,
     },
   };
-  const liveOrder = ['run', 'wait', 'fail', 'idle', 'spawn', 'childParent', 'archivedFail'];
+  const liveOrder = [
+    'run',
+    'wait',
+    'fail',
+    'readFail',
+    'idle',
+    'spawn',
+    'childParent',
+    'archivedFail',
+  ];
 
-  it('只收蓝绿红活跃态(含未读绿点),按最后活跃时间倒序', () => {
+  it('只收蓝绿红活跃态(含未读绿点、未读失败),按最后活跃时间倒序', () => {
     expect(activeConversationIds(liveOrder, live)).toEqual([
       'idle',
       'fail',
@@ -508,6 +556,10 @@ describe('activeConversationIds', () => {
       'spawn',
       'childParent',
     ]);
+  });
+
+  it('已读的失败会话退出活跃栏', () => {
+    expect(activeConversationIds(liveOrder, live)).not.toContain('readFail');
   });
 
   it('归档会话与归档项目不进活跃栏', () => {

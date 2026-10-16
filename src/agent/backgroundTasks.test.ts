@@ -316,6 +316,37 @@ describe('BackgroundTaskManager', () => {
     expect(result?.status).toBe('done');
   });
 
+  it('level 事件：启动、结束、配额清理已完成任务时都推该会话的全量存活快照', async () => {
+    const levels: Array<{ sessionId: string; ids: string[]; statuses: string[] }> = [];
+    const manager = new BackgroundTaskManager(
+      {
+        onStarted: () => {},
+        onOutput: () => {},
+        onEnded: () => {},
+        onCompletionNotify: () => {},
+        onLevel: (sessionId, tasks) =>
+          levels.push({
+            sessionId,
+            ids: tasks.map((task) => task.taskId),
+            statuses: tasks.map((task) => task.status),
+          }),
+      },
+      mkdtempSync(path.join(tmpdir(), 'enso-bg-'))
+    );
+    const first = manager.start('s1', 'true', '/tmp');
+    expect(levels.at(-1)).toEqual({ sessionId: 's1', ids: [first], statuses: ['running'] });
+    await until(() => levels.at(-1)?.statuses[0] === 'done');
+    for (let i = 0; i < 9; i++) manager.start('s2', 'sleep 5', '/tmp');
+    // 第 11 个触发配额清理：s1 的已完成任务被移除，s1 必须收到空快照
+    manager.start('s2', 'sleep 5', '/tmp');
+    expect(levels.filter((level) => level.sessionId === 's1').at(-1)).toEqual({
+      sessionId: 's1',
+      ids: [],
+      statuses: [],
+    });
+    for (const task of manager.snapshot('s2')) manager.stop(task.taskId);
+  });
+
   it('阻塞等待拿到结束态 → consumed,不再自动通知', async () => {
     const { manager, notified } = makeManager();
     const taskId = manager.start('s1', 'sleep 0.2 && echo done-x', '/tmp');
