@@ -7,7 +7,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { McpServerSpawnConfig } from '@shared/types/agent';
 import { looksLikeApplyPatchDocument } from './applyPatch/parser';
-import { mcpNamespaceName } from './mcpNames';
+import { mcpNamespaceName, oneLine } from './mcpNames';
 
 export const CODEMODE_TOOL_NAME = 'codemode';
 export const TOOL_SEARCH_TOOL_NAME = 'tool_search';
@@ -88,20 +88,6 @@ export function withCodemodeTimeout(code: string): string {
       : CODEMODE_DEFAULT_TIMEOUT_MS;
   const rest = newline === -1 ? '' : code.slice(newline);
   return `${OPTIONS_PREFIX} ${JSON.stringify({ ...options, timeout_ms: timeout })}${rest}`;
-}
-
-const isBidiControl = (code: number): boolean =>
-  (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
-
-function oneLine(text: string, max: number): string {
-  let clean = '';
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || isBidiControl(code)) clean += ' ';
-    else clean += char;
-  }
-  const line = clean.replace(/\s+/g, ' ').trim();
-  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
 }
 
 export const isDeferredMcp = (server: McpServerSpawnConfig): boolean =>

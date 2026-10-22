@@ -452,6 +452,7 @@ function scheduleWrite(
       .then(
         async ({
           pushApprovalReviewer,
+          pushCompactRoute,
           pushMaxActiveCoworkers,
           pushAutoRetryLimit,
           pushDisabledWorkflowPresets,
@@ -459,6 +460,7 @@ function scheduleWrite(
           pushWebSearchConfig,
         }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
+          pushCompactRoute(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
           pushAutoRetryLimit();
           pushDisabledWorkflowPresets();
@@ -577,6 +579,7 @@ export function commitSettingsTransaction(
     .then(
       async ({
         pushApprovalReviewer,
+        pushCompactRoute,
         pushMaxActiveCoworkers,
         pushAutoRetryLimit,
         pushDisabledWorkflowPresets,
@@ -584,6 +587,7 @@ export function commitSettingsTransaction(
         pushWebSearchConfig,
       }) => {
         pushApprovalReviewer(await readStoredOauthCredentialKeys());
+        pushCompactRoute(await readStoredOauthCredentialKeys());
         pushMaxActiveCoworkers();
         pushAutoRetryLimit();
         pushDisabledWorkflowPresets();

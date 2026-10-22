@@ -142,6 +142,7 @@ import {
   registerCustomProviderModels,
 } from './customProviderRegistry';
 import { createNormalizedEditTool } from './editTool';
+import type { EnsoCompactOptions } from './ensoCompact/types';
 import { ENSO_SYSTEM_PROMPT } from './ensoPrompt';
 import { EnsoSafeJournal } from './ensoSafeJournal';
 import {
@@ -193,7 +194,7 @@ import {
 import { branchSessionFromPersistedFile, resolveForkLeafId } from './sessionFork';
 import { createSessionCommandTool } from './sessionShell';
 import { type SilentTurnKind, silentTurnKind } from './silentTurn';
-import { providerKeyFor, smartCompactInlineExtension } from './smartCompact';
+import { assignCompactRoute, providerKeyFor, smartCompactInlineExtension } from './smartCompact';
 import {
   createSshExecutor,
   resolveSshControlPath,
@@ -465,6 +466,8 @@ function createSessionResourceLoader(options: {
   compactStrategy?: CompactStrategy;
   smartCompactSummaryModel?: SpawnModelConfig;
   smartCompactMode?: SmartCompactMode;
+  /** 已打开会话共用；设置变更后原地改，下一次压缩读最新模型 */
+  compactRoute?: EnsoCompactOptions;
   /** 仅普通 parent：替换 pi 默认提示词开头的角色段落；会强制整段提示词，故排在扩展最后。 */
   persona?: string;
   /** 仅子会话：追加子代理行为合同到系统提示词（进 system prompt 才不会随压缩丢失） */
@@ -531,17 +534,21 @@ function createSessionResourceLoader(options: {
             continuousMemoryInlineExtension({
               model: options.smartCompactSummaryModel,
               mode: options.smartCompactMode,
+              compact: options.compactRoute,
             }),
           ]
         : !options.noExtensions &&
             (options.compactStrategy === 'smart' || options.compactStrategy === 'codex-native')
           ? [
               smartCompactInlineExtension(
-                {
-                  summaryModel: options.smartCompactSummaryModel,
-                  mode: options.smartCompactMode,
-                },
-                options.compactStrategy === 'codex-native'
+                options.compactRoute
+                  ? null
+                  : {
+                      summaryModel: options.smartCompactSummaryModel,
+                      mode: options.smartCompactMode,
+                    },
+                options.compactStrategy === 'codex-native',
+                options.compactRoute
               ),
             ]
           : []),
@@ -846,6 +853,8 @@ export class SessionSupervisor {
   private pinned: ReadonlySet<string> = new Set();
   private readonly evictionTimer: ReturnType<typeof setInterval>;
   private approvalReviewer: SpawnModelConfig | undefined;
+  /** 所有已打开会话的压缩摘要路线；设置变更时原地改 */
+  private readonly compactRoute: EnsoCompactOptions = {};
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
   private autoRetryLimit = DEFAULT_AUTO_RETRY_LIMIT;
   private disabledWorkflowPresets: string[] = [];
@@ -1210,6 +1219,10 @@ export class SessionSupervisor {
     }
     if (command.type === 'set-approval-reviewer') {
       this.approvalReviewer = command.model;
+      return;
+    }
+    if (command.type === 'set-compact-route') {
+      this.publishCompactRoute(command.model, command.mode);
       return;
     }
     if (command.type === 'set-max-active-coworkers') {
@@ -1867,6 +1880,19 @@ export class SessionSupervisor {
     }
   }
 
+  private publishCompactRoute(
+    model: SpawnModelConfig | undefined,
+    mode: SmartCompactMode | undefined
+  ): void {
+    assignCompactRoute(this.compactRoute, model, mode);
+    if (!model) return;
+    void this.getRuntime()
+      .then((runtime) => resolveBaseModelOrRefresh(runtime, model))
+      .catch((error: unknown) => {
+        console.warn('[compact] summary model unavailable:', toErrorMessage(error));
+      });
+  }
+
   private async spawn(
     identity: SessionIdentity,
     cwd: string,
@@ -1910,6 +1936,7 @@ export class SessionSupervisor {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
     const toolEnabled = (id: string) => !disabledTools.includes(id);
+    this.publishCompactRoute(smartCompactSummaryModel, smartCompactMode);
     const existing = this.sessions.get(sessionId);
     if (existing) {
       if (!isSameGeneration(existing.identity, identity) || existing.childIdentity) {
@@ -1998,6 +2025,7 @@ export class SessionSupervisor {
       ...(compactStrategy !== 'standard'
         ? {
             compactStrategy,
+            compactRoute: this.compactRoute,
             smartCompactSummaryModel,
             smartCompactMode,
           }
