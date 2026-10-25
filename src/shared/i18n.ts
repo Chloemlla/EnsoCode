@@ -498,7 +498,8 @@ export const zhTranslations: Record<string, string> = {
   Connecting: '连接中',
   'Not authorized': '未授权',
   'Authorized, pending connection': '已授权，待连接',
-  'Authorized. Takes effect in new conversations.': '已授权，新会话生效。',
+  'Authorized. Conversations that already include this server can use it on the next message.':
+    '已授权。已包含该服务器的对话，下一条消息即可使用。',
   'New sessions only': '新会话生效',
   'Open sessions keep the previous setting; it applies once you start a new session.':
     '已打开的会话保持原设置，新建会话后生效。',
@@ -660,6 +661,9 @@ export const zhTranslations: Record<string, string> = {
   Send: '发送',
   'Create or select a project to start a conversation': '创建或选择一个项目以开始对话',
   'Ask Enso': '询问 Enso',
+  'Compact view': '精简版',
+  'The built-in browser is not available in full view. Check it on the computer.':
+    '完整版暂不支持内置浏览器，请在电脑上查看。',
   'Need help choosing a setup? Ask Enso.': '不确定如何配置？询问 Enso。',
   Locked: '已锁定',
   'Inherits the conversation model and provides product capabilities':

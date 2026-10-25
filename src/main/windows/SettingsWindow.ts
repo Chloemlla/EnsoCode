@@ -1,4 +1,5 @@
 import type { BrowserWindow } from 'electron';
+import { isRemoteSettingsSender } from '../services/remoteRenderer/senders';
 import { createAppWindow } from './createAppWindow';
 
 let settingsWindow: BrowserWindow | null = null;
@@ -32,6 +33,7 @@ export function getSettingsWindow(): BrowserWindow | null {
 }
 
 export function isSettingsWebContents(webContentsId: number): boolean {
+  if (isRemoteSettingsSender(webContentsId)) return true;
   return Boolean(
     settingsWindow &&
       !settingsWindow.isDestroyed() &&

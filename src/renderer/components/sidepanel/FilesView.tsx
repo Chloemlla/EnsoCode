@@ -3,7 +3,7 @@ import { Editor, type EditorOptions } from '@pierre/diffs/edit';
 import { EditProvider, File, Virtualizer } from '@pierre/diffs/react';
 import type { FilesDirEntry } from '@shared/types';
 import type { ProjectedMessage } from '@shared/types/agent';
-import { ChevronRight, Code2, Eye, RefreshCw, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Code2, Eye, RefreshCw, Search } from 'lucide-react';
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { CODE_THEME, ensureHighlighter } from '@/components/chat/codeHighlighter';
@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/context-menu';
 import { addToast } from '@/components/ui/toast';
 import { useCodeHighlightOptions } from '@/hooks/useColorScheme';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useI18n } from '@/i18n';
 import {
   addSidePanelBrowser,
@@ -121,6 +122,16 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   const [ready, setReady] = useState(false);
   const [openDocs, setOpenDocs] = useState<OpenDoc[]>([]);
   const [activeRel, setActiveRel] = useState<string | null>(null);
+  // 窄屏下文件树与编辑区逐级显示：打开文件进编辑区，返回回到文件树
+  const isMobile = useIsMobile();
+  const [mobileTree, setMobileTree] = useState(true);
+  const showDoc = useCallback((rel: string) => {
+    setActiveRel(rel);
+    setMobileTree(false);
+  }, []);
+  useEffect(() => {
+    if (!activeRel) setMobileTree(true);
+  }, [activeRel]);
   const [treeGen, setTreeGen] = useState(0);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
   const [searchOpen, setSearchOpen] = useState(false);
@@ -195,7 +206,7 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
         if (viewMode) {
           setOpenDocs((docs) => docs.map((doc) => (doc.rel === rel ? { ...doc, viewMode } : doc)));
         }
-        setActiveRel(rel);
+        showDoc(rel);
         return;
       }
       const epoch = opEpochRef.current;
@@ -218,7 +229,7 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
             tooLarge: true,
           },
         ]);
-        setActiveRel(rel);
+        showDoc(rel);
         return;
       }
       setOpenDocs((docs) => [
@@ -233,10 +244,10 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
           viewMode,
         },
       ]);
-      setActiveRel(rel);
+      showDoc(rel);
       void window.electronAPI.workspaceFiles.watchStart({ ...req, rel });
     },
-    [failToast, readFile, req]
+    [failToast, readFile, req, showDoc]
   );
 
   const [confirmClose, setConfirmClose] = useState<null | {
@@ -467,7 +478,7 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
       const key = toPreviewKey(rel);
       const existing = openDocsRef.current.find((doc) => doc.rel === key);
       if (existing) {
-        setActiveRel(key);
+        showDoc(key);
         return;
       }
       const epoch = opEpochRef.current;
@@ -489,9 +500,9 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
           preview: true,
         },
       ]);
-      setActiveRel(key);
+      showDoc(key);
     },
-    [failToast, readFile, openFile]
+    [failToast, readFile, openFile, showDoc]
   );
 
   useEffect(
@@ -710,7 +721,12 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   return (
     <EditProvider createEditor={createEditor}>
       <div className="flex h-full min-h-0 bg-background">
-        <div className="flex w-56 shrink-0 flex-col overflow-hidden border-r text-sm">
+        <div
+          className={cn(
+            'flex shrink-0 flex-col overflow-hidden text-sm',
+            !isMobile ? 'w-56 border-r' : mobileTree ? 'w-full' : 'hidden'
+          )}
+        >
           <div className="flex justify-end gap-0.5 px-1 py-0.5">
             <Button
               variant="ghost"
@@ -806,12 +822,23 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
             </div>
           )}
         </div>
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className={cn('flex min-w-0 flex-1 flex-col', isMobile && mobileTree && 'hidden')}>
           {openDocs.length > 0 && (
             <div
               ref={tabStripRef}
               className="flex shrink-0 gap-1 overflow-x-auto border-b px-2 py-1"
             >
+              {isMobile && (
+                <button
+                  type="button"
+                  className="flex shrink-0 items-center rounded-md px-1 text-muted-foreground hover:bg-muted/50"
+                  onClick={() => setMobileTree(true)}
+                  aria-label={t('Files')}
+                  title={t('Files')}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+              )}
               {openDocs.map((doc) => {
                 const renamingHere =
                   renaming?.rel === doc.rel && renaming.at === 'tab' && !doc.preview;

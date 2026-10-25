@@ -52,6 +52,7 @@ import { IPC_CHANNELS, providerIdOfAccountKey, sanitizeOauthLabel } from '@share
 import { app, BrowserWindow, shell, type WebContents } from 'electron';
 import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
 import { OauthQuotaCoordinator } from './oauthQuotaCoordinator';
+import { sendToRemoteRenderers } from './remoteRenderer/senders';
 
 // pi-ai 不在依赖树顶层，auth 交互类型从 ModelRuntime.login 签名结构化提取
 type AuthInteraction = Parameters<ModelRuntimeType['login']>[2];
@@ -482,6 +483,7 @@ export function broadcastOauthCredentialsChanged(source?: WebContents): void {
     if (ui === source || ui.isDestroyed()) continue;
     sendToWindow(win, IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
   }
+  sendToRemoteRenderers(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED, [], source?.id);
 }
 
 /** Renderer 只需要展示来源，不得拿到 OAuth 查询参数里的 state 等敏感值 */

@@ -66,10 +66,12 @@ export interface QueuedMessage {
   images?: AttachedImage[];
 }
 
+import { parseConversationsPatch } from '@shared/conversationsPatch';
 import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { isLeaderRenderer } from '@/lib/rendererRole';
 import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
@@ -111,12 +113,14 @@ import {
   canWithdrawMessage,
   emptyProjection,
   isVisibleGenerationOutput,
+  joinsMidStream,
   rewindTruncatedNeedsSnapshotResync,
   type SessionProjection,
   type TimelineMessage,
   upsertOutOfRange,
 } from './reducer';
 import { applyConversationReload } from './reload';
+import { applyConversationsPatchToState } from './remotePatch';
 import { isPairViewed, nextUnread } from './unread';
 import {
   DIRTY_MAIN_TREE,
@@ -1162,7 +1166,7 @@ export const useSessionsStore = create<SessionsState>()(
               const id = session.identity.sessionId;
               // 补快照可能意味着 turn-completed 已错过（renderer 重载 / 正文脱节），排队消息与
               // goal 一并泵；用户中断的轮次由 turn-completed 收口，这里不抢跑
-              if (get().conversations[id]?.abortRequested) continue;
+              if (!isLeaderRenderer() || get().conversations[id]?.abortRequested) continue;
               flushQueue(id);
               continueGoal(id);
             }
@@ -1411,8 +1415,9 @@ export const useSessionsStore = create<SessionsState>()(
         if (event.type === 'fork-done') {
           const targetId = event.targetConversationId;
           const source = get().conversations[id];
+          const initiated = localForkTargets.delete(targetId);
           if (event.error || !event.sessionFile) {
-            if (get().conversations[targetId]) get().removeConversation(targetId);
+            if (initiated && get().conversations[targetId]) get().removeConversation(targetId);
             return;
           }
           void window.electronAPI.worktree
@@ -1440,7 +1445,7 @@ export const useSessionsStore = create<SessionsState>()(
                     : undefined,
                 });
               });
-              if (!get().conversations[targetId]) return;
+              if (!initiated || !get().conversations[targetId]) return;
               void get().resumeConversation(targetId);
               get().selectConversation(targetId);
             })
@@ -1484,7 +1489,9 @@ export const useSessionsStore = create<SessionsState>()(
           // 压缩不发 turn-completed：成功结束后再泵队列，否则排队消息会卡住
           if (event.state === 'end') {
             // 放弃（中断 / 轮失败）不泵；中断标记留给被中断轮的收束消费，这里抢先清会让那一轮把队列泵出去
-            if (event.abandoned || get().conversations[id]?.abortRequested) return;
+            if (!isLeaderRenderer() || event.abandoned || get().conversations[id]?.abortRequested) {
+              return;
+            }
             // 已有投递在途（worker 等压完才起轮）：再泵就是并发 prompt，交给那一轮收束时泵
             if (get().conversations[id]?.messages.some((message) => message.optimistic)) return;
             flushQueue(id);
@@ -1500,7 +1507,9 @@ export const useSessionsStore = create<SessionsState>()(
             const next = applyAgentEvent(conversation, id, event);
             if (next === conversation) return state;
             const expected = rewindDraftGuard.get(id);
-            const hasDraft = Boolean(event.editorText || event.editorImages?.length);
+            // 只有发起回退的窗口才接回退文本；其它窗口（桌面 / 远程完整版）的输入框不受影响
+            const hasDraft =
+              expected !== undefined && Boolean(event.editorText || event.editorImages?.length);
             const edited =
               expected !== undefined &&
               conversation.draftText !== undefined &&
@@ -1566,11 +1575,15 @@ export const useSessionsStore = create<SessionsState>()(
             btwHotSessionIds(current.conversations)
           )
         ) {
+          // 冷会话不落正文，但错过了运行态（如另一窗口新建的会话）仍要补：快照会领养 generation，只补一次
+          if (joinsMidStream(currentConversation, event)) resyncSnapshot(id);
           if (extractedTitle && rawUserText) {
-            trySummarizeTitle(id, rawUserText, extractedTitle, {
-              providerId: currentConversation.lastProviderId,
-              modelId: currentConversation.lastModelId,
-            });
+            if (isLeaderRenderer()) {
+              trySummarizeTitle(id, rawUserText, extractedTitle, {
+                providerId: currentConversation.lastProviderId,
+                modelId: currentConversation.lastModelId,
+              });
+            }
             set((state) => patch(state, id, { title: extractedTitle }));
           }
           // 正文不落地，但可见输出仍要续心跳，否则 watchdog 会把后台仍在跑的会话当卡死。
@@ -1603,9 +1616,14 @@ export const useSessionsStore = create<SessionsState>()(
           // 冷缓存清空后用户先发了一句（乐观回显占位），worker 推来的 upsert 带原 index 对不上
           // 本地权威区：reducer 会丢正文只推 seq，若不补要 snapshot，历史与正在跑的工具卡永远不出现。
           if (
-            event.type === 'message-upsert' &&
-            conversation.started &&
-            upsertOutOfRange(conversation.messages, event.index, conversation.historyBaseIndex)
+            (event.type === 'message-upsert' &&
+              conversation.started &&
+              upsertOutOfRange(
+                conversation.messages,
+                event.index,
+                conversation.historyBaseIndex
+              )) ||
+            joinsMidStream(conversation, event)
           ) {
             resyncSnapshot(id);
           }
@@ -1627,7 +1645,7 @@ export const useSessionsStore = create<SessionsState>()(
           const title = conversation.title || extractedTitle || firstUserText(next) || '';
           if (!conversation.title && title) {
             const raw = rawUserText || firstUserRawText(next);
-            if (raw) {
+            if (raw && isLeaderRenderer()) {
               trySummarizeTitle(id, raw, title, {
                 providerId: conversation.lastProviderId,
                 modelId: conversation.lastModelId,
@@ -1708,7 +1726,11 @@ export const useSessionsStore = create<SessionsState>()(
               : {}),
           });
         });
-        if (event.type === 'parent-rejected' && event.reason.startsWith(STALE_SESSION_ERROR)) {
+        if (
+          event.type === 'parent-rejected' &&
+          event.reason.startsWith(STALE_SESSION_ERROR) &&
+          isLeaderRenderer()
+        ) {
           void recoverStaleSession(id, event.reason);
         }
         if (event.type === 'turn-completed' || event.type === 'turn-failed') {
@@ -1725,6 +1747,7 @@ export const useSessionsStore = create<SessionsState>()(
               state.conversations[id] ? patch(state, id, { lastTurnDigest: digest }) : state
             );
           }
+          if (!isLeaderRenderer()) return;
           tryRollingSummarizeTitle(id, event.digest);
           flushQueue(id);
           continueGoal(id);
@@ -4105,6 +4128,8 @@ useSessionsStore.subscribe((state) => {
   armColdEvictTimer();
 });
 
+const localForkTargets = new Set<string>();
+
 async function forkConversation(
   get: () => {
     conversations: Record<string, Conversation>;
@@ -4129,10 +4154,18 @@ async function forkConversation(
     },
   });
   if (!targetId) return null;
+  localForkTargets.add(targetId);
   const result = await window.electronAPI.agent.fork(sourceId, targetId, anchor);
   if (!result.ok) {
+    localForkTargets.delete(targetId);
     get().removeConversation(targetId);
     return null;
   }
   return targetId;
 }
+
+window.electronAPI.settings?.onConversationsPatch?.((value) => {
+  const remotePatch = parseConversationsPatch(value);
+  if (!remotePatch || !useSessionsStore.persist.hasHydrated()) return;
+  useSessionsStore.setState((state) => applyConversationsPatchToState(state, remotePatch));
+});

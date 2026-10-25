@@ -3,6 +3,7 @@ import { WINDOWS_CAPTION_BUTTONS_WIDTH } from '@shared/windowControls';
 import { Copy, Minus, Sparkles, Square, X } from 'lucide-react';
 import { useRef } from 'react';
 import { useNativeWindowControls } from '@/hooks/useNativeWindowControls';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useWindowMaximized } from '@/hooks/useWindowMaximized';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
@@ -52,8 +53,10 @@ export function SummonEnsoButton({ label = true }: { label?: boolean }) {
  */
 export function TitleBar({ title, className, actions, leading, centered }: TitleBarProps) {
   const { t } = useI18n();
-  const isMac = window.electronAPI.env.platform === 'darwin';
-  const isWindows = window.electronAPI.env.platform === 'win32';
+  // 窄屏或远程浏览器：没有系统窗口控件，不留红绿灯/原生按钮空间，也不画自绘按钮
+  const isMobile = useIsMobile() || Boolean(window.electronAPI.remote);
+  const isMac = !isMobile && window.electronAPI.env.platform === 'darwin';
+  const isWindows = !isMobile && window.electronAPI.env.platform === 'win32';
   const headerRef = useRef<HTMLElement>(null);
   useNativeWindowControls(headerRef);
   const maximized = useWindowMaximized();
@@ -88,7 +91,7 @@ export function TitleBar({ title, className, actions, leading, centered }: Title
 
       {actions && <div className="no-drag ml-auto flex items-center gap-1">{actions}</div>}
 
-      {!isMac && !isWindows && (
+      {!isMac && !isWindows && !isMobile && (
         <div className={cn('no-drag flex h-full items-center', !actions && 'ml-auto')}>
           <button
             type="button"

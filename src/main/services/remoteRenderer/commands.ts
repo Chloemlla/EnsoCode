@@ -1,0 +1,69 @@
+import type { PhoneToHost, RemoteToHost } from '@enso/pair';
+
+type Check = { ok: true; command: PhoneToHost } | { ok: false; error: string };
+
+const isId = (v: unknown): v is string =>
+  typeof v === 'string' && v.length > 0 && v.length <= 64 && /^[\w-]+$/.test(v);
+const isChannel = (v: unknown): v is string =>
+  typeof v === 'string' && v.length > 0 && v.length <= 128 && /^[\w:./-]+$/.test(v);
+const isSeq = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+
+export function parseRemoteCommand(v: Record<string, unknown>): Check {
+  const ok = (command: RemoteToHost): Check => ({ ok: true, command });
+  switch (v.type) {
+    case 'rpc-hello':
+      if (!isId(v.cid)) return { ok: false, error: 'invalid cid' };
+      if (v.kind !== 'main' && v.kind !== 'settings') return { ok: false, error: 'invalid kind' };
+      if (v.seq !== undefined && !isSeq(v.seq)) return { ok: false, error: 'invalid seq' };
+      if (v.page !== undefined && !isId(v.page)) return { ok: false, error: 'invalid page' };
+      return ok({
+        type: 'rpc-hello',
+        cid: v.cid,
+        kind: v.kind,
+        ...(v.seq !== undefined ? { seq: v.seq } : {}),
+        ...(v.page !== undefined ? { page: v.page } : {}),
+      });
+    case 'rpc-bye':
+      if (!isId(v.cid)) return { ok: false, error: 'invalid cid' };
+      return ok({ type: 'rpc-bye', cid: v.cid });
+    case 'rpc-invoke':
+      if (!isId(v.cid) || !isSeq(v.id) || !isChannel(v.ch) || !Array.isArray(v.args)) {
+        return { ok: false, error: 'invalid rpc-invoke' };
+      }
+      return ok({ type: 'rpc-invoke', cid: v.cid, id: v.id, ch: v.ch, args: v.args });
+    case 'rpc-send':
+      if (
+        !isId(v.cid) ||
+        !isChannel(v.ch) ||
+        !Array.isArray(v.args) ||
+        (v.id !== undefined && !isSeq(v.id))
+      ) {
+        return { ok: false, error: 'invalid rpc-send' };
+      }
+      return ok({
+        type: 'rpc-send',
+        cid: v.cid,
+        ...(v.id !== undefined ? { id: v.id } : {}),
+        ch: v.ch,
+        args: v.args,
+      });
+    case 'asset-get':
+      if (!isSeq(v.id) || typeof v.path !== 'string' || v.path.length > 8192) {
+        return { ok: false, error: 'invalid asset-get' };
+      }
+      return ok({ type: 'asset-get', id: v.id, path: v.path });
+    case 'remote-ack':
+      if (!isSeq(v.bytes)) return { ok: false, error: 'invalid remote-ack' };
+      return ok({ type: 'remote-ack', bytes: v.bytes, ...(v.gzip === true ? { gzip: true } : {}) });
+    default:
+      return { ok: false, error: 'unknown remote command' };
+  }
+}
+
+export const isRemoteCommandType = (type: unknown): boolean =>
+  type === 'rpc-hello' ||
+  type === 'rpc-bye' ||
+  type === 'rpc-invoke' ||
+  type === 'rpc-send' ||
+  type === 'asset-get' ||
+  type === 'remote-ack';

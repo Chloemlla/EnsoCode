@@ -118,6 +118,7 @@ function createBrowserPeer(iceServers: IceServerEntry[]): DirectPeer {
         return false;
       }
     },
+    buffered: () => (dc && !closed ? dc.bufferedAmount : 0),
     close() {
       if (closed) return;
       closed = true;

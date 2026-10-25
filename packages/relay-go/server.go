@@ -277,6 +277,12 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		rel = "index.html"
 	}
 	b, err := fs.ReadFile(s.static, rel)
+	if err != nil && path.Ext(rel) == "" {
+		// Cloudflare 等前置会把 /desk.html 规范成 /desk
+		if hb, herr := fs.ReadFile(s.static, rel+".html"); herr == nil {
+			b, err, rel = hb, nil, rel+".html"
+		}
+	}
 	if err != nil {
 		b, err = fs.ReadFile(s.static, "index.html")
 		rel = "index.html"
@@ -285,7 +291,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if rel == "index.html" {
+	if path.Ext(rel) == ".html" {
 		w.Header().Set("Cache-Control", "no-cache")
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")

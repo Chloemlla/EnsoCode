@@ -46,11 +46,12 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Smartphone,
   Sparkles,
   Trash2,
 } from 'lucide-react';
 import type * as React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AddProjectDialog } from '@/components/chat/AddProjectDialog';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
@@ -163,9 +164,17 @@ interface SidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   onOpenSearch?: () => void;
+  /** 用户点了某个会话（窄屏抽屉据此收起，即使点的是当前会话） */
+  onNavigate?: () => void;
 }
 
-export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: SidebarProps) {
+export function Sidebar({
+  width,
+  collapsed,
+  onToggleCollapse,
+  onOpenSearch,
+  onNavigate,
+}: SidebarProps) {
   const { t, locale } = useI18n();
   const projects = useSettingsStore((state) => state.projects);
   const projectGroups = useSettingsStore((state) => state.projectGroups);
@@ -185,7 +194,16 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
   const order = useSessionsStore((state) => state.order);
   const activeId = useSessionsStore((state) => state.activeId);
   const newConversation = useSessionsStore((state) => state.newConversation);
-  const selectConversation = useSessionsStore((state) => state.selectConversation);
+  const selectConversationInStore = useSessionsStore((state) => state.selectConversation);
+  const onNavigateRef = useRef(onNavigate);
+  onNavigateRef.current = onNavigate;
+  const selectConversation = useCallback(
+    (id: string) => {
+      onNavigateRef.current?.();
+      selectConversationInStore(id);
+    },
+    [selectConversationInStore]
+  );
   const removeConversation = useSessionsStore((state) => state.removeConversation);
   const togglePinConversation = useSessionsStore((state) => state.togglePinConversation);
   const toggleArchiveConversation = useSessionsStore((state) => state.toggleArchiveConversation);
@@ -761,6 +779,16 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
           >
             <Sparkles className="h-4 w-4" />
           </button>
+          {window.electronAPI.remote && (
+            <button
+              type="button"
+              onClick={() => window.electronAPI.remote?.exitDesk()}
+              className={ICON_BUTTON_CLASS}
+              title={t('Compact view')}
+            >
+              <Smartphone className="h-4 w-4" />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => window.electronAPI.window.openSettings()}
@@ -1428,6 +1456,16 @@ export function Sidebar({ width, collapsed, onToggleCollapse, onOpenSearch }: Si
             >
               <Sparkles className="h-4 w-4" />
             </button>
+            {window.electronAPI.remote && (
+              <button
+                type="button"
+                onClick={() => window.electronAPI.remote?.exitDesk()}
+                className={ICON_BUTTON_CLASS}
+                title={t('Compact view')}
+              >
+                <Smartphone className="h-4 w-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => window.electronAPI.window.openSettings()}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -200,6 +201,38 @@ func TestStaticIndex(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
 		t.Fatalf("spa fallback %d", res.StatusCode)
+	}
+}
+
+func TestStaticDeskShellNotCached(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "relay.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.close() })
+	static := fstest.MapFS{
+		"index.html":      {Data: []byte("phone")},
+		"desk.html":       {Data: []byte("desk")},
+		"assets/app-1.js": {Data: []byte("js")},
+	}
+	hs := httptest.NewServer(newServer(st, static, nil))
+	t.Cleanup(hs.Close)
+	get := func(p string) (string, string) {
+		res, err := http.Get(hs.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return string(b), res.Header.Get("Cache-Control")
+	}
+	for _, p := range []string{"/desk.html", "/desk"} {
+		if body, cc := get(p); body != "desk" || cc != "no-cache" {
+			t.Fatalf("%s => %q %q", p, body, cc)
+		}
+	}
+	if _, cc := get("/assets/app-1.js"); !strings.Contains(cc, "immutable") {
+		t.Fatalf("asset cache %q", cc)
 	}
 }
 

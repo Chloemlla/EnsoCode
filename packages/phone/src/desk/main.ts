@@ -1,0 +1,412 @@
+import type { RemoteBridge, RemoteFrameKind } from '@shared/remoteBridge';
+import { IPC_CHANNELS } from '@shared/types/ipc';
+import type { ConnState } from '../client';
+import { pickActive } from '../deviceList';
+import { loadActiveDeviceId, loadDevices, saveActiveDeviceId } from '../storage';
+import { PHONE_URL, saveUiMode } from '../uiMode';
+import { watchDeskChrome } from './chrome';
+import { type DeskMeta, deskBase, downloadProgress, loadDeskMeta, saveDeskMeta } from './launch';
+import {
+  loadSnapshot,
+  mountSnapshot,
+  pruneSnapshots,
+  saveSnapshot,
+  snapshotReady,
+} from './snapshot';
+import { type DeskFrame, DeskTunnel } from './tunnel';
+
+const DESK_CACHE_PREFIX = 'enso-desk-';
+const META_TIMEOUT_MS = 25_000;
+
+const $ = (id: string) => document.getElementById(id) as HTMLElement;
+
+/** 已判定无法使用（旧桌面/只读）：后续连接状态、超时提示不再覆盖结论 */
+let stopped = false;
+
+function splash(html: string): void {
+  if (stopped) return;
+  loading = false;
+  $('frames').style.visibility = 'hidden';
+  $('splash').style.display = 'flex';
+  $('splash-text').innerHTML = html;
+}
+
+/** 启动进度：只在仍处于加载阶段时更新，不覆盖错误结论 */
+let loading = true;
+function progress(text: string): void {
+  if (!loading || stopped) return;
+  $('splash-text').textContent = text;
+}
+
+function revealFrames(): void {
+  loading = false;
+  $('splash').style.display = 'none';
+  $('frames').style.visibility = 'visible';
+  renderStatus();
+}
+
+/** 回退手机版：记住的模式改回 phone，下次启动不再跳进来 */
+function fallback(html: string): void {
+  saveUiMode('phone');
+  splash(`${html}<a href="${PHONE_URL}">返回精简版</a>`);
+  stopped = true;
+}
+
+const STATE_TEXT: Record<ConnState, string> = {
+  connecting: '连接中…',
+  online: '',
+  'host-offline': '桌面不在线',
+  offline: '已断开，正在重连…',
+  unauthorized: '配对已失效',
+};
+
+const LOADING_TEXT: Partial<Record<ConnState, string>> = {
+  connecting: '正在连接中继…',
+  online: '正在等待桌面响应…',
+  'host-offline': '桌面不在线，等它上线后自动连接…',
+  offline: '网络已断开，正在重连…',
+};
+
+/** 正盖着上次的界面快照：在线时提示还在同步、暂不能操作 */
+let syncing = false;
+let lastState: ConnState = 'connecting';
+
+function renderStatus(): void {
+  const el = $('status');
+  const text = lastState === 'online' ? (syncing ? '正在同步…' : '') : STATE_TEXT[lastState];
+  el.textContent = text;
+  // 启动画面已在说明进度时不再叠一个状态胶囊
+  el.style.display = text && !loading ? 'block' : 'none';
+}
+
+function showState(state: ConnState): void {
+  lastState = state;
+  renderStatus();
+  const text = LOADING_TEXT[state];
+  if (text) progress(text);
+  if (state === 'unauthorized')
+    splash(`配对已失效，请回到<a href="${PHONE_URL}">精简版</a>重新配对。`);
+}
+
+/** SW 需要能代理 /desk/* ：旧版 SW 没有 fetch 处理，先确保新版接管本页 */
+async function ensureDeskWorker(): Promise<void> {
+  const registration = await navigator.serviceWorker.register('/sw.js');
+  const ping = () =>
+    new Promise<boolean>((resolve) => {
+      const controller = navigator.serviceWorker.controller;
+      if (!controller) {
+        resolve(false);
+        return;
+      }
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => resolve(false), 1500);
+      channel.port1.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data?.desk === 1);
+      };
+      controller.postMessage({ type: 'desk-ping' }, [channel.port2]);
+    });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await ping()) return;
+    await registration.update().catch(() => {});
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3000);
+      navigator.serviceWorker.addEventListener(
+        'controllerchange',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+    });
+  }
+  throw new Error('service worker unavailable');
+}
+
+async function main(): Promise<void> {
+  if (!('serviceWorker' in navigator)) {
+    splash('当前浏览器不支持 Service Worker，无法使用完整版。');
+    return;
+  }
+  const params = new URLSearchParams(location.search);
+  const devices = loadDevices();
+  const device =
+    devices.find((d) => d.pairId === params.get('device')) ??
+    pickActive(devices, loadActiveDeviceId());
+  if (!device) {
+    fallback('还没有配对的电脑，请先在精简版完成配对。');
+    return;
+  }
+  if (device.scope === 'read') {
+    fallback('该设备在桌面端被设为只读，无法使用完整版。');
+    return;
+  }
+  // 记住桌面模式与所用设备：下次从主屏打开直接回到这里
+  saveUiMode('desk');
+  saveActiveDeviceId(device.pairId);
+  if (params.get('device') !== device.pairId) {
+    params.set('device', device.pairId);
+    history.replaceState(null, '', `${location.pathname}?${params}`);
+  }
+
+  await ensureDeskWorker();
+
+  const frames = $('frames');
+  const iframes: Partial<Record<RemoteFrameKind, HTMLIFrameElement>> = {};
+  const attached: Partial<Record<RemoteFrameKind, DeskFrame>> = {};
+  let base = '';
+  let version = '';
+  let settingsLink: unknown = null;
+  let settingsLoaded = false;
+  let snapshot: HTMLIFrameElement | null = null;
+
+  const tunnel = new DeskTunnel(device, showState, (error) => {
+    if (error === 'host-outdated') fallback('桌面端版本过旧，不支持完整版，请升级后再试。');
+    else if (error === 'read-only') fallback('该设备在桌面端被设为只读，无法使用完整版。');
+    else if (error === 'renderer-missing')
+      splash('桌面端缺少浏览器版资源，请更新或重新构建桌面版。');
+    else splash(`桌面拒绝连接：${error}`);
+  });
+
+  const mount = (kind: RemoteFrameKind): HTMLIFrameElement => {
+    const iframe = document.createElement('iframe');
+    iframe.className = kind;
+    iframe.allow = 'clipboard-read; clipboard-write; microphone';
+    iframe.src = `${base}/${kind === 'main' ? 'index' : 'settings'}.html`;
+    frames.appendChild(iframe);
+    iframes[kind] = iframe;
+    return iframe;
+  };
+
+  const closeSettings = () => {
+    iframes.settings?.remove();
+    delete iframes.settings;
+  };
+
+  const bridge: RemoteBridge = {
+    platform: 'linux',
+    attach(kind) {
+      const frame = tunnel.attach(kind, () => {
+        const iframe = iframes[kind];
+        iframe?.contentWindow?.location.reload();
+      });
+      attached[kind] = frame;
+      return {
+        invoke:
+          kind === 'main'
+            ? (channel, payload) => {
+                const result = frame.invoke(channel, payload);
+                if (channel === IPC_CHANNELS.SETTINGS_READ)
+                  void result.then(() => {
+                    settingsLoaded = true;
+                  });
+                return result;
+              }
+            : frame.invoke,
+        send: frame.send,
+        on: frame.on,
+        close: () => {
+          frame.close();
+          if (attached[kind] === frame) delete attached[kind];
+        },
+      };
+    },
+    leader: () => tunnel.leader,
+    openSettings(link) {
+      settingsLink = link ?? null;
+      if (iframes.settings) {
+        if (link) attached.settings?.emit(IPC_CHANNELS.SETTINGS_DEEP_LINK, [link]);
+        return;
+      }
+      mount('settings');
+    },
+    closeSettings,
+    consumeSettingsLink() {
+      const link = settingsLink;
+      settingsLink = null;
+      return link;
+    },
+    exitDesk() {
+      location.href = PHONE_URL;
+    },
+  };
+  (window as Window & { __ensoRemote?: RemoteBridge }).__ensoRemote = bridge;
+
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event.data as { type?: unknown; path?: unknown } | null;
+    const port = event.ports[0];
+    if (data?.type !== 'desk-fetch' || typeof data.path !== 'string' || !port) return;
+    void tunnel.fetchAsset(data.path).then((asset) => {
+      const body = asset.body.slice().buffer;
+      port.postMessage({ status: asset.status, mime: asset.mime, body }, [body]);
+    });
+  });
+
+  /** 某个构建的入口页已在 SW 缓存里：可以不等宿主，直接起 renderer */
+  const cachedBuild = async (meta: DeskMeta): Promise<boolean> => {
+    try {
+      const cache = await caches.open(`${DESK_CACHE_PREFIX}${meta.version}`);
+      return Boolean(
+        await cache.match(`${location.origin}${deskBase(device.pairId, meta.version)}/index.html`)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const use = (meta: DeskMeta): void => {
+    bridge.platform = meta.platform;
+    base = deskBase(device.pairId, meta.version);
+    version = meta.version;
+  };
+
+  const liveChars = () => iframes.main?.contentDocument?.body?.textContent?.length ?? 0;
+
+  const dropSnapshot = (): void => {
+    const el = snapshot;
+    snapshot = null;
+    syncing = false;
+    renderStatus();
+    if (!el) return;
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 200);
+  };
+
+  /** 先盖上次的界面，renderer 拿到设置且内容基本追上（或稳定下来）再揭开 */
+  const coverWithSnapshot = async (): Promise<void> => {
+    const saved = await loadSnapshot(`${DESK_CACHE_PREFIX}${version}`, base);
+    if (!saved || !iframes.main) return;
+    const snapChars = saved.chars;
+    snapshot = mountSnapshot(frames, saved.html);
+    syncing = true;
+    renderStatus();
+    const started = Date.now();
+    let last = -1;
+    let changedAt = started;
+    const timer = setInterval(() => {
+      if (!snapshot) {
+        clearInterval(timer);
+        return;
+      }
+      const now = Date.now();
+      const chars = liveChars();
+      if (chars !== last) {
+        last = chars;
+        changedAt = now;
+      }
+      const ready = snapshotReady({
+        elapsed: now - started,
+        liveChars: chars,
+        snapChars,
+        settingsLoaded,
+        stableFor: now - changedAt,
+      });
+      if (!ready) return;
+      clearInterval(timer);
+      dropSnapshot();
+    }, 200);
+  };
+
+  /** 切后台/离开时存一份当前界面，下次启动先显示它 */
+  const keepSnapshot = (): void => {
+    const doc = iframes.main?.contentDocument;
+    if (snapshot || !settingsLoaded || !doc || !version) return;
+    void saveSnapshot(`${DESK_CACHE_PREFIX}${version}`, base, doc).catch(() => {});
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') keepSnapshot();
+  });
+  window.addEventListener('pagehide', keepSnapshot);
+  setInterval(() => {
+    if (document.visibilityState === 'visible') keepSnapshot();
+  }, 60_000);
+
+  /** 首次（或桌面升级后）要经隧道下载整套界面：盖着启动画面并报进度，iframe 加载完再露出 */
+  const mountFresh = (total?: number): void => {
+    const iframe = mount('main');
+    const started = tunnel.downloadedBytes;
+    const timer = setInterval(() => {
+      progress(
+        `正在下载完整版界面（首次或桌面端升级后需要）… ${downloadProgress(tunnel.downloadedBytes - started, total)}`
+      );
+    }, 500);
+    iframe.addEventListener(
+      'load',
+      () => {
+        clearInterval(timer);
+        revealFrames();
+      },
+      { once: true }
+    );
+  };
+
+  tunnel.start();
+  const cached = loadDeskMeta(localStorage, device.pairId);
+  const launched = cached !== null && (await cachedBuild(cached));
+  if (launched) {
+    use(cached);
+    mount('main');
+    revealFrames();
+    void coverWithSnapshot();
+  }
+  watchDeskChrome(() => iframes.settings ?? iframes.main);
+
+  const timeout = launched
+    ? undefined
+    : setTimeout(
+        () => splash('连接桌面超时：桌面可能不在线，或版本过旧不支持完整版。'),
+        META_TIMEOUT_MS
+      );
+  const meta = await tunnel.fetchAsset('meta');
+  clearTimeout(timeout);
+  let info: Partial<DeskMeta> & { download?: unknown } = {};
+  try {
+    info = JSON.parse(new TextDecoder().decode(meta.body));
+  } catch {}
+  if (meta.status !== 200 || !info.version) {
+    splash('桌面端缺少浏览器版资源，请更新或重新构建桌面版。');
+    return;
+  }
+  const current: DeskMeta = { version: info.version, platform: info.platform ?? 'linux' };
+  const download =
+    typeof info.download === 'number' && info.download > 0 ? info.download : undefined;
+  saveDeskMeta(localStorage, device.pairId, current);
+  void pruneSnapshots(
+    `${DESK_CACHE_PREFIX}${current.version}`,
+    devices.map((d) => d.pairId)
+  );
+
+  // 上一次启动的构建保留到下次：升级时 SW 从中复用内容未变的带指纹文件
+  const keep = new Set([current.version, cached?.version].map((v) => `${DESK_CACHE_PREFIX}${v}`));
+  void caches
+    .keys()
+    .then((keys) =>
+      Promise.all(
+        keys
+          .filter((k) => k.startsWith(DESK_CACHE_PREFIX) && !keep.has(k))
+          .map((k) => caches.delete(k))
+      )
+    )
+    .catch(() => {});
+
+  if (launched && cached.version === current.version) return;
+  // 桌面已升级（或首次）：换到新构建，旧构建的快照也不再适用
+  use(current);
+  dropSnapshot();
+  settingsLoaded = false;
+  closeSettings();
+  iframes.main?.remove();
+  delete iframes.main;
+  if (await cachedBuild(current)) {
+    mount('main');
+    revealFrames();
+    return;
+  }
+  loading = true;
+  $('splash').style.display = 'flex';
+  $('frames').style.visibility = 'hidden';
+  mountFresh(download);
+}
+
+void main().catch((error) => splash(`启动失败：${error instanceof Error ? error.message : error}`));

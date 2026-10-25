@@ -29,6 +29,7 @@ import {
   type MentionFolderId,
   useMentionSearch,
 } from '@/hooks/useMentionSearch';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useI18n } from '@/i18n';
 import { effectiveKeybindings, eventToBinding, formatBinding } from '@/lib/keybindings';
 import { cn } from '@/lib/utils';
@@ -59,11 +60,12 @@ interface ComposerProps {
   running: boolean;
   busy: boolean;
   focusKey?: string;
-  /** 挂载/切会话时是否自动聚焦。移动端置 false，否则一进会话就弹出键盘挡住内容 */
+  /** 挂载/切会话时是否自动聚焦。移动端/远程桌面（PWA）默认 false，否则一进会话就弹出键盘挡住内容 */
   autoFocus?: boolean;
   /**
    * Enter 是否发送（默认 true，桌面习惯）。移动端置 false：软键盘的「换行」
    * 也是 Enter keydown，默认行为会把换行变成误发送；此时只能点发送按钮。
+   * 远程桌面（完整版）在触屏上默认 false，接实体键盘的电脑浏览器仍 Enter 发送。
    */
   enterToSend?: boolean;
   /** 底部工具行左侧插槽（模型选择器等） */
@@ -112,14 +114,17 @@ interface ComposerDraft {
 
 const drafts = new Map<string, ComposerDraft>();
 
+const isTouchRemote = (): boolean =>
+  Boolean(window.electronAPI?.remote) && window.matchMedia?.('(pointer: coarse)').matches === true;
+
 export function Composer({
   cwd,
   commands,
   running,
   busy,
   focusKey,
-  autoFocus = true,
-  enterToSend = true,
+  autoFocus = !window.electronAPI?.remote,
+  enterToSend = !isTouchRemote(),
   toolbar,
   locked = false,
   injectedDraft,
@@ -143,6 +148,7 @@ export function Composer({
   savePastedText,
 }: ComposerProps) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [holdToTalk, setHoldToTalk] = useState(false);
   // 断线重连时语音会短暂不可用：不清掉按住说话，恢复后原样回来
   const holdVoice = voiceMode === 'hold' ? voice : undefined;
@@ -474,6 +480,16 @@ export function Composer({
         continue;
       }
       const filePath = window.electronAPI.files.pathForFile(file);
+      const remote = window.electronAPI.remote;
+      if (!filePath && remote) {
+        void remote
+          .upload(file)
+          .then((hostPath) => {
+            if (hostPath) editorRef.current?.insertFileChip(hostPath);
+          })
+          .catch(() => {});
+        continue;
+      }
       if (!filePath) continue;
       // 拖入的文件在光标处插原子卡片，位置/顺序语义保留
       editorRef.current?.insertFileChip(filePath);
@@ -781,7 +797,12 @@ export function Composer({
         </div>
         {agentRecipient && <p className="sr-only">{t('Send only to the selected Agent')}</p>}
         <div className="flex items-center justify-between gap-1.5 px-2 pt-0.5 pb-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+          <div
+            className={cn(
+              'flex min-w-0 flex-1 items-center gap-1',
+              isMobile ? 'overflow-x-auto [scrollbar-width:none]' : 'overflow-hidden'
+            )}
+          >
             <input
               ref={imageInputRef}
               type="file"

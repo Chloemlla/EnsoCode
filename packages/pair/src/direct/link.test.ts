@@ -17,6 +17,7 @@ function fakePeer() {
   const sendResults: boolean[] = [];
   const calls: string[] = [];
   let closed = false;
+  let buffered = 0;
   const peer: DirectPeer = {
     createOffer: vi.fn(async () => {
       calls.push('createOffer');
@@ -53,6 +54,7 @@ function fakePeer() {
       sent.push(b);
       return true;
     },
+    buffered: () => buffered,
     close: () => {
       closed = true;
       calls.push('close');
@@ -63,6 +65,9 @@ function fakePeer() {
     calls,
     sent,
     sendResults,
+    setBuffered: (bytes: number) => {
+      buffered = bytes;
+    },
     isClosed: () => closed,
     fire: {
       ice: (c: DirectCandidate) => {
@@ -284,6 +289,25 @@ describe('DirectLink guest', () => {
     expect(p.isClosed()).toBe(false);
     expect(h.link.transport()).toBe('direct');
     expect(h.transports).toEqual(['direct']);
+  });
+
+  it('缓冲余量放不下整帧 → 整帧改走中继，直连不作废', async () => {
+    const h = harness('guest');
+    h.link.peerOnline(true);
+    h.link.hostInfo({ capabilities: ['direct-v1'] });
+    await flush();
+    const p = h.peers[0];
+    p.fire.open();
+    p.setBuffered(1_040_000);
+    const before = p.sent.length;
+
+    expect(h.link.send(new Uint8Array(20_000))).toBe(false);
+    expect(p.sent).toHaveLength(before);
+    expect(p.isClosed()).toBe(false);
+    expect(h.link.transport()).toBe('direct');
+
+    p.setBuffered(0);
+    expect(h.link.send(new Uint8Array(20_000))).toBe(true);
   });
 
   it('通道关闭 → 切回 relay、resync、退避后重新 offer（gen 2）', async () => {

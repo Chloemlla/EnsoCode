@@ -18,6 +18,7 @@ import {
   type PromptTemplate,
   type ResourceDiagnostic,
   SessionManager,
+  type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { autoRetryOverrides, DEFAULT_AUTO_RETRY_LIMIT } from '@shared/autoRetry';
 import {
@@ -134,7 +135,12 @@ import {
   continuousMemoryInlineExtension,
 } from './continuousMemory/extension';
 import { CURSOR_PROVIDER_ID, loadCursorProvider } from './cursor/loadProvider';
-import { attachCursorBridgeToSession, isCursorModel } from './cursor/sessionBridge';
+import {
+  attachCursorBridgeToSession,
+  type CursorSessionBridge,
+  indexCursorTools,
+  isCursorModel,
+} from './cursor/sessionBridge';
 import {
   installPushedCustomProviders,
   type ModelDirectoryPushState,
@@ -374,6 +380,13 @@ interface ManagedSession {
   contextUsage: ContextUsageTracker;
   requestBody?: RequestBodyUsage;
   unsubscribe: () => void;
+}
+
+/** 会话 spawn 时选中的常驻 MCP。授权后把当时没连上的工具补进这个会话。 */
+interface McpHotplug {
+  serverKeys: ReadonlySet<string>;
+  adopt: (tools: readonly ToolDefinition[]) => void;
+  pending: ToolDefinition[];
 }
 
 /** ManagedSession 上所有带 pendingCount 的能力字段 */
@@ -756,6 +769,7 @@ export class SessionSupervisor {
     refreshOAuth: (serverId, rejected) => this.requestMcpOAuthRefresh(serverId, rejected),
   });
   private readonly mcpOAuthPending = new Map<string, (result: McpOAuthRefreshResult) => void>();
+  private readonly mcpHotplug = new Map<string, McpHotplug>();
   /** MCP access token 续期只在 Main 做（refresh_token 不进 worker）；超时按临时故障处理 */
   private readonly requestMcpOAuthRefresh = (
     serverId: string,
@@ -1056,6 +1070,7 @@ export class SessionSupervisor {
         child.session.dispose();
       } catch {}
       this.sessions.delete(id);
+      this.mcpHotplug.delete(id);
       this.settleRound(child);
     }
     managed.coworkers.clear();
@@ -1080,6 +1095,7 @@ export class SessionSupervisor {
       managed.session.dispose();
     } catch {}
     this.sessions.delete(parentId);
+    this.mcpHotplug.delete(parentId);
     this.options.emit({
       type: 'parent-ended',
       identity: managed.identity,
@@ -1169,7 +1185,7 @@ export class SessionSupervisor {
     if (command.type === 'warm-mcp') {
       const deferred = command.servers.filter(isDeferredMcp);
       for (const server of deferred) this.mcp.refresh(server);
-      void this.mcp.toolsFor(command.servers.filter((server) => !isDeferredMcp(server)));
+      void this.adoptDirectMcp(command.servers.filter((server) => !isDeferredMcp(server)));
       return;
     }
     if (command.type === 'pin-sessions') {
@@ -2475,7 +2491,26 @@ export class SessionSupervisor {
           sessionManager,
         });
         const childExtraTools = childCodemode.activeToolNames();
-        if (isCursorModel(subModel)) attachCursorBridgeToSession(session, subTools, cwd);
+        const childCursor = isCursorModel(subModel)
+          ? attachCursorBridgeToSession(session, subTools, cwd)
+          : undefined;
+        if (childIdentity && !isLockedEnso) {
+          const childServers = typed
+            ? selectedMcp
+            : directMcp.filter((server) => !isDeferredMcp(server));
+          this.rememberMcpHotplug(
+            childIdentity.sessionId,
+            new Set(childServers.map((server) => this.mcpServerKey(server))),
+            (tools) => {
+              this.installAdoptedMcpTools(
+                childCodemode,
+                childIdentity.sessionId,
+                decorateChild(tools.map((tool) => withApproval(childGate, 'mcp', tool))),
+                childCursor
+              );
+            }
+          );
+        }
         return {
           session,
           modelId: selectedModel.modelId,
@@ -2718,8 +2753,10 @@ export class SessionSupervisor {
         : SessionManager.create(cwd, this.options.sessionDir),
     });
     const codemodeTools = codemodeHost.activeToolNames();
-    if (isCursorModel(piModel)) attachCursorBridgeToSession(session, customTools, cwd);
-    else ensureAssistantUsage(session.messages as unknown[]);
+    const cursorBridge = isCursorModel(piModel)
+      ? attachCursorBridgeToSession(session, customTools, cwd)
+      : undefined;
+    if (!cursorBridge) ensureAssistantUsage(session.messages as unknown[]);
     console.log(
       `[spawn] ${sessionId.slice(0, 8)} total ${Date.now() - spawnStart}ms` +
         ` (tools ${toolsMs}ms, mcp ${mcpTools.length} tools + ${deferredMcp.length} deferred servers, cwd ${cwd})`
@@ -2733,6 +2770,25 @@ export class SessionSupervisor {
       checkpoints,
       runawayGuard: runaway,
     });
+    this.rememberMcpHotplug(
+      sessionId,
+      new Set(directMcp.map((server) => this.mcpServerKey(server))),
+      (tools) => {
+        for (const tool of tools) {
+          if (!mcpTools.some((existing) => existing.name === tool.name)) mcpTools.push(tool);
+        }
+        this.installAdoptedMcpTools(
+          codemodeHost,
+          sessionId,
+          decorateSessionTools(planGated(tools.map((tool) => withApproval(gate, 'mcp', tool))), {
+            reminders,
+            runaway,
+            budget,
+          }),
+          cursorBridge
+        );
+      }
+    );
     managedRef.agentControl = agentControl;
     managedRef.workflowRuns = workflowRuns;
     if (rolePrompt && !resumeFile) managedRef.pendingRole = rolePrompt;
@@ -2869,6 +2925,7 @@ export class SessionSupervisor {
       this.onSessionEvent(managed, event);
     });
     this.sessions.set(identity.sessionId, managed);
+    this.flushPendingMcpTools(managed);
     this.bindAutoRetryLimit(session);
     const stream = session.agent?.streamFunction;
     if (stream) {
@@ -2897,10 +2954,14 @@ export class SessionSupervisor {
     if (opts.resumeFile) {
       const raw = this.transcript(managed);
       const { immediate, deferFull } = projectResumeTail(raw);
-      const emitResumeSnapshot = (payload: { messages: ProjectedMessage[]; baseIndex: number }) => {
+      const emitResumeSnapshot = (
+        payload: { messages: ProjectedMessage[]; baseIndex: number },
+        resumeFull = false
+      ) => {
         this.options.emit({
           type: 'snapshot',
           partial: true,
+          ...(resumeFull ? { resumeFull: true } : {}),
           sessions: [
             {
               identity,
@@ -2921,7 +2982,7 @@ export class SessionSupervisor {
           if (this.sessions.get(identity.sessionId) !== managed) return;
           const full = { messages: projectMessages(raw), baseIndex: 0 };
           managed.messages = full.messages;
-          emitResumeSnapshot(full);
+          emitResumeSnapshot(full, true);
         });
       }
       managed.turnStartIndex = managed.messages.length;
@@ -3221,6 +3282,7 @@ export class SessionSupervisor {
         managed.session.dispose();
       } catch {}
       this.sessions.delete(coworkerId);
+      this.mcpHotplug.delete(coworkerId);
       this.settleRound(managed);
     }
     let dismissedName = managed?.coworkerName ?? coworkerId.split('::cw-').at(-1) ?? coworkerId;
@@ -3413,6 +3475,85 @@ export class SessionSupervisor {
   ): Promise<string> {
     const base = managed.lastRoundSummary ?? this.roundBaseSummary(managed);
     return gateCommand ? `${base}\n\n${await this.runParentGate(managed, gateCommand)}` : base;
+  }
+
+  private mcpServerKey(server: McpServerSpawnConfig): string {
+    return server.id ?? server.name;
+  }
+
+  private rememberMcpHotplug(
+    sessionId: string,
+    serverKeys: ReadonlySet<string>,
+    adopt: (tools: readonly ToolDefinition[]) => void
+  ): void {
+    this.mcpHotplug.set(sessionId, { serverKeys, adopt, pending: [] });
+  }
+
+  /** 会话正忙时先攒着：中途重建工具表会碰到还在执行的工具。 */
+  private sessionAcceptsMcpTools(managed: ManagedSession): boolean {
+    if (managed.status === 'running' || managed.session.isStreaming) return false;
+    return managed.session.isIdle !== false;
+  }
+
+  private deliverMcpTools(sessionId: string, tools: readonly ToolDefinition[]): void {
+    const plug = this.mcpHotplug.get(sessionId);
+    const managed = this.sessions.get(sessionId);
+    if (!plug || tools.length === 0) return;
+    // 子会话可能还没登记：先攒着，registerManagedSession 收口时再补
+    if (!managed || !this.sessionAcceptsMcpTools(managed)) {
+      const seen = new Set(plug.pending.map((tool) => tool.name));
+      for (const tool of tools) {
+        if (seen.has(tool.name)) continue;
+        plug.pending.push(tool);
+        seen.add(tool.name);
+      }
+      return;
+    }
+    plug.adopt(tools);
+  }
+
+  private flushPendingMcpTools(managed: ManagedSession): void {
+    const plug = this.mcpHotplug.get(managed.identity.sessionId);
+    if (!plug || plug.pending.length === 0 || !this.sessionAcceptsMcpTools(managed)) return;
+    const tools = plug.pending.splice(0);
+    plug.adopt(tools);
+  }
+
+  private installAdoptedMcpTools(
+    host: CodemodeHost,
+    sessionId: string,
+    tools: readonly ToolDefinition[],
+    cursor?: CursorSessionBridge
+  ): void {
+    const added = new Set(host.adoptDirectTools(tools));
+    if (added.size === 0) return;
+    if (cursor) {
+      for (const tool of tools) {
+        if (!added.has(tool.name)) continue;
+        const bridgeTool = indexCursorTools([tool]).get(tool.name);
+        if (bridgeTool) cursor.tools.set(tool.name, bridgeTool);
+      }
+    }
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return;
+    for (const name of added) {
+      if (!managed.toolIds.includes(name)) managed.toolIds.push(name);
+    }
+  }
+
+  /** 授权或预热连上常驻 MCP 后，补进 spawn 时已经选了它、但当时没拿到工具的会话。 */
+  private async adoptDirectMcp(servers: readonly McpServerSpawnConfig[]): Promise<void> {
+    await Promise.all(
+      servers.map(async (server) => {
+        const tools = await this.mcp.toolsFor([server]);
+        if (tools.length === 0) return;
+        const key = this.mcpServerKey(server);
+        for (const [sessionId, plug] of this.mcpHotplug) {
+          if (!plug.serverKeys.has(key)) continue;
+          this.deliverMcpTools(sessionId, tools);
+        }
+      })
+    );
   }
 
   private onSessionEvent(
@@ -3627,6 +3768,7 @@ export class SessionSupervisor {
         return;
       }
       case 'agent_settled': {
+        this.flushPendingMcpTools(managed);
         for (const slot of managed.steerDeliveries ?? []) {
           if (!slot.id || !slot.detach?.()) continue;
           managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
@@ -3946,6 +4088,7 @@ export class SessionSupervisor {
     images?: { type: 'image'; data: string; mimeType: string }[],
     deliveryId?: string
   ): void {
+    this.flushPendingMcpTools(managed);
     if (managed.session.isStreaming) {
       void this.steerTracked(managed, text, images, deliveryId).catch((error) => {
         this.failTurn(managed, toErrorMessage(error));

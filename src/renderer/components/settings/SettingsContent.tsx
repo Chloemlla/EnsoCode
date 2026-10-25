@@ -4,6 +4,8 @@ import {
   Bot,
   BotMessageSquare,
   Brain,
+  ChevronLeft,
+  ChevronRight,
   FileText,
   FlaskConical,
   Gauge,
@@ -23,6 +25,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import * as React from 'react';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
@@ -70,6 +73,13 @@ export function SettingsContent() {
   const [flashRowId, setFlashRowId] = React.useState<string | null>(null);
   // 提炼写入记忆后让记忆库重新拉数据（两个组件各自持有列表）
   const [memoryRevision, setMemoryRevision] = React.useState(0);
+  // 窄屏下分类列表与内容逐级进入
+  const isMobile = useIsMobile();
+  const [mobileList, setMobileList] = React.useState(true);
+  const openCategory = (category: SettingsCategory) => {
+    setActiveCategory(category);
+    setMobileList(false);
+  };
   const disabledBuiltinTools = useSettingsStore((state) => state.disabledBuiltinTools);
   const botModeEnabled = useSettingsStore((state) => state.botModeEnabled);
   // 水合前 botModeEnabled 恒为 false：此时不据此把指向 Bot 页的深链改落到实验页
@@ -80,6 +90,7 @@ export function SettingsContent() {
 
   const applyLink = React.useCallback((link: SettingsDeepLink) => {
     setActiveCategory(link.category);
+    setMobileList(false);
     setFlashRowId(link.rowId);
   }, []);
 
@@ -138,61 +149,86 @@ export function SettingsContent() {
     if (resolvedCategory !== activeCategory) setActiveCategory(resolvedCategory);
   }, [resolvedCategory, activeCategory]);
 
+  const showList = !isMobile || mobileList;
+  const showContent = !isMobile || !mobileList;
+  const activeLabel = categories.find((c) => c.id === activeCategory)?.label;
+
   return (
     <div className="flex h-full w-full">
       {/* Left: Category List */}
-      <nav className="w-48 shrink-0 space-y-1 overflow-y-auto border-r p-2">
-        {categories.map((category) => (
-          <button
-            type="button"
-            key={category.id}
-            onClick={() => setActiveCategory(category.id)}
-            className={cn(
-              'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors',
-              category.sub && 'pl-8',
-              activeCategory === category.id
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            )}
-          >
-            <category.icon className="h-4 w-4" />
-            {category.label}
-          </button>
-        ))}
-      </nav>
+      {showList && (
+        <nav
+          className={cn(
+            'shrink-0 space-y-1 overflow-y-auto p-2',
+            isMobile ? 'w-full' : 'w-48 border-r'
+          )}
+        >
+          {categories.map((category) => (
+            <button
+              type="button"
+              key={category.id}
+              onClick={() => openCategory(category.id)}
+              className={cn(
+                'flex w-full items-center gap-2 rounded-md px-3 text-sm transition-colors',
+                isMobile ? 'py-3' : 'py-2',
+                category.sub && 'pl-8',
+                activeCategory === category.id && !isMobile
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+              )}
+            >
+              <category.icon className="h-4 w-4" />
+              {category.label}
+              {isMobile && <ChevronRight className="ml-auto h-4 w-4 opacity-60" />}
+            </button>
+          ))}
+        </nav>
+      )}
 
       {/* Right: Settings Panel */}
-      <div className="flex-1 min-w-0 overflow-y-auto p-6">
-        {activeCategory === 'general' && <GeneralSettings />}
-        {activeCategory === 'shortcuts' && <KeybindingsSettings />}
-        {activeCategory === 'appearance' && <AppearanceSettings />}
-        {activeCategory === 'providers' && <ProvidersSettings />}
-        {activeCategory === 'skills' && <SkillsSettings />}
-        {activeCategory === 'plugins' && <PluginsSettings />}
-        {activeCategory === 'mcp' && <McpSettings />}
-        {activeCategory === 'instructions' && <InstructionsSettings />}
-        {activeCategory === 'presets' && <PresetsSettings />}
-        {activeCategory === 'agents' && <AgentTypesSettings />}
-        {activeCategory === 'workflows' && <WorkflowsSettings />}
-        {activeCategory === 'tools' && <BuiltinToolsSettings />}
-        {activeCategory === 'memory' && (
-          <div className="space-y-8">
-            <MemorySettings onLibraryChanged={() => setMemoryRevision((n) => n + 1)} />
-            <MemoryKnowledge revision={memoryRevision} />
-            <MemoryLibrary revision={memoryRevision} />
-          </div>
-        )}
-        {activeCategory === 'phone' && <DevicesSettings />}
-        {activeCategory === 'ssh' && <SshSettings />}
-        {activeCategory === 'usage' && <UsageSettings />}
-        {activeCategory === 'resources' && <ResourcesSettings />}
-        {activeCategory === 'voice' && <VoiceInputSettings />}
-        {activeCategory === 'experimental' && (
-          <ExperimentalSettings onOpenBots={() => setActiveCategory('bots')} />
-        )}
-        {activeCategory === 'bots' && <BotSettings />}
-        {activeCategory === 'botTemplates' && <BotTemplatesSettings />}
-      </div>
+      {showContent && (
+        <div className={cn('flex-1 min-w-0 overflow-y-auto', isMobile ? 'px-4 pb-6' : 'p-6')}>
+          {isMobile && (
+            <button
+              type="button"
+              onClick={() => setMobileList(true)}
+              className="sticky top-0 z-10 -mx-4 mb-3 flex w-[calc(100%+2rem)] items-center gap-1 border-b bg-background px-2 py-2.5 text-sm font-medium"
+            >
+              <ChevronLeft className="h-5 w-5 text-muted-foreground" />
+              {activeLabel}
+            </button>
+          )}
+          {activeCategory === 'general' && <GeneralSettings />}
+          {activeCategory === 'shortcuts' && <KeybindingsSettings />}
+          {activeCategory === 'appearance' && <AppearanceSettings />}
+          {activeCategory === 'providers' && <ProvidersSettings />}
+          {activeCategory === 'skills' && <SkillsSettings />}
+          {activeCategory === 'plugins' && <PluginsSettings />}
+          {activeCategory === 'mcp' && <McpSettings />}
+          {activeCategory === 'instructions' && <InstructionsSettings />}
+          {activeCategory === 'presets' && <PresetsSettings />}
+          {activeCategory === 'agents' && <AgentTypesSettings />}
+          {activeCategory === 'workflows' && <WorkflowsSettings />}
+          {activeCategory === 'tools' && <BuiltinToolsSettings />}
+          {activeCategory === 'memory' && (
+            <div className="space-y-8">
+              <MemorySettings onLibraryChanged={() => setMemoryRevision((n) => n + 1)} />
+              <MemoryKnowledge revision={memoryRevision} />
+              <MemoryLibrary revision={memoryRevision} />
+            </div>
+          )}
+          {activeCategory === 'phone' && <DevicesSettings />}
+          {activeCategory === 'ssh' && <SshSettings />}
+          {activeCategory === 'usage' && <UsageSettings />}
+          {activeCategory === 'resources' && <ResourcesSettings />}
+          {activeCategory === 'voice' && <VoiceInputSettings />}
+          {activeCategory === 'experimental' && (
+            <ExperimentalSettings onOpenBots={() => setActiveCategory('bots')} />
+          )}
+          {activeCategory === 'bots' && <BotSettings />}
+          {activeCategory === 'botTemplates' && <BotTemplatesSettings />}
+        </div>
+      )}
     </div>
   );
 }

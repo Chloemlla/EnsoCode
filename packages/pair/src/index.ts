@@ -111,6 +111,27 @@ export {
   toWebSocketUrl,
 } from './relay';
 export {
+  createRemoteOrderedStream,
+  createRemotePartAssembler,
+  decodeBase64,
+  decodeRemoteValue,
+  encodeBase64,
+  encodeRemoteValue,
+  gunzipRemoteFrame,
+  gzipRemoteJson,
+  type HostToRemote,
+  isHostRemoteFrame,
+  isRemotePart,
+  REMOTE_GZIP_MIN_CHARS,
+  REMOTE_PART_CHARS,
+  type RemoteGzip,
+  type RemoteKind,
+  type RemotePart,
+  type RemotePartAssembler,
+  type RemoteToHost,
+  splitRemoteFrame,
+} from './remote';
+export {
   createCachedHostLookup,
   isConnectStuck,
   isForegroundSocketStale,

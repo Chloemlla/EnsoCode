@@ -24,6 +24,7 @@ import {
   FolderGit2,
   Laptop,
   MessageSquarePlus,
+  Monitor,
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
@@ -61,6 +62,7 @@ import {
   subscribeTheme,
   type ThemePreference,
 } from './theme';
+import { deskUrl } from './uiMode';
 
 /**
  * 手机侧边栏：复刻桌面 Sidebar 的项目分组结构（chevron / 仓库图标 / 状态点 /
@@ -100,6 +102,8 @@ interface Props {
   /** 已配对的桌面列表（切换式：一次只连活跃那台） */
   devices: StoredDevice[];
   activeDevicePairId: string | null;
+  /** 当前桌面支持桌面模式（旧桌面不显示入口） */
+  remoteDesktop?: boolean;
   /** 活跃那台的连接状态 */
   connected: boolean;
   connectionLabel: string;
@@ -137,6 +141,7 @@ export function SessionDrawer({
   canCreate,
   devices,
   activeDevicePairId,
+  remoteDesktop,
   connected,
   connectionLabel,
   pushEnabled,
@@ -161,6 +166,9 @@ export function SessionDrawer({
   const [archivedOpen, setArchivedOpen] = useState(false);
   /** 待确认解绑的 pairId；null = 无确认框 */
   const [confirmUnpair, setConfirmUnpair] = useState<string | null>(null);
+  const deskDevice = remoteDesktop
+    ? devices.find((d) => d.pairId === activeDevicePairId && d.scope !== 'read')
+    : undefined;
   const [themePref, setThemePref] = useState<ThemePreference>(getThemePreference);
   const [selectedGroupId, setSelectedGroupId] = useState(() => {
     try {
@@ -576,6 +584,27 @@ export function SessionDrawer({
                     {option.label}
                   </button>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {!confirmUnpair && deskDevice && (
+            <div className="flex items-center gap-2 px-2 py-1.5">
+              <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 text-muted-foreground text-sm">界面</span>
+              <div className="flex shrink-0 gap-0.5 rounded-md border p-0.5">
+                <span className="rounded bg-primary px-2 py-1 text-[11px] text-primary-foreground">
+                  精简
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.location.href = deskUrl(deskDevice.pairId);
+                  }}
+                  className="rounded px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent"
+                >
+                  完整
+                </button>
               </div>
             </div>
           )}

@@ -70,16 +70,29 @@ export interface BrowserSurface {
   updateParameters(params: object): void;
 }
 
-export function BrowserView({
-  conversationId,
-  panelApi,
-  active,
-}: {
+interface BrowserViewProps {
   conversationId: string;
   panelApi: BrowserSurface;
   /** 宿主自行判定可见时传入（Bot 面板）；缺省按 Code 侧栏与当前会话判定 */
   active?: boolean;
-}) {
+}
+
+/** 浏览器版（远程桌面）看不到 Main 里的原生网页视图，只给说明 */
+function RemoteBrowserNotice() {
+  const { t } = useI18n();
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground text-sm">
+      <Globe className="h-6 w-6" />
+      <p>{t('The built-in browser is not available in full view. Check it on the computer.')}</p>
+    </div>
+  );
+}
+
+export function BrowserView(props: BrowserViewProps) {
+  return window.electronAPI.remote ? <RemoteBrowserNotice /> : <DesktopBrowserView {...props} />;
+}
+
+function DesktopBrowserView({ conversationId, panelApi, active }: BrowserViewProps) {
   const { t } = useI18n();
   const dockConversationId = useSessionsStore((s) =>
     resolveSidePanelDockConversationId(s.conversations, conversationId)

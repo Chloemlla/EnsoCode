@@ -1,5 +1,7 @@
 import { app, type BrowserWindow } from 'electron';
 import { attachAppCloseConfirm } from '../services/appCloseConfirm';
+import { setConversationsMainWindowGetter } from '../services/remoteRenderer/conversationSync';
+import { isRemoteMainSender } from '../services/remoteRenderer/senders';
 import { createAppWindow, getWindowWebContents, sendToWindow } from './createAppWindow';
 
 let mainWindow: BrowserWindow | null = null;
@@ -31,20 +33,31 @@ export function createMainWindow(): BrowserWindow {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    refreshRemoteLeadership();
   });
+  refreshRemoteLeadership();
 
   return mainWindow;
+}
+
+function refreshRemoteLeadership(): void {
+  void import('../services/remoteRenderer')
+    .then((mod) => mod.refreshRemoteLeadership())
+    .catch(() => {});
 }
 
 export function getMainWindow(): BrowserWindow | null {
   return mainWindow;
 }
+setConversationsMainWindowGetter(getMainWindow);
 
 export function isMainWindowAlive(): boolean {
   return Boolean(mainWindow && !mainWindow.isDestroyed());
 }
 
+/** 远程浏览器里的主界面 renderer 与桌面主窗口同权 */
 export function isMainWebContents(webContentsId: number): boolean {
+  if (isRemoteMainSender(webContentsId)) return true;
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   const contents = getWindowWebContents(mainWindow);
   return !contents.isDestroyed() && contents.id === webContentsId;

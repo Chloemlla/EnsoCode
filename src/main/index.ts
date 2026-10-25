@@ -34,6 +34,7 @@ import {
 import { startPairGuest, stopPairGuest } from './services/pairGuest';
 import { startPairHost, stopPairHost } from './services/pairHost';
 import { getProxyConfig } from './services/proxyConfig';
+import { setupRemoteRenderer } from './services/remoteRenderer';
 import { hydrateShellPath, seedProcessPath } from './services/shellPath';
 import { syncSpeechFromSettings } from './services/speech/service';
 import { disposeAllTerminals, hasPendingPtys, waitPtyQuitIdle } from './services/terminalService';
@@ -109,6 +110,8 @@ if (!gotTheLock) {
       optimizer.watchWindowShortcuts(window);
     });
 
+    // 先装 ipcMain 镜像表：远程浏览器 renderer 复用同一批 handler
+    setupRemoteRenderer();
     registerIpcHandlers();
     setTrayToggleHandler(() => {
       if (isServerMode()) leaveServerMode();

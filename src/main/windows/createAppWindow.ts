@@ -12,6 +12,7 @@ import {
   type WebContents,
   WebContentsView,
 } from 'electron';
+import { sendToRemoteRenderers } from '../services/remoteRenderer/senders';
 import { shouldReloadRenderer } from './rendererGone';
 import { attachPinnedWorkbenchBoundsSync, attachWindowsRestoreWake } from './win32Restore';
 import { windowChromeOptions } from './windowChrome';
@@ -82,6 +83,7 @@ export function sendToWindow(win: BrowserWindow, channel: string, ...args: unkno
 
 export function sendToAllWindows(channel: string, ...args: unknown[]): void {
   for (const win of BrowserWindow.getAllWindows()) sendToWindow(win, channel, ...args);
+  sendToRemoteRenderers(channel, args);
 }
 
 function webPreferences(): Electron.WebPreferences {

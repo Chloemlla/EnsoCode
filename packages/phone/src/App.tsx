@@ -171,6 +171,8 @@ export function App() {
   const [voiceInput, setVoiceInput] = useState(false);
   /** 桌面把本设备设为只读（host-info.readOnly） */
   const [deviceReadOnly, setDeviceReadOnly] = useState(false);
+  /** 桌面支持桌面模式（host-info.remoteDesktop）；旧桌面缺省，入口隐藏 */
+  const [remoteDesktop, setRemoteDesktop] = useState(false);
   /** 有写操作被桌面以只读拦下：横幅改为明确提示 */
   const [readOnlyRejected, setReadOnlyRejected] = useState(false);
   /** 订阅进行中：开关乐观显示已开但禁用，避免数秒无反馈 */
@@ -341,6 +343,7 @@ export function App() {
     setTransport('relay');
     setVoiceInput(false);
     setDeviceReadOnly(false);
+    setRemoteDesktop(false);
     setReadOnlyRejected(false);
     setBotNewSessionSupported(false);
     setBotNewSessionBusy(false);
@@ -380,6 +383,7 @@ export function App() {
       },
       onRtt: setRttMs,
       onVoiceInput: setVoiceInput,
+      onRemoteDesktop: setRemoteDesktop,
       onReadOnly: (readOnly) => {
         setDeviceReadOnly(readOnly);
         if (!readOnly) setReadOnlyRejected(false);
@@ -1139,6 +1143,7 @@ export function App() {
         canCreate={state === 'online' && !deviceReadOnly}
         devices={devices}
         activeDevicePairId={device.pairId}
+        remoteDesktop={remoteDesktop}
         connected={state === 'online'}
         connectionLabel={connectionLabel}
         onClose={() => closeDrawer()}

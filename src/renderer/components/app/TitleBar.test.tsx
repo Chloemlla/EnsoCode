@@ -8,6 +8,8 @@ vi.stubGlobal('window', {
   electronAPI: { env: { platform: 'darwin' } },
 });
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+let mobile = false;
+vi.mock('@/hooks/useViewport', () => ({ useIsMobile: () => mobile }));
 
 const setPlatform = (platform: 'darwin' | 'win32' | 'linux') => {
   window.electronAPI.env.platform = platform;
@@ -75,5 +77,25 @@ describe('TitleBar centered content', () => {
     expect(win).toContain('data-native-window-controls="true"');
     setPlatform('linux');
     expect(render({ title: 'Settings' })).toContain('aria-label="Close"');
+  });
+});
+
+describe('TitleBar on narrow viewports (remote browser)', () => {
+  it('drops traffic-light inset, native caption inset and custom caption buttons', () => {
+    mobile = true;
+    try {
+      setPlatform('darwin');
+      const mac = render({ title: 'EnsoCode', centered });
+      expect(mac).not.toContain('pl-[84px]');
+      expect(mac).toContain('EnsoCode');
+      setPlatform('win32');
+      const win = render({ title: 'EnsoCode', centered });
+      expect(win).not.toContain('data-native-window-controls');
+      expect(win).not.toContain('padding-right');
+      setPlatform('linux');
+      expect(render({ title: 'EnsoCode' })).not.toContain('aria-label="Close"');
+    } finally {
+      mobile = false;
+    }
   });
 });

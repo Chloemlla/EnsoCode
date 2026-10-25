@@ -27,6 +27,12 @@ import {
   parseTraySleepPolicy,
   type TraySleepPolicy,
 } from '../services/pairPowerKeepAlive';
+import {
+  CONVERSATIONS_KEY,
+  mergeConversationsWrite,
+  noteConversationsRead,
+} from '../services/remoteRenderer/conversationSync';
+import { sendToRemoteRenderers } from '../services/remoteRenderer/senders';
 import { deleteSystemPrompt, isSystemPromptId } from '../services/systemPromptStore';
 import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
 
@@ -367,7 +373,9 @@ function snapshotBeforeDestructiveWrite(fields: string[]): void {
 function scheduleWrite(
   data: Record<string, unknown>,
   sender?: Electron.WebContents,
-  broadcast: SettingsBroadcast = 'exclude-sender'
+  broadcast: SettingsBroadcast = 'exclude-sender',
+  /** 远端主界面已经通过会话补丁拿到这次变化：不再让它经中继整份重读 settings */
+  patchedRemoteMain = false
 ): boolean {
   try {
     const store = objectRecord(data['enso-settings']);
@@ -420,6 +428,12 @@ function scheduleWrite(
         sendToWindow(win, IPC_CHANNELS.SETTINGS_CHANGED);
       }
     }
+    sendToRemoteRenderers(
+      IPC_CHANNELS.SETTINGS_CHANGED,
+      [],
+      broadcast === 'all-renderers' ? undefined : sender?.id,
+      patchedRemoteMain ? 'main' : undefined
+    );
 
     if (pendingWrite) {
       clearTimeout(pendingWrite);
@@ -572,6 +586,7 @@ export function commitSettingsTransaction(
       if (win.isDestroyed()) continue;
       sendToWindow(win, IPC_CHANNELS.SETTINGS_CHANGED);
     }
+    sendToRemoteRenderers(IPC_CHANNELS.SETTINGS_CHANGED, []);
   } catch {
     // Durable write already succeeded; a dead renderer must not fail the import.
   }
@@ -831,8 +846,10 @@ export function removeProjectAndConversations(
 }
 
 export function registerSettingsHandlers(): void {
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_READ, async () => {
-    return readSettings();
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_READ, async (event) => {
+    const data = readSettings();
+    noteConversationsRead(event.sender, data?.[CONVERSATIONS_KEY]);
+    return data;
   });
 
   // 按键合并写：只更新单个顶层键,避免多 store 并发 read-modify-write 互相覆盖
@@ -840,9 +857,18 @@ export function registerSettingsHandlers(): void {
     if (typeof name !== 'string') return false;
     const current = readSettings() ?? {};
     const next = { ...current };
-    if (value === undefined) delete next[name];
-    else next[name] = value;
-    return scheduleWrite(next, event.sender);
+    const merged =
+      name === CONVERSATIONS_KEY
+        ? mergeConversationsWrite(event.sender, current[name], value)
+        : value;
+    if (merged === undefined) delete next[name];
+    else next[name] = merged;
+    return scheduleWrite(
+      next,
+      event.sender,
+      'exclude-sender',
+      name === CONVERSATIONS_KEY && value !== undefined
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.SETTINGS_WRITE, async (event, data: unknown) => {

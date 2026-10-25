@@ -219,6 +219,34 @@ describe('settings广播策略', () => {
     expect(mocks.sends[1]).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
   });
 
+  it('会话写入对远端主界面只推补丁，不再触发整份 settings 重读', async () => {
+    const { registerSettingsHandlers } = await import('./settings');
+    const { addRemoteSender, RemoteSender } = await import('../services/remoteRenderer/senders');
+    registerSettingsHandlers();
+    const remote = new RemoteSender('pair-s', 'cid-s', 'main', () => {});
+    const remoteSettings = new RemoteSender('pair-s', 'cid-t', 'settings', () => {});
+    addRemoteSender(remote);
+    addRemoteSender(remoteSettings);
+    const mainSends = vi.spyOn(remote, 'send');
+    const settingsSends = vi.spyOn(remoteSettings, 'send');
+    const handler = mocks.handlers.get(IPC_CHANNELS.SETTINGS_WRITE_KEY);
+    if (!handler) throw new Error('SETTINGS_WRITE_KEY handler missing');
+    const [owner] = mocks.windows;
+
+    await handler({ sender: owner.webContents }, 'enso-conversations', {
+      state: { conversations: { a: { id: 'a', title: 'x' } }, order: ['a'] },
+    });
+    const mainChannels = mainSends.mock.calls.map(([channel]) => channel);
+    expect(mainChannels).not.toContain(IPC_CHANNELS.SETTINGS_CHANGED);
+    expect(settingsSends).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
+
+    mainSends.mockClear();
+    await handler({ sender: owner.webContents }, 'enso-settings', { state: { theme: 'dark' } });
+    expect(mainSends).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
+    remote.destroy();
+    remoteSettings.destroy();
+  });
+
   it('托盘休眠策略写入不会清掉更新后回托盘标记', async () => {
     const {
       consumeTrayReenterAfterUpdate,

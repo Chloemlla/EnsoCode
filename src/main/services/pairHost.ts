@@ -1,18 +1,22 @@
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import {
   attachHeartbeat,
   backoffDelay,
   buildPairLink,
   type CatalogEntry,
+  createRemotePartAssembler,
   DEFAULT_RELAY_URL,
   DirectLink,
   type DirectSignal,
   fromBase64Url,
+  gzipRemoteJson,
   type Heartbeat,
   type HostAppearance,
   type HostPairSession,
   type HostToPhone,
   isConnectStuck,
+  isRemotePart,
   openFrame,
   type PairedDevice,
   type PairScope,
@@ -23,9 +27,12 @@ import {
   type ProviderEntry,
   pollHostPairing,
   RELAY_CONNECT_TIMEOUT_MS,
+  REMOTE_GZIP_MIN_CHARS,
+  type RemotePartAssembler,
   revokePairing,
   sealFrame,
   shouldReplaceOnNudge,
+  splitRemoteFrame,
   startHostPairing,
   type TerminalPalette,
   toBase64Url,
@@ -110,6 +117,13 @@ import {
   sendPush,
   setPushSubscription,
 } from './pushNotifier';
+import { BulkWindow } from './remoteRenderer/bulkWindow';
+import {
+  handleRemoteCommand,
+  type RemoteLink,
+  remoteLinkDown,
+  remoteLinkRevoked,
+} from './remoteRenderer/hostHooks';
 import { onSpeechAvailabilityChange, openSpeechSession, speechAvailable } from './speech/service';
 
 /**
@@ -175,6 +189,12 @@ interface Connection {
   ioEpoch: number;
   receiveQueue: Promise<void>;
   sendQueue: Promise<void>;
+  /** 远程桌面上行大帧的分片重组 */
+  remoteParts: RemotePartAssembler;
+  /** 远程桌面下行大帧的流控窗口 */
+  remoteWindow: BulkWindow<HostToPhone>;
+  /** 浏览器声明能解 gzip：大帧压缩后再发（桌面上行常是瓶颈） */
+  remoteGzip: boolean;
   voiceUploads: VoiceUploads;
 }
 
@@ -570,6 +590,8 @@ export function setDeviceScope(pairId: string, scope: PairScope): { ok: boolean;
     // host-info 指纹含 readOnly，变了即重发给在线手机
     requestMeta(conn);
   }
+  // 降为只读即收回远程桌面：已接入的浏览器 renderer 立刻失效
+  if (scope === 'read') remoteLinkRevoked(pairId);
   notifyStatus();
   return { ok: true };
 }
@@ -647,6 +669,9 @@ function openConnection(device: PairedDevice): void {
     syncRevision: 0,
     receiveQueue: Promise.resolve(),
     sendQueue: Promise.resolve(),
+    remoteParts: createRemotePartAssembler(),
+    remoteWindow: new BulkWindow((frame) => sendRemoteFrame(conn, frame)),
+    remoteGzip: false,
     voiceUploads: new VoiceUploads({
       open: openSpeechSession,
       // 每处 ioEpoch++ 都伴随 voiceUploads.clear()，旧连接的会话已取消，中间结果不会再出来
@@ -703,6 +728,10 @@ function clearConnectionSubscription(conn: Connection): void {
   conn.ioEpoch++;
   conn.syncRevision++;
   conn.voiceUploads.clear();
+  conn.remoteParts.clear();
+  conn.remoteWindow.reset();
+  conn.remoteGzip = false;
+  remoteLinkDown(conn.device.pairId);
   conn.receiveQueue = Promise.resolve();
   conn.sendQueue = Promise.resolve();
   conn.subscribedId = null;
@@ -818,6 +847,7 @@ function attachHostSocket(conn: Connection, ws: WebSocket, generation: number): 
 function forgetDevice(pairId: string): void {
   stableMetaByPair.delete(pairId);
   sentProviderFp.delete(pairId);
+  remoteLinkRevoked(pairId);
   const conn = connections.get(pairId);
   if (conn) {
     conn.closed = true;
@@ -900,6 +930,13 @@ async function handleFrame(
   if (!conn.phoneOnline) {
     conn.phoneOnline = true;
     notifyStatus();
+  }
+  // 远程桌面大帧分片：只有可操作设备能用，只读设备的分片直接丢，免得被拿来占内存
+  if (isRemotePart(payload)) {
+    if (deviceScope(conn.device) !== 'operate') return;
+    const assembled = conn.remoteParts.push(payload);
+    if (assembled === null || isRemotePart(assembled)) return;
+    payload = assembled;
   }
   const parsed = parsePhoneCommand(payload);
   if (!parsed.ok) {
@@ -1089,6 +1126,19 @@ async function handleFrame(
     case 'voice-cancel':
       conn.voiceUploads.cancel(command.requestId);
       break;
+    case 'rpc-hello':
+    case 'rpc-bye':
+    case 'rpc-invoke':
+    case 'rpc-send':
+    case 'asset-get':
+      await handleRemoteCommand(remoteLink(conn.device.pairId), command);
+      return;
+    case 'remote-ack':
+      conn.remoteGzip = command.gzip === true;
+      conn.remoteWindow.ack(command.bytes);
+      return;
+    case 'part':
+      return;
     case 'spawn': {
       const check = checkSpawn(command, whitelist);
       if (!check.ok) {
@@ -1227,6 +1277,53 @@ function send(conn: Connection, message: HostToPhone, guard?: SendGuard): Promis
   return enqueueSend(conn, message, false, guard);
 }
 
+/**
+ * 远程桌面下行：按 pairId 取当前连接（重连后 conn 对象可能已换代），超限消息切片。
+ * 分片（大资源/大结果）经流控窗口发出，且优先走中继：连发 MB 级数据会塞满 DataChannel，
+ * 直连探活超时被判坏重建，在途分片随之丢失；中继是 TCP，不受影响。
+ */
+function remoteLink(pairId: string): RemoteLink {
+  return {
+    pairId,
+    get gzip() {
+      return connections.get(pairId)?.remoteGzip === true;
+    },
+    send(message) {
+      const conn = connections.get(pairId);
+      if (!conn) return;
+      // 手机已离开中继、直连也不在：发出去没人收。挂起远端 renderer（帧已在其保留窗口，续上时补发）
+      if (!conn.phoneOnline && conn.direct.transport() !== 'direct') {
+        remoteLinkDown(pairId);
+        return;
+      }
+      const json = JSON.stringify(message);
+      // 压缩是异步的，可能与后续小帧换序：rpc 帧浏览器按 seq 重排，资源按 id 对应
+      if (conn.remoteGzip && json.length >= REMOTE_GZIP_MIN_CHARS) {
+        void gzipRemoteJson(json)
+          .then((packed) => sendRemoteMessage(conn, packed))
+          .catch((error) => console.warn('[pair] remote frame dropped', error));
+      } else {
+        sendRemoteMessage(conn, message);
+      }
+    },
+  };
+}
+
+function sendRemoteMessage(conn: Connection, message: HostToPhone): void {
+  try {
+    for (const frame of splitRemoteFrame(message, randomUUID)) {
+      if (frame.type === 'part') conn.remoteWindow.push(frame, frame.data.length);
+      else sendRemoteFrame(conn, frame);
+    }
+  } catch (error) {
+    console.warn('[pair] remote frame dropped', error);
+  }
+}
+
+function sendRemoteFrame(conn: Connection, frame: HostToPhone): void {
+  void enqueueSend(conn, frame, frame.type === 'part' && conn.ws?.readyState === 1);
+}
+
 function sendFrameViaRelay(conn: Connection, frame: Uint8Array): boolean {
   const ws = conn.ws;
   if (ws?.readyState !== 1) return false;
@@ -1284,7 +1381,9 @@ async function sendMeta(conn: Connection): Promise<void> {
     appVersion: app.getVersion(),
     ...(directReady ? { capabilities: ['direct-v1' as const], iceServers: PAIR_STUN_SERVERS } : {}),
     ...(speechAvailable() ? { voiceInput: true as const } : {}),
-    ...(deviceScope(conn.device) === 'read' ? { readOnly: true as const } : {}),
+    ...(deviceScope(conn.device) === 'read'
+      ? { readOnly: true as const }
+      : { remoteDesktop: true as const }),
   };
   const catalogEntries = slimCatalogForPhone(catalog, conn.subscribedId);
   const projectEntries = slimProjectsForPhone(projects);

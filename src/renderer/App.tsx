@@ -7,8 +7,9 @@ import {
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import { FoldHorizontal, PanelRight, UnfoldHorizontal } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { FoldHorizontal, Menu, PanelRight, UnfoldHorizontal } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { BackgroundLayer } from '@/components/app/BackgroundLayer';
 import { TitleBar } from '@/components/app/TitleBar';
 import { UpdateBanner } from '@/components/app/UpdateBanner';
@@ -39,15 +40,18 @@ import { useAutoArchiveScan } from '@/hooks/useAutoArchiveScan';
 import { useBackgroundImage } from '@/hooks/useBackgroundImage';
 import { useDockBadge } from '@/hooks/useDockBadge';
 import { useGenerationStallTimeout } from '@/hooks/useGenerationStallTimeout';
+import { isMobileWidth, useIsMobile, useViewportWidth } from '@/hooks/useViewport';
 import { useWindowsWindowChrome } from '@/hooks/useWindowsWindowChrome';
 import { useI18n } from '@/i18n';
 import { effectiveKeybindings, eventToBinding, isEventInSidePanel } from '@/lib/keybindings';
+import { springStandard } from '@/lib/motion';
 import {
   addSidePanelBtw,
   addSidePanelTerminal,
   closeActiveSidePanelTab,
 } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
+import { Z_INDEX } from '@/lib/z-index';
 import { useBotsStore } from '@/stores/bots';
 import {
   isBotModeActive,
@@ -77,6 +81,11 @@ const MAX_WIDTH = 420;
 
 export default function App() {
   const onboarded = useSettingsStore((s) => s.onboarded);
+  // 水合前 onboarded 恒为 false：浏览器版经隧道读设置要好几秒，不能先弹引导
+  const settingsHydrated = useSyncExternalStore(
+    (onChange) => useSettingsStore.persist?.onFinishHydration?.(onChange) ?? (() => {}),
+    () => useSettingsStore.persist?.hasHydrated?.() ?? true
+  );
   useBackgroundImage();
   useGenerationStallTimeout();
   useAutoArchiveScan();
@@ -89,6 +98,21 @@ export default function App() {
     return Number.isFinite(saved) && saved >= MIN_WIDTH ? Math.min(saved, MAX_WIDTH) : 280;
   });
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === '1');
+  // 窄屏下侧栏是抽屉，与桌面折叠状态互不影响
+  const isMobile = useIsMobile();
+  const viewportWidth = useViewportWidth();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  useEffect(() => {
+    if (!isMobile) setDrawerOpen(false);
+  }, [isMobile]);
+  useEffect(
+    () =>
+      useSessionsStore.subscribe((state, prev) => {
+        if (state.activeId !== prev.activeId) setDrawerOpen(false);
+      }),
+    []
+  );
   const { t } = useI18n();
   const chatWide = useSettingsStore((s) => s.chatWide);
   const activeConversationId = useSessionsStore((s) => s.activeId);
@@ -268,7 +292,8 @@ export default function App() {
       }
       if (pressed === bindings['toggle-sidebar']) {
         e.preventDefault();
-        setCollapsed((v) => !v);
+        if (isMobileWidth(window.innerWidth)) setDrawerOpen((v) => !v);
+        else setCollapsed((v) => !v);
       } else if (pressed === bindings['open-settings']) {
         e.preventDefault();
         void window.electronAPI.window.openSettings();
@@ -332,7 +357,7 @@ export default function App() {
   );
 
   return (
-    <div className="relative isolate flex h-screen flex-col">
+    <div className={cn('relative isolate flex flex-col', isMobile ? 'h-dvh' : 'h-screen')}>
       {/* 全局 toast 出口（addToast 依赖；不挂则静默失效） */}
       <ToastProvider />
       <BackgroundLayer />
@@ -340,13 +365,32 @@ export default function App() {
       <TitleBar
         title="EnsoCode"
         centered={botModeEnabled && !remoteNodeActive ? <ModeSwitch /> : undefined}
+        leading={
+          isMobile && !remoteNodeActive && !botModeActive ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                className="-ml-1.5 flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                onClick={() => setDrawerOpen(true)}
+                aria-label={t('Conversations')}
+                title={t('Conversations')}
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+              {!(botModeEnabled && !remoteNodeActive) && (
+                <span className="text-sm font-medium text-muted-foreground">EnsoCode</span>
+              )}
+            </div>
+          ) : undefined
+        }
         actions={
           <>
             <button
               type="button"
               className={cn(
                 'flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-accent/50',
-                chatWide ? 'text-foreground' : 'text-muted-foreground'
+                chatWide ? 'text-foreground' : 'text-muted-foreground',
+                isMobile && 'hidden'
               )}
               onClick={() => useSettingsStore.getState().setChatWide(!chatWide)}
               aria-label={chatWide ? t('Use reading width') : t('Use full chat width')}
@@ -362,7 +406,8 @@ export default function App() {
               <button
                 type="button"
                 className={cn(
-                  'flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-accent/50',
+                  'flex items-center justify-center rounded-md transition-colors hover:bg-accent/50',
+                  isMobile ? 'h-9 w-9' : 'h-7 w-7',
                   (botModeActive ? botPanelOpen : sideOpen)
                     ? 'text-foreground'
                     : 'text-muted-foreground'
@@ -392,13 +437,49 @@ export default function App() {
           />
         ) : (
           <DndContext sensors={dndSensors} collisionDetection={dndCollision}>
-            <Sidebar
-              width={collapsed ? undefined : width}
-              collapsed={collapsed}
-              onToggleCollapse={() => setCollapsed((v) => !v)}
-              onOpenSearch={() => setSearchOpen(true)}
-            />
-            {!collapsed && <ResizeHandle onResize={handleResize} />}
+            {isMobile ? (
+              <>
+                <AnimatePresence>
+                  {drawerOpen && (
+                    <motion.div
+                      key="drawer-backdrop"
+                      className="fixed inset-0 bg-black/40"
+                      style={{ zIndex: Z_INDEX.MOBILE_DRAWER }}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      onClick={closeDrawer}
+                    />
+                  )}
+                </AnimatePresence>
+                <motion.div
+                  className="fixed inset-y-0 left-0 flex bg-background shadow-xl"
+                  style={{ zIndex: Z_INDEX.MOBILE_DRAWER }}
+                  initial={false}
+                  animate={{ x: drawerOpen ? 0 : '-105%' }}
+                  transition={springStandard}
+                  inert={!drawerOpen}
+                >
+                  <Sidebar
+                    width={Math.min(320, Math.round(viewportWidth * 0.85))}
+                    collapsed={false}
+                    onToggleCollapse={closeDrawer}
+                    onOpenSearch={() => setSearchOpen(true)}
+                    onNavigate={closeDrawer}
+                  />
+                </motion.div>
+              </>
+            ) : (
+              <>
+                <Sidebar
+                  width={collapsed ? undefined : width}
+                  collapsed={collapsed}
+                  onToggleCollapse={() => setCollapsed((v) => !v)}
+                  onOpenSearch={() => setSearchOpen(true)}
+                />
+                {!collapsed && <ResizeHandle onResize={handleResize} />}
+              </>
+            )}
             <div
               ref={workspaceRef}
               className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
@@ -406,7 +487,7 @@ export default function App() {
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <ChatView />
               </div>
-              {sideOpen && !sideFullscreen && (
+              {sideOpen && !sideFullscreen && !isMobile && (
                 <ResizeHandle onResize={handleSideResize} onResizingChange={setSideResizing} />
               )}
               <SidePanel width={sideWidth} resizing={sideResizing} />
@@ -414,7 +495,7 @@ export default function App() {
           </DndContext>
         )}
       </div>
-      {!onboarded && <Onboarding />}
+      {settingsHydrated && !onboarded && !window.electronAPI.remote && <Onboarding />}
       <WorkspaceSearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
       <AlertDialog
         open={closeRequestId !== null}

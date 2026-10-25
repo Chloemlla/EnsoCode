@@ -9,6 +9,7 @@ import { isMediaId } from '@shared/bots/sendImage';
 import { takeSnapshotTail } from '@shared/snapshotTail';
 import { isDeliveryId, THINKING_LEVELS } from '@shared/types/agent';
 import { parseArtifactTarget } from './bots/artifacts';
+import { isRemoteCommandType, parseRemoteCommand } from './remoteRenderer/commands';
 
 /**
  * 手机上行命令的结构校验 + 下行事件过滤。
@@ -190,6 +191,7 @@ export function parsePhoneCommand(value: unknown): CommandCheck {
   if (typeof value !== 'object' || value === null) return { ok: false, error: 'not an object' };
   const v = value as Record<string, unknown>;
   if (typeof v.type === 'string' && v.type.startsWith('bot-')) return parseBotCommand(v);
+  if (isRemoteCommandType(v.type)) return parseRemoteCommand(v);
   switch (v.type) {
     case 'prompt':
     case 'steer':

@@ -1893,8 +1893,17 @@ export type AgentWorkerEvent =
       entry: AgentSessionCustomEntry;
     }
   | McpWorkerEvent
-  /** sessionId：targeted 快照回带请求目标；sessions 为空时 renderer 据此收回 started */
-  | { type: 'snapshot'; sessions: SessionSnapshot[]; partial?: boolean; sessionId?: string }
+  /**
+   * sessionId：targeted 快照回带请求目标；sessions 为空时 renderer 据此收回 started。
+   * resumeFull：resume 尾窗之后补发的全量（远端裁成尾窗后与前一份相同即可跳过）
+   */
+  | {
+      type: 'snapshot';
+      sessions: SessionSnapshot[];
+      partial?: boolean;
+      sessionId?: string;
+      resumeFull?: boolean;
+    }
   | { type: 'session-reloaded'; requestId: string; result: SessionReloadResult };
 
 /** MCP 连接旁路事件：无 identity/seq，不属于任何会话，Main 走独立 IPC 通道转发 */

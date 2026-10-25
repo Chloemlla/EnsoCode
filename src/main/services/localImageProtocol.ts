@@ -68,22 +68,30 @@ export function registerLocalImageSchemePrivileges(): void {
 
 /** 在 app ready 之后调用 */
 export function registerLocalImageProtocolHandler(): void {
-  protocol.handle(LOCAL_IMAGE_SCHEME, async (request) => {
-    let url: URL;
-    try {
-      url = new URL(request.url);
-    } catch {
-      return new Response('Bad URL', { status: 400 });
-    }
+  protocol.handle(LOCAL_IMAGE_SCHEME, (request) =>
+    handleLocalImageRequest(request.url, request.headers.get('range'))
+  );
+}
 
-    if (url.hostname === REMOTE_FETCH_HOST) {
-      return proxyRemoteImage(url);
-    }
-    if (url.hostname === BOT_AVATAR_HOST) {
-      return serveBotAvatar(decodeURIComponent(url.pathname.slice(1)));
-    }
-    return serveLocalMedia(url, request.headers.get('range'));
-  });
+/** 远程桌面隧道复用同一套校验：浏览器里的 local-image 请求经隧道转到这里 */
+export async function handleLocalImageRequest(
+  rawUrl: string,
+  rangeHeader: string | null
+): Promise<Response> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return new Response('Bad URL', { status: 400 });
+  }
+  if (url.protocol !== `${LOCAL_IMAGE_SCHEME}:`) return new Response('Bad URL', { status: 400 });
+  if (url.hostname === REMOTE_FETCH_HOST) {
+    return proxyRemoteImage(url);
+  }
+  if (url.hostname === BOT_AVATAR_HOST) {
+    return serveBotAvatar(decodeURIComponent(url.pathname.slice(1)));
+  }
+  return serveLocalMedia(url, rangeHeader);
 }
 
 async function serveBotAvatar(botId: string): Promise<Response> {

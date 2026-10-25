@@ -10,8 +10,10 @@ import {
   fromBase64Url,
   type Heartbeat,
   type HostToPhone,
+  type HostToRemote,
   isConnectStuck,
   isForegroundSocketStale,
+  isHostRemoteFrame,
   isPairSyncCursor,
   type NudgeReason,
   openFrame,
@@ -113,6 +115,8 @@ export interface ClientEvents {
   onVoiceInput?(available: boolean): void;
   /** 桌面把本设备设为只读（host-info.readOnly）；host 侧另有强制拦截 */
   onReadOnly?(readOnly: boolean): void;
+  /** 桌面支持桌面模式（host-info.remoteDesktop）；旧桌面缺省 */
+  onRemoteDesktop?(available: boolean): void;
   /** 写命令被 host 拦截（如作用域刚被改成只读） */
   onCommandRejected?(command: string, error: string): void;
   /** Bot 模式（桌面开启时才下发；enabled=false = 已关闭） */
@@ -138,6 +142,8 @@ export interface ClientEvents {
   /** 一条回复的产物卡片与 send_image 图（bot-artifacts 应答） */
   onBotArtifacts?(frame: Extract<HostToPhone, { type: 'bot-artifacts' }>): void;
   onBotArtifactImage?(frame: Extract<HostToPhone, { type: 'bot-artifact-image' }>): void;
+  /** 远程桌面隧道帧（rpc-* / asset / part），只有 desk 壳关心 */
+  onRemoteFrame?(frame: HostToRemote): void;
 }
 
 export class PairClient {
@@ -459,6 +465,10 @@ export class PairClient {
       return;
     }
     if (this.closed || this.revoked || (socket && socket !== this.ws)) return;
+    if (isHostRemoteFrame(payload)) {
+      this.events.onRemoteFrame?.(payload);
+      return;
+    }
     switch (payload.type) {
       case 'catalog': {
         // 幽灵会话判定要在 onCatalog 前：上层可能据 ghost 立即切走
@@ -519,6 +529,7 @@ export class PairClient {
         this.direct.hostInfo(payload);
         this.setVoiceInput(payload.voiceInput === true);
         this.events.onReadOnly?.(payload.readOnly === true);
+        this.events.onRemoteDesktop?.(payload.remoteDesktop === true);
         break;
       case 'voice-result': {
         const { error } = payload;
@@ -899,8 +910,13 @@ export class PairClient {
     );
   }
 
-  send(command: PhoneToHost): void {
+  /** bulk：大分片优先走中继，避免塞满 DataChannel 触发直连重建而丢帧 */
+  send(command: PhoneToHost, opts?: { bulk?: boolean }): void {
     if (!this.canSend()) return;
+    if (opts?.bulk && this.ws?.readyState === 1) {
+      this.sendViaRelay(command);
+      return;
+    }
     this.sendQueue = this.sendQueue
       .then(async () => {
         if (this.closed || this.revoked) return;

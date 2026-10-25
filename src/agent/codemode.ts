@@ -143,6 +143,9 @@ export interface CodemodeHostOptions {
 export class CodemodeHost {
   private loadDeferred?: (server: McpServerSpawnConfig) => Promise<ToolDefinition[] | null>;
   private readonly registeredServers = new Set<string>();
+  /** 本会话后来补进的常驻 MCP 工具，避免授权预热重复注册 */
+  private readonly adoptedDirect = new Set<string>();
+  private pi?: ExtensionAPI;
   private deferredPending?: Promise<void>;
   private readonly nestedCounts = new Map<string, number>();
 
@@ -165,6 +168,30 @@ export class CodemodeHost {
     this.loadDeferred = load;
   }
 
+  /**
+   * 把授权后才连上的常驻 MCP 工具补进当前会话。pi 会在下一次模型请求声明它们。
+   * 已有同名工具不替换：换 token 只更新原连接上的凭据。
+   */
+  adoptDirectTools(tools: readonly ToolDefinition[]): string[] {
+    const pi = this.pi;
+    if (!pi || tools.length === 0) return [];
+    const existing = new Set(this.adoptedDirect);
+    try {
+      for (const tool of pi.getAllTools()) existing.add(tool.name);
+    } catch {
+      // 扩展还没绑到会话上时没有工具表，只靠已补记的名字去重
+    }
+    const added: string[] = [];
+    for (const tool of tools) {
+      if (existing.has(tool.name)) continue;
+      pi.registerTool({ ...tool, defaultActive: true });
+      existing.add(tool.name);
+      this.adoptedDirect.add(tool.name);
+      added.push(tool.name);
+    }
+    return added;
+  }
+
   readonly extension: InlineExtension = {
     name: 'enso-codemode',
     hidden: true,
@@ -172,6 +199,7 @@ export class CodemodeHost {
   };
 
   private install(pi: ExtensionAPI): void {
+    this.pi = pi;
     if (!this.enabled) return;
     const { codemode, deferredServers } = this.options;
     // pi 默认注册为未激活；Enso 按开关直接在注册时激活

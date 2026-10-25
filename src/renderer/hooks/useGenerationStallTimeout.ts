@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
+import { isLeaderRenderer } from '@/lib/rendererRole';
 import { useSessionsStore } from '@/stores/sessions';
 import {
   hasLiveGenerationWork,
@@ -20,6 +21,7 @@ export function useGenerationStallTimeout(): void {
     const pendingRetry = new Set<string>();
     const attempts = new Map<string, number>();
     const timer = setInterval(() => {
+      if (!isLeaderRenderer()) return;
       const timeoutMs = minutes * 60_000;
       const now = Date.now();
       const sessions = useSessionsStore.getState();

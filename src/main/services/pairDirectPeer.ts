@@ -179,6 +179,7 @@ function createPeer(mod: Ndc, iceServers: IceServerEntry[]): DirectPeer {
         return false;
       }
     },
+    buffered: () => (dc && !closed && dc.isOpen() ? dc.bufferedAmount() : 0),
     close() {
       if (closed) return;
       closed = true;

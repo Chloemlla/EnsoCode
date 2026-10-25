@@ -29,6 +29,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from '@/components/ui/menu';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useI18n } from '@/i18n';
 import {
   addSidePanelBrowser,
@@ -400,11 +401,15 @@ function SidePanelHeaderActions({
   const fullscreen = useSidePanelStore((s) => s.fullscreen);
   const toggleFullscreen = useSidePanelStore((s) => s.toggleFullscreen);
   const workflowAvailable = useWorkflowAvailable(projectId);
+  const isMobile = useIsMobile();
   return (
     <div className="flex h-full items-center gap-0.5">
       <button
         type="button"
-        className="flex h-6 w-6 items-center justify-center rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className={cn(
+          'flex h-6 w-6 items-center justify-center rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+          isMobile && 'hidden'
+        )}
         onClick={toggleFullscreen}
         aria-label={fullscreen ? t('Exit side panel fullscreen') : t('Expand side panel')}
         title={fullscreen ? t('Exit side panel fullscreen') : t('Expand side panel')}
@@ -617,7 +622,10 @@ export function SidePanel({
   const open = useSidePanelStore((s) =>
     activeIdForUi ? Boolean(s.uiByConversation[activeIdForUi]?.open) : false
   );
-  const fullscreen = useSidePanelStore((s) => s.fullscreen);
+  // 窄屏没有并排空间：打开即全屏盖住聊天区
+  const isMobile = useIsMobile();
+  const storeFullscreen = useSidePanelStore((s) => s.fullscreen);
+  const fullscreen = storeFullscreen || (isMobile && open);
   useEffect(() => {
     const stopReveal = window.electronAPI.browser.onReveal((event) => {
       if (botBrowserChatId(event.conversationId)) return;
@@ -712,7 +720,7 @@ export function SidePanel({
 
   return (
     <>
-      {cover ? <div className="shrink-0" style={{ width }} aria-hidden /> : null}
+      {cover && !isMobile ? <div className="shrink-0" style={{ width }} aria-hidden /> : null}
       <motion.aside
         ref={asideRef}
         data-slot="side-panel"

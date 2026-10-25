@@ -43,7 +43,7 @@ import {
   parseParentModelSelectionRequest,
   parseParentSourceBindingRequest,
 } from '@shared/types/mentions';
-import { app, ipcMain, powerMonitor, type WebContents, webContents } from 'electron';
+import { app, ipcMain, powerMonitor, type WebContents } from 'electron';
 import { EnsoSafeJournal } from '../../agent/ensoSafeJournal';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
 import { ActiveConversationRegistry } from '../services/activeConversationRegistry';
@@ -128,6 +128,7 @@ import {
   handlePairHeadlessAgentEvent,
 } from '../services/pairSessionHost';
 import { remoteCandidates } from '../services/remoteModels';
+import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import {
   projectParentHistoryPage,
@@ -921,7 +922,7 @@ export function registerAgentHandlers(): void {
     readStoredOauthCredentialKeys,
     emitRendererEvent: broadcastAgentEvent,
     emitDispatchEvent: (ownerWebContentsId, dispatchEvent) => {
-      const owner = webContents.fromId(ownerWebContentsId);
+      const owner = webContentsOrRemote(ownerWebContentsId);
       if (owner && !owner.isDestroyed()) {
         owner.send(IPC_CHANNELS.AGENT_DISPATCH_EVENT, dispatchEvent);
       }

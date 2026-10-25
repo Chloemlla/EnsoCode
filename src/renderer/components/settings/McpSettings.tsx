@@ -80,7 +80,7 @@ export function McpSettings() {
   const revoke = useMcpStatusStore((state) => state.revoke);
   React.useEffect(() => useMcpStatusStore.getState().bind(), []);
   const [importOpen, setImportOpen] = React.useState(false);
-  // 已运行会话的工具集在 spawn 时定格，授权只影响新会话：成功后明示一句
+  // 授权会补进已经选了该服务器的会话；没选过的（刚启用）仍要新会话
   const [authorizedHint, setAuthorizedHint] = React.useState<string | null>(null);
   const runAuthorize = async (serverId: string) => {
     await authorize(serverId);
@@ -288,7 +288,9 @@ export function McpSettings() {
                     </div>
                     {authorizedHint === server.id && (
                       <p className="px-3 text-muted-foreground text-xs">
-                        {t('Authorized. Takes effect in new conversations.')}
+                        {t(
+                          'Authorized. Conversations that already include this server can use it on the next message.'
+                        )}
                       </p>
                     )}
                   </div>

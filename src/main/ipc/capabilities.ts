@@ -1,7 +1,7 @@
 import { parseCapabilityAskResponse } from '@shared/capabilities/types';
 import { IPC_CHANNELS } from '@shared/types';
 import type { AgentWorkerEvent } from '@shared/types/agent';
-import { app, BrowserWindow, ipcMain, webContents } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { appendSessionCustomEntry, sendCapabilityResultToSession } from '../services/agentHost';
 import { AgentSessionIndex } from '../services/agentSessionIndex';
 import { CapabilityGateway, type CapabilityGatewayTransport } from '../services/capabilityGateway';
@@ -20,15 +20,26 @@ import {
 import { listModels, testProvider } from '../services/providerApi';
 import { getProxyConfig } from '../services/proxyConfig';
 import { getRecentProjects } from '../services/recentProjects';
+import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
+import { remoteSenderById } from '../services/remoteRenderer/senders';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { sshProbeLogin } from '../services/sshProbe';
 import { patchSettingsState, readSettings, removeProjectAndConversations } from './settings';
 
 function senderById(webContentsId?: number): Electron.WebContents | undefined {
   if (webContentsId === undefined || webContentsId < 0) return undefined;
-  const sender = webContents.fromId(webContentsId);
+  const sender = webContentsOrRemote(webContentsId);
+  if (sender && remoteSenderById(webContentsId) && !watchedRemotes.has(webContentsId)) {
+    watchedRemotes.add(webContentsId);
+    sender.once('destroyed', () => {
+      watchedRemotes.delete(webContentsId);
+      capabilityGateway.releaseWindow(webContentsId);
+    });
+  }
   return sender && !sender.isDestroyed() ? sender : undefined;
 }
+
+const watchedRemotes = new Set<number>();
 
 function updaterAvailable(): boolean {
   return !(process.platform === 'linux' && !process.env.APPIMAGE);

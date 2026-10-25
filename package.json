@@ -1,6 +1,6 @@
 {
   "name": "enso-code",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "EnsoCode - Electron Multi-Window Scaffold",
   "main": "./out/main/index.js",
   "author": {
@@ -13,7 +13,7 @@
   "scripts": {
     "predev": "pnpm rtk:prepare",
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "electron-vite build && vite build -c vite.web-preload.config.ts",
     "preview": "electron-vite preview",
     "build:mac": "pnpm build && electron-builder --mac",
     "build:mac:dir": "pnpm build && electron-builder --mac --arm64 --dir -c.mac.notarize=false",

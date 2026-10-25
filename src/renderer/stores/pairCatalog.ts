@@ -4,6 +4,7 @@ import { projectDisplayName } from '@shared/projectName';
 import type { PairCatalogPayload } from '@shared/types';
 import { resolveContextUsage } from '@/components/chat/usageSegments';
 import { getXtermTheme } from '@/lib/ghosttyTheme';
+import { isLeaderRenderer, onLeaderRendererChanged } from '@/lib/rendererRole';
 import { useModelDirectoryStore } from '@/stores/modelDirectory';
 import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
@@ -184,7 +185,7 @@ function schedulePush(): void {
   if (timer) clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
-    if (!storesHydrated()) return;
+    if (!isLeaderRenderer() || !storesHydrated()) return;
     const payload = buildPayload();
     const fingerprint = catalogPushFingerprint(payload);
     if (fingerprint === lastPushFingerprint) return;
@@ -231,20 +232,28 @@ export function bindPairCatalogSync(): void {
   });
   // 侧栏拖拽重排（项目/置顶）落盘后同步给手机
   subscribeSidebarOrder(schedulePush);
+  onLeaderRendererChanged((leader) => {
+    if (!leader) return;
+    lastPushFingerprint = null;
+    schedulePush();
+  });
   // 手机订阅历史会话时恢复它，worker 才有投影可发（resume 对已启动会话自动忽略）
   window.electronAPI.pair.onResumeSession((sessionId) => {
     setPairViewedSession(sessionId);
+    if (!isLeaderRenderer()) return;
     useSessionsStore.getState().markConversationRead(sessionId);
     void useSessionsStore.getState().resumeConversation(sessionId);
   });
   // 手机新建的会话登记进桌面列表；不登记的话它的 agent 事件会因「未知会话」被丢弃
   window.electronAPI.pair.onSessionCreated((session) => {
     setPairViewedSession(session.sessionId);
+    if (!isLeaderRenderer()) return;
     useSessionsStore.getState().adoptPairSession(session);
   });
   // 手机改会话模型/推理档位：走桌面选择器同一 store 方法
   // （setModel 只记忆待用模型；reasoning/thinking 对已启动会话即时下发）
   window.electronAPI.pair.onSessionConfig((config) => {
+    if (!isLeaderRenderer()) return;
     const store = useSessionsStore.getState();
     if (config.type === 'set-model') {
       store.setModel(config.sessionId, config.providerId, config.modelId);
@@ -256,6 +265,7 @@ export function bindPairCatalogSync(): void {
   });
   // 手机操作排队消息：与桌面队列区同一批 store 方法
   window.electronAPI.pair.onQueueAction((action) => {
+    if (!isLeaderRenderer()) return;
     const store = useSessionsStore.getState();
     switch (action.type) {
       case 'enqueue':

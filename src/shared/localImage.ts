@@ -12,6 +12,14 @@
 
 export const LOCAL_IMAGE_SCHEME = 'local-image';
 
+/** 远程桌面（浏览器）里由 web-preload 设置：local-image URL 改走壳页面 SW 的隧道代理 */
+export const REMOTE_LOCAL_IMAGE_PREFIX_KEY = '__ensoRemoteLocalImagePrefix';
+
+function routed(url: string): string {
+  const prefix = (globalThis as Record<string, unknown>)[REMOTE_LOCAL_IMAGE_PREFIX_KEY];
+  return typeof prefix === 'string' ? `${prefix}${encodeURIComponent(url)}` : url;
+}
+
 /** POSIX 绝对路径的固定 host（盘符 host 恒为单字母，二者不会撞） */
 const POSIX_HOST = 'posix';
 
@@ -21,7 +29,7 @@ export const REMOTE_FETCH_HOST = 'remote-fetch';
 /** 成员头像的保留 host：只按 botId 寻址，路径由 Main 推导；v 为头像版本（缓存失效） */
 export const BOT_AVATAR_HOST = 'bot-avatar';
 export const botAvatarUrl = (botId: string, version: number): string =>
-  `${LOCAL_IMAGE_SCHEME}://${BOT_AVATAR_HOST}/${encodeURIComponent(botId)}?v=${version}`;
+  routed(`${LOCAL_IMAGE_SCHEME}://${BOT_AVATAR_HOST}/${encodeURIComponent(botId)}?v=${version}`);
 
 export const IMAGE_EXTENSIONS = [
   'png',
@@ -62,19 +70,19 @@ export function toLocalImageUrl(filePath: string): string {
   // UNC：//server/share/...（含 WSL 的 \\wsl.localhost\...）
   if (normalized.startsWith('//')) {
     const [host, ...rest] = normalized.slice(2).split('/').filter(Boolean);
-    return `${LOCAL_IMAGE_SCHEME}://${host}/${rest.map(encodeURIComponent).join('/')}`;
+    return routed(`${LOCAL_IMAGE_SCHEME}://${host}/${rest.map(encodeURIComponent).join('/')}`);
   }
 
   // Windows 盘符：C:/...
   const drive = /^([a-zA-Z]):\/(.*)$/.exec(normalized);
   if (drive) {
     const segments = drive[2].split('/').filter(Boolean).map(encodeURIComponent);
-    return `${LOCAL_IMAGE_SCHEME}://${drive[1].toLowerCase()}/${segments.join('/')}`;
+    return routed(`${LOCAL_IMAGE_SCHEME}://${drive[1].toLowerCase()}/${segments.join('/')}`);
   }
 
   // POSIX 绝对路径
   const segments = normalized.split('/').filter(Boolean).map(encodeURIComponent);
-  return `${LOCAL_IMAGE_SCHEME}://${POSIX_HOST}/${segments.join('/')}`;
+  return routed(`${LOCAL_IMAGE_SCHEME}://${POSIX_HOST}/${segments.join('/')}`);
 }
 
 /** local-image:// URL → 本地绝对路径；形状不合法返回 null */
@@ -94,5 +102,7 @@ export function localImageUrlToPath(url: URL): string | null {
 /** 远程图片走主进程代理的 URL；nonce 用于手动/定时刷新时绕开缓存 */
 export function toRemoteImageProxyUrl(remoteUrl: string, nonce = 0): string {
   const bust = nonce > 0 ? `&_t=${nonce}` : '';
-  return `${LOCAL_IMAGE_SCHEME}://${REMOTE_FETCH_HOST}/?url=${encodeURIComponent(remoteUrl)}${bust}`;
+  return routed(
+    `${LOCAL_IMAGE_SCHEME}://${REMOTE_FETCH_HOST}/?url=${encodeURIComponent(remoteUrl)}${bust}`
+  );
 }

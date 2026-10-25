@@ -46,6 +46,7 @@ import type {
 } from '@shared/memory/graphDto';
 import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
+import type { RemoteApi } from '@shared/remoteBridge';
 import type {
   ResourceSnapshot,
   SessionCleanRequest,
@@ -298,6 +299,12 @@ const electronAPI = {
       const listener = () => callback();
       ipcRenderer.on(IPC_CHANNELS.SETTINGS_CHANGED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.SETTINGS_CHANGED, listener);
+    },
+    /** 其他主界面（远程浏览器/桌面窗口）改动的会话元数据补丁 */
+    onConversationsPatch: (callback: (patch: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, patch: unknown) => callback(patch);
+      ipcRenderer.on(IPC_CHANNELS.CONVERSATIONS_PATCH, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.CONVERSATIONS_PATCH, listener);
     },
   },
 
@@ -1555,6 +1562,9 @@ const electronAPI = {
     query: (request: WorkspaceSearchQueryRequest): Promise<WorkspaceSearchQueryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_SEARCH_QUERY, request),
   },
+
+  /** 仅远程浏览器里的 web-preload 提供 */
+  remote: undefined as RemoteApi | undefined,
 };
 
 export type ElectronAPI = typeof electronAPI;

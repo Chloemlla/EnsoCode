@@ -42,5 +42,13 @@ export default defineConfig({
     ],
   },
   server: { host: true, port: 5174 },
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    rollupOptions: {
+      input: {
+        main: path.resolve(import.meta.dirname, 'index.html'),
+        desk: path.resolve(import.meta.dirname, 'desk.html'),
+      },
+    },
+  },
 });

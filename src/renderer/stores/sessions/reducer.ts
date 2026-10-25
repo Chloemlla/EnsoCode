@@ -135,6 +135,17 @@ export function upsertOutOfRange(
   return localIndex < 0 || localIndex > authoritativeLength(messages);
 }
 
+/**
+ * 尚未领养 generation 就收到非首条事件：之前的事件（含 status:running）已经错过，
+ * 典型是另一个窗口新建的会话经补丁晚到。只靠后续增量补不回运行态，需要 snapshot。
+ */
+export function joinsMidStream(
+  state: { generation?: string; lastSeq: number },
+  event: { seq: number }
+): boolean {
+  return state.generation === undefined && event.seq > state.lastSeq + 1;
+}
+
 /** worker 的 truncated.length 是绝对长度；裁到尾窗起点之前时本地权威正文已全部失效。 */
 export function truncatedNeedsSnapshotResync(
   historyBaseIndex: number | undefined,

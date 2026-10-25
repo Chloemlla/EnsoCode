@@ -22,9 +22,14 @@ export interface DirectPeer {
   onClose(cb: () => void): Unsubscribe;
   /** false = 未 open 或背压拒绝，调用方应改走中继 */
   send(bytes: Uint8Array): boolean;
+  /** DataChannel 已缓冲字节数；DirectLink 据此整帧判断余量，避免半帧后背压作废通道 */
+  buffered?(): number;
   /** 幂等；之后不再触发任何回调 */
   close(): void;
 }
+
+/** 与各实现 send 内的单片背压阈值一致 */
+export const DIRECT_BUFFER_LIMIT = 1_048_576;
 
 export type DirectPeerFactory = (iceServers: IceServerEntry[]) => DirectPeer | null;
 

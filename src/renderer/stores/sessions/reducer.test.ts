@@ -6,6 +6,7 @@ import {
   applyDispatchEvent,
   applyHistoryPage,
   emptyProjection,
+  joinsMidStream,
   retainedOptimisticTail,
   rewindTruncatedNeedsSnapshotResync,
   type SessionProjection,
@@ -1785,5 +1786,17 @@ describe('background-tasks-level', () => {
       { type: 'background-tasks-level', identity: identity(), seq: 3, tasks: [] }
     );
     expect(state.backgroundTasks).toEqual([task('t1', 'running')]);
+  });
+});
+
+describe('joinsMidStream', () => {
+  it('flags adopting a generation after earlier events were missed', () => {
+    // 另一个窗口建的会话经补丁才到：status:running 等早期事件已因会话不存在被丢
+    expect(joinsMidStream({ generation: undefined, lastSeq: 0 }, { seq: 7 })).toBe(true);
+  });
+
+  it('does not flag the first event of a fresh spawn or an already adopted generation', () => {
+    expect(joinsMidStream({ generation: undefined, lastSeq: 0 }, { seq: 1 })).toBe(false);
+    expect(joinsMidStream({ generation: 'g1', lastSeq: 3 }, { seq: 9 })).toBe(false);
   });
 });

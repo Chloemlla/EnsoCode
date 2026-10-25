@@ -1,0 +1,144 @@
+import { createHash } from 'node:crypto';
+import { readFile, realpath } from 'node:fs/promises';
+import { extname, isAbsolute, join, relative, sep } from 'node:path';
+import { encodeBase64, gzipRemoteJson, REMOTE_GZIP_MIN_CHARS } from '@enso/pair';
+
+/** 浏览器 renderer 的入口：先跑 web-preload（经父页面隧道实现 window.electronAPI），再加载桌面原样产物 */
+export const WEB_PRELOAD_FILE = 'web-preload.js';
+const HTML_ENTRIES = new Set(['index.html', 'settings.html']);
+const MAX_ASSET_BYTES = 32 * 1024 * 1024;
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.wasm': 'application/wasm',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+export const assetMime = (path: string): string =>
+  MIME[extname(path).toLowerCase()] ?? 'application/octet-stream';
+
+/** 只接受 renderer 产物目录内的相对路径（无 ..、无绝对路径、无反斜杠、无 NUL） */
+export function normalizeAssetPath(raw: string): string | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 512) return null;
+  const path = raw.split(/[?#]/, 1)[0] ?? '';
+  if (!path || path.includes('\\') || path.includes('\0') || path.startsWith('/')) return null;
+  const segments = path.split('/');
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) return null;
+  return path;
+}
+
+export function injectWebPreload(html: string): string {
+  const tag = `<script src="./${WEB_PRELOAD_FILE}"></script>`;
+  const withCsp = html.replace(/local-image:/g, 'blob:');
+  return /<head[^>]*>/i.test(withCsp)
+    ? withCsp.replace(/<head[^>]*>/i, (head) => `${head}\n    ${tag}`)
+    : `${tag}\n${withCsp}`;
+}
+
+export interface RendererAsset {
+  status: number;
+  mime: string;
+  body: Uint8Array;
+}
+
+const notFound = (): RendererAsset => ({
+  status: 404,
+  mime: 'text/plain; charset=utf-8',
+  body: new TextEncoder().encode('Not found'),
+});
+
+export async function readRendererAsset(root: string, raw: string): Promise<RendererAsset> {
+  const path = normalizeAssetPath(raw);
+  if (!path) return notFound();
+  try {
+    // asar 内 realpath 可能不可用：路径已规范化（无 ..），回退原路径仍在根内；realpath 只防符号链接
+    const realRoot = await realpath(root).catch(() => root);
+    const candidate = join(realRoot, ...path.split('/'));
+    const file = await realpath(candidate).catch(() => candidate);
+    const rel = relative(realRoot, file);
+    if (!rel || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) return notFound();
+    const data = await readFile(file);
+    if (data.byteLength > MAX_ASSET_BYTES) return notFound();
+    if (HTML_ENTRIES.has(path)) {
+      return {
+        status: 200,
+        mime: assetMime(path),
+        body: new TextEncoder().encode(injectWebPreload(data.toString('utf8'))),
+      };
+    }
+    return { status: 200, mime: assetMime(path), body: new Uint8Array(data) };
+  } catch {
+    return notFound();
+  }
+}
+
+/** 入口与 web-preload 的内容指纹：浏览器缓存按它分代，桌面升级后自动换新 */
+export async function rendererBuildId(root: string, appVersion: string): Promise<string | null> {
+  const hash = createHash('sha256').update(appVersion);
+  for (const file of ['index.html', 'settings.html', WEB_PRELOAD_FILE]) {
+    try {
+      hash.update(await readFile(join(root, file)));
+    } catch {
+      return null;
+    }
+  }
+  return `${appVersion}-${hash.digest('hex').slice(0, 12)}`;
+}
+
+/** 首次加载必经的资源：入口页、web-preload 与入口页直接引用的 ./assets/*（懒加载块不算） */
+export function initialAssetPaths(html: string): string[] {
+  const paths = ['index.html', WEB_PRELOAD_FILE];
+  for (const match of html.matchAll(/\b(?:src|href)="\.\/(assets\/[^"?#]+)"/g)) {
+    const path = normalizeAssetPath(match[1] ?? '');
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+const estimates = new Map<string, Promise<number>>();
+
+/** 首次下载的线上字节数估算（与 asset 帧同样编码，按浏览器是否接受 gzip 计），按构建缓存 */
+export function downloadEstimate(root: string, gzip: boolean, build = ''): Promise<number> {
+  const key = `${root}\0${build}\0${gzip}`;
+  const cached = build ? estimates.get(key) : undefined;
+  if (cached) return cached;
+  const task = (async () => {
+    const entry = await readRendererAsset(root, 'index.html');
+    if (entry.status !== 200) return 0;
+    let total = 0;
+    for (const path of initialAssetPaths(new TextDecoder().decode(entry.body))) {
+      const file = await readRendererAsset(root, path);
+      const json = JSON.stringify({
+        type: 'asset',
+        id: 0,
+        status: file.status,
+        mime: file.mime,
+        data: encodeBase64(file.body),
+      });
+      total +=
+        gzip && json.length >= REMOTE_GZIP_MIN_CHARS
+          ? (await gzipRemoteJson(json)).data.length
+          : json.length;
+    }
+    return total;
+  })().catch(() => 0);
+  if (build) estimates.set(key, task);
+  return task;
+}

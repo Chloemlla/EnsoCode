@@ -31,8 +31,8 @@ import {
   applyPairSessionConfigHeadless,
   resumePairSessionHeadless,
 } from '../services/pairSessionHost';
+import { hasMainRenderer } from '../services/remoteRenderer';
 import { sendToAllWindows } from '../windows/createAppWindow';
-import { isMainWindowAlive } from '../windows/MainWindow';
 
 export function registerPairHandlers(): void {
   // 状态变化广播回设置页（配对成功、手机上下线、重连）
@@ -43,25 +43,25 @@ export function registerPairHandlers(): void {
 
   // 手机订阅历史会话时，请渲染层按桌面同路径恢复（worker 里才有投影可发）
   setPairResumeListener((sessionId) => {
-    if (isMainWindowAlive()) sendToAllWindows(IPC_CHANNELS.PAIR_RESUME_SESSION, sessionId);
+    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_RESUME_SESSION, sessionId);
     else void resumePairSessionHeadless(sessionId);
   });
 
   // 手机新建会话后请渲染层登记，否则桌面列表看不到它、其事件也会被丢弃
   setPairSessionCreatedListener((session) => {
-    if (isMainWindowAlive()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CREATED, session);
+    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CREATED, session);
     else adoptPairSessionHeadless(session);
   });
 
   // 手机改会话模型/推理档位：交给渲染层的 store 方法，与桌面选择器同一路径
   setPairSessionConfigListener((config) => {
-    if (isMainWindowAlive()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CONFIG, config);
+    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CONFIG, config);
     else applyPairSessionConfigHeadless(config);
   });
 
   // 手机操作排队消息 / 会话目标：状态只在 renderer store，交给它处理
   setPairQueueActionListener((action) => {
-    if (isMainWindowAlive()) sendToAllWindows(IPC_CHANNELS.PAIR_QUEUE_ACTION, action);
+    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_QUEUE_ACTION, action);
     else applyPairQueueActionHeadless(action);
   });
 

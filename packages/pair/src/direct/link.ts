@@ -12,6 +12,7 @@ import {
 } from './directSession';
 import { describeCandidates } from './nat';
 import {
+  DIRECT_BUFFER_LIMIT,
   type DirectPeer,
   type DirectPeerFactory,
   isAllowedCandidate,
@@ -147,6 +148,8 @@ export class DirectLink {
   /** 直连可用时分片发出；返回 false 表示调用方应改走中继 */
   send(frame: Uint8Array): boolean {
     if (this.transport() !== 'direct' || !this.peer) return false;
+    // 余量放不下整帧就整帧走中继：大帧连发时若中途背压，半帧会污染对端拼帧器而作废整条直连
+    if ((this.peer.buffered?.() ?? 0) + frame.byteLength > DIRECT_BUFFER_LIMIT) return false;
     const chunks = encodeChunks(frame);
     for (let i = 0; i < chunks.length; i++) {
       if (!this.peer.send(chunks[i])) {

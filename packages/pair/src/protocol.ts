@@ -4,6 +4,8 @@
  * main 侧解密后按结构校验再交给现有 sendCommand / IPC。
  */
 
+import type { HostToRemote, RemoteToHost } from './remote';
+
 // 与 @shared/types/agent 对齐的最小重定义（保持字面量一致以便结构兼容）
 export interface AttachedImage {
   data: string;
@@ -154,7 +156,9 @@ export type PhoneToHost =
       target: PairBotArtifactTarget;
       mediaId?: string;
       rel?: string;
-    };
+    }
+  /** 远程桌面隧道（仅 operate 设备） */
+  | RemoteToHost;
 
 /** 手机命令白名单：main 只接受这些 type，其余（set-approval-mode、设置写入等）拒绝 */
 export const PHONE_COMMAND_TYPES = [
@@ -206,6 +210,13 @@ export const PHONE_COMMAND_TYPES = [
   'bot-inbox-dismiss',
   'bot-artifacts',
   'bot-artifact-image',
+  'rpc-hello',
+  'rpc-bye',
+  'rpc-invoke',
+  'rpc-send',
+  'asset-get',
+  'remote-ack',
+  'part',
 ] as const satisfies readonly PhoneToHost['type'][];
 
 export function isPhoneCommand(value: unknown): value is PhoneToHost {
@@ -559,6 +570,8 @@ export type HostToPhone =
       voiceInput?: true;
       /** 本设备被桌面设为只读：手机隐藏发送/审批等写操作（host 侧另有强制拦截） */
       readOnly?: true;
+      /** 可用桌面模式（浏览器复用桌面界面）；缺省即旧桌面或只读设备，PWA 隐藏入口 */
+      remoteDesktop?: true;
     }
   | { type: 'direct-answer'; gen: number; sdp: string }
   | ({ type: 'direct-ice'; gen: number } & DirectCandidate)
@@ -625,4 +638,5 @@ export type HostToPhone =
       artifacts: PairBotArtifact[];
       media: PairBotMedia[];
     }
-  | { type: 'bot-artifact-image'; requestId: string; dataUrl?: string; error?: string };
+  | { type: 'bot-artifact-image'; requestId: string; dataUrl?: string; error?: string }
+  | HostToRemote;

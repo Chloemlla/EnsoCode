@@ -692,6 +692,19 @@ describe('PairClient 缓存与续传', () => {
     expect(onReadOnly).toHaveBeenLastCalledWith(false);
   });
 
+  it('host-info 声明 remoteDesktop 才可用桌面模式，缺省（旧桌面）不可用', async () => {
+    const onRemoteDesktop = vi.fn();
+    events.onRemoteDesktop = onRemoteDesktop;
+    const socket = await start();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'host-online' }) });
+    socket.receive({ type: 'host-info', hostname: 'h', appVersion: '1', remoteDesktop: true });
+    await settle();
+    expect(onRemoteDesktop).toHaveBeenLastCalledWith(true);
+    socket.receive({ type: 'host-info', hostname: 'h', appVersion: '1' });
+    await settle();
+    expect(onRemoteDesktop).toHaveBeenLastCalledWith(false);
+  });
+
   it('写命令被 host 以只读拒绝时回报给上层', async () => {
     const onCommandRejected = vi.fn();
     events.onCommandRejected = onCommandRejected;

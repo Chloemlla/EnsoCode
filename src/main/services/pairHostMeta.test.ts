@@ -68,6 +68,7 @@ vi.mock('./pushNotifier', () => ({
 }));
 
 import { startPairHost, stopPairHost, updatePairCatalog } from './pairHost';
+import { type RemoteLink, setRemoteHostHooks } from './remoteRenderer/hostHooks';
 
 describe('pairHost 目录下发', () => {
   const contentKey = new Uint8Array(32).fill(7);
@@ -145,6 +146,15 @@ describe('pairHost 目录下发', () => {
     });
   });
 
+  it('host-info 向可操作设备声明桌面模式能力', async () => {
+    control('peer-joined');
+    await vi.waitFor(async () => expect(await sentTypes()).toContain('host-info'));
+    // 可操作设备才声明桌面模式；旧桌面缺省该字段，PWA 据此隐藏入口
+    expect((await sentPayloads()).find((payload) => payload.type === 'host-info')).toMatchObject({
+      remoteDesktop: true,
+    });
+  });
+
   it('同一次进房内对端再要目录，不重打模型表', async () => {
     control('peer-joined');
     updatePairCatalog({
@@ -167,5 +177,41 @@ describe('pairHost 目录下发', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(await sentTypes()).not.toContain('providers');
+  });
+
+  it('手机已离开且无直连时，远程桌面帧不再发往中继，改为挂起远端 renderer', async () => {
+    const links: RemoteLink[] = [];
+    const linkDown = vi.fn();
+    setRemoteHostHooks({
+      command: async (link) => {
+        links.push(link);
+      },
+      linkDown,
+      linkRevoked: vi.fn(),
+    });
+    control('peer-joined');
+    const frame = await sealFrame(contentKey, { type: 'rpc-hello', cid: 'c1', kind: 'main' });
+    hostMocks.socket?.onmessage?.({
+      data: frame.buffer.slice(
+        frame.byteOffset,
+        frame.byteOffset + frame.byteLength
+      ) as ArrayBuffer,
+    });
+    await vi.waitFor(() => expect(links).toHaveLength(1));
+    const link = links[0] as RemoteLink;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    hostMocks.socket?.send.mockClear();
+    link.send({ type: 'rpc-event', cid: 'c1', ch: 'x', args: [], seq: 1 } as never);
+    await vi.waitFor(async () => expect(await sentTypes()).toContain('rpc-event'));
+
+    control('peer-left');
+    linkDown.mockClear();
+    hostMocks.socket?.send.mockClear();
+    link.send({ type: 'rpc-event', cid: 'c1', ch: 'x', args: [], seq: 2 } as never);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // 发给中继也没人收：帧已在 RemoteSender 保留窗口里，挂起后等手机续上再补
+    expect(await sentTypes()).not.toContain('rpc-event');
+    expect(linkDown).toHaveBeenCalledWith('pair-1');
   });
 });

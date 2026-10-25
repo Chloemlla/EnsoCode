@@ -1,9 +1,14 @@
 import { useEffect } from 'react';
+import { isLeaderRenderer } from '@/lib/rendererRole';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 
 function bothHydrated(): boolean {
-  return useSessionsStore.persist.hasHydrated() && useSettingsStore.persist.hasHydrated();
+  return (
+    isLeaderRenderer() &&
+    useSessionsStore.persist.hasHydrated() &&
+    useSettingsStore.persist.hasHydrated()
+  );
 }
 
 function scanIdleArchive(idleDays: number, mergedEnabled: boolean): void {

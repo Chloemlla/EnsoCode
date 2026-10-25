@@ -1,5 +1,13 @@
 import type { AgentSessionCustomEntry, ProjectedMessage } from '@shared/types/agent';
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useOpenChangesOnEdit } from '@/hooks/useOpenChangesOnEdit';
 import { eventToBinding } from '@/lib/keybindings';
 import { useSessionsStore } from '@/stores/sessions';
@@ -17,6 +25,12 @@ import { MessageTimeline, type MessageTimelineHandle } from './MessageTimeline';
 
 const EMPTY_MESSAGES: ProjectedMessage[] = [];
 const EMPTY_CUSTOM: AgentSessionCustomEntry[] = [];
+
+/**
+ * 远程桌面（多为手机 WebKit）不虚拟化：Virtuoso 在 WebKit 上切换渲染范围时滚动位置会被钳位，
+ * 表现为流式输出跟不到底、画面往上跳。手机版同样全量渲染，历史本就按尾窗分页。
+ */
+const REMOTE = typeof window !== 'undefined' && Boolean(window.electronAPI?.remote);
 
 export function ChatSessionTimeline({
   conversationId,
@@ -207,6 +221,25 @@ export function ChatSessionTimeline({
     [conversationId, cwd, projectId]
   );
 
+  /*
+   * 全量渲染时（远程桌面）上滑分页的滚动锚定：iOS Safari 不支持 overflow-anchor，
+   * 旧页插到顶部后内容整体下压。请求前记下 scrollHeight，旧页落地后用差值补偿。
+   */
+  const anchorRef = useRef<{ height: number; top: number } | null>(null);
+  const loadOlder = useCallback(() => {
+    const el = timelineRef.current?.getScroller();
+    anchorRef.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null;
+    void useSessionsStore.getState().loadOlderHistory(conversationId);
+  }, [conversationId, timelineRef]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: historyBaseIndex 变小 = 旧页已渲染，此时才补偿
+  useLayoutEffect(() => {
+    const el = timelineRef.current?.getScroller();
+    const anchor = anchorRef.current;
+    if (!el || !anchor) return;
+    anchorRef.current = null;
+    el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+  }, [historyBaseIndex]);
+
   return (
     <MarkdownLinkContext.Provider value={markdownLinkContext}>
       {findOpen && (
@@ -228,6 +261,7 @@ export function ChatSessionTimeline({
       )}
       <MessageTimeline
         key={conversationId}
+        virtualize={!REMOTE}
         ref={timelineRef}
         items={timeline}
         busy={timelineActivity !== null}
@@ -246,11 +280,7 @@ export function ChatSessionTimeline({
         historyLoading={historyLoading}
         hasOlder={historyBaseIndex > 0}
         olderCursor={historyBaseIndex}
-        onStartReached={
-          historyBaseIndex > 0
-            ? () => void useSessionsStore.getState().loadOlderHistory(conversationId)
-            : undefined
-        }
+        onStartReached={historyBaseIndex > 0 ? loadOlder : undefined}
         searchQuery={findOpen ? findQuery : ''}
         activeHit={findOpen ? (findHits[findIndex] ?? null) : null}
       />

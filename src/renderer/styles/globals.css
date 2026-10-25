@@ -948,3 +948,20 @@ html.bg-image-enabled [data-slot='bot-card-button']:not(:hover) {
   inset: auto;
   grid-area: 1 / 1;
 }
+
+/* 窄屏触屏没有 hover：悬停才出现的行内操作直接显示，否则点不到 */
+@media (hover: none) and (max-width: 767px) {
+  .opacity-0[class*="group-hover"]:not([class*="grid-cols"]) {
+    opacity: 1;
+  }
+}
+
+/* iOS Safari 对小于 16px 的输入框聚焦时会自动放大页面 */
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: 16px;
+  }
+}

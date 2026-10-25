@@ -10,6 +10,8 @@ export const Z_INDEX = {
   BASE: 0,
   /** Settings floating window - just above main window */
   SETTINGS_WINDOW: 10,
+  /** Mobile (narrow viewport) sidebar drawer and its backdrop */
+  MOBILE_DRAWER: 30,
   /** Dropdowns, menus, and popovers */
   DROPDOWN: 40,
   /** Background overlay for modal dialogs */

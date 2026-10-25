@@ -2,9 +2,22 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { installStatusBarOverlapGuard } from './statusBarOverlap';
+import { loadActiveDeviceId, loadDevices } from './storage';
 import { installElectronApiShim } from './stubs/electron-api';
 import { initTheme } from './theme';
+import { launchTarget, loadUiMode, saveUiMode } from './uiMode';
 import './styles.css';
+
+// 记住的界面模式：上次在桌面模式就直接回去；从桌面模式点回来（?mode=phone）则落盘为手机版
+const params = new URLSearchParams(location.search);
+if (params.get('mode') === 'phone') {
+  saveUiMode('phone');
+  params.delete('mode');
+  const query = params.toString();
+  history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
+}
+const deskTarget = launchTarget(location.search, loadUiMode(), loadDevices(), loadActiveDeviceId());
+if (deskTarget) location.replace(deskTarget);
 
 // 复用的桌面组件里有少量 electronAPI 调用，先装降级实现（必须早于组件加载）
 installElectronApiShim();
@@ -23,7 +36,7 @@ installStatusBarOverlapGuard();
  */
 
 const root = document.getElementById('root');
-if (root)
+if (root && !deskTarget)
   createRoot(root).render(
     <StrictMode>
       <App />

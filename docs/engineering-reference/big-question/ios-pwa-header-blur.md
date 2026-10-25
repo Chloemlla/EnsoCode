@@ -44,6 +44,13 @@ header 改 sticky / fixed 贴顶实色条都无效。切后台再回来会恢复
 先把当前底部安全区写入 `--phone-safe-bottom`，再去掉 `viewport-fit=cover`；
 `pb-safe` 取 `env()` 与该变量的较大值。正常态不改 viewport。键盘弹起时视口变矮，不会误判。
 
+## 桌面模式（desk 壳）同源问题
+
+desk 壳启动画面写死深色，状态栏在启动时按它采样后不再重采，所以上边缘一直是黑的；
+后续改 body 底色、theme-color 都无效。修法：`desk/chrome.ts` 记下 renderer 上下边缘实际底色，
+`desk.html` 头部内联脚本在首帧前铺上（无缓存时按系统深浅色）。键盘弹起时页面上推露出画布色，
+所以 html 也要铺底（下边缘色）。主题切换后需重开 PWA 才更新状态栏，同手机版。
+
 ## 回归防线
 
 - 真机检查独立 PWA 的标题清晰、状态栏底色正确，header 高度和文字位置不变。
