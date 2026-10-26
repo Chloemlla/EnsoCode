@@ -1,5 +1,6 @@
 import type { CodeViewItem } from '@pierre/diffs';
 import { CodeView } from '@pierre/diffs/react';
+import { conversationCwd } from '@shared/conversationCwd';
 import type { ProjectedMessage } from '@shared/types/agent';
 import type { SessionChangeSnapshots } from '@shared/types/fileChanges';
 import {
@@ -102,8 +103,14 @@ export function ChangesView({
     Boolean(s.conversations[conversationId]?.workspaceMigrating)
   );
   const project = useSettingsStore((s) => s.projects.find((item) => item.id === projectId));
-  const root = useSessionsStore(
-    (s) => s.conversations[conversationId]?.worktree?.path ?? project?.path
+  const root = useSessionsStore((s) =>
+    project?.kind === 'scratch'
+      ? (conversationCwd({
+          kind: 'scratch',
+          canonicalPath: project.path,
+          conversationId,
+        }) ?? undefined)
+      : (s.conversations[conversationId]?.worktree?.path ?? project?.path)
   );
   const running = useSessionsStore((s) => s.conversations[conversationId]?.status === 'running');
 

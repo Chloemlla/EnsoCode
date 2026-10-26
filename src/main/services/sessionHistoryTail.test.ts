@@ -130,3 +130,23 @@ describe('projectParentHistoryTail', () => {
     spy.mockRestore();
   });
 });
+
+describe('privacy mask history', () => {
+  it('冷读历史时把脱敏记录挂到其后的 assistant 消息', () => {
+    const assistant = { role: 'assistant', content: [{ type: 'text', text: 'ok' }], timestamp: 2 };
+    const report = { hits: [], blocked: false, restored: 1 };
+    const branch = [
+      ...makeBranch(1),
+      {
+        type: 'custom',
+        customType: 'enso-privacy-mask',
+        data: { at: 1, provider: 'p', model: 'm', source: 'session', report },
+      },
+      { type: 'message', message: assistant },
+    ];
+    expect(projectParentHistoryTail(branch as never).messages[1]).toMatchObject({
+      role: 'assistant',
+      privacyMask: report,
+    });
+  });
+});

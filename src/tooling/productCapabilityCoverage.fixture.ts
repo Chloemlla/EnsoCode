@@ -54,6 +54,9 @@ export const SETTINGS_DATA_COVERAGE = {
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
   botModeEnabled: excluded('Experimental Bot mode toggle; device-local, not an Enso capability.'),
+  scratchSessionsEnabled: excluded(
+    'Experimental temporary chats toggle; device-local, not an Enso capability.'
+  ),
   botMaxRunningTurns: excluded('Device-local Bot concurrency limit; not an Enso capability.'),
   botRouteClassifier: excluded('Bot group smart-routing model preference; not an Enso capability.'),
   botAssistantModel: excluded('Bot helper-task model preference; not an Enso capability.'),
@@ -98,6 +101,7 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   maxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
   autoRetryLimit: excluded('Desktop transient-error retry preference; not an Enso capability.'),
+  privacyMasking: excluded('Device-local privacy masking rules; must not be agent-editable.'),
   sshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   generationStallTimeoutMin: excluded('Renderer stall-abort preference; not an Enso capability.'),
   autoArchiveIdleDays: excluded('Renderer sidebar archive preference; not an Enso capability.'),
@@ -194,6 +198,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   setBotModeEnabled: excluded(
     'Experimental Bot mode toggle; device-local, not an Enso capability.'
   ),
+  setScratchSessionsEnabled: excluded(
+    'Experimental temporary chats toggle; device-local, not an Enso capability.'
+  ),
   setBotRouteClassifier: excluded(
     'Bot group smart-routing model preference; not an Enso capability.'
   ),
@@ -242,6 +249,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setMaxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
   setAutoRetryLimit: excluded('Desktop transient-error retry preference; not an Enso capability.'),
+  setPrivacyMasking: excluded('Device-local privacy masking rules; must not be agent-editable.'),
   setSshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   setGenerationStallTimeoutMin: excluded(
     'Renderer stall-abort preference; not an Enso capability.'
@@ -715,6 +723,9 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   USAGE_SUMMARY: excluded(
     'Read-only local token usage aggregation for the Settings → Usage panel.'
+  ),
+  PRIVACY_MASK_RECORDS: excluded(
+    'Read-only local privacy masking records for the Settings → Privacy panel.'
   ),
   RESOURCES_SAMPLE: excluded('Read-only local process sampling for Settings → Resources.'),
   RESOURCES_STORAGE_SCAN: excluded('Read-only userData disk scan for Settings → Resources.'),

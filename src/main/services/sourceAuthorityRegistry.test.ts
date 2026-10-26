@@ -48,6 +48,37 @@ describe('SourceAuthorityRegistry', () => {
     ).toBe(false);
   });
 
+  it('scratch 项目由 Main 幂等登记，renderer 不能创建或删除，但可以建会话', () => {
+    const root = temporary();
+    const registry = new SourceAuthorityRegistry({
+      registryFile: path.join(root, 'registry.json'),
+    });
+    const dir = path.join(root, 'scratch');
+    const first = registry.ensureScratchProject(dir);
+    expect(first?.kind).toBe('scratch');
+    expect(registry.ensureScratchProject(dir)?.projectId).toBe(first?.projectId);
+    if (!first) return;
+
+    expect(registry.rendererProjection().projects.map((project) => project.kind)).toContain(
+      'scratch'
+    );
+    expect(registry.createProject({ requestId: 'p', path: dir, kind: 'scratch' }).accepted).toBe(
+      false
+    );
+    expect(
+      registry.selectProject({ requestId: 's', projectId: first.projectId, version: 1 }).accepted
+    ).toBe(false);
+    expect(
+      registry.removeProject({ requestId: 'r', projectId: first.projectId, version: 1 }).accepted
+    ).toBe(false);
+    const conversation = registry.createConversation({
+      requestId: 'c',
+      projectId: first.projectId,
+      projectVersion: 1,
+    });
+    expect(conversation.accepted).toBe(true);
+  });
+
   it('bot 会话只由 Main 创建/结束，renderer 投影和通用会话操作拒绝它', () => {
     const root = temporary();
     const registryFile = path.join(root, 'registry.json');

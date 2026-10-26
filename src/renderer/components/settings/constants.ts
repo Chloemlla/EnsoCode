@@ -16,6 +16,7 @@ export type SettingsCategory =
   | 'workflows'
   | 'tools'
   | 'memory'
+  | 'privacy'
   | 'phone'
   | 'ssh'
   | 'usage'

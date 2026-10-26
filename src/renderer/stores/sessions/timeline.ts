@@ -1,4 +1,5 @@
 import { IMAGE_EXTENSIONS, mediaExtension } from '@shared/localImage';
+import { type MaskReport, mergeMaskReports } from '@shared/privacyMask/report';
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
 import type { RtkToolStats } from '@shared/rtk';
 import { nestedToolCallParent } from '@shared/toolCallId';
@@ -34,6 +35,8 @@ export type TimelineItem =
       /** 本轮首个 assistant 回复的模型与时间，供回复身份头显示 */
       replyModel?: string;
       replyAt?: number;
+      /** 本轮各次请求的脱敏报告合计 */
+      replyPrivacyMask?: MaskReport;
     }
   | {
       kind: 'text';
@@ -989,6 +992,12 @@ function buildMessageTimeline(
     }
     if (turnSteps === 1 && currentTurnUserItem && message.timestamp !== undefined) {
       currentTurnUserItem.replyAt = message.timestamp;
+    }
+    if (currentTurnUserItem && message.privacyMask) {
+      currentTurnUserItem.replyPrivacyMask = mergeMaskReports(
+        currentTurnUserItem.replyPrivacyMask,
+        message.privacyMask
+      );
     }
     const stepRunMs = completedStepRunMs(message);
     if (stepRunMs !== undefined) turnActiveMs += stepRunMs;

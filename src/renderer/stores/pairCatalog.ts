@@ -1,4 +1,6 @@
 import { toPairProjectEntry } from '@enso/pair';
+import { conversationCwd } from '@shared/conversationCwd';
+import { normalizeLocale, translate } from '@shared/i18n';
 import { catalogSyncFingerprint, pairJsonFingerprint } from '@shared/pair/metaSync';
 import { projectDisplayName } from '@shared/projectName';
 import type { PairCatalogPayload } from '@shared/types';
@@ -38,15 +40,36 @@ function buildPayload(): PairCatalogPayload {
   const sessions = useSessionsStore.getState();
   // 与桌面侧栏一致的项目手动顺序（拖拽偏好存 localStorage，不进 settings store）
   const orderedProjects = applyProjectOrder(settings.projects, readSidebarOrder(PROJECT_ORDER_KEY));
+  const scratchIds = new Set(
+    settings.projects.filter((project) => project.kind === 'scratch').map((project) => project.id)
+  );
+  const listedProjects = orderedProjects.filter(
+    (project): project is typeof project & { kind?: 'local' | 'ssh' } => project.kind !== 'scratch'
+  );
   const archivedProjects = new Set(readSidebarOrder(ARCHIVED_PROJECTS_KEY));
-  // 与桌面侧栏同口径的展示名（别名优先），手机端没有 settings.projects 只能拿下发的字符串
-  const projectName = new Map(settings.projects.map((p) => [p.id, projectDisplayName(p)]));
+  const scratchLabel = translate(normalizeLocale(settings.language), 'Temporary chats');
+  const projectName = new Map(
+    settings.projects.map((project) => [
+      project.id,
+      project.kind === 'scratch' ? scratchLabel : projectDisplayName(project),
+    ])
+  );
   const projectPath = new Map(settings.projects.map((p) => [p.id, p.path]));
+  const projectKind = new Map(settings.projects.map((p) => [p.id, p.kind]));
 
   type Conversation = NonNullable<(typeof sessions.conversations)[string]>;
   // 子会话跟随父会话的 worktree（与桌面 ChatView 的 toolCwd 同源）
   const toolCwd = (c: Conversation): string | undefined => {
     const owner = (c.parentId ? sessions.conversations[c.parentId] : undefined) ?? c;
+    if (projectKind.get(owner.projectId) === 'scratch') {
+      return (
+        conversationCwd({
+          kind: 'scratch',
+          canonicalPath: projectPath.get(owner.projectId) ?? '',
+          conversationId: owner.id,
+        }) ?? undefined
+      );
+    }
     return owner.worktree?.path ?? projectPath.get(c.projectId);
   };
   const slashCommands = settings.skills
@@ -116,6 +139,9 @@ function buildPayload(): PairCatalogPayload {
   );
 
   const catalog = [...topLevel, ...children].map(toEntry);
+  const visibleCatalog = settings.scratchSessionsEnabled
+    ? catalog
+    : catalog.filter((entry) => !scratchIds.has(entry.projectId));
 
   // 与桌面选择器同一套可用口径（启用 + 凭证真实可用 + 启用模型），并剥掉密钥。
   // OAuth 未就绪的空列表不结算，main 会扣下这一帧，避免手机显示没有模型服务。
@@ -126,10 +152,10 @@ function buildPayload(): PairCatalogPayload {
   );
 
   return {
-    catalog,
+    catalog: visibleCatalog,
     // 置顶组的手动拖拽顺序：手机置顶栏按它排前，未收录的按活跃倒序
     pinnedOrder: readSidebarOrder(PINNED_ORDER_KEY),
-    projects: orderedProjects.map((project) => ({
+    projects: listedProjects.map((project) => ({
       ...toPairProjectEntry(project),
       ...(archivedProjects.has(project.id) ? { archived: true as const } : {}),
     })),

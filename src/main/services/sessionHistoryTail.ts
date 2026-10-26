@@ -3,7 +3,10 @@ import { type SessionEntry, sessionEntryToContextMessages } from '@earendil-work
 import { takeSnapshotTail } from '@shared/snapshotTail';
 import type { ProjectedMessage } from '@shared/types/agent';
 import { projectMessage } from '../../agent/projection';
-import { withUserEntryIds } from '../../agent/transcript';
+import { withPrivacyMask, withUserEntryIds } from '../../agent/transcript';
+
+const displayMessages = (branch: readonly SessionEntry[]): unknown[] =>
+  withPrivacyMask(withUserEntryIds(branch.flatMap(sessionEntryToContextMessages), branch), branch);
 
 export function resolveParentHistoryFile(
   sessionDir: string,
@@ -41,23 +44,20 @@ export function projectParentHistoryPage(
   messages: ProjectedMessage[];
   baseIndex: number;
 } {
-  return projectWindow(
-    withUserEntryIds(branch.flatMap(sessionEntryToContextMessages), branch),
-    beforeIndex
-  );
+  return projectWindow(displayMessages(branch), beforeIndex);
 }
 
 export function projectParentHistoryTail(branch: readonly SessionEntry[]): {
   messages: ProjectedMessage[];
   baseIndex: number;
 } {
-  const raw = withUserEntryIds(branch.flatMap(sessionEntryToContextMessages), branch);
+  const raw = displayMessages(branch);
   return projectWindow(raw, raw.length);
 }
 
 /** 全量投影：worker 无投影的会话合成快照用（分页由快照链路按绝对 index 切） */
 export function projectParentHistoryAll(branch: readonly SessionEntry[]): ProjectedMessage[] {
-  return withUserEntryIds(branch.flatMap(sessionEntryToContextMessages), branch)
+  return displayMessages(branch)
     .map(projectMessage)
     .filter((message): message is ProjectedMessage => message !== null);
 }

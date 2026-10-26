@@ -597,6 +597,10 @@ async function projectNames(): Promise<Map<string, string>> {
   const names = new Map<string, string>();
   for (const project of registry?.projection().projects ?? []) {
     if (project.kind === 'bot-home') continue;
+    if (project.kind === 'scratch') {
+      names.set(project.projectId, '临时会话');
+      continue;
+    }
     names.set(project.projectId, basename(project.canonicalPath));
   }
   return names;
@@ -612,6 +616,10 @@ async function spaceLabeler(): Promise<(spaceId: string) => string> {
   const names = new Map<string, string>();
   for (const project of registry?.projection().projects ?? []) {
     if (project.kind === 'bot-home') continue;
+    if (project.kind === 'scratch') {
+      names.set(project.projectId, '临时会话');
+      continue;
+    }
     names.set(project.projectId, basename(project.canonicalPath));
   }
   const bots = new BotStore(path.join(app.getPath('userData'), 'bots'));

@@ -541,7 +541,13 @@ export function MessageTimeline({
           '[overflow-wrap:anywhere]'
         )}
       >
-        {replyHead && <ReplyHeader model={replyHead.replyModel} at={replyHead.replyAt} />}
+        {replyHead && (
+          <ReplyHeader
+            model={replyHead.replyModel}
+            at={replyHead.replyAt}
+            privacyMask={replyHead.replyPrivacyMask}
+          />
+        )}
         <RowErrorBoundary itemKey={item.key}>
           <TimelineRow item={item} onToggleGroup={toggleGroup} onToggleTurn={setTurnCollapsed} />
         </RowErrorBoundary>

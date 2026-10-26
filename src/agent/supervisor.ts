@@ -43,6 +43,12 @@ import {
   splitPlanPrefix,
   withPlanNote,
 } from '@shared/planMode';
+import {
+  type MaskReport,
+  mergeMaskReports,
+  PRIVACY_MASK_ENTRY,
+  type PrivacyMaskRecord,
+} from '@shared/privacyMask/report';
 import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
@@ -174,6 +180,11 @@ import {
   resolveOauthPoolModel,
 } from './oauthAccountPool';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
+import {
+  configurePrivacyMasking,
+  installPrivacyMasking,
+  runWithPrivacySink,
+} from './privacyMask/runtime';
 import { createProjectSettingsManager } from './projectCode';
 import { projectMessage } from './projection';
 import { applyWorkerProxyEnv } from './proxyEnv';
@@ -379,6 +390,8 @@ interface ManagedSession {
   lastActivityAt: number;
   contextUsage: ContextUsageTracker;
   requestBody?: RequestBodyUsage;
+  /** 已发出、待挂到下一条 assistant 消息上的脱敏报告 */
+  pendingPrivacyMask?: MaskReport;
   unsubscribe: () => void;
 }
 
@@ -1247,6 +1260,10 @@ export class SessionSupervisor {
     }
     if (command.type === 'set-auto-retry-limit') {
       this.autoRetryLimit = command.limit;
+      return;
+    }
+    if (command.type === 'set-privacy-masking') {
+      configurePrivacyMasking(this.options.agentDir, command.settings);
       return;
     }
     if (command.type === 'set-disabled-workflow-presets') {
@@ -2929,26 +2946,45 @@ export class SessionSupervisor {
     this.bindAutoRetryLimit(session);
     const stream = session.agent?.streamFunction;
     if (stream) {
+      const privacySink = (report: MaskReport, model: { provider: string; id: string }) => {
+        const record: PrivacyMaskRecord = {
+          at: Date.now(),
+          provider: model.provider,
+          model: model.id,
+          source: session.isCompacting ? 'compaction' : 'session',
+          sessionId: session.sessionId,
+          report,
+        };
+        if (record.source === 'compaction' || this.sessions.get(identity.sessionId) !== managed) {
+          this.options.emit({ type: 'privacy-mask-ledger', record });
+          return;
+        }
+        // 请求发出时落盘，排在 assistant 消息条目之前；投影时挂到下一条 assistant
+        managed.pendingPrivacyMask = mergeMaskReports(managed.pendingPrivacyMask, report);
+        session.sessionManager.appendCustomEntry(PRIVACY_MASK_ENTRY, record);
+      };
       session.agent.streamFunction = (model, context, options) =>
-        runWithRequestBodyObserver(
-          (usage) => {
-            // 共享 runtime/provider 不意味着共享会话；释放、换代或换模型后的尾回调不能污染新投影。
-            if (
-              this.sessions.get(identity.sessionId) !== managed ||
-              session.model?.id !== model.id ||
-              session.model?.provider !== model.provider
-            )
-              return;
-            managed.requestBody = usage;
-            this.options.emit({
-              type: 'request-body',
-              identity: managed.identity,
-              seq: ++managed.seq,
-              usage,
-            });
-          },
-          () => stream.call(session.agent, model, context, options),
-          { sessionId: session.sessionId, signal: options?.signal }
+        runWithPrivacySink(privacySink, () =>
+          runWithRequestBodyObserver(
+            (usage) => {
+              // 共享 runtime/provider 不意味着共享会话；释放、换代或换模型后的尾回调不能污染新投影。
+              if (
+                this.sessions.get(identity.sessionId) !== managed ||
+                session.model?.id !== model.id ||
+                session.model?.provider !== model.provider
+              )
+                return;
+              managed.requestBody = usage;
+              this.options.emit({
+                type: 'request-body',
+                identity: managed.identity,
+                seq: ++managed.seq,
+                usage,
+              });
+            },
+            () => stream.call(session.agent, model, context, options),
+            { sessionId: session.sessionId, signal: options?.signal }
+          )
         );
     }
     if (opts.resumeFile) {
@@ -3624,6 +3660,10 @@ export class SessionSupervisor {
         if (timing) timing.completedMs = Date.now();
         this.stampContextSnapshot(managed, event.message);
         const projected = projectMessage(event.message);
+        if (projected?.role === 'assistant' && managed.pendingPrivacyMask) {
+          projected.privacyMask = managed.pendingPrivacyMask;
+          managed.pendingPrivacyMask = undefined;
+        }
         this.replaceLastMessage(managed, projected);
         if (projected?.role === 'assistant') {
           const text = projected.content
@@ -4561,6 +4601,18 @@ export class SessionSupervisor {
         refreshOnCreate: false,
       });
       await initializeWorkerRuntime(runtime);
+      installPrivacyMasking(runtime, (report, model) =>
+        this.options.emit({
+          type: 'privacy-mask-ledger',
+          record: {
+            at: Date.now(),
+            provider: model.provider,
+            model: model.id,
+            source: 'aux',
+            report,
+          },
+        })
+      );
       installOauthPoolSelector(runtime, this.selectOauthPool);
       return runtime;
     })();

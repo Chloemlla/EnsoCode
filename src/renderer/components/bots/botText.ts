@@ -99,7 +99,7 @@ export function workspaceLabel(
 
 /** 只有本地项目能当 Bot 工作区 */
 export function localProjects(projects: readonly Project[]): Project[] {
-  return projects.filter((project) => project.kind !== 'ssh');
+  return projects.filter((project) => project.kind !== 'ssh' && project.kind !== 'scratch');
 }
 
 /** 「X 的副本」重名时依次加 2、3… */

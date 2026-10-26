@@ -1,11 +1,14 @@
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { conversationCwd } from '@shared/conversationCwd';
 import { removePastedTextFiles } from './pastedTextFiles';
 
 export interface RemoveConversationSessionFilesOptions {
   sessionDir: string;
   conversationId: string;
   sessionFile?: string;
+  /** scratch 会话的根目录；只删除其中 `<id>` 这一层，非法 id 或越界不删 */
+  scratchRoot?: string;
 }
 
 /**
@@ -35,7 +38,7 @@ export function removeConversationSessionFiles(
   try {
     entries = readdirSync(root);
   } catch {
-    return;
+    entries = [];
   }
   for (const entry of entries) {
     if (!entry.startsWith(prefix)) continue;
@@ -57,4 +60,14 @@ export function removeConversationSessionFiles(
     } catch {}
   }
   removePastedTextFiles(root, id);
+  if (!options.scratchRoot) return;
+  const scratchDir = conversationCwd({
+    kind: 'scratch',
+    canonicalPath: options.scratchRoot,
+    conversationId: options.conversationId,
+  });
+  if (!scratchDir) return;
+  try {
+    rmSync(scratchDir, { recursive: true, force: true });
+  } catch {}
 }

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { browserSessionKey } from '@shared/bots/browser';
 import type { ChildSessionIdentity, SessionIdentity } from '@shared/builtinAgents';
+import { conversationCwd } from '@shared/conversationCwd';
 import { resolveSshTarget } from '@shared/ssh';
 import {
   IPC_CHANNELS,
@@ -297,20 +298,44 @@ function rootIdentity(sessionId: unknown): SessionIdentity | undefined {
 
 function persistedRootSpawn(request: AgentSpawnRequest, ownerWebContentsId: number): boolean {
   if (!isMainWebContents(ownerWebContentsId) || request.sessionId.includes('::cw-')) return false;
-  const conversation = sourceAuthority?.conversation(request.sessionId);
+  const cwd = authoritativeSpawnCwd(request.sessionId);
+  return cwd !== null && cwd === request.cwd;
+}
+
+/** cwd 只从权威记录推导。scratch 固定为 `<根>/<会话 id>`，不接受 worktree 或其他路径。 */
+function authoritativeSpawnCwd(sessionId: string): string | null {
+  const conversation = sourceAuthority?.conversation(sessionId);
   const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
   if (
     conversation?.kind !== 'root' ||
     conversation.lifecycle === 'ended' ||
     project?.state !== 'active'
   ) {
-    return false;
+    return null;
   }
-  // cwd 授权：项目主工作树，或该会话在 main 登记过的隔离 worktree（不信任其它路径）
-  if (project.canonicalPath === request.cwd) return true;
-  // ssh 项目无 worktree：cwd 只允许等于远端 canonicalPath
-  if (project.kind === 'ssh') return false;
-  return sessionWorktree(request.sessionId)?.path === request.cwd;
+  return conversationCwd({
+    kind: project.kind,
+    canonicalPath: project.canonicalPath,
+    conversationId: sessionId,
+    worktreePath:
+      project.kind === 'ssh' || project.kind === 'scratch'
+        ? undefined
+        : sessionWorktree(sessionId)?.path,
+  });
+}
+
+function removeConversationFiles(conversation: {
+  conversationId: string;
+  projectId: string;
+  sessionFile?: string;
+}): void {
+  const project = sourceAuthority?.project(conversation.projectId);
+  removeConversationSessionFiles({
+    sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
+    conversationId: conversation.conversationId,
+    ...(conversation.sessionFile ? { sessionFile: conversation.sessionFile } : {}),
+    ...(project?.kind === 'scratch' ? { scratchRoot: project.canonicalPath } : {}),
+  });
 }
 
 /** ssh 项目→远程执行配置。只认 main 侧项目权威,渲染层请求里不存在也不采信此字段 */
@@ -350,9 +375,15 @@ export function resolveConversationWorkspace(conversationId: string): {
     return null;
   }
   const cwd = sessionWorktree(conversationId)?.path ?? project.canonicalPath;
-  if (!cwd) return null;
+  const resolved = conversationCwd({
+    kind: project.kind,
+    canonicalPath: project.canonicalPath,
+    conversationId,
+    worktreePath: project.kind === 'ssh' || project.kind === 'scratch' ? undefined : cwd,
+  });
+  if (!resolved) return null;
   const remote = remoteConfigFor(conversationId);
-  return { cwd, projectId: conversation.projectId, ...(remote ? { remote } : {}) };
+  return { cwd: resolved, projectId: conversation.projectId, ...(remote ? { remote } : {}) };
 }
 
 function spawnBoundSession(
@@ -887,6 +918,7 @@ export function registerAgentHandlers(): void {
       sendToAllWindows(IPC_CHANNELS.SOURCE_AUTHORITY_CHANGED, projection);
     },
   });
+  sourceAuthority.ensureScratchProject(path.join(app.getPath('userData'), 'scratch'));
   setBrowserFileRootResolver((conversationId) => {
     const conversation = sourceAuthority?.conversation(conversationId);
     const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
@@ -1056,6 +1088,7 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'session-reloaded' ||
       workerEvent.type === 'workspace-lock-result' ||
       workerEvent.type === 'oauth-pool-select' ||
+      workerEvent.type === 'privacy-mask-ledger' ||
       workerEvent.type === 'mcp-oauth-refresh' ||
       workerEvent.type === 'workspace-unlock-result'
     )
@@ -1109,9 +1142,9 @@ export function registerAgentHandlers(): void {
       } else {
         discardForkWorktree(workerEvent.targetConversationId);
         if (workerEvent.sessionFile)
-          removeConversationSessionFiles({
-            sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
+          removeConversationFiles({
             conversationId: workerEvent.targetConversationId,
+            projectId: target?.projectId ?? '',
             sessionFile: workerEvent.sessionFile,
           });
         if (target) {
@@ -1435,11 +1468,7 @@ export function registerAgentHandlers(): void {
     const result = sourceAuthority!.removeConversation(parsed);
     if (result.accepted) {
       sourceBindings!.invalidateConversation(parsed.conversationId);
-      removeConversationSessionFiles({
-        sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
-        conversationId: parsed.conversationId,
-        ...(result.value.sessionFile ? { sessionFile: result.value.sessionFile } : {}),
-      });
+      removeConversationFiles(result.value);
     }
     return result;
   });
@@ -1613,12 +1642,10 @@ export function registerAgentHandlers(): void {
     if (parsedRaw && sessionWorktreeBusy(parsedRaw.sessionId)) {
       return { ok: false, error: 'worktree operation in progress' };
     }
-    // 隔离会话的 cwd 以 main 登记的 worktree 为准，无条件覆写：
-    // 渲染层的自动 resume 可能携陈旧 cwd 抢先 spawn（Move to worktree 竞态，CDP 实测），
-    // 在权威侧收口后整类问题消失。
-    const registeredWorktree = parsedRaw ? sessionWorktree(parsedRaw.sessionId) : undefined;
-    const parsed =
-      parsedRaw && registeredWorktree ? { ...parsedRaw, cwd: registeredWorktree.path } : parsedRaw;
+    // cwd 以权威记录为准，无条件覆写：隔离会话用登记的 worktree，临时会话用自己的 scratch 目录。
+    // 渲染层的自动 resume 可能携陈旧 cwd 抢先 spawn（Move to worktree 竞态，CDP 实测）。
+    const spawnedCwd = parsedRaw ? authoritativeSpawnCwd(parsedRaw.sessionId) : null;
+    const parsed = parsedRaw && spawnedCwd ? { ...parsedRaw, cwd: spawnedCwd } : parsedRaw;
     if (!parsed || !persistedRootSpawn(parsed, event.sender.id)) {
       return { ok: false, error: 'invalid spawn request' };
     }
@@ -1636,10 +1663,20 @@ export function registerAgentHandlers(): void {
     if (sessionWorktreeBusy(parsed.sessionId)) {
       return { ok: false, error: 'worktree operation in progress' };
     }
-    const currentWorktree = sessionWorktree(parsed.sessionId);
-    const currentRequest = currentWorktree ? { ...parsed, cwd: currentWorktree.path } : parsed;
+    const currentCwd = authoritativeSpawnCwd(parsed.sessionId);
+    const currentRequest = currentCwd ? { ...parsed, cwd: currentCwd } : parsed;
     if (!persistedRootSpawn(currentRequest, event.sender.id)) {
       return { ok: false, error: 'conversation authority changed' };
+    }
+    const scratchProject = sourceAuthority?.project(
+      sourceAuthority.conversation(parsed.sessionId)?.projectId ?? ''
+    );
+    if (scratchProject?.kind === 'scratch') {
+      try {
+        mkdirSync(currentRequest.cwd, { recursive: true });
+      } catch {
+        return { ok: false, error: 'scratch workspace unavailable' };
+      }
     }
     return spawnBoundSession(identity, currentRequest, credentialKeys);
   });

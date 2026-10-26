@@ -8,6 +8,8 @@ export function ExperimentalSettings({ onOpenBots }: { onOpenBots: () => void })
   const { t } = useI18n();
   const botModeEnabled = useSettingsStore((s) => s.botModeEnabled);
   const setBotModeEnabled = useSettingsStore((s) => s.setBotModeEnabled);
+  const scratchSessionsEnabled = useSettingsStore((s) => s.scratchSessionsEnabled);
+  const setScratchSessionsEnabled = useSettingsStore((s) => s.setScratchSessionsEnabled);
   return (
     <div className="space-y-6">
       <div>
@@ -31,6 +33,15 @@ export function ExperimentalSettings({ onOpenBots }: { onOpenBots: () => void })
             {t('Bot mode settings')}
           </Button>
         )}
+        <SwitchRow
+          rowId="experimental.scratchSessions"
+          title={t('Temporary chats')}
+          description={t(
+            'Chats that are not tied to a project. Tools follow your global settings.'
+          )}
+          checked={scratchSessionsEnabled}
+          onChange={setScratchSessionsEnabled}
+        />
       </div>
     </div>
   );

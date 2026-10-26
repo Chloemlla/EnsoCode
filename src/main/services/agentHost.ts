@@ -32,6 +32,7 @@ import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
 import { materializeProviders } from '@shared/modelDirectory';
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
+import { parsePrivacyMaskSettings } from '@shared/privacyMask/settings';
 import { providerKeyFor } from '@shared/providers/providerKey';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
@@ -115,6 +116,7 @@ import { OAUTH_POOL_EXHAUSTED } from './oauthAccountPool';
 import { getOauthQuotaCoordinator, getRuntime as getOauthRuntime } from './oauthProviders';
 import { PendingReloadRegistry } from './pendingReloads';
 import { enabledPlugins, type RuntimeAgentType, withPluginAgentTypes } from './pluginRuntime';
+import { recordPrivacyMaskLedger } from './privacyMask';
 import { killAndWaitExit } from './processExit';
 import { bundledRtkPath } from './rtkBinary';
 import { pickSubagentModelRefs } from './subagentModels';
@@ -326,6 +328,7 @@ export function startAgentWorker(): void {
     pushApprovalReviewer();
     pushMaxActiveCoworkers();
     pushAutoRetryLimit();
+    pushPrivacyMasking();
     pushDisabledWorkflowPresets();
     pushModelDirectory();
     pushWebSearchConfig();
@@ -333,6 +336,10 @@ export function startAgentWorker(): void {
   child.on('message', (raw) => {
     const event = parseAgentWorkerEvent(raw);
     if (event) {
+      if (event.type === 'privacy-mask-ledger') {
+        recordPrivacyMaskLedger(event.record);
+        return;
+      }
       if (event.type === 'oauth-pool-select') {
         void selectOauthPoolAccount(event).then((result) => {
           if (worker === child) child.postMessage(result);
@@ -1871,6 +1878,14 @@ export function pushAutoRetryLimit(): void {
   worker.postMessage({
     type: 'set-auto-retry-limit',
     limit: normalizeAutoRetryLimit(readSettingsState()?.autoRetryLimit),
+  } satisfies AgentCommand);
+}
+
+export function pushPrivacyMasking(): void {
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-privacy-masking',
+    settings: parsePrivacyMaskSettings(readSettingsState()?.privacyMasking),
   } satisfies AgentCommand);
 }
 

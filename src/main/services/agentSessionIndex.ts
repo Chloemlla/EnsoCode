@@ -114,6 +114,7 @@ function identityOf(
     | { type: 'choice-classified' | 'choice-failed' }
     | { type: 'text-delta' }
     | { type: 'oauth-pool-select' }
+    | { type: 'privacy-mask-ledger' }
     | McpWorkerEvent
     | WorkspaceLockEvent
   >
@@ -413,6 +414,7 @@ export class AgentSessionIndex {
     if (
       event.type === 'session-reloaded' ||
       event.type === 'oauth-pool-select' ||
+      event.type === 'privacy-mask-ledger' ||
       event.type === 'workspace-lock-result' ||
       event.type === 'workspace-unlock-result'
     )

@@ -386,6 +386,18 @@ describe('Main-owned source authority contracts', () => {
     expect(
       parseCreateProjectAuthorityRequest({ requestId: 'p', path: '/x', kind: 'bot-home' })
     ).toBeNull();
+    expect(
+      parseProjectAuthority({
+        projectId,
+        canonicalPath: '/u/scratch',
+        kind: 'scratch',
+        state: 'active',
+        version: 1,
+      })
+    ).not.toBeNull();
+    expect(
+      parseCreateProjectAuthorityRequest({ requestId: 'p', path: '/x', kind: 'scratch' })
+    ).toBeNull();
 
     const base = { conversationId, projectId, kind: 'root', lifecycle: 'draft', version: 1 };
     const direct = { ...base, bot: { botId, chatId } };

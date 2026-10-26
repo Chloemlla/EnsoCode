@@ -1,6 +1,7 @@
 import { useDraggable } from '@dnd-kit/core';
 import { Editor, type EditorOptions } from '@pierre/diffs/edit';
 import { EditProvider, File, Virtualizer } from '@pierre/diffs/react';
+import { conversationCwd } from '@shared/conversationCwd';
 import type { FilesDirEntry } from '@shared/types';
 import type { ProjectedMessage } from '@shared/types/agent';
 import { ChevronLeft, ChevronRight, Code2, Eye, RefreshCw, Search } from 'lucide-react';
@@ -326,8 +327,14 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   }, [applyDisk, conversationId, readFile]);
 
   const running = useSessionsStore((s) => s.conversations[conversationId]?.status === 'running');
-  const root = useSessionsStore(
-    (s) => s.conversations[conversationId]?.worktree?.path ?? project?.path
+  const root = useSessionsStore((s) =>
+    project?.kind === 'scratch'
+      ? (conversationCwd({
+          kind: 'scratch',
+          canonicalPath: project.path,
+          conversationId,
+        }) ?? undefined)
+      : (s.conversations[conversationId]?.worktree?.path ?? project?.path)
   );
   const historyBaseIndex = useSessionsStore(
     (s) => s.conversations[conversationId]?.historyBaseIndex
@@ -747,6 +754,54 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
               projectId={projectId}
               onOpenFile={(rel) => void openFile(rel)}
               onClose={() => setSearchOpen(false)}
+              menu={{
+                local,
+                onPreview: (rel) => void openPreview(rel),
+                onBrowser: (rel) => void openInBrowser(rel),
+                onCopyPath: (rel) =>
+                  void window.electronAPI.workspaceFiles.copyPath({
+                    ...req,
+                    rel,
+                    mode: 'absolute',
+                  }),
+                onCopyRel: (rel) =>
+                  void window.electronAPI.workspaceFiles.copyPath({
+                    ...req,
+                    rel,
+                    mode: 'relative',
+                  }),
+                onCopyFile: (rel) =>
+                  void window.electronAPI.workspaceFiles
+                    .copyFile({ ...req, rel })
+                    .then((result) => {
+                      if (!result.ok) failToast(result.error);
+                    }),
+                onReveal: (rel) => void window.electronAPI.workspaceFiles.reveal({ ...req, rel }),
+                onNewFile: (parent) => {
+                  setSearchOpen(false);
+                  expandDirs(ancestorDirs(parent));
+                  handleNewFile(parent);
+                },
+                onNewFolder: (parent) => {
+                  setSearchOpen(false);
+                  expandDirs(ancestorDirs(parent));
+                  handleNewFolder(parent);
+                },
+                onRename: (rel, name) => {
+                  setSearchOpen(false);
+                  expandDirs(ancestorDirs(rel));
+                  setRenaming({ rel, name, at: 'tree' });
+                },
+                onDelete: (rel, name) => setConfirmDelete({ rel, name }),
+                onSend: (rel, name) => {
+                  insertComposerMention({
+                    kind: 'file',
+                    id: rel,
+                    label: name,
+                    relativePath: rel,
+                  });
+                },
+              }}
             />
           ) : (
             <div className="min-h-0 flex-1 overflow-auto">

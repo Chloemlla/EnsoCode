@@ -726,7 +726,9 @@ export function getBotServices(): BotServices | null {
     watermarksFile: path.join(userData, 'bot-chats', 'memory-watermarks.json'),
     isCodeProject: (id) => {
       const project = authority.project(id);
-      return project?.state === 'active' && project.kind !== 'bot-home';
+      return (
+        project?.state === 'active' && project.kind !== 'bot-home' && project.kind !== 'scratch'
+      );
     },
     schedule: async (payload) =>
       (await import('../services/memoryHost')).scheduleMemoryDistill(payload),
@@ -826,6 +828,7 @@ function resolveWorkspaceInput(
   if (project.kind === 'ssh' || project.kind === 'bot-home') {
     return { error: 'workspace-unsupported' };
   }
+  if (project.kind === 'scratch') return { error: 'workspace-unsupported' };
   return { kind: 'project', projectId: project.projectId };
 }
 

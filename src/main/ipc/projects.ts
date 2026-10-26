@@ -1,5 +1,6 @@
-import { statSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { conversationCwd } from '@shared/conversationCwd';
 import { resolveSshTarget } from '@shared/ssh';
 import { IPC_CHANNELS } from '@shared/types';
 import {
@@ -57,6 +58,29 @@ function resolveLocalCwd(parsed: {
   if (project?.state !== 'active') return { error: 'unavailable' };
   // ssh 项目的路径在远端，本机打不开；bot-home 只走 Bot 通道
   if (project.kind === 'ssh' || project.kind === 'bot-home') return { error: 'unsupported' };
+  if (project.kind === 'scratch') {
+    if (!parsed.conversationId) return { error: 'unsupported' };
+    const conversation = registry?.conversation(parsed.conversationId);
+    if (
+      conversation?.kind !== 'root' ||
+      conversation.lifecycle === 'ended' ||
+      conversation.projectId !== parsed.projectId
+    ) {
+      return { error: 'unavailable' };
+    }
+    const cwd = conversationCwd({
+      kind: 'scratch',
+      canonicalPath: project.canonicalPath,
+      conversationId: parsed.conversationId,
+    });
+    if (!cwd) return { error: 'unavailable' };
+    try {
+      mkdirSync(cwd, { recursive: true });
+    } catch {
+      return { error: 'unavailable' };
+    }
+    return isDirectory(cwd) ? { cwd } : { error: 'unavailable' };
+  }
   let cwd = project.canonicalPath;
   if (parsed.conversationId) {
     const conversation = registry?.conversation(parsed.conversationId);

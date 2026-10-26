@@ -25,6 +25,10 @@ import {
   normalizeMemoryModelIdleMinutes,
 } from '@shared/memory/modelIdle';
 import { directorySectionForAccount, materializeProviders } from '@shared/modelDirectory';
+import {
+  DEFAULT_PRIVACY_MASK_SETTINGS,
+  parsePrivacyMaskSettings,
+} from '@shared/privacyMask/settings';
 import { applyProjectGroupPatch } from '@shared/projectGroups';
 import { projectNameFromPath } from '@shared/projectName';
 import { applyIncomingProviders } from '@shared/providerIdentity';
@@ -171,6 +175,7 @@ const initialState = {
   memoryKgEnabled: false,
   voiceInputEnabled: false,
   botModeEnabled: false,
+  scratchSessionsEnabled: false,
   botRouteClassifier: null as VirtualClassifierConfig | null,
   botAssistantModel: null as import('@shared/defaultModel').DefaultModelRef | null,
   botMaxRunningTurns: DEFAULT_BOT_MAX_RUNNING_TURNS,
@@ -196,6 +201,7 @@ const initialState = {
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
   autoRetryLimit: DEFAULT_AUTO_RETRY_LIMIT,
+  privacyMasking: DEFAULT_PRIVACY_MASK_SETTINGS,
   sshTimeoutSeconds: DEFAULT_SSH_TIMEOUT_SECONDS,
   generationStallTimeoutMin: 0,
   autoArchiveIdleDays: DEFAULT_AUTO_ARCHIVE_IDLE_DAYS,
@@ -338,6 +344,7 @@ export const useSettingsStore = create<SettingsState>()(
       setMemoryKgEnabled: (memoryKgEnabled) => set({ memoryKgEnabled }),
       setVoiceInputEnabled: (voiceInputEnabled) => set({ voiceInputEnabled }),
       setBotModeEnabled: (botModeEnabled) => set({ botModeEnabled }),
+      setScratchSessionsEnabled: (scratchSessionsEnabled) => set({ scratchSessionsEnabled }),
       setBotRouteClassifier: (botRouteClassifier) => set({ botRouteClassifier }),
       setBotAssistantModel: (botAssistantModel) => set({ botAssistantModel }),
       setBotMaxRunningTurns: (value) =>
@@ -380,6 +387,7 @@ export const useSettingsStore = create<SettingsState>()(
       setMaxActiveCoworkers: (value) =>
         set({ maxActiveCoworkers: normalizeMaxActiveCoworkers(value) }),
       setAutoRetryLimit: (value) => set({ autoRetryLimit: normalizeAutoRetryLimit(value) }),
+      setPrivacyMasking: (value) => set({ privacyMasking: parsePrivacyMaskSettings(value) }),
       setSshTimeoutSeconds: (value) =>
         set({ sshTimeoutSeconds: normalizeSshTimeoutSeconds(value) }),
       setGenerationStallTimeoutMin: (minutes) =>
@@ -1131,6 +1139,10 @@ export const useSettingsStore = create<SettingsState>()(
         if (autoRetryLimit !== s.autoRetryLimit) {
           useSettingsStore.setState({ autoRetryLimit });
         }
+        const privacyMasking = parsePrivacyMaskSettings(s.privacyMasking);
+        if (JSON.stringify(privacyMasking) !== JSON.stringify(s.privacyMasking)) {
+          useSettingsStore.setState({ privacyMasking });
+        }
         const botMaxRunningTurns = normalizeBotMaxRunningTurns(s.botMaxRunningTurns);
         if (botMaxRunningTurns !== s.botMaxRunningTurns) {
           useSettingsStore.setState({ botMaxRunningTurns });
@@ -1215,7 +1227,9 @@ function applyProjectAuthorityProjection(projection: SourceAuthorityProjection):
               sshConnectionId: project.sshConnectionId,
               sshConnectionName: project.sshConnectionName,
             }
-          : {}),
+          : project.kind === 'scratch'
+            ? { kind: 'scratch' as const, name: 'Temporary chats' }
+            : {}),
       };
     });
   // 投影未变时必须不写 state：persist 的每次 setState 都会落盘并广播 SETTINGS_CHANGED，

@@ -35,6 +35,13 @@ import {
   type PlanState,
   parsePlanState,
 } from '../planMode';
+import {
+  type MaskReport,
+  type PrivacyMaskRecord,
+  parseMaskReport,
+  parsePrivacyMaskRecord,
+} from '../privacyMask/report';
+import { type PrivacyMaskSettings, parsePrivacyMaskSettings } from '../privacyMask/settings';
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
 import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsage';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
@@ -782,8 +789,11 @@ export interface ModelRef {
   modelId: string;
 }
 
-/** bot-home：Bot 成员 / 群独立工作区的隐藏项目，只由 Main 创建，不投影给 renderer */
-export type ProjectKind = 'local' | 'ssh' | 'bot-home';
+/**
+ * bot-home：Bot 成员 / 群独立工作区的隐藏项目，只由 Main 创建，不投影给 renderer。
+ * scratch：临时会话的隐藏项目，Main 登记，会投影给 renderer，但不能由 renderer 创建或删除。
+ */
+export type ProjectKind = 'local' | 'ssh' | 'bot-home' | 'scratch';
 
 export interface ProjectAuthority {
   projectId: string;
@@ -1246,6 +1256,8 @@ export type AgentCommand =
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
   | { type: 'set-web-search-config'; chain: WebSearchChainEntry[]; configured?: boolean }
+  /** 隐私脱敏配置：worker 全局生效，不重启会话 */
+  | { type: 'set-privacy-masking'; settings: PrivacyMaskSettings }
   /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
   | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
@@ -1466,6 +1478,8 @@ export interface ProjectedMessage {
   tokensBefore?: number;
   /** 摘要来自 Enso compact hook，不是原生 summarizer */
   verified?: boolean;
+  /** 产生这条 assistant 回复的请求的脱敏报告（不含原值） */
+  privacyMask?: MaskReport;
   /** 摘要由持续记忆 ledger 渲染（非智能压缩兜底） */
   memory?: boolean;
 }
@@ -1604,6 +1618,7 @@ export type RendererAgentEvent =
       | McpWorkerEvent
       | WorkspaceLockEvent
       | { type: 'oauth-pool-select' }
+      | { type: 'privacy-mask-ledger' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -1628,6 +1643,8 @@ export type WorkspaceLockEvent =
   | { type: 'workspace-unlock-result'; requestId: string; ok: boolean; error?: string };
 
 export type AgentWorkerEvent =
+  /** 会话外（辅助补全 / compaction）的脱敏记录，Main 写 ledger */
+  | { type: 'privacy-mask-ledger'; record: PrivacyMaskRecord }
   | {
       type: 'oauth-pool-select';
       requestId: string;
@@ -2063,6 +2080,7 @@ function isProjectedCodemodeCalls(value: unknown): value is ProjectedCodemodeCal
 
 function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   if (value.rtk !== undefined && !parseRtkToolStats(value.rtk)) return false;
+  if (value.privacyMask !== undefined && !parseMaskReport(value.privacyMask)) return false;
   if (value.codemodeCalls !== undefined && !isProjectedCodemodeCalls(value.codemodeCalls)) {
     return false;
   }
@@ -2314,6 +2332,9 @@ function isValidProjectRemoteFields(value: Record<string, unknown>): boolean {
     return value.sshHost === undefined && value.sshConnectionId === undefined;
   }
   if (value.kind === 'bot-home') {
+    return value.sshHost === undefined && value.sshConnectionId === undefined;
+  }
+  if (value.kind === 'scratch') {
     return value.sshHost === undefined && value.sshConnectionId === undefined;
   }
   return false;
@@ -3322,6 +3343,11 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'limit']) && parseAutoRetryLimit(value.limit) !== null
         ? (value as unknown as AgentCommand)
         : null;
+    case 'set-privacy-masking':
+      return hasExactKeys(value, ['type', 'settings']) &&
+        JSON.stringify(parsePrivacyMaskSettings(value.settings)) === JSON.stringify(value.settings)
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'set-web-search-config':
       return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
         (value.configured === undefined || typeof value.configured === 'boolean') &&
@@ -3535,6 +3561,12 @@ const isOptionalTimestamp = (value: unknown): boolean =>
 
 export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  if (value.type === 'privacy-mask-ledger') {
+    const record = parsePrivacyMaskRecord(value.record);
+    return hasExactKeys(value, ['type', 'record']) && record
+      ? { type: 'privacy-mask-ledger', record }
+      : null;
+  }
   if (value.type === 'oauth-pool-select') {
     return hasOnlyKeys(value, [
       'type',

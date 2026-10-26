@@ -5,6 +5,67 @@ export const SUBAGENT_MODELS_CONFIGURE_PROMPT =
   'Configure "Let the agent pick subagent models" for me. How it is used: when the main agent dispatches a subagent or coworker (built-in types: scout for read-only recon, reviewer for code review, tester for writing tests, worker for implementation), it reads each entry\'s description from the tool\'s model parameter to choose a model per subtask — so descriptions are decision rules, not marketing copy. Steps: 1) read the current entries and toggle state; 2) list providers with valid credentials and their enabled models, never invent models; 3) pick 2–4 models that cover: a cheap, fast, long-context model for recon / reading / summarizing; a strong reasoning model for review, architecture and hard debugging; a reliable coding model for implementation; 4) add what is missing, fix duplicates or unusable entries, then enable the toggle; 5) each description is one short sentence in my interface language: when to use it, relative cost / speed, one caveat. Finish by listing the final entries with the reason for each.';
 
 export const zhTranslations: Record<string, string> = {
+  Privacy: '隐私',
+  'Privacy masking': '隐私脱敏',
+  'Replace API keys and personal data with placeholders before requests leave this device, and restore them in replies. Original values stay in memory on this device only.':
+    '请求离开本机前把 API Key 和个人信息换成占位符，回复中自动还原。原值只保存在本机内存里。',
+  'Applies to chats, compaction, bot members and helper requests.':
+    '作用于会话、压缩、Bot 成员和各类辅助请求。',
+  Secrets: '密钥',
+  'API keys, tokens, private keys, passwords in URLs and config files.':
+    'API Key、令牌、私钥、URL 和配置文件里的密码。',
+  'Detect secrets': '识别密钥',
+  'Recommended. Covers common vendor key formats.': '建议开启，覆盖常见厂商的 key 格式。',
+  'Send look-alike keys': '发送形似的假 key',
+  'Replace keys with fake keys of the same format instead of placeholders, so the model treats them as real keys.':
+    '用格式相同的假 key 代替占位符，模型会把它当成真 key 处理。',
+  'Personal data': '个人信息',
+  'Detect personal data': '识别个人信息',
+  'Matches are validated (checksums, real domains) to limit false hits.':
+    '命中会做校验（校验位、真实域名），减少误伤。',
+  Mask: '脱敏',
+  'Warn only': '只提醒',
+  Block: '拦截',
+  Email: '邮箱',
+  'Phone number': '手机号',
+  'ID card number': '身份证号',
+  'Bank card number': '银行卡号',
+  'IP address': 'IP 地址',
+  'Custom rules': '自定义规则',
+  Words: '词语',
+  'One per line, case-insensitive. Project codenames, customer names…':
+    '每行一个，不区分大小写。项目代号、客户名称等。',
+  'Prefixes or patterns': '前缀或正则',
+  'One per line. A prefix like corp_ or a regex like /INC-\\d{4}/i.':
+    '每行一个。可以是前缀如 corp_，或正则如 /INC-\\d{4}/i。',
+  'Allow list': '允许名单',
+  'Never mask': '从不脱敏',
+  'Exact values, one per line. Team emails, test keys…':
+    '完整值，每行一个。团队邮箱、测试 key 等。',
+  'Try it': '试一试',
+  'Runs locally. Nothing is remembered or sent anywhere.': '只在本地运行，不记住也不发送任何内容。',
+  'Paste some text, e.g. an .env file': '粘贴一段文本，例如 .env 文件',
+  'Nothing matched': '没有命中',
+  Records: '记录',
+  'Requested at': '请求时间',
+  'Auxiliary request': '辅助请求',
+  Compaction: '压缩',
+  Hits: '命中',
+  'Request blocked': '请求已拦截',
+  'No records yet': '暂无记录',
+  'Your message': '你的消息',
+  'Tool output': '工具输出',
+  'Tool arguments': '工具参数',
+  'Earlier replies': '之前的回复',
+  'Tool descriptions': '工具说明',
+  'Restored {{count}} in the reply': '回复中已还原 {{count}} 处',
+  'Privacy masking blocks {{kinds}}. Remove it, or change the action or allow list in Settings → Privacy.':
+    '隐私脱敏拦截了 {{kinds}}。请删掉它，或到「设置 → 隐私」调整动作或允许名单。',
+  'Will be blocked: {{kinds}}': '将被拦截：{{kinds}}',
+  'Emails, phone numbers, ID and bank card numbers, IP addresses.':
+    '邮箱、手机号、身份证号、银行卡号、IP 地址。',
+  'Words and patterns specific to your work.': '与你的工作相关的词语和格式。',
+  '{{count}} will be masked': '发送时将脱敏 {{count}} 项',
   'Classification only, not for chat': '仅用于分类，不能聊天',
   'ChatGPT account selected': '已选择 ChatGPT 账号',
   'ChatGPT account switched': 'ChatGPT 账号已接替',
@@ -928,6 +989,10 @@ export const zhTranslations: Record<string, string> = {
   'Add project': '添加项目',
   'Adding...': '正在添加...',
   'Add a project to start': '添加一个项目开始',
+  'Temporary chats': '临时会话',
+  'Start a temporary chat': '开始临时会话',
+  'Chats that are not tied to a project. Tools follow your global settings.':
+    '不挂项目的会话。工具跟随全局设置。',
   'Add a local directory as the conversation working folder.': '把本地目录加为对话的工作目录。',
   'Type a path or select from recent projects...': '输入路径或从最近项目中选择...',
   'Local directory': '本地目录',

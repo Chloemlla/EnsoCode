@@ -46,6 +46,7 @@ import type {
 } from '@shared/memory/graphDto';
 import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
+import type { PrivacyMaskRecord } from '@shared/privacyMask/report';
 import type { RemoteApi } from '@shared/remoteBridge';
 import type {
   ResourceSnapshot,
@@ -333,6 +334,11 @@ const electronAPI = {
   usage: {
     summary: (days: UsageRangeDays): Promise<UsageSummaryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.USAGE_SUMMARY, days),
+  },
+
+  privacyMask: {
+    records: (days: 1 | 7 | 30): Promise<PrivacyMaskRecord[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRIVACY_MASK_RECORDS, days),
   },
 
   resources: {

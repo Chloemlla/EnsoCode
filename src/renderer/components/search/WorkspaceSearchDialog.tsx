@@ -83,6 +83,7 @@ const SETTINGS_CATEGORY_LABELS: Record<SettingsCategory, string> = {
   workflows: 'Workflows',
   tools: 'Built-in tools',
   memory: 'Memory',
+  privacy: 'Privacy',
   phone: 'Devices',
   ssh: 'SSH',
   usage: 'Usage',
@@ -163,6 +164,7 @@ export function WorkspaceSearchDialog({
   const conversations = useSessionsStore((state) => state.conversations);
   const activeId = useSessionsStore((state) => state.activeId);
   const projects = useSettingsStore((state) => state.projects);
+  const scratchSessionsEnabled = useSettingsStore((state) => state.scratchSessionsEnabled);
   const providers = useSettingsStore((state) => state.providers);
   const skills = useSettingsStore((state) => state.skills);
   const mcpServers = useSettingsStore((state) => state.mcpServers);
@@ -179,23 +181,26 @@ export function WorkspaceSearchDialog({
     const viewed = activeId ? conversations[activeId] : undefined;
     const viewedChild = viewed?.activeTabId;
     const currentId = viewedChild && conversations[viewedChild] ? viewedChild : activeId;
-    return Object.values(conversations).map((conversation) => {
-      const project = projects.find((item) => item.id === conversation.projectId);
-      return conversationToSearchDoc({
-        conversationId: conversation.id,
-        projectId: conversation.projectId,
-        projectName: project?.name ?? conversation.projectId,
-        title: conversation.title,
-        lastActiveAt: conversationActivityAt(conversation),
-        archived: conversation.archived,
-        isDraftEmpty: isDraftEmptyConversation(conversation),
-        isCurrent: conversation.id === currentId,
-        parentConversationId: conversation.parentId,
-        coworkerId: conversation.parentId ? conversation.id : undefined,
-        messages: conversation.messages,
-      });
-    });
-  }, [activeId, conversations, open, projects]);
+    return Object.values(conversations)
+      .map((conversation) => {
+        const project = projects.find((item) => item.id === conversation.projectId);
+        if (!scratchSessionsEnabled && project?.kind === 'scratch') return null;
+        return conversationToSearchDoc({
+          conversationId: conversation.id,
+          projectId: conversation.projectId,
+          projectName: project?.name ?? conversation.projectId,
+          title: conversation.title,
+          lastActiveAt: conversationActivityAt(conversation),
+          archived: conversation.archived,
+          isDraftEmpty: isDraftEmptyConversation(conversation),
+          isCurrent: conversation.id === currentId,
+          parentConversationId: conversation.parentId,
+          coworkerId: conversation.parentId ? conversation.id : undefined,
+          messages: conversation.messages,
+        });
+      })
+      .filter((doc): doc is NonNullable<typeof doc> => doc !== null);
+  }, [activeId, conversations, open, projects, scratchSessionsEnabled]);
 
   const hotHits = useMemo(
     () => (trimmed ? searchWorkspace(docs, query, { currentProjectId, scope }) : NO_HITS),

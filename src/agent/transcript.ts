@@ -1,4 +1,10 @@
 import { type SessionEntry, sessionEntryToContextMessages } from '@earendil-works/pi-coding-agent';
+import {
+  type MaskReport,
+  mergeMaskReports,
+  PRIVACY_MASK_ENTRY,
+  parsePrivacyMaskRecord,
+} from '@shared/privacyMask/report';
 import { OM_FOLDED } from './continuousMemory/vendor/session-ledger/types';
 
 /**
@@ -20,17 +26,40 @@ export function transcriptMessages(
       break;
     }
   }
-  if (compactionIndex < 0) return withUserEntryIds(contextMessages, branch);
+  if (compactionIndex < 0)
+    return withPrivacyMask(withUserEntryIds(contextMessages, branch), branch);
   const compaction = branch[compactionIndex] as Extract<SessionEntry, { type: 'compaction' }>;
   const keptIndex = compaction.firstKeptEntryId
     ? branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId)
     : -1;
   const cut = keptIndex >= 0 && keptIndex < compactionIndex ? keptIndex : compactionIndex;
   const summarized = branch.slice(0, cut).flatMap(sessionEntryToContextMessages);
-  return withUserEntryIds(
-    stampCompactionFromHook([...summarized, ...contextMessages], branch),
+  return withPrivacyMask(
+    withUserEntryIds(stampCompactionFromHook([...summarized, ...contextMessages], branch), branch),
     branch
   );
+}
+
+/** 脱敏记录写在请求发出时，挂到分支上紧随其后的 assistant 消息；重试的多次请求合并 */
+export function withPrivacyMask(messages: unknown[], branch: readonly SessionEntry[]): unknown[] {
+  const reports = new Map<unknown, MaskReport>();
+  let pending: MaskReport | undefined;
+  for (const entry of branch) {
+    if (entry.type === 'custom' && entry.customType === PRIVACY_MASK_ENTRY) {
+      const record = parsePrivacyMaskRecord(entry.data);
+      if (record) pending = mergeMaskReports(pending, record.report);
+    } else if (entry.type === 'message' && entry.message.role === 'assistant' && pending) {
+      reports.set(entry.message, pending);
+      pending = undefined;
+    }
+  }
+  if (!reports.size) return messages;
+  return messages.map((message) => {
+    const privacyMask = reports.get(message);
+    return privacyMask && typeof message === 'object' && message !== null
+      ? { ...message, privacyMask }
+      : message;
+  });
 }
 
 /** Match source objects, never text: repeated prompts and unpersisted messages must not share an ID. */

@@ -5,6 +5,7 @@ import {
   type PastedTextFileResult,
   pastedTextFileContent,
 } from '@shared/pastedText';
+import { scanUserInput } from '@shared/privacyMask/preview';
 import { filterSlashSubcommands, slashSubcommandQuery } from '@shared/slashSubcommands';
 import type { AttachedImage, SlashCommand } from '@shared/types/agent';
 import type {
@@ -14,7 +15,7 @@ import type {
   UiElementMentionCandidate,
 } from '@shared/types/mentions';
 import type { StartVoiceSession } from '@shared/types/speech';
-import { ArrowUp, CircleStop, ImagePlus, SlashSquare, X } from 'lucide-react';
+import { ArrowUp, CircleStop, ImagePlus, Shield, ShieldX, SlashSquare, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
@@ -24,6 +25,7 @@ import {
   DialogPanel,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { addToast } from '@/components/ui/toast';
 import {
   flattenMentionRoot,
   type MentionFolderId,
@@ -153,6 +155,7 @@ export function Composer({
   // 断线重连时语音会短暂不可用：不清掉按住说话，恢复后原样回来
   const holdVoice = voiceMode === 'hold' ? voice : undefined;
   const keybindings = useSettingsStore((s) => s.keybindings);
+  const privacyMasking = useSettingsStore((s) => s.privacyMasking);
   const sendBinding = effectiveKeybindings(keybindings)['send-message'];
   const voiceHoldBinding = effectiveKeybindings(keybindings)['voice-hold'];
   const mentionPickerId = useId();
@@ -448,6 +451,10 @@ export function Composer({
   const steerAvailable =
     running && queuedCount > 0 && onSteerQueued !== undefined && enterToSend && !!sendBinding;
   const steerable = steerAvailable && !hasContent && !agentRecipient && !locked;
+  const privacyScan = useMemo(
+    () => (privacyMasking.enabled && content ? scanUserInput(content, privacyMasking) : null),
+    [content, privacyMasking]
+  );
 
   const handleSend = () => {
     if (!hasContent) return;
@@ -457,6 +464,21 @@ export function Composer({
       images,
       recipient,
     });
+    // 拦截类在乐观回显之前拒绝：不会发给 worker，草稿保留
+    const blocked = privacyMasking.enabled
+      ? scanUserInput(payload.text, privacyMasking).blocked
+      : [];
+    if (blocked.length > 0) {
+      addToast({
+        type: 'error',
+        title: t('Message not sent'),
+        description: t(
+          'Privacy masking blocks {{kinds}}. Remove it, or change the action or allow list in Settings → Privacy.',
+          { kinds: blocked.join(', ') }
+        ),
+      });
+      return;
+    }
     if (onSend(payload) === false) return;
     editorRef.current?.clear();
     setImages([]);
@@ -849,6 +871,26 @@ export function Composer({
               />
             ) : null}
             {toolbar}
+            {privacyScan && (privacyScan.blocked.length > 0 || privacyScan.masked > 0) && (
+              <span
+                className={cn(
+                  'flex shrink-0 items-center gap-1 text-[11px]',
+                  privacyScan.blocked.length > 0
+                    ? 'text-red-600 dark:text-red-400'
+                    : 'text-sky-600 dark:text-sky-400'
+                )}
+                data-privacy-precheck
+              >
+                {privacyScan.blocked.length > 0 ? (
+                  <ShieldX className="size-3.5" />
+                ) : (
+                  <Shield className="size-3.5" />
+                )}
+                {privacyScan.blocked.length > 0
+                  ? t('Will be blocked: {{kinds}}', { kinds: privacyScan.blocked.join(', ') })
+                  : t('{{count}} will be masked', { count: privacyScan.masked })}
+              </span>
+            )}
           </div>
           {/* 生成中且输入为空才显示停止；有草稿则保持发送，方便手机点按钮入队 */}
           {effectiveBusy && !hasContent ? (

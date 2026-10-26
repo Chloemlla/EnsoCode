@@ -52,6 +52,9 @@ export const IPC_CHANNELS = {
   // Local token usage statistics
   USAGE_SUMMARY: 'usage:summary',
 
+  // 隐私脱敏记录（只读，不含原值）
+  PRIVACY_MASK_RECORDS: 'privacy-mask:records',
+
   // Resource monitor
   RESOURCES_SAMPLE: 'resources:sample',
   RESOURCES_STORAGE_SCAN: 'resources:storage-scan',

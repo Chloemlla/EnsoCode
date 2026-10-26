@@ -91,6 +91,7 @@ export const SETTINGS_STATE_FIELDS = [
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
   'autoRetryLimit',
+  'privacyMasking',
   'sshTimeoutSeconds',
   'generationStallTimeoutMin',
   'autoArchiveIdleDays',
@@ -145,6 +146,7 @@ export const SETTINGS_STATE_FIELDS = [
   'memoryDistillEnabled',
   'voiceInputEnabled',
   'botModeEnabled',
+  'scratchSessionsEnabled',
   'botMaxRunningTurns',
   'botRouteClassifier',
   'botAssistantModel',
@@ -169,6 +171,7 @@ export type SettingsStateField = (typeof SETTINGS_STATE_FIELDS)[number];
 /** Device-local keys that config-sync must never fingerprint or write back. */
 const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'hashlineEditEnabled',
+  'privacyMasking',
   'virtualModels',
   'windowsLocalShell',
   'terminalShell',
@@ -193,6 +196,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'memoryEmbeddingRemoteProviderId',
   'voiceInputEnabled',
   'botModeEnabled',
+  'scratchSessionsEnabled',
   'botMaxRunningTurns',
   'botRouteClassifier',
   'botAssistantModel',
@@ -469,6 +473,7 @@ function scheduleWrite(
           pushCompactRoute,
           pushMaxActiveCoworkers,
           pushAutoRetryLimit,
+          pushPrivacyMasking,
           pushDisabledWorkflowPresets,
           pushModelDirectory,
           pushWebSearchConfig,
@@ -477,6 +482,7 @@ function scheduleWrite(
           pushCompactRoute(await readStoredOauthCredentialKeys());
           pushMaxActiveCoworkers();
           pushAutoRetryLimit();
+          pushPrivacyMasking();
           pushDisabledWorkflowPresets();
           pushModelDirectory();
           pushWebSearchConfig();
@@ -597,6 +603,7 @@ export function commitSettingsTransaction(
         pushCompactRoute,
         pushMaxActiveCoworkers,
         pushAutoRetryLimit,
+        pushPrivacyMasking,
         pushDisabledWorkflowPresets,
         pushModelDirectory,
         pushWebSearchConfig,
@@ -605,6 +612,7 @@ export function commitSettingsTransaction(
         pushCompactRoute(await readStoredOauthCredentialKeys());
         pushMaxActiveCoworkers();
         pushAutoRetryLimit();
+        pushPrivacyMasking();
         pushDisabledWorkflowPresets();
         pushModelDirectory();
         pushWebSearchConfig();

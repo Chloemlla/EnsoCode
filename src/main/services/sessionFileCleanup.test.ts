@@ -106,4 +106,31 @@ describe('removeConversationSessionFiles', () => {
     expect(existsSync(child)).toBe(false);
     expect(existsSync(other)).toBe(true);
   });
+
+  it('删除 scratch 会话目录，不越界删到根目录或其他会话', () => {
+    const scratchRoot = path.join(root, 'scratch');
+    const own = path.join(scratchRoot, CONVERSATION_ID);
+    const other = path.join(scratchRoot, '22222222-2222-4222-8222-222222222222');
+    mkdirSync(own, { recursive: true });
+    mkdirSync(other, { recursive: true });
+    writeFileSync(path.join(own, 'note.txt'), 'x');
+    writeFileSync(path.join(scratchRoot, 'keep.txt'), 'y');
+
+    removeConversationSessionFiles({
+      sessionDir,
+      conversationId: CONVERSATION_ID,
+      scratchRoot,
+    });
+
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    expect(existsSync(path.join(scratchRoot, 'keep.txt'))).toBe(true);
+
+    removeConversationSessionFiles({
+      sessionDir,
+      conversationId: `../${CONVERSATION_ID}`,
+      scratchRoot,
+    });
+    expect(existsSync(scratchRoot)).toBe(true);
+  });
 });

@@ -20,6 +20,7 @@ import { registerModelDirectoryHandlers } from './modelDirectory';
 import { registerNodesHandlers } from './nodes';
 import { registerPairHandlers } from './pair';
 import { registerPairBotHandlers } from './pairBots';
+import { registerPrivacyMaskHandlers } from './privacyMask';
 import { registerProjectHandlers } from './projects';
 import { registerProviderHandlers } from './providers';
 import { registerProxyHandlers } from './proxy';
@@ -60,6 +61,7 @@ export function registerIpcHandlers(): void {
   registerTerminalHandlers();
   registerWorkspaceSearchHandlers();
   registerUsageHandlers();
+  registerPrivacyMaskHandlers();
   registerResourceHandlers();
   registerMemoryHandlers();
   registerBtwHandlers();

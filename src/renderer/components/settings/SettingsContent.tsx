@@ -18,6 +18,7 @@ import {
   Puzzle,
   Server,
   Settings,
+  Shield,
   Smartphone,
   Sparkles,
   Terminal,
@@ -46,6 +47,7 @@ import { MemoryLibrary } from './MemoryLibrary';
 import { MemorySettings } from './MemorySettings';
 import { PluginsSettings } from './PluginsSettings';
 import { PresetsSettings } from './PresetsSettings';
+import { PrivacySettings } from './PrivacySettings';
 import { ProvidersSettings } from './ProvidersSettings';
 import { ResourcesSettings } from './ResourcesSettings';
 import { SkillsSettings } from './SkillsSettings';
@@ -125,6 +127,7 @@ export function SettingsContent() {
     { id: 'tools', icon: Wrench, label: t('Built-in tools') },
     { id: 'workflows', icon: Workflow, label: t('Workflows') },
     { id: 'memory', icon: Brain, label: t('Memory') },
+    { id: 'privacy', icon: Shield, label: t('Privacy') },
     { id: 'skills', icon: Sparkles, label: t('Skills') },
     { id: 'plugins', icon: Puzzle, label: t('Plugins') },
     { id: 'mcp', icon: Plug, label: t('MCP Servers') },
@@ -220,6 +223,7 @@ export function SettingsContent() {
           {activeCategory === 'phone' && <DevicesSettings />}
           {activeCategory === 'ssh' && <SshSettings />}
           {activeCategory === 'usage' && <UsageSettings />}
+          {activeCategory === 'privacy' && <PrivacySettings />}
           {activeCategory === 'resources' && <ResourcesSettings />}
           {activeCategory === 'voice' && <VoiceInputSettings />}
           {activeCategory === 'experimental' && (

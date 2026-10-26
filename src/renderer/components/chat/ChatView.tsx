@@ -371,9 +371,12 @@ export function ChatView() {
 
       <div className="@container pt-1">
         <div className={CHAT_COL}>
-          {project && project.kind !== 'ssh' && !chrome.displayedParentId && (
-            <ProjectCodeTrustBar projectId={project.id} conversationId={chrome.id} />
-          )}
+          {project &&
+            project.kind !== 'ssh' &&
+            project.kind !== 'scratch' &&
+            !chrome.displayedParentId && (
+              <ProjectCodeTrustBar projectId={project.id} conversationId={chrome.id} />
+            )}
           {chrome.retry && (
             <RetryBar
               retry={chrome.retry}

@@ -1,6 +1,7 @@
 import type { AgentTypeKey } from '@shared/builtinAgents';
 import type { CapabilityAskRequest } from '@shared/capabilities/types';
 import { parseCompactCommand } from '@shared/compactCommand';
+import { conversationCwd } from '@shared/conversationCwd';
 import {
   type DefaultModelRef,
   defaultApprovalMode,
@@ -2010,7 +2011,8 @@ export const useSessionsStore = create<SessionsState>()(
             conversation.historyOnly ||
             conversation.archived ||
             !project ||
-            project.kind === 'ssh'
+            project.kind === 'ssh' ||
+            project.kind === 'scratch'
           ) {
             return {
               ok: false,
@@ -3208,7 +3210,21 @@ export const useSessionsStore = create<SessionsState>()(
                   providerId: target.providerId,
                   modelId: target.modelId,
                   // 隔离会话一律在自己的 worktree 里跑，不信任调用方传的 cwd
-                  cwd: conversation.worktree?.path ?? target.cwd,
+                  cwd:
+                    useSettingsStore
+                      .getState()
+                      .projects.find((item) => item.id === conversation.projectId)?.kind ===
+                    'scratch'
+                      ? (conversationCwd({
+                          kind: 'scratch',
+                          canonicalPath:
+                            useSettingsStore
+                              .getState()
+                              .projects.find((item) => item.id === conversation.projectId)?.path ??
+                            target.cwd,
+                          conversationId: id,
+                        }) ?? target.cwd)
+                      : (conversation.worktree?.path ?? target.cwd),
                   resumeFile: conversation.sessionFile,
                   reasoningEnabled: conversation.reasoningEnabled,
                   thinkingLevel: conversation.thinkingLevel,
@@ -3326,7 +3342,14 @@ export const useSessionsStore = create<SessionsState>()(
             sessionId: id,
             providerId,
             modelId,
-            cwd: conversation.worktree?.path ?? project.path,
+            cwd:
+              project.kind === 'scratch'
+                ? (conversationCwd({
+                    kind: 'scratch',
+                    canonicalPath: project.path,
+                    conversationId: id,
+                  }) ?? project.path)
+                : (conversation.worktree?.path ?? project.path),
             resumeFile: conversation.sessionFile,
             reasoningEnabled: conversation.reasoningEnabled,
             thinkingLevel: conversation.thinkingLevel,

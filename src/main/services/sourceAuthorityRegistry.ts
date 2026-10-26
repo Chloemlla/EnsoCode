@@ -66,6 +66,7 @@ function projectIdentity(
   project: Pick<ProjectAuthority, 'kind' | 'canonicalPath' | 'sshConnectionId'>
 ): string {
   if (project.kind === 'ssh') return `ssh:${project.sshConnectionId}:${project.canonicalPath}`;
+  if (project.kind === 'scratch') return `scratch:${project.canonicalPath}`;
   return project.kind === 'bot-home'
     ? `bot-home:${project.canonicalPath}`
     : `local:${project.canonicalPath}`;
@@ -150,6 +151,9 @@ export class SourceAuthorityRegistry {
     if (request.kind === 'bot-home') {
       return { accepted: false, error: 'Project kind is reserved.' };
     }
+    if (request.kind === 'scratch') {
+      return { accepted: false, error: 'Project kind is reserved.' };
+    }
     try {
       return request.kind === 'ssh'
         ? this.createSshProject(request)
@@ -185,6 +189,26 @@ export class SourceAuthorityRegistry {
         projectId: this.randomUuid(),
         canonicalPath,
         kind: 'bot-home',
+        state: 'active',
+        version: 1,
+      });
+      return inserted.accepted ? inserted.value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 仅 Main：把临时会话根目录登记为 scratch 项目（按路径幂等，目录不存在则创建） */
+  ensureScratchProject(dir: string): ProjectAuthorityProjection | undefined {
+    try {
+      mkdirSync(dir, { recursive: true });
+      const canonicalPath = realpathSync(dir);
+      const existing = this.findActiveByIdentity(`scratch:${canonicalPath}`);
+      if (existing) return { ...existing };
+      const inserted = this.insertProject({
+        projectId: this.randomUuid(),
+        canonicalPath,
+        kind: 'scratch',
         state: 'active',
         version: 1,
       });
@@ -264,6 +288,7 @@ export class SourceAuthorityRegistry {
     const project = this.projects.get(request.projectId);
     return project &&
       project.kind !== 'bot-home' &&
+      project.kind !== 'scratch' &&
       project.state === 'active' &&
       project.version === request.version
       ? { accepted: true, value: this.hydrateProject(project) }
@@ -277,6 +302,7 @@ export class SourceAuthorityRegistry {
     if (
       project?.state !== 'active' ||
       project.kind === 'bot-home' ||
+      project.kind === 'scratch' ||
       project.version !== request.version
     ) {
       return { accepted: false, error: 'Project authority is stale or unavailable.' };

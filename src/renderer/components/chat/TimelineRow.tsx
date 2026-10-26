@@ -4,6 +4,7 @@ import { stripBotNotesUpdate } from '@shared/bots/notes';
 import { isBtwIsolationPrompt } from '@shared/btw';
 import { toLocalImageUrl } from '@shared/localImage';
 import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
+import type { MaskReport } from '@shared/privacyMask/report';
 import type {
   AgentRunProgress,
   AgentSessionCustomEntry,
@@ -109,6 +110,7 @@ import { MemoryCaptureResult, MemorySearchResults } from './MemorySearchResults'
 import { mentionChipClass } from './MentionChip';
 import { parseMemoryCapture, parseMemorySearchHits } from './memorySearchHits';
 import { splitInlineMentions, splitMentionRefs } from './mentionComposer';
+import { PrivacyMaskBadge } from './PrivacyMaskBadge';
 import { ReadFileView } from './ReadFileView';
 import { RtkToolStatsBar } from './RtkToolStatsBar';
 import { SlashChip, slashChipClass, splitSlashCommand } from './SlashChip';
@@ -673,7 +675,15 @@ export function isCompactRow(item: TimelineItem): boolean {
 }
 
 /** 每轮回复的身份头：标识 + 模型 + 时间，挂在本轮首个 assistant 行之上 */
-export function ReplyHeader({ model, at }: { model?: string; at?: number }) {
+export function ReplyHeader({
+  model,
+  at,
+  privacyMask,
+}: {
+  model?: string;
+  at?: number;
+  privacyMask?: MaskReport;
+}) {
   const speaker = useChatHost()?.speaker;
   return (
     <div className="mb-2 flex h-6 min-w-0 items-center gap-2 text-xs select-none">
@@ -710,6 +720,7 @@ export function ReplyHeader({ model, at }: { model?: string; at?: number }) {
       {typeof at === 'number' && (
         <span className="shrink-0 text-[11px] text-muted-foreground">{formatClock(at)}</span>
       )}
+      {privacyMask && <PrivacyMaskBadge report={privacyMask} />}
     </div>
   );
 }

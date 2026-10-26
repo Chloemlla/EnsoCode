@@ -19,4 +19,18 @@ it('仅可信活动本地会话解析 cwd，拒绝错配 worktree', () => {
   expect(pick({ conversation, project, worktree: { projectId: 'p', path: '/worktree' } })).toBe(
     '/worktree'
   );
+  const scratchId = '11111111-1111-4111-8111-111111111111';
+  expect(
+    pick({
+      conversation: { ...conversation, conversationId: scratchId },
+      project: { ...project, kind: 'scratch', canonicalPath: '/data/scratch' },
+      worktree: { projectId: 'p', path: '/data/scratch/other' },
+    })
+  ).toBe(`/data/scratch/${scratchId}`);
+  expect(
+    pick({
+      conversation,
+      project: { ...project, kind: 'scratch', canonicalPath: '/data/scratch' },
+    })
+  ).toBeNull();
 });
