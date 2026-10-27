@@ -201,6 +201,15 @@ describe('projectConversationIds', () => {
   it('脏输入不崩:order 里有 conversations 缺失的 id', () => {
     expect(projectConversationIds(['x', 'b'], conversations, 'p1')).toEqual(['b']);
   });
+
+  it('误入 order 的子会话不进项目分组', () => {
+    expect(projectConversationIds(['ghost', ...order], conversations, 'p1')).toEqual([
+      'e',
+      'b',
+      'a',
+      'd',
+    ]);
+  });
 });
 
 describe('archived 与分组的互斥', () => {
@@ -574,6 +583,21 @@ describe('activeConversationIds', () => {
 
   it('order 之外的 coworker 不进栏', () => {
     expect(activeConversationIds(liveOrder, live)).not.toContain('kid');
+  });
+
+  it('误入 order 的子会话不进活跃栏和置顶栏', () => {
+    const leaked = {
+      ...live,
+      kid: { ...live.kid, parentId: 'childParent' },
+    };
+    expect(activeConversationIds([...liveOrder, 'kid'], leaked)).not.toContain('kid');
+    expect(activeConversationIds([...liveOrder, 'kid'], leaked)).toContain('childParent');
+    expect(
+      pinnedConversationIds(['ghost', ...order], {
+        ...conversations,
+        ghost: { ...conversations.ghost, pinned: true },
+      })
+    ).toEqual(['e', 'c', 'b']);
   });
 });
 

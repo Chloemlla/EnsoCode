@@ -5129,4 +5129,23 @@ describe('Plan 模式', () => {
     sessionsModule.useSessionsStore.getState().setPlanMode('plan-parent', true);
     await vi.waitFor(() => expect(conv()?.planState?.active).toBe(false));
   });
+
+  it('会话在异步回滚前已删除时不复活成半截会话', async () => {
+    sessionsModule.useSessionsStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        'plan-parent': { ...state.conversations['plan-parent'], started: true },
+      },
+    }));
+    let settle!: (value: { ok: boolean; error?: string }) => void;
+    agentSetPlanMode.mockImplementationOnce(() => new Promise((resolve) => (settle = resolve)));
+    sessionsModule.useSessionsStore.getState().setPlanMode('plan-parent', false);
+    sessionsModule.useSessionsStore.setState(({ conversations }) => {
+      const { 'plan-parent': _removed, ...rest } = conversations;
+      return { conversations: rest, order: [] };
+    });
+    settle({ ok: false, error: 'stale' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(conv()).toBeUndefined();
+  });
 });

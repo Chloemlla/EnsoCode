@@ -1,4 +1,5 @@
 import { pickActive, type StoredDevice } from './deviceList';
+import { parseSessionId } from './launchSession';
 
 /** 手机版（index）与桌面模式（desk）共用同源 localStorage，记住上次所在界面 */
 export type UiMode = 'phone' | 'desk';
@@ -19,7 +20,10 @@ export function deskUrl(pairId: string): string {
   return `/desk?device=${encodeURIComponent(pairId)}`;
 }
 
-/** index 启动时要跳转的 desk 地址；显式回手机版或通知深链（?session=）时留在手机版 */
+/**
+ * index 启动时要跳转的 desk 地址。
+ * 显式 `?mode=phone` 留在手机版；通知深链（`?session=`）在桌面模式下带进 desk，不退回精简版。
+ */
 export function launchTarget(
   search: string,
   mode: UiMode,
@@ -28,8 +32,11 @@ export function launchTarget(
 ): string | null {
   if (mode !== 'desk') return null;
   const params = new URLSearchParams(search);
-  if (params.get('mode') === 'phone' || params.has('session')) return null;
+  if (params.get('mode') === 'phone') return null;
   const device = pickActive(devices, activeId);
   if (!device || device.scope === 'read') return null;
-  return deskUrl(device.pairId);
+  const session = parseSessionId(params.get('session'));
+  const target = new URLSearchParams({ device: device.pairId });
+  if (session) target.set('session', session);
+  return `/desk?${target}`;
 }

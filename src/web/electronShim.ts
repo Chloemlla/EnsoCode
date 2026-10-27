@@ -33,6 +33,7 @@ const CACHED_READS: ReadonlySet<string> = new Set([
   IPC_CHANNELS.SOURCE_AUTHORITY_READ,
   IPC_CHANNELS.ASSETS_LIST_PROJECT_SKILLS,
   IPC_CHANNELS.PROVIDERS_MODEL_META,
+  IPC_CHANNELS.AGENT_PARENT_HISTORY_TAIL,
 ]);
 /** 只合并同时发出的相同请求（结果随会话变化或依赖发起方，不跨次缓存） */
 const SHARED_READS: ReadonlySet<string> = new Set([
@@ -40,7 +41,6 @@ const SHARED_READS: ReadonlySet<string> = new Set([
   IPC_CHANNELS.WORKTREE_LIST,
   IPC_CHANNELS.WORKTREE_BRANCHES,
   IPC_CHANNELS.PROJECTS_CODE_SOURCES,
-  IPC_CHANNELS.AGENT_PARENT_HISTORY_TAIL,
 ]);
 
 // 缓存放父页面（父 realm 的 Map，只存字符串）：iframe 重载、设置页 iframe 都能复用

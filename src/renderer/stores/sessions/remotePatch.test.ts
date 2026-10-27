@@ -66,6 +66,26 @@ describe('applyConversationsPatchToState', () => {
     expect(next.activeId).toBe('a');
   });
 
+  it('ignores partial patches for conversations this renderer does not have', () => {
+    const before = state({ a: row('a') }, ['a'], 'a');
+    const next = applyConversationsPatchToState(before, {
+      upserts: { gone: { set: { title: 'renamed', lastActiveAt: 2 }, unset: [] } },
+      removes: [],
+    });
+    expect(next.conversations).not.toHaveProperty('gone');
+    expect(next.order).toEqual(['a']);
+  });
+
+  it('gives new conversations an empty messages list when the row lacks one', () => {
+    const incoming: Row = { ...row('b') };
+    delete incoming.messages;
+    const next = applyConversationsPatchToState(state({}, [], null), {
+      upserts: { b: { set: incoming, unset: [] } },
+      removes: [],
+    });
+    expect(next.conversations.b.messages).toEqual([]);
+  });
+
   it('removes conversations and moves activeId to the next in order', () => {
     const before = state({ a: row('a'), b: row('b'), c: row('c') }, ['a', 'b', 'c'], 'a');
     const next = applyConversationsPatchToState(before, { upserts: {}, removes: ['a'] });

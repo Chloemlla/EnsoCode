@@ -142,4 +142,19 @@ describe('cachedPartializeSessions', () => {
     expect(persisted.order).toEqual(['a']);
     expect(persisted.activeId).toBe('a');
   });
+
+  it('keeps child conversations but drops them from sidebar order', () => {
+    const persisted = cachedPartializeSessions({
+      conversations: {
+        a: conv('a'),
+        child: { ...conv('child'), parentId: 'a', title: 'review' },
+      },
+      order: ['child', 'a'],
+      activeId: 'child',
+    });
+    expect(persisted.conversations.child).toMatchObject({ parentId: 'a', title: 'review' });
+    expect(persisted.conversations.a).toBeDefined();
+    expect(persisted.order).toEqual(['a']);
+    expect(persisted.activeId).toBe('a');
+  });
 });

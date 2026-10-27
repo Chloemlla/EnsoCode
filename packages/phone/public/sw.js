@@ -147,12 +147,27 @@ self.addEventListener('notificationclick', (event) => {
         type: 'window',
         includeUncontrolled: true,
       });
+      // 完整版的 renderer / 快照是嵌套 iframe，把消息发给它们不会切会话
+      const topLevel = windows.filter((client) => {
+        if (client.frameType) return client.frameType === 'top-level';
+        try {
+          const url = new URL(client.url);
+          return url.protocol !== 'about:' && !url.pathname.startsWith('/desk/');
+        } catch {
+          return false;
+        }
+      });
       const existing =
-        windows.find((client) => client.focused) ||
-        windows.find((client) => client.visibilityState === 'visible') ||
-        windows[0];
+        topLevel.find((client) => client.focused) ||
+        topLevel.find((client) => client.visibilityState === 'visible') ||
+        topLevel[0];
       if (existing) {
         existing.postMessage({ type: 'open-session', sessionId });
+        // 页面自己处理深链；留下的冷启动兜底会让下次打开又跳一次
+        try {
+          const cache = await caches.open(LAUNCH_SESSION_CACHE);
+          await cache.delete(LAUNCH_SESSION_URL);
+        } catch {}
         return existing.focus();
       }
       return self.clients.openWindow(target);

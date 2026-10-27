@@ -666,7 +666,10 @@ export function MessageTimeline({
           </EmptyReveal>
         ) : items.length === 0 ? (
           // spawn/resume 期间（历史消息尚未回放）：明确的加载态，不留空白页
-          <div className="flex h-full flex-col items-center justify-center gap-2.5 text-center">
+          <div
+            data-timeline-loading=""
+            className="flex h-full flex-col items-center justify-center gap-2.5 text-center"
+          >
             <LoaderCircle className="h-5 w-5 animate-spin text-muted-foreground" />
             <p className="text-sm text-muted-foreground">{t('Preparing session…')}</p>
           </div>

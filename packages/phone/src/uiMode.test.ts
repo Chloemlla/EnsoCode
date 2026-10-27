@@ -34,11 +34,20 @@ describe('uiMode', () => {
     expect(deskUrl('a/b')).toBe('/desk?device=a%2Fb');
   });
 
-  it('stays on phone when mode is phone, no usable device, or an explicit phone/session link', () => {
+  it('stays on phone when mode is phone, no usable device, or an explicit phone link', () => {
     expect(launchTarget('', 'phone', [device('a')], 'a')).toBeNull();
     expect(launchTarget('', 'desk', [], null)).toBeNull();
     expect(launchTarget('', 'desk', [device('a', 'read')], 'a')).toBeNull();
     expect(launchTarget(PHONE_URL.slice(1), 'desk', [device('a')], 'a')).toBeNull();
-    expect(launchTarget('?session=s1', 'desk', [device('a')], 'a')).toBeNull();
+    expect(launchTarget('?session=s1&mode=phone', 'desk', [device('a')], 'a')).toBeNull();
+  });
+
+  it('keeps a notification deep link inside desk mode', () => {
+    expect(launchTarget('?session=s1', 'desk', [device('a')], 'a')).toBe(
+      '/desk?device=a&session=s1'
+    );
+    expect(launchTarget('?session=s1', 'phone', [device('a')], 'a')).toBeNull();
+    expect(launchTarget('?session=s1', 'desk', [device('a', 'read')], 'a')).toBeNull();
+    expect(launchTarget('?session=bad id', 'desk', [device('a')], 'a')).toBe('/desk?device=a');
   });
 });

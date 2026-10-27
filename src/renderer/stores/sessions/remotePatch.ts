@@ -18,7 +18,9 @@ export function applyConversationsPatchToState<C extends object>(
   for (const [id, row] of Object.entries(patch.upserts)) {
     const current = conversations[id];
     if (!current) {
-      conversations[id] = row.set as C;
+      // 本地已删/从未有过的会话只收到字段级差量时，拼不出完整会话，丢弃
+      if (typeof row.set.id !== 'string') continue;
+      conversations[id] = { ...row.set, messages: [] } as C;
       continue;
     }
     const merged: Record<string, unknown> = Object.fromEntries(Object.entries(current));

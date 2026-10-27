@@ -22,11 +22,13 @@ export interface SnapshotProgress {
   settingsLoaded: boolean;
   /** renderer 文字量多久没变了 */
   stableFor: number;
+  /** 时间线还在「正在读取历史」：文字量稳定也不算追上 */
+  liveLoading: boolean;
 }
 
 export function snapshotReady(p: SnapshotProgress): boolean {
   if (p.elapsed >= MAX_SNAPSHOT_MS) return true;
-  if (!p.settingsLoaded) return false;
+  if (!p.settingsLoaded || p.liveLoading) return false;
   return p.liveChars >= p.snapChars * 0.8 || p.stableFor >= SETTLED_MS;
 }
 
@@ -135,15 +137,73 @@ export function mountSnapshot(container: HTMLElement, html: string): HTMLIFrameE
   return iframe;
 }
 
-/** 删掉已不在配对列表里的设备的快照 */
+const READS_FILE = '__reads.json';
+/** 持久化的只读结果上限（字符）：设置 + 当前会话历史尾窗足够 */
+const READS_BUDGET = 4_000_000;
+
+type ReadEntry = { h: string; json: string };
+
+/** 只读缓存（按 hash 的设置/历史等）序列化：从最近写入的往前保留，超预算丢最旧的 */
+export function packReads(reads: Map<string, ReadEntry>, budget = READS_BUDGET): string {
+  const kept: [string, ReadEntry][] = [];
+  let chars = 0;
+  for (const item of [...reads].reverse()) {
+    chars += item[0].length + item[1].json.length;
+    if (chars > budget) break;
+    kept.unshift(item);
+  }
+  return JSON.stringify(kept);
+}
+
+export function unpackReads(text: string): Map<string, ReadEntry> {
+  const reads = new Map<string, ReadEntry>();
+  try {
+    const list: unknown = JSON.parse(text);
+    if (!Array.isArray(list)) return reads;
+    for (const item of list) {
+      const [key, value] = Array.isArray(item) ? item : [];
+      const entry = value as Partial<ReadEntry> | undefined;
+      if (typeof key === 'string' && typeof entry?.h === 'string' && typeof entry.json === 'string')
+        reads.set(key, { h: entry.h, json: entry.json });
+    }
+  } catch {}
+  return reads;
+}
+
+const readsUrl = (base: string) => `${location.origin}${base}/${READS_FILE}`;
+
+/** 下次启动时 shim 带着 hash 去问，内容没变宿主只回「没变」，不必再经中继下载 */
+export async function saveReads(
+  cacheName: string,
+  base: string,
+  reads: Map<string, ReadEntry>
+): Promise<void> {
+  if (reads.size === 0) return;
+  const cache = await caches.open(cacheName);
+  await cache.put(
+    readsUrl(base),
+    new Response(packReads(reads), { headers: { 'Content-Type': 'application/json' } })
+  );
+}
+
+export async function loadReads(cacheName: string, base: string): Promise<Map<string, ReadEntry>> {
+  try {
+    const hit = await (await caches.open(cacheName)).match(readsUrl(base));
+    return hit ? unpackReads(await hit.text()) : new Map();
+  } catch {
+    return new Map();
+  }
+}
+
+/** 删掉已不在配对列表里的设备的快照与只读缓存 */
 export async function pruneSnapshots(cacheName: string, pairIds: string[]): Promise<void> {
   try {
     const keep = new Set(pairIds.map((id) => `/desk/r/${encodeURIComponent(id)}/`));
     const cache = await caches.open(cacheName);
     for (const request of await cache.keys()) {
       const path = new URL(request.url).pathname;
-      if (path.endsWith(`/${SNAPSHOT_FILE}`) && ![...keep].some((p) => path.startsWith(p)))
-        await cache.delete(request);
+      const local = path.endsWith(`/${SNAPSHOT_FILE}`) || path.endsWith(`/${READS_FILE}`);
+      if (local && ![...keep].some((p) => path.startsWith(p))) await cache.delete(request);
     }
   } catch {}
 }

@@ -68,6 +68,51 @@ describe('conversations patch', () => {
     expect(merged.state.order).toEqual(['n']);
   });
 
+  it('ignores partial upserts for conversations missing from the target', () => {
+    const base = blob({ a: { id: 'a' } }, ['a']);
+    const merged = applyConversationsPatch(base, {
+      upserts: { gone: { set: { title: 'renamed' }, unset: [] } },
+      removes: [],
+    }) as ReturnType<typeof blob>;
+    expect(merged.state.conversations).not.toHaveProperty('gone');
+    expect(merged.state.order).toEqual(['a']);
+  });
+
+  it('does not promote a child conversation into sidebar order', () => {
+    const base = blob({ parent: { id: 'parent', title: 'P' } }, ['parent']);
+    const patch = diffConversations(
+      base,
+      blob(
+        {
+          parent: { id: 'parent', title: 'P' },
+          child: { id: 'child', parentId: 'parent', title: 'review' },
+        },
+        ['parent']
+      )
+    );
+    const merged = applyConversationsPatch(base, patch) as ReturnType<typeof blob>;
+    expect(merged.state.conversations.child).toMatchObject({ parentId: 'parent', title: 'review' });
+    expect(merged.state.order).toEqual(['parent']);
+  });
+
+  it('drops a child already stuck in order instead of keeping it as an unknown extra', () => {
+    const disk = blob(
+      {
+        parent: { id: 'parent', title: 'P' },
+        child: { id: 'child', parentId: 'parent', title: 'review' },
+      },
+      ['child', 'parent']
+    );
+    const patch = diffConversations(
+      blob({ parent: { id: 'parent', title: 'P' } }, ['parent']),
+      blob({ parent: { id: 'parent', title: 'P2' } }, ['parent'])
+    );
+    const merged = applyConversationsPatch(disk, patch) as ReturnType<typeof blob>;
+    expect(merged.state.conversations.parent).toMatchObject({ title: 'P2' });
+    expect(merged.state.conversations.child).toMatchObject({ parentId: 'parent' });
+    expect(merged.state.order).toEqual(['parent']);
+  });
+
   it('parses only well-formed patches', () => {
     expect(parseConversationsPatch({ upserts: {}, removes: [] })).toEqual({
       upserts: {},
