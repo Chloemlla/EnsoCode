@@ -53,4 +53,13 @@ describe('conversationCwd', () => {
     );
     expect(conversationCwd({ kind: 'scratch', canonicalPath: '', conversationId: ID })).toBeNull();
   });
+
+  it('scratch 不依赖 node:path，保留根目录分隔符风格', () => {
+    expect(
+      conversationCwd({ kind: 'scratch', canonicalPath: 'C:\\data\\scratch\\', conversationId: ID })
+    ).toBe(`C:\\data\\scratch\\${ID}`);
+    expect(
+      conversationCwd({ kind: 'scratch', canonicalPath: '/data/scratch/', conversationId: ID })
+    ).toBe(`/data/scratch/${ID}`);
+  });
 });

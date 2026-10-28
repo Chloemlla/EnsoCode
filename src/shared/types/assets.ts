@@ -64,6 +64,14 @@ export interface Preset {
   instructionId?: string;
   /** 自定义开头角色段落的外部正文 UUID 引用；缺省使用 pi 默认，工具及后续规则不变 */
   systemPromptId?: string;
+  /** 钉到 skills/cwd 之后的真尾正文 */
+  systemPromptTailId?: string;
+  /** 真尾之后的短覆盖块 */
+  boostPromptId?: string;
+  /** 模型推脱时自动补发一轮；无 refusalRetryPromptId 时视为关 */
+  refusalRetry?: boolean;
+  /** 推脱补发正文 */
+  refusalRetryPromptId?: string;
 }
 
 export const DEFAULT_PRESET_ID = 'default';

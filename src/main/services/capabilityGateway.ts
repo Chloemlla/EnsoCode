@@ -527,8 +527,13 @@ function parsePresetFields(
       : typeof existing?.instructionId === 'string'
         ? existing.instructionId
         : undefined;
-  const systemPromptId =
-    typeof existing?.systemPromptId === 'string' ? existing.systemPromptId : undefined;
+  const optionalId = (key: string) =>
+    typeof existing?.[key] === 'string' ? (existing[key] as string) : undefined;
+  const systemPromptId = optionalId('systemPromptId');
+  const systemPromptTailId = optionalId('systemPromptTailId');
+  const boostPromptId = optionalId('boostPromptId');
+  const refusalRetryPromptId = optionalId('refusalRetryPromptId');
+  const refusalRetry = existing?.refusalRetry === true;
   return {
     ok: true,
     value: {
@@ -537,6 +542,10 @@ function parsePresetFields(
       mcpServerIds,
       ...(instructionId ? { instructionId } : {}),
       ...(systemPromptId ? { systemPromptId } : {}),
+      ...(systemPromptTailId ? { systemPromptTailId } : {}),
+      ...(boostPromptId ? { boostPromptId } : {}),
+      ...(refusalRetry ? { refusalRetry: true } : {}),
+      ...(refusalRetryPromptId ? { refusalRetryPromptId } : {}),
     },
   };
 }

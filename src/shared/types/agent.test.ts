@@ -2521,6 +2521,16 @@ describe('受保护动作底线协议', () => {
       parseAgentWorkerEvent({ ...event, request: { ...event.request, protected: 'nuke' } })
     ).toBeNull();
   });
+
+  it('spawn-parent 携真尾 / boost / 拒答正文：非空字符串通过,脏值拒绝', () => {
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
+    expect(parseAgentCommand({ ...base, systemPromptAppend: 'tail' })).not.toBeNull();
+    expect(parseAgentCommand({ ...base, systemPromptBoost: 'boost' })).not.toBeNull();
+    expect(parseAgentCommand({ ...base, refusalRetryPrompt: 'continue' })).not.toBeNull();
+    expect(parseAgentCommand({ ...base, systemPromptAppend: '' })).toBeNull();
+    expect(parseAgentCommand({ ...base, systemPromptBoost: 1 })).toBeNull();
+    expect(parseAgentCommand({ ...base, refusalRetryPrompt: '' })).toBeNull();
+  });
 });
 
 describe('等人超时协议', () => {

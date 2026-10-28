@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,6 +30,7 @@ type Server struct {
 	store  *Store
 	hub    *hub
 	static fs.FS
+	desk   func() *deskBundle
 	now    func() int64
 	log    *slog.Logger
 }
@@ -41,6 +43,7 @@ func newServer(store *Store, static fs.FS, log *slog.Logger) *Server {
 		store:  store,
 		hub:    newHub(),
 		static: static,
+		desk:   sync.OnceValue(func() *deskBundle { return loadDeskBundle(static) }),
 		now:    func() int64 { return time.Now().UnixMilli() },
 		log:    log,
 	}
@@ -82,6 +85,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleClaim(w, r)
 	case p == "/healthz" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case strings.HasPrefix(p, "/"+deskBundleDir+"/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		s.desk().serve(w, r, strings.TrimPrefix(p, "/"+deskBundleDir+"/"))
 	default:
 		if pairID, ok := pairIDFromPath(p); ok {
 			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {

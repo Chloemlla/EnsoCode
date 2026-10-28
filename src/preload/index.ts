@@ -46,6 +46,7 @@ import type {
 } from '@shared/memory/graphDto';
 import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
+import type { PresetImportDraft } from '@shared/presetImport';
 import type { PrivacyMaskRecord } from '@shared/privacyMask/report';
 import type { RemoteApi } from '@shared/remoteBridge';
 import type {
@@ -592,6 +593,10 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.PRESETS_SYSTEM_PROMPT_READ, id),
     writeSystemPrompt: (id: string, content: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PRESETS_SYSTEM_PROMPT_WRITE, id, content),
+    fetchImport: (
+      url: string
+    ): Promise<{ ok: true; draft: PresetImportDraft } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRESETS_FETCH_IMPORT, url),
   },
 
   dialog: {

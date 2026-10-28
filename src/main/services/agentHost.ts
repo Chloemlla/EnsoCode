@@ -885,10 +885,10 @@ export function spawnSession(
   const preset: Preset | undefined = bot
     ? { id: 'bot', name: 'bot', skillIds: bot.skillIds, mcpServerIds: bot.mcpServerIds }
     : resolvePreset(request.presetId);
-  const systemPrompt = bot
-    ? { ok: true as const, content: bot.systemPrompt }
-    : resolvePresetSystemPrompt(preset);
-  if (!systemPrompt.ok) {
+  const promptKit = bot
+    ? { ok: true as const, systemPrompt: bot.systemPrompt }
+    : resolvePresetPromptKit(preset);
+  if (!promptKit.ok) {
     return { ok: false, error: '自定义系统提示词正文读取失败，请重新保存或恢复默认。' };
   }
   const instruction = bot
@@ -982,7 +982,10 @@ export function spawnSession(
     ...(instruction ? { instruction } : {}),
     ...(remote ? { remote } : {}),
     ...(options?.rolePrompt ? { rolePrompt: options.rolePrompt } : {}),
-    ...(systemPrompt.content ? { systemPrompt: systemPrompt.content } : {}),
+    ...(promptKit.systemPrompt ? { systemPrompt: promptKit.systemPrompt } : {}),
+    ...(promptKit.systemPromptAppend ? { systemPromptAppend: promptKit.systemPromptAppend } : {}),
+    ...(promptKit.systemPromptBoost ? { systemPromptBoost: promptKit.systemPromptBoost } : {}),
+    ...(promptKit.refusalRetryPrompt ? { refusalRetryPrompt: promptKit.refusalRetryPrompt } : {}),
     ...(options?.bot ? { botMode: true } : {}),
     ...(options?.bot?.groupTasks ? { botGroupTasks: true } : {}),
     ...(options?.bot?.routines ? { botRoutines: true } : {}),
@@ -1006,12 +1009,42 @@ export function spawnSession(
   return sent;
 }
 
+function readPresetPrompt(id?: string): { ok: true; content?: string } | { ok: false } {
+  if (!id) return { ok: true };
+  const result = readStoredSystemPrompt(id);
+  return result.ok ? { ok: true, content: result.content } : { ok: false };
+}
+
+export function resolvePresetPromptKit(preset?: Preset):
+  | {
+      ok: true;
+      systemPrompt?: string;
+      systemPromptAppend?: string;
+      systemPromptBoost?: string;
+      refusalRetryPrompt?: string;
+    }
+  | { ok: false } {
+  if (!preset) return { ok: true };
+  const role = readPresetPrompt(preset.systemPromptId);
+  const tail = readPresetPrompt(preset.systemPromptTailId);
+  const boost = readPresetPrompt(preset.boostPromptId);
+  const retry = readPresetPrompt(preset.refusalRetryPromptId);
+  if (!role.ok || !tail.ok || !boost.ok || !retry.ok) return { ok: false };
+  return {
+    ok: true,
+    ...(role.content ? { systemPrompt: role.content } : {}),
+    ...(tail.content ? { systemPromptAppend: tail.content } : {}),
+    ...(boost.content ? { systemPromptBoost: boost.content } : {}),
+    ...(preset.refusalRetry === true && retry.content ? { refusalRetryPrompt: retry.content } : {}),
+  };
+}
+
 export function resolvePresetSystemPrompt(
   preset?: Pick<Preset, 'systemPromptId'>
 ): { ok: true; content?: string } | { ok: false } {
-  if (!preset?.systemPromptId) return { ok: true };
-  const result = readStoredSystemPrompt(preset.systemPromptId);
-  return result.ok ? { ok: true, content: result.content } : { ok: false };
+  const result = readPresetPrompt(preset?.systemPromptId);
+  if (!result.ok) return { ok: false };
+  return { ok: true, ...(result.content ? { content: result.content } : {}) };
 }
 
 /**

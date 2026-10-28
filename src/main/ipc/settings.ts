@@ -18,6 +18,7 @@ import {
   parseContextMenuOpen,
   parseFileOpenRules,
 } from '@shared/fileOpening';
+import { collectPresetPromptIds } from '@shared/presetPrompts';
 import { normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import { IPC_CHANNELS, isEditMode, resolveEditMode } from '@shared/types';
 import { app, BrowserWindow, ipcMain } from 'electron';
@@ -33,7 +34,7 @@ import {
   noteConversationsRead,
 } from '../services/remoteRenderer/conversationSync';
 import { sendToRemoteRenderers } from '../services/remoteRenderer/senders';
-import { deleteSystemPrompt, isSystemPromptId } from '../services/systemPromptStore';
+import { deleteSystemPrompt } from '../services/systemPromptStore';
 import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
 
 function getSettingsPath(): string {
@@ -97,6 +98,7 @@ export const SETTINGS_STATE_FIELDS = [
   'autoArchiveIdleDays',
   'autoArchiveMergedWorktrees',
   'autoDeleteArchivedDays',
+  'activeRetentionMinutes',
   'backgroundImageEnabled',
   'backgroundSourceType',
   'backgroundImagePath',
@@ -271,9 +273,7 @@ function systemPromptIds(settings: Record<string, unknown> | null): Set<string> 
   const presets = settingsStateOf(settings).presets;
   const ids = new Set<string>();
   for (const preset of Array.isArray(presets) ? presets : []) {
-    if (!preset || typeof preset !== 'object') continue;
-    const id = (preset as Record<string, unknown>).systemPromptId;
-    if (typeof id === 'string' && isSystemPromptId(id)) ids.add(id);
+    for (const id of collectPresetPromptIds(preset)) ids.add(id);
   }
   return ids;
 }

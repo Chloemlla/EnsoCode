@@ -234,11 +234,19 @@ jobs:
         run: ELECTRON_RUN_AS_NODE=1 dist/linux-unpacked/enso-code scripts/smoke-packaged-natives.cjs dist/linux-unpacked/resources
 
   build-relay:
+    needs: build-app
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      # 与各平台安装包同一份 renderer：清单 id 才能和电脑端对上
+      - name: Download build output
+        uses: actions/download-artifact@v7
+        with:
+          name: app-build
+          path: out/
 
       - name: Setup Node.js
         uses: actions/setup-node@v5

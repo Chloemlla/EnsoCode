@@ -16,7 +16,7 @@ import { isMainWindowAlive } from '../../windows/MainWindow';
 import { isServerMode } from '../appServerMode';
 import { handleLocalImageRequest } from '../localImageProtocol';
 import { isPairHeadless, setPairHeadless } from '../pairSessionHost';
-import { downloadEstimate, readRendererAsset, rendererBuildId } from './assets';
+import { bundleManifest, downloadEstimate, readRendererAsset, rendererBuildId } from './assets';
 import { isRemoteChannelAllowed } from './channels';
 import { type RemoteLink, setRemoteHostHooks } from './hostHooks';
 import { installIpcRegistry, registeredHandler, registeredListeners } from './ipcRegistry';
@@ -281,8 +281,16 @@ async function asset(link: RemoteLink, command: Extract<RemoteToHost, { type: 'a
     const root = rendererRoot();
     const version = await rendererBuildId(root, app.getVersion());
     const download = version ? await downloadEstimate(root, link.gzip === true, version) : 0;
+    const bundle = version ? (await bundleManifest(root, version))?.id : undefined;
     const body = JSON.stringify(
-      version ? { version, platform: process.platform, ...(download ? { download } : {}) } : {}
+      version
+        ? {
+            version,
+            platform: process.platform,
+            ...(download ? { download } : {}),
+            ...(bundle ? { bundle } : {}),
+          }
+        : {}
     );
     reply(version ? 200 : 503, 'application/json', new TextEncoder().encode(body));
     return;

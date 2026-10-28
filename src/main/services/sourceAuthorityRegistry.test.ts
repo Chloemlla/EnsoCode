@@ -48,7 +48,7 @@ describe('SourceAuthorityRegistry', () => {
     ).toBe(false);
   });
 
-  it('scratch 项目由 Main 幂等登记，renderer 不能创建或删除，但可以建会话', () => {
+  it('scratch 项目由 Main 幂等登记，renderer 不能创建或删除，但可以选中和建会话', () => {
     const root = temporary();
     const registry = new SourceAuthorityRegistry({
       registryFile: path.join(root, 'registry.json'),
@@ -67,7 +67,7 @@ describe('SourceAuthorityRegistry', () => {
     );
     expect(
       registry.selectProject({ requestId: 's', projectId: first.projectId, version: 1 }).accepted
-    ).toBe(false);
+    ).toBe(true);
     expect(
       registry.removeProject({ requestId: 'r', projectId: first.projectId, version: 1 }).accepted
     ).toBe(false);

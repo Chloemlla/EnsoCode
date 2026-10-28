@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fetchPresetImport } from '@shared/presetImport';
 import type { InstructionEntry, McpServerEntry, SkillEntry } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { projectTrustedCode } from '@shared/types/project';
@@ -214,5 +215,9 @@ export function registerAssetHandlers(): void {
       }
       return writeSystemPrompt(id, content);
     }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.PRESETS_FETCH_IMPORT, (_event, url: unknown) =>
+    fetchPresetImport(url)
   );
 }

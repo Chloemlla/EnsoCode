@@ -411,6 +411,10 @@ export const zhTranslations: Record<string, string> = {
     '超过此时长没有 token 或工具结果就中止并重试。思考输出也算有输出。',
   Never: '永不',
   '{{count}} min': '{{count}} 分钟',
+  'Keep in Active after last message': '活跃中留存时长',
+  'Stays in Active for about {{count}} more min': '活跃中还会保留约 {{count}} 分钟',
+  'Viewed conversations stay in Active for this long after their last message or your last open while still in Active, then leave. Unviewed ones stay until you open them.':
+    '从最后一条消息或在「活跃中」时最后一次点开算起，此时长内即使已查看也保留，超时后移出；未查看的仍保留到你点开。',
   'Auto-retry on transient errors': '瞬态错误自动重试',
   'Retry with backoff (up to 60s apart) after 429, 5xx or network errors. Quota and billing errors are never retried. Unlimited keeps retrying until you cancel.':
     '遇到 429、5xx 或网络错误时退避重试（间隔最长 60 秒）。额度与计费错误不重试。选「无限」会一直重试，直到手动取消。',
@@ -1922,6 +1926,22 @@ export const zhTranslations: Record<string, string> = {
     '跟随技能 / MCP / 指令文件页的启用开关',
   '{{skills}} skills · {{mcp}} MCP · {{instruction}} instruction':
     '{{skills}} 个技能 · {{mcp}} 个 MCP · {{instruction}} 份指令',
+  Tail: '真尾',
+  Boost: 'Boost',
+  'Refusal retry': '拒答补发',
+  'Refusal retry prompt': '拒答补发正文',
+  Advanced: '高级',
+  'Rewrites the role paragraph or appends text to the system prompt.':
+    '改写角色段落，或往系统提示词末尾追加内容。',
+  'Import URL': '从 URL 导入',
+  'https://example.com/preset.json': 'https://example.com/preset.json',
+  'Pinned after skills and working directory. Child sessions inherit this text.':
+    '钉在 skills 和工作目录之后。子会话会继承这段文字。',
+  'Short override block after the tail. Child sessions inherit this text.':
+    '接在真尾之后的短覆盖块。子会话会继承这段文字。',
+  'If the model refuses, send this once per turn as an internal follow-up. Child sessions inherit it.':
+    '模型推脱时，每轮内部补发一次。子会话会继承。',
+  'Import hints (not selected): {{skills}} / {{mcp}}': '导入提示（未勾选）：{{skills}} / {{mcp}}',
   'Let the agent auto-discover skills under .agents/skills and .pi/skills':
     '让 agent 自动发现 .agents/skills、.pi/skills 下的 skill',
   'Explore fold': '探后折叠',

@@ -1,9 +1,11 @@
+import type { PresetImportDraft } from '@shared/presetImport';
 import type { InstructionEntry, Preset } from '@shared/types';
-import { Eye, Layers, Loader2, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, Eye, Layers, Loader2, Pencil, Plus, Trash2 } from 'lucide-react';
 import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
   Dialog,
   DialogContent,
@@ -17,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useScrollChain } from '@/hooks/useScrollChain';
 import { useI18n } from '@/i18n';
+import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { ListFilterBar, matchesFilter } from './ListFilterBar';
 import { NewSessionBadge } from './NewSessionBadge';
@@ -28,7 +31,30 @@ export function PresetsSettings() {
   const defaultPresetId = useSettingsStore((state) => state.defaultPresetId);
   const setDefaultPresetId = useSettingsStore((state) => state.setDefaultPresetId);
   const [editing, setEditing] = React.useState<Preset | 'new' | null>(null);
+  const [draft, setDraft] = React.useState<PresetImportDraft | null>(null);
+  const [importUrl, setImportUrl] = React.useState('');
+  const [importing, setImporting] = React.useState(false);
+  const [importError, setImportError] = React.useState('');
   const [previewDefault, setPreviewDefault] = React.useState(false);
+
+  const importFromUrl = async () => {
+    const url = importUrl.trim();
+    if (!url || importing) return;
+    setImporting(true);
+    setImportError('');
+    try {
+      const result = await window.electronAPI.presets.fetchImport(url);
+      if (!result.ok) {
+        setImportError(result.error);
+        return;
+      }
+      setDraft(result.draft);
+      setEditing('new');
+      setImportUrl('');
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -44,10 +70,38 @@ export function PresetsSettings() {
             )}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => setEditing('new')}>
-          <Plus className="mr-1.5 h-4 w-4" />
-          {t('New preset')}
-        </Button>
+        <div className="flex flex-col items-end gap-2">
+          <Button variant="outline" size="sm" onClick={() => setEditing('new')}>
+            <Plus className="mr-1.5 h-4 w-4" />
+            {t('New preset')}
+          </Button>
+          <div className="flex items-center gap-2">
+            <Input
+              className="h-8 w-56"
+              value={importUrl}
+              disabled={importing}
+              placeholder={t('https://example.com/preset.json')}
+              onChange={(event) => setImportUrl(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void importFromUrl();
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={importing || !importUrl.trim()}
+              onClick={() => void importFromUrl()}
+            >
+              {importing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t('Import URL')}
+            </Button>
+          </div>
+          {importError && (
+            <p role="alert" className="text-xs text-destructive">
+              {importError}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -88,6 +142,9 @@ export function PresetsSettings() {
                 <p className="flex items-center gap-2 truncate text-sm font-medium">
                   {preset.name}
                   {preset.systemPromptId && <Badge variant="outline">{t('Custom role')}</Badge>}
+                  {preset.systemPromptTailId && <Badge variant="outline">{t('Tail')}</Badge>}
+                  {preset.boostPromptId && <Badge variant="outline">{t('Boost')}</Badge>}
+                  {preset.refusalRetry && <Badge variant="outline">{t('Refusal retry')}</Badge>}
                   {defaultPresetId === preset.id && (
                     <Badge variant="secondary">{t('Default')}</Badge>
                   )}
@@ -118,7 +175,11 @@ export function PresetsSettings() {
       {editing !== null && (
         <PresetEditDialog
           preset={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          draft={editing === 'new' ? draft : null}
+          onClose={() => {
+            setEditing(null);
+            setDraft(null);
+          }}
         />
       )}
       {previewDefault && <DefaultSystemPromptDialog onClose={() => setPreviewDefault(false)} />}
@@ -128,9 +189,11 @@ export function PresetsSettings() {
 
 export function PresetEditDialog({
   preset,
+  draft,
   onClose,
 }: {
   preset: Preset | null;
+  draft?: PresetImportDraft | null;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -140,16 +203,48 @@ export function PresetEditDialog({
   const addPreset = useSettingsStore((state) => state.addPreset);
   const updatePreset = useSettingsStore((state) => state.updatePreset);
 
-  const [name, setName] = React.useState(preset?.name ?? '');
+  const [name, setName] = React.useState(draft?.name ?? preset?.name ?? '');
   const [skillIds, setSkillIds] = React.useState<string[]>(preset?.skillIds ?? []);
   const [mcpServerIds, setMcpServerIds] = React.useState<string[]>(preset?.mcpServerIds ?? []);
   const [instructionId, setInstructionId] = React.useState<string | undefined>(
     preset?.instructionId
   );
-  const [customPrompt, setCustomPrompt] = React.useState(Boolean(preset?.systemPromptId));
-  const prompt = useSystemPromptContent(preset?.systemPromptId);
+  const [customPrompt, setCustomPrompt] = React.useState(
+    Boolean(preset?.systemPromptId) || Boolean(draft?.role)
+  );
+  const [customTail, setCustomTail] = React.useState(
+    Boolean(preset?.systemPromptTailId) || Boolean(draft?.tail)
+  );
+  const [customBoost, setCustomBoost] = React.useState(
+    Boolean(preset?.boostPromptId) || Boolean(draft?.boost)
+  );
+  const [refusalRetry, setRefusalRetry] = React.useState(
+    Boolean(preset?.refusalRetry) || Boolean(draft?.refusalRetry)
+  );
+  const prompt = useSystemPromptContent(preset?.systemPromptId, draft?.role);
+  const tail = useStoredPrompt(preset?.systemPromptTailId, draft?.tail);
+  const boost = useStoredPrompt(preset?.boostPromptId, draft?.boost);
+  const retryPrompt = useStoredPrompt(preset?.refusalRetryPromptId, draft?.refusalRetryPrompt);
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState('');
+  const [advancedOpen, setAdvancedOpen] = React.useState(
+    Boolean(draft?.role || draft?.tail || draft?.boost || draft?.refusalRetryPrompt)
+  );
+  const prompts = [prompt, tail, boost, retryPrompt];
+  const promptsBusy = prompts.some((item) => item.loading);
+  const promptsFailed = prompts.some((item) => item.error);
+  // 折叠后仍要能看出里面配了什么；有读取错误则强制展开，否则保存按钮变灰却找不到原因。
+  const advancedSummary = [
+    customPrompt && t('Custom role'),
+    customTail && t('Tail'),
+    customBoost && t('Boost'),
+    refusalRetry && t('Refusal retry'),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  React.useEffect(() => {
+    if (promptsFailed) setAdvancedOpen(true);
+  }, [promptsFailed]);
 
   const toggle = (list: string[], id: string): string[] =>
     list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
@@ -157,8 +252,8 @@ export function PresetEditDialog({
   const save = async () => {
     if (
       saving ||
-      prompt.loading ||
-      prompt.error ||
+      promptsBusy ||
+      promptsFailed ||
       (customPrompt && prompt.selectionError) ||
       preset?.id === 'default'
     )
@@ -166,25 +261,54 @@ export function PresetEditDialog({
     setSaving(true);
     setSaveError('');
     try {
-      let systemPromptId: string | undefined;
-      if (customPrompt) {
-        if (!prompt.content.trim()) throw new Error(t('System prompt cannot be empty'));
-        systemPromptId = preset?.systemPromptId;
-        if (!systemPromptId || prompt.content !== prompt.originalContent) {
-          systemPromptId = crypto.randomUUID();
-          const result = await window.electronAPI.presets.writeSystemPrompt(
-            systemPromptId,
-            prompt.content
-          );
-          if (!result.ok) throw new Error(result.error || t('Failed to save system prompt'));
-        }
-      }
+      const persist = async (
+        enabled: boolean,
+        content: string,
+        existingId: string | undefined,
+        original: string
+      ) => {
+        if (!enabled) return undefined;
+        if (!content.trim()) throw new Error(t('System prompt cannot be empty'));
+        if (existingId && content === original) return existingId;
+        const id = crypto.randomUUID();
+        const result = await window.electronAPI.presets.writeSystemPrompt(id, content);
+        if (!result.ok) throw new Error(result.error || t('Failed to save system prompt'));
+        return id;
+      };
+      const systemPromptId = await persist(
+        customPrompt,
+        prompt.content,
+        preset?.systemPromptId,
+        prompt.originalContent
+      );
+      const systemPromptTailId = await persist(
+        customTail,
+        tail.content,
+        preset?.systemPromptTailId,
+        tail.originalContent
+      );
+      const boostPromptId = await persist(
+        customBoost,
+        boost.content,
+        preset?.boostPromptId,
+        boost.originalContent
+      );
+      const refusalRetryPromptId = await persist(
+        refusalRetry,
+        retryPrompt.content,
+        preset?.refusalRetryPromptId,
+        retryPrompt.originalContent
+      );
       const payload = {
         name: name.trim() || t('Untitled'),
         skillIds,
         mcpServerIds,
         instructionId,
         systemPromptId,
+        systemPromptTailId,
+        boostPromptId,
+        refusalRetry: refusalRetry || undefined,
+        refusalRetryPromptId,
       };
       if (preset) updatePreset(preset.id, payload);
       else addPreset(payload);
@@ -209,34 +333,14 @@ export function PresetEditDialog({
             <Input value={name} disabled={saving} onChange={(e) => setName(e.target.value)} />
           </Field>
 
-          <Field className="w-full">
-            <FieldLabel>{t('Role description')}</FieldLabel>
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={customPrompt}
-                disabled={saving || prompt.loading || Boolean(prompt.error)}
-                onCheckedChange={(checked) => setCustomPrompt(Boolean(checked))}
-              />
-              {t('Replace pi opening role description')}
-            </label>
-            {customPrompt && (
-              <p className="text-xs text-muted-foreground">
-                {t(
-                  'Only replaces the opening role paragraph. Available tools and everything after it stay unchanged. Applies to new and cold-restored sessions.'
-                )}
-              </p>
-            )}
-            {(customPrompt || prompt.error) && (
-              <SystemPromptText
-                content={prompt.content}
-                readOnly={saving}
-                loading={prompt.loading}
-                error={prompt.error || prompt.selectionError}
-                onChange={prompt.setContent}
-                onRetry={prompt.retry}
-              />
-            )}
-          </Field>
+          {draft && (draft.suggestedSkills.length > 0 || draft.suggestedMcp.length > 0) && (
+            <p className="text-xs text-muted-foreground">
+              {t('Import hints (not selected): {{skills}} / {{mcp}}', {
+                skills: draft.suggestedSkills.join(', ') || t('None'),
+                mcp: draft.suggestedMcp.join(', ') || t('None'),
+              })}
+            </p>
+          )}
 
           <PickList
             title={t('Skills')}
@@ -304,6 +408,101 @@ export function PresetEditDialog({
             }
             renderDetail={(i) => <InstructionDetail instruction={i} />}
           />
+
+          <Collapsible
+            open={advancedOpen}
+            onOpenChange={setAdvancedOpen}
+            className="rounded-md border"
+          >
+            <CollapsibleTrigger className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  {t('Advanced')}
+                  {advancedSummary && (
+                    <span className="truncate font-normal text-muted-foreground text-xs">
+                      {advancedSummary}
+                    </span>
+                  )}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  {t('Rewrites the role paragraph or appends text to the system prompt.')}
+                </p>
+              </div>
+              <ChevronDown
+                className={cn(
+                  'h-4 w-4 shrink-0 text-muted-foreground transition-transform',
+                  advancedOpen && 'rotate-180'
+                )}
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className="space-y-4 border-t px-3 py-3">
+                <Field className="w-full">
+                  <FieldLabel>{t('Role description')}</FieldLabel>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={customPrompt}
+                      disabled={saving || prompt.loading || Boolean(prompt.error)}
+                      onCheckedChange={(checked) => setCustomPrompt(Boolean(checked))}
+                    />
+                    {t('Replace pi opening role description')}
+                  </label>
+                  {customPrompt && (
+                    <p className="text-muted-foreground text-xs">
+                      {t(
+                        'Only replaces the opening role paragraph. Available tools and everything after it stay unchanged. Applies to new and cold-restored sessions.'
+                      )}
+                    </p>
+                  )}
+                  {(customPrompt || prompt.error) && (
+                    <SystemPromptText
+                      content={prompt.content}
+                      readOnly={saving}
+                      loading={prompt.loading}
+                      error={prompt.error || prompt.selectionError}
+                      onChange={prompt.setContent}
+                      onRetry={prompt.retry}
+                    />
+                  )}
+                </Field>
+
+                <PromptSection
+                  title={t('Tail')}
+                  checked={customTail}
+                  disabled={saving || tail.loading || Boolean(tail.error)}
+                  onCheckedChange={setCustomTail}
+                  hint={t(
+                    'Pinned after skills and working directory. Child sessions inherit this text.'
+                  )}
+                  prompt={tail}
+                  saving={saving}
+                  label={t('Tail')}
+                />
+                <PromptSection
+                  title={t('Boost')}
+                  checked={customBoost}
+                  disabled={saving || boost.loading || Boolean(boost.error)}
+                  onCheckedChange={setCustomBoost}
+                  hint={t('Short override block after the tail. Child sessions inherit this text.')}
+                  prompt={boost}
+                  saving={saving}
+                  label={t('Boost')}
+                />
+                <PromptSection
+                  title={t('Refusal retry')}
+                  checked={refusalRetry}
+                  disabled={saving || retryPrompt.loading || Boolean(retryPrompt.error)}
+                  onCheckedChange={setRefusalRetry}
+                  hint={t(
+                    'If the model refuses, send this once per turn as an internal follow-up. Child sessions inherit it.'
+                  )}
+                  prompt={retryPrompt}
+                  saving={saving}
+                  label={t('Refusal retry prompt')}
+                />
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
         </DialogPanel>
 
         <DialogFooter>
@@ -318,9 +517,12 @@ export function PresetEditDialog({
           <Button
             disabled={
               saving ||
-              prompt.loading ||
-              Boolean(prompt.error) ||
-              (customPrompt && (Boolean(prompt.selectionError) || !prompt.content.trim()))
+              promptsBusy ||
+              promptsFailed ||
+              (customPrompt && (Boolean(prompt.selectionError) || !prompt.content.trim())) ||
+              (customTail && !tail.content.trim()) ||
+              (customBoost && !boost.content.trim()) ||
+              (refusalRetry && !retryPrompt.content.trim())
             }
             onClick={save}
           >
@@ -333,16 +535,114 @@ export function PresetEditDialog({
   );
 }
 
-function useSystemPromptContent(id?: string) {
+function PromptSection({
+  title,
+  checked,
+  disabled,
+  onCheckedChange,
+  hint,
+  prompt,
+  saving,
+  label,
+}: {
+  title: string;
+  checked: boolean;
+  disabled: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  hint: string;
+  prompt: ReturnType<typeof useStoredPrompt>;
+  saving: boolean;
+  label: string;
+}) {
+  return (
+    <Field className="w-full">
+      <label className="flex items-center gap-2 text-sm font-medium">
+        <Checkbox
+          checked={checked}
+          disabled={disabled}
+          onCheckedChange={(value) => onCheckedChange(Boolean(value))}
+        />
+        {title}
+      </label>
+      {checked && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {(checked || prompt.error) && (
+        <SystemPromptText
+          content={prompt.content}
+          readOnly={saving}
+          loading={prompt.loading}
+          error={prompt.error}
+          onChange={prompt.setContent}
+          onRetry={prompt.retry}
+          label={label}
+        />
+      )}
+    </Field>
+  );
+}
+
+function useStoredPrompt(id?: string, initial?: string) {
   const { t } = useI18n();
-  const [content, setContent] = React.useState('');
-  const [originalContent, setOriginalContent] = React.useState('');
-  const [loading, setLoading] = React.useState(true);
+  const [content, setContent] = React.useState(initial ?? '');
+  const [originalContent, setOriginalContent] = React.useState(initial ?? '');
+  const [loading, setLoading] = React.useState(Boolean(id) && initial === undefined);
+  const [error, setError] = React.useState('');
+  const [attempt, setAttempt] = React.useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt retries failed file reads.
+  React.useEffect(() => {
+    if (initial !== undefined || !id) {
+      setLoading(false);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    setError('');
+    void window.electronAPI.presets
+      .readSystemPrompt(id)
+      .then((result) => {
+        if (!alive) return;
+        if (!result.ok) {
+          setError(result.error || t('Failed to read system prompt'));
+          return;
+        }
+        setOriginalContent(result.content);
+        setContent(result.content);
+      })
+      .catch((reason: unknown) => {
+        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, attempt, t, initial]);
+  return {
+    content,
+    setContent,
+    originalContent,
+    loading,
+    error,
+    retry: () => setAttempt((value) => value + 1),
+  };
+}
+
+function useSystemPromptContent(id?: string, initial?: string) {
+  const { t } = useI18n();
+  const [content, setContent] = React.useState(initial ?? '');
+  const [originalContent, setOriginalContent] = React.useState(initial ?? '');
+  const [loading, setLoading] = React.useState(initial === undefined);
   const [error, setError] = React.useState('');
   const [selectionError, setSelectionError] = React.useState('');
   const [attempt, setAttempt] = React.useState(0);
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt retries failed file reads.
   React.useEffect(() => {
+    if (initial !== undefined) {
+      setLoading(false);
+      setError('');
+      setSelectionError('');
+      return;
+    }
     let alive = true;
     setLoading(true);
     setError('');
@@ -371,7 +671,7 @@ function useSystemPromptContent(id?: string) {
     return () => {
       alive = false;
     };
-  }, [id, attempt, t]);
+  }, [id, attempt, t, initial]);
   return {
     content,
     setContent,
@@ -390,6 +690,7 @@ function SystemPromptText({
   error,
   onChange,
   onRetry,
+  label,
 }: {
   content: string;
   readOnly: boolean;
@@ -397,6 +698,7 @@ function SystemPromptText({
   error: string;
   onChange?: (content: string) => void;
   onRetry: () => void;
+  label?: string;
 }) {
   const { t } = useI18n();
   if (loading) return <p className="text-sm text-muted-foreground">{t('Loading...')}</p>;
@@ -413,7 +715,7 @@ function SystemPromptText({
     );
   return (
     <Textarea
-      aria-label={t('Role description')}
+      aria-label={label ?? t('Role description')}
       className="h-32 w-full resize-y font-mono text-xs leading-relaxed"
       value={content}
       readOnly={readOnly}

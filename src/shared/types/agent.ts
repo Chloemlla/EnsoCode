@@ -1147,6 +1147,12 @@ export type AgentCommand =
       rolePrompt?: string;
       /** 仅普通 parent：替换 pi 默认提示词开头的角色段落，其余运行时内容保留 */
       systemPrompt?: string;
+      /** skills/cwd 之后的真尾段 */
+      systemPromptAppend?: string;
+      /** 真尾之后的短覆盖块 */
+      systemPromptBoost?: string;
+      /** 推脱时内部补发的那一句；缺省不重试 */
+      refusalRetryPrompt?: string;
       botMode?: boolean;
       /** Bot 群聊成员会话：挂 group_tasks / group_history 工具（私聊 / 委派子会话不挂） */
       botGroupTasks?: boolean;
@@ -3033,6 +3039,9 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'remote',
           'rolePrompt',
           'systemPrompt',
+          'systemPromptAppend',
+          'systemPromptBoost',
+          'refusalRetryPrompt',
           'botMode',
           'botGroupTasks',
           'botRoutines',
@@ -3084,6 +3093,9 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           parseSpawnModelConfig(value.approvalReviewer) === null) ||
         (value.rolePrompt !== undefined && !isNonEmptyString(value.rolePrompt)) ||
         (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt)) ||
+        (value.systemPromptAppend !== undefined && !isNonEmptyString(value.systemPromptAppend)) ||
+        (value.systemPromptBoost !== undefined && !isNonEmptyString(value.systemPromptBoost)) ||
+        (value.refusalRetryPrompt !== undefined && !isNonEmptyString(value.refusalRetryPrompt)) ||
         (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
         (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
         (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath } from 'node:fs/promises';
+import { readdir, readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { encodeBase64, gzipRemoteJson, REMOTE_GZIP_MIN_CHARS } from '@enso/pair';
 
@@ -140,5 +140,44 @@ export function downloadEstimate(root: string, gzip: boolean, build = ''): Promi
     return total;
   })().catch(() => 0);
   if (build) estimates.set(key, task);
+  return task;
+}
+
+export interface BundleManifest {
+  text: string;
+  id: string;
+}
+
+const manifests = new Map<string, Promise<BundleManifest | null>>();
+
+/**
+ * 中继内置同一份 renderer 时手机直接从中继取：清单逐行「sha256  相对路径」按路径排序，
+ * 不含入口页（宿主下发时会注入）、sourcemap 与符号链接；id 为清单的 sha256。
+ * 算法须与 packages/relay-go/deskbundle.go 一致。
+ */
+export function bundleManifest(root: string, build: string): Promise<BundleManifest | null> {
+  const key = `${root}\0${build}`;
+  const cached = manifests.get(key);
+  if (cached) return cached;
+  const task = (async () => {
+    const files: [path: string, hash: string][] = [];
+    // 不用 readdir recursive：asar 内未必支持
+    const walk = async (dir: string, prefix: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const path = `${prefix}${entry.name}`;
+        if (entry.isDirectory()) await walk(join(dir, entry.name), `${path}/`);
+        else if (entry.isFile() && !HTML_ENTRIES.has(path) && !path.endsWith('.map')) {
+          const data = await readFile(join(dir, entry.name));
+          files.push([path, createHash('sha256').update(data).digest('hex')]);
+        }
+      }
+    };
+    await walk(root, '');
+    if (files.length === 0) return null;
+    files.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const text = files.map(([path, hash]) => `${hash}  ${path}\n`).join('');
+    return { text, id: createHash('sha256').update(text).digest('hex') };
+  })().catch(() => null);
+  manifests.set(key, task);
   return task;
 }

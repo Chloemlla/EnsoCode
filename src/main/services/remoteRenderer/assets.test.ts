@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  bundleManifest,
   downloadEstimate,
   initialAssetPaths,
   injectWebPreload,
@@ -94,5 +95,26 @@ describe('first-load download estimate', () => {
     expect(plain).toBeGreaterThan(20_000 * 13);
     expect(packed).toBeGreaterThan(0);
     expect(packed).toBeLessThan(plain / 5);
+  });
+});
+
+describe('relay bundle manifest', () => {
+  it('hashes every servable file except HTML entries, maps and symlinks, matching the relay', async () => {
+    const root = fixture();
+    mkdirSync(join(root, 'fonts'));
+    writeFileSync(join(root, 'fonts', 'f.ttf'), 'x');
+    writeFileSync(join(root, 'assets', 'a.js.map'), '{}');
+    const manifest = await bundleManifest(root, 'b1');
+    expect(manifest?.text).toBe(
+      'f4c5cf9bb78e85f15dc27180260637cf24b2a24bc39e0788783a3accc4dde614  assets/a.js\n' +
+        '2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881  fonts/f.ttf\n' +
+        'cb28eafc61a54ef9b4621764371ef6b8fc5cc1a217a966416197ed9a903aa585  web-preload.js\n'
+    );
+    // packages/relay-go/deskbundle_test.go 断言同一个 id：两边算法必须一致
+    expect(manifest?.id).toBe('8832e4e906adc9ed3a64e64d5910f3cf121c36faf9b39c7748ac9ec1d1f304b6');
+  });
+
+  it('is null when the renderer is missing', async () => {
+    expect(await bundleManifest(join(fixture(), 'missing'), 'b2')).toBeNull();
   });
 });

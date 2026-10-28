@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { deskBase, downloadProgress, loadDeskMeta, saveDeskMeta } from './launch';
+import {
+  buildReady,
+  deskBase,
+  downloadProgress,
+  loadDeskMeta,
+  markBuildReady,
+  saveDeskMeta,
+} from './launch';
 
 class MemoryStorage {
   private map = new Map<string, string>();
@@ -44,5 +51,33 @@ describe('downloadProgress', () => {
 
   it('falls back to downloaded only when an old desktop reports no total', () => {
     expect(downloadProgress(2.2 * 1024 * 1024)).toBe('2.2 MB');
+  });
+});
+
+class MemoryCache {
+  map = new Map<string, Response>();
+  async match(url: string) {
+    return this.map.get(url);
+  }
+  async put(url: string, response: Response) {
+    this.map.set(url, response);
+  }
+}
+
+describe('build readiness', () => {
+  const origin = 'https://relay.example';
+  const base = deskBase('pair', '1.0.0-abc');
+
+  it('does not treat an interrupted download (entry page only) as launchable', async () => {
+    const cache = new MemoryCache();
+    await cache.put(`${origin}${base}/index.html`, new Response('<html>'));
+    expect(await buildReady(cache, origin, base)).toBe(false);
+  });
+
+  it('is launchable once the renderer has booted, per build', async () => {
+    const cache = new MemoryCache();
+    await markBuildReady(cache, origin, base);
+    expect(await buildReady(cache, origin, base)).toBe(true);
+    expect(await buildReady(cache, origin, deskBase('pair', '1.0.1-def'))).toBe(false);
   });
 });

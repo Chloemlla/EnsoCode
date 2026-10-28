@@ -68,6 +68,7 @@
       "!temp",
       "!docs/project-history/**/*.html",
       "!packages/relay-go/frontend/assets",
+      "!packages/relay-go/frontend/desk-bundle",
       "!src/agent/continuousMemory/vendor",
       "!src/shared/providers/devin/vendor"
     ]

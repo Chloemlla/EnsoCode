@@ -2,15 +2,15 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
 import { DEFAULT_PERSONA_PROMPT } from '../../shared/systemPrompt';
+import { isSystemPromptId } from '../../shared/systemPromptId';
+
+export { isSystemPromptId };
 
 export interface SystemPromptResult {
   ok: boolean;
   content: string;
   error?: string;
 }
-
-export const isSystemPromptId = (id: string): boolean =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(id);
 
 function storeDir(): string {
   return join(app.getPath('userData'), 'system-prompts');

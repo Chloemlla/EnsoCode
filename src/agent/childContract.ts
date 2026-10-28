@@ -23,3 +23,22 @@ export function appendSystemPromptExtension(name: string, text: string): InlineE
     },
   };
 }
+
+/**
+ * 注册一个具名系统提示词段，落在整段提示词的最末（pi 的 sections 排在 skills / cwd 之后）。
+ * appendSystemPrompt 那个段（pi 内部叫 addendum）排在 skills 之前，长技能清单会把尾部提醒推离输出位置。
+ */
+export function tailSystemPromptSection(name: string, text: string): InlineExtension {
+  return {
+    name,
+    hidden: true,
+    factory: (pi) => {
+      pi.on('before_agent_start', (event) => {
+        const options = event.systemPromptOptions as { sections?: Record<string, string> };
+        const sections = options.sections ?? {};
+        if (sections[name] === text) return;
+        options.sections = { ...sections, [name]: text };
+      });
+    },
+  };
+}

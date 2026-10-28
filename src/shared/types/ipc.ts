@@ -159,6 +159,8 @@ export const IPC_CHANNELS = {
   PRESETS_SYSTEM_PROMPT_READ: 'presets:system-prompt-read',
   PRESETS_SYSTEM_PROMPT_WRITE: 'presets:system-prompt-write',
 
+  PRESETS_FETCH_IMPORT: 'presets:fetch-import',
+
   // Agent sessions (Renderer → Main → utilityProcess)
   AGENT_SPAWN: 'agent:spawn',
   AGENT_PROMPT: 'agent:prompt',

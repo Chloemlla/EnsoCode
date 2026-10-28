@@ -31,6 +31,17 @@ export function saveDeskMeta(storage: KeyValue, pairId: string, meta: DeskMeta):
 export const deskBase = (pairId: string, version: string): string =>
   `/desk/r/${encodeURIComponent(pairId)}/${encodeURIComponent(version)}`;
 
+/** 入口页最先进缓存，下载中途打断也会留下它；renderer 真正跑起来后才记完成标记 */
+const readyUrl = (origin: string, base: string) => `${origin}${base}/.ready`;
+
+export async function buildReady(cache: Pick<Cache, 'match'>, origin: string, base: string) {
+  return Boolean(await cache.match(readyUrl(origin, base)));
+}
+
+export async function markBuildReady(cache: Pick<Cache, 'put'>, origin: string, base: string) {
+  await cache.put(readyUrl(origin, base), new Response('1'));
+}
+
 const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 
 /** 「1.2 / 4.8 MB」；旧桌面不报总量时只显示已下载。估算有偏差，未完成前不超过总量 */

@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { collectPresetPromptIds } from '@shared/presetPrompts';
 import type {
   ConfigSyncCommitResult,
   ConfigSyncExportOptions,
@@ -33,7 +34,6 @@ import {
 import { isValidId } from '../instructionStore';
 import {
   deleteSystemPrompt,
-  isSystemPromptId,
   readStoredSystemPrompt,
   writeSystemPrompt,
 } from '../systemPromptStore';
@@ -133,6 +133,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   autoArchiveIdleDays: { mode: 'portable' },
   autoArchiveMergedWorktrees: { mode: 'portable' },
   autoDeleteArchivedDays: { mode: 'portable' },
+  activeRetentionMinutes: { mode: 'portable' },
   backgroundImageEnabled: {
     mode: 'excluded',
     reason: 'background appearance activation could enable unavailable or private resources',
@@ -237,9 +238,7 @@ function referencedSystemPromptIds(value: unknown): Set<string> {
   const ids = new Set<string>();
   if (!Array.isArray(value)) return ids;
   for (const preset of value) {
-    if (!preset || typeof preset !== 'object') continue;
-    const id = (preset as Record<string, unknown>).systemPromptId;
-    if (typeof id === 'string' && isSystemPromptId(id)) ids.add(id);
+    for (const id of collectPresetPromptIds(preset)) ids.add(id);
   }
   return ids;
 }
@@ -400,18 +399,13 @@ function collectBundle(secretsIncluded: boolean): {
   }
   const collectedSystemPromptIds = new Set<string>();
   for (const value of Array.isArray(state.presets) ? state.presets : []) {
-    if (!value || typeof value !== 'object') continue;
-    const systemPromptId = (value as Record<string, unknown>).systemPromptId;
-    if (systemPromptId === undefined || collectedSystemPromptIds.has(String(systemPromptId))) {
-      continue;
+    for (const systemPromptId of collectPresetPromptIds(value)) {
+      if (collectedSystemPromptIds.has(systemPromptId)) continue;
+      const result = readStoredSystemPrompt(systemPromptId);
+      if (!result.ok) throw new ExportError(MISSING_SYSTEM_PROMPT);
+      collectedSystemPromptIds.add(systemPromptId);
+      systemPrompts.push({ id: systemPromptId, content: result.content });
     }
-    if (typeof systemPromptId !== 'string' || !isSystemPromptId(systemPromptId)) {
-      throw new ExportError(MISSING_SYSTEM_PROMPT);
-    }
-    const result = readStoredSystemPrompt(systemPromptId);
-    if (!result.ok) throw new ExportError(MISSING_SYSTEM_PROMPT);
-    collectedSystemPromptIds.add(systemPromptId);
-    systemPrompts.push({ id: systemPromptId, content: result.content });
   }
   return {
     bundle: {
@@ -662,20 +656,32 @@ export async function commitImportForSender(
       usedSystemPromptIds.add(destinationId);
       systemPromptIdMap.set(resource.id, destinationId);
     }
-    const importedPromptIdsByPreset = new Map<string, string>();
+    const promptKeys = [
+      'systemPromptId',
+      'systemPromptTailId',
+      'boostPromptId',
+      'refusalRetryPromptId',
+    ] as const;
+    const importedPromptIdsByPreset = new Map<string, Record<string, string>>();
     for (const preset of entry.bundle.state.presets) {
-      if (!preset.systemPromptId) continue;
       const presetId = entry.plan.presetIdMap[preset.id];
-      const promptId = systemPromptIdMap.get(preset.systemPromptId);
-      if (!presetId || !promptId) throw new Error('Unable to map system prompt resource');
-      importedPromptIdsByPreset.set(presetId, promptId);
+      if (!presetId) continue;
+      const mapped: Record<string, string> = {};
+      for (const key of promptKeys) {
+        const oldId = preset[key];
+        if (typeof oldId !== 'string') continue;
+        const promptId = systemPromptIdMap.get(oldId);
+        if (!promptId) throw new Error('Unable to map system prompt resource');
+        mapped[key] = promptId;
+      }
+      if (Object.keys(mapped).length > 0) importedPromptIdsByPreset.set(presetId, mapped);
     }
     const presets = Array.isArray(patch.presets) ? patch.presets : [];
     patch.presets = presets.map((value) => {
       if (!value || typeof value !== 'object') return value;
       const item = { ...(value as Record<string, unknown>) };
-      const promptId = importedPromptIdsByPreset.get(String(item.id));
-      if (promptId) item.systemPromptId = promptId;
+      const mapped = importedPromptIdsByPreset.get(String(item.id));
+      if (mapped) Object.assign(item, mapped);
       return item;
     });
     for (const resource of entry.bundle.resources.systemPrompts ?? []) {

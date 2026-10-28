@@ -288,7 +288,6 @@ export class SourceAuthorityRegistry {
     const project = this.projects.get(request.projectId);
     return project &&
       project.kind !== 'bot-home' &&
-      project.kind !== 'scratch' &&
       project.state === 'active' &&
       project.version === request.version
       ? { accepted: true, value: this.hydrateProject(project) }
