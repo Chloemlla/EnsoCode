@@ -93,7 +93,7 @@ export function hasPackagedAddon(name: string): boolean {
 }
 
 async function defaultRoot(): Promise<string> {
-  const { app } = await import('electron');
+  const { app } = await import('@platform');
   return path.join(app.getPath('userData'), 'llama-gpu-backends');
 }
 

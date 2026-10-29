@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
+import { net } from '@platform';
 import { sniffImage } from '@shared/bots/cardPng';
 import {
   BOT_AVATAR_HOST,
@@ -12,7 +13,6 @@ import {
   REMOTE_FETCH_HOST,
 } from '@shared/localImage';
 import { isBotId } from '@shared/types/bot';
-import { net, protocol } from 'electron';
 
 let botAvatarResolver: (botId: string) => string | null = () => null;
 
@@ -48,30 +48,6 @@ const MIME_TYPES: Record<string, string> = {
   ogv: 'video/ogg',
   mov: 'video/quicktime',
 };
-
-/** 必须在 app ready 之前调用（Electron 限制） */
-export function registerLocalImageSchemePrivileges(): void {
-  protocol.registerSchemesAsPrivileged([
-    {
-      scheme: LOCAL_IMAGE_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        bypassCSP: true,
-        stream: true,
-      },
-    },
-  ]);
-}
-
-/** 在 app ready 之后调用 */
-export function registerLocalImageProtocolHandler(): void {
-  protocol.handle(LOCAL_IMAGE_SCHEME, (request) =>
-    handleLocalImageRequest(request.url, request.headers.get('range'))
-  );
-}
 
 /** 远程桌面隧道复用同一套校验：浏览器里的 local-image 请求经隧道转到这里 */
 export async function handleLocalImageRequest(

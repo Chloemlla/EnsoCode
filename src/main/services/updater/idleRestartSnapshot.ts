@@ -1,15 +1,14 @@
 import {
-  anyWindowFocused,
   countCatalogIdleBlocks,
   countPersistedQueuedMessages,
   mergeIdleRestartBlocks,
   persistedConversations,
 } from '@shared/updater/idleRestart';
-import { BrowserWindow } from 'electron';
 import { agentSessionIndex } from '../../ipc/capabilities';
 import { readSettings } from '../../ipc/settings';
 import { getPairCatalog } from '../pairHost';
 import { headlessIdleBlocks, isPairHeadless } from '../pairSessionHost';
+import { anyRendererFocused } from '../renderers';
 import type { IdleRestartObservation } from './idleRestartGate';
 
 export function currentIdleRestartObservation(
@@ -30,7 +29,7 @@ export function currentIdleRestartObservation(
     enabled,
     downloaded,
     agentBusy: agentSessionIndex.anyWorkspaceBusy(),
-    windowFocused: anyWindowFocused(BrowserWindow.getAllWindows()),
+    windowFocused: anyRendererFocused(),
     ...blocks,
   };
 }

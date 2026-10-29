@@ -64,6 +64,11 @@ export interface RecentProject {
   sourceName: string;
 }
 
+/** 宿主机目录浏览结果：parent 为 null 表示已到根 */
+export type HostDirListing =
+  | { ok: true; path: string; parent: string | null; dirs: string[] }
+  | { ok: false; error: string };
+
 /** 本机已安装、可用于打开项目目录的编辑器 / 终端（id 是注册表标识，不是路径） */
 export interface OpenInApp {
   id: string;

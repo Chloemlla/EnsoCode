@@ -29,7 +29,10 @@ vi.mock('../services/agentHost', () => ({
   readSettingsState: () => ({}),
   setWorkspaceBusyResolver: vi.fn(),
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: (id: number) => id === 1 }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: (id: number) => id === 1,
+}));
 vi.mock('./agent', () => ({
   getSourceAuthorityRegistry: () => ({ project: mocks.project, conversation: mocks.conversation }),
 }));

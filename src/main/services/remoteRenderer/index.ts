@@ -8,14 +8,14 @@ import {
   type HostToRemote,
   type RemoteToHost,
 } from '@enso/pair';
+import { app, type IpcEvent, type IpcInvokeEvent, ipcMain } from '@platform';
 import { RemoteReadCache, takeRemoteMarks } from '@shared/remoteDelta';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, type IpcMainEvent, type IpcMainInvokeEvent, ipcMain } from 'electron';
 import { readSettings } from '../../ipc/settings';
-import { isMainWindowAlive } from '../../windows/MainWindow';
-import { isServerMode } from '../appServerMode';
 import { handleLocalImageRequest } from '../localImageProtocol';
 import { isPairHeadless, setPairHeadless } from '../pairSessionHost';
+import { localMainContents } from '../renderers';
+import { localUi } from '../uiHost';
 import { bundleManifest, downloadEstimate, readRendererAsset, rendererBuildId } from './assets';
 import { isRemoteChannelAllowed } from './channels';
 import { type RemoteLink, setRemoteHostHooks } from './hostHooks';
@@ -31,6 +31,13 @@ import {
   remoteSenders,
   staleRemoteSenders,
 } from './senders';
+
+let hostControl = false;
+
+/** 无界面服务端把自身的更新/重启开放给已配对的浏览器 */
+export function allowRemoteHostControl(): void {
+  hostControl = true;
+}
 
 /** 断线后保留远端 renderer 的时长：期间事件缓冲，同 cid 回来即续上 */
 const RESUME_GRACE_MS = 30_000;
@@ -75,6 +82,10 @@ export function setupRemoteRenderer(): void {
   });
 }
 
+const isMainWindowAlive = (): boolean => localMainContents() !== null;
+/** 服务器没有本地界面，等同永久托盘态 */
+const isTrayMode = (): boolean => localUi()?.trayMode() ?? true;
+
 export const hasMainRenderer = (): boolean => isMainWindowAlive() || hasRemoteMain();
 
 function isLeader(sender: RemoteSender): boolean {
@@ -92,13 +103,13 @@ export function refreshRemoteLeadership(): void {
     leaderSent.set(sender.id, value);
     sender.send(IPC_CHANNELS.REMOTE_LEADER_CHANGED, value);
   }
-  if (!desktop && isServerMode()) {
+  if (!desktop && isTrayMode()) {
     const headless = leader === null;
     if (isPairHeadless() !== headless) setPairHeadless(headless);
   }
 }
 
-function fakeEvent(sender: RemoteSender): IpcMainInvokeEvent & IpcMainEvent {
+function fakeEvent(sender: RemoteSender): IpcInvokeEvent & IpcEvent {
   return {
     sender,
     senderFrame: null,
@@ -109,7 +120,7 @@ function fakeEvent(sender: RemoteSender): IpcMainInvokeEvent & IpcMainEvent {
     defaultPrevented: false,
     preventDefault() {},
     reply: (channel: string, ...args: unknown[]) => sender.send(channel, ...args),
-  } as unknown as IpcMainInvokeEvent & IpcMainEvent;
+  } as unknown as IpcInvokeEvent & IpcEvent;
 }
 
 function settingsState(): Record<string, unknown> {
@@ -222,7 +233,7 @@ async function invoke(link: RemoteLink, command: Extract<RemoteToHost, { type: '
   if (!sender.accept(command.id)) return;
   const fail = (error: string) =>
     sender.post({ type: 'rpc-result', cid: command.cid, id: command.id, ok: false, error });
-  if (!isRemoteChannelAllowed(command.ch, isLeader(sender))) {
+  if (!isRemoteChannelAllowed(command.ch, isLeader(sender), hostControl)) {
     return fail(`Channel '${command.ch}' is not available remotely`);
   }
   const handler = registeredHandler(command.ch);
@@ -261,7 +272,7 @@ async function invoke(link: RemoteLink, command: Extract<RemoteToHost, { type: '
 function emit(link: RemoteLink, command: Extract<RemoteToHost, { type: 'rpc-send' }>): void {
   const sender = getRemoteSender(link.pairId, command.cid);
   if (!sender?.online || !sender.accept(command.id)) return;
-  if (!isRemoteChannelAllowed(command.ch, isLeader(sender))) return;
+  if (!isRemoteChannelAllowed(command.ch, isLeader(sender), hostControl)) return;
   const decoded = decodeRemoteValue<unknown>(command.args);
   const args = Array.isArray(decoded) ? decoded : [];
   const event = fakeEvent(sender);

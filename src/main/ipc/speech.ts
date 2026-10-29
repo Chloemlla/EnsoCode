@@ -1,3 +1,4 @@
+import { ipcMain, mediaAccess, type RendererContents } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import {
   isSpeechModelId,
@@ -8,7 +9,7 @@ import {
   type SpeechTranscribeResult,
   type VoiceSession,
 } from '@shared/types/speech';
-import { ipcMain, systemPreferences, type WebContents } from 'electron';
+import { broadcastToRenderers, isMainRenderer, isSettingsRenderer } from '../services/renderers';
 import {
   cancelSpeechDownload,
   deleteSpeechModel,
@@ -19,9 +20,6 @@ import {
   setSpeechProgressSink,
   startSpeechDownload,
 } from '../services/speech/service';
-import { sendToAllWindows } from '../windows/createAppWindow';
-import { isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
 
 const UNSUPPORTED: SpeechStatusDto = {
   state: 'unsupported',
@@ -36,14 +34,14 @@ const MAX_SESSIONS_PER_SENDER = 2;
 const sessions = new Map<number, Map<string, VoiceSession>>();
 
 function isTrustedWindow(webContentsId: number): boolean {
-  return isMainWebContents(webContentsId) || isSettingsWebContents(webContentsId);
+  return isMainRenderer(webContentsId) || isSettingsRenderer(webContentsId);
 }
 
 function isSessionId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= SPEECH_SESSION_ID_MAX;
 }
 
-function sessionsOf(sender: WebContents): Map<string, VoiceSession> {
+function sessionsOf(sender: RendererContents): Map<string, VoiceSession> {
   let owned = sessions.get(sender.id);
   if (!owned) {
     const id = sender.id;
@@ -60,9 +58,8 @@ function sessionsOf(sender: WebContents): Map<string, VoiceSession> {
 export function registerSpeechHandlers(): void {
   // 设置窗下载，主窗口据 done 事件重查状态决定是否显示麦克风
   // （主窗口 UI 在 WebContentsView 里，win.webContents.send 送不到）
-  setSpeechProgressSink((progress) => sendToAllWindows(IPC_CHANNELS.SPEECH_PROGRESS, progress));
-  // 设置变化（如填入云端 Key）改变可用性时，各窗口重查状态
-  onSpeechAvailabilityChange(() => sendToAllWindows(IPC_CHANNELS.SPEECH_STATUS_CHANGED));
+  setSpeechProgressSink((progress) => broadcastToRenderers(IPC_CHANNELS.SPEECH_PROGRESS, progress));
+  onSpeechAvailabilityChange(() => broadcastToRenderers(IPC_CHANNELS.SPEECH_STATUS_CHANGED));
 
   ipcMain.handle(IPC_CHANNELS.SPEECH_STATUS, (event) =>
     isTrustedWindow(event.sender.id) ? getSpeechStatus() : UNSUPPORTED
@@ -89,7 +86,7 @@ export function registerSpeechHandlers(): void {
   // 首块到达时开会话；中间结果只回发给发起窗口
   ipcMain.on(IPC_CHANNELS.SPEECH_SESSION_PUSH, (event, sessionId: unknown, audio: unknown) => {
     const sender = event.sender;
-    if (!isMainWebContents(sender.id) || !isSessionId(sessionId)) return;
+    if (!isMainRenderer(sender.id) || !isSessionId(sessionId)) return;
     if (!(audio instanceof Float32Array) || audio.length > MAX_PUSH_SAMPLES) return;
     const owned = sessionsOf(sender);
     let session = owned.get(sessionId);
@@ -112,7 +109,7 @@ export function registerSpeechHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.SPEECH_SESSION_FINISH,
     (event, sessionId: unknown): Promise<SpeechTranscribeResult> | SpeechTranscribeResult => {
-      if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'disabled' };
+      if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'disabled' };
       if (!isSessionId(sessionId)) return { ok: false, error: 'invalid-audio' };
       const owned = sessions.get(event.sender.id);
       const session = owned?.get(sessionId);
@@ -132,11 +129,10 @@ export function registerSpeechHandlers(): void {
 
   // macOS 必须由主进程发起授权；拒绝过则只能去系统设置里打开
   ipcMain.handle(IPC_CHANNELS.SPEECH_MIC_ACCESS, async (event) => {
-    if (!isMainWebContents(event.sender.id)) return false;
+    if (!isMainRenderer(event.sender.id)) return false;
     // 开录第一步就是问授权：顺带让云端模型提前建连
     prewarmSpeech();
     if (process.platform !== 'darwin') return true;
-    if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true;
-    return systemPreferences.askForMediaAccess('microphone');
+    return mediaAccess.microphone();
   });
 }

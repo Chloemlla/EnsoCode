@@ -19,6 +19,7 @@ import {
   toBase64Url,
   toWebSocketUrl,
 } from '@enso/pair';
+import { powerMonitor, safeStorage } from '@platform';
 import type {
   NodeActionResult,
   NodeMessage,
@@ -26,7 +27,6 @@ import type {
   NodesStatus,
   RemoteNodeStatus,
 } from '@shared/types/nodes';
-import { powerMonitor, safeStorage } from 'electron';
 import {
   adoptHostname,
   loadNodes,

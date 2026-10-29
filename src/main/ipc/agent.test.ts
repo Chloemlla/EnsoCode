@@ -60,7 +60,10 @@ vi.mock('electron', () => ({
 vi.mock('../services/sessionFileCleanup', () => ({
   removeConversationSessionFiles: mocks.cleanupSessionFiles,
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: mocks.isMainWebContents }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: mocks.isMainWebContents,
+}));
 vi.mock('../services/oauthProviders', () => ({
   readStoredOauthCredentialKeys: mocks.credentials,
 }));
@@ -110,13 +113,23 @@ vi.mock('../services/agentHost', () => ({
   readSettingsState: mocks.readSettingsState,
   sendComputerResultToSession: mocks.sendComputerResult,
 }));
-vi.mock('../services/computerHost', () => ({
-  computerHost: {
-    invoke: mocks.computerInvoke,
-    close: vi.fn(),
-    closeAll: mocks.computerCloseAll,
-  },
-}));
+vi.mock('../services/desktopHooks', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/desktopHooks')>();
+  actual.installDesktopHooks({
+    session: {
+      ...actual.sessionDesktop(),
+      invokeComputer: mocks.computerInvoke,
+      closeComputer: vi.fn(),
+      closeAllComputers: mocks.computerCloseAll,
+    },
+    notify: {
+      maybeNotify: vi.fn(),
+      maybeNotifyBot: mocks.maybeNotifyBot,
+      setViewedSession: vi.fn(),
+    },
+  });
+  return actual;
+});
 vi.mock('../services/agentDispatchService', async () => {
   const actual = await vi.importActual<typeof import('../services/agentDispatchService')>(
     '../services/agentDispatchService'
@@ -131,10 +144,6 @@ vi.mock('../services/agentDispatchService', async () => {
     },
   };
 });
-vi.mock('../services/notifications', () => ({
-  maybeNotify: vi.fn(),
-  maybeNotifyBot: mocks.maybeNotifyBot,
-}));
 vi.mock('../services/pairHost', () => ({
   forwardAgentEvent: vi.fn(),
   setPairAgentBridge: mocks.setPairAgentBridge,

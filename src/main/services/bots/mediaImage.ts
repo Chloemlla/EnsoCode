@@ -1,4 +1,4 @@
-import { nativeImage } from 'electron';
+import { images } from '@platform';
 import { MEDIA_FILE_MAX } from './media';
 
 const MIME: Record<string, string> = {
@@ -12,8 +12,7 @@ export const mediaMime = (mediaId: string): string =>
   MIME[mediaId.slice(mediaId.lastIndexOf('.') + 1)] ?? 'image/png';
 
 function decode(data: Buffer) {
-  const image = nativeImage.createFromBuffer(data);
-  return image.isEmpty() ? null : image;
+  return images.fromBuffer(data);
 }
 
 /** 依次缩小长边 / 降质量，直到 accept 通过；解码失败（GIF/WebP 等）返回 null */

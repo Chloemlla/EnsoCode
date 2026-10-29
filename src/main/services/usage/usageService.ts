@@ -1,10 +1,10 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { app } from '@platform';
 import { aggregateUsage } from '@shared/usage/aggregate';
 import { mergeUsageSources } from '@shared/usage/ledger';
 import { type ModelPricing, mergePricingTable, type PricingTable } from '@shared/usage/pricing';
 import type { UsageRangeDays, UsageSummaryResult } from '@shared/usage/types';
-import { app } from 'electron';
 import { getRuntime } from '../oauthProviders';
 import { loadUsageModelPricing, loadUsageProjectAliases } from './aliases';
 import { loadLedger } from './ledgerStore';

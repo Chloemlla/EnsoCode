@@ -52,6 +52,7 @@ import { app, session, WebContentsView } from 'electron';
 import { getWorkbenchView } from '../windows/createAppWindow';
 import { pinnedWorkbenchBounds } from '../windows/win32Restore';
 import { assertBrowserUrl, resolveLocalCwdForBrowser } from './browserFileRoot';
+import { isBrowserPartition, partitionName } from './browserPartition';
 import {
   BROWSER_TAB_CLOSED_NOTICE,
   BROWSER_TAKEOVER_NOTICE,
@@ -60,13 +61,14 @@ import {
   browserTabBusyMessage,
 } from './browserTabClaims';
 
+export { isBrowserPartition, partitionName };
+
 /**
  * 内嵌浏览器宿主：guest 页只活在 Main。独立 persist session，与编辑器 defaultSession 切开。
  * 第一刀无头：view 不挂窗口，导航 / 快照 / 点 / 填 / 截图全走 webContents。
  * 不 import ipcMain；协议入口在 ipc/agent.ts。
  */
 
-const PARTITION_SUFFIX = '-browser';
 const NAVIGATE_TIMEOUT_MS = 30_000;
 const MAX_HEADLESS_TABS = 4;
 /** 会话不在看的 Browser 进程，闲置这么久就卸掉（URL 仍落盘） */
@@ -79,15 +81,6 @@ const SCREENSHOT_MAX_WIDTH = 1280;
  * 元素、截图为空），所以再用 CDP `Emulation.setDeviceMetricsOverride` 撑出尺寸。
  */
 const HEADLESS_BOUNDS = { width: 1280, height: 800 };
-
-export function partitionName(isPackaged: boolean): string {
-  return `persist:${isPackaged ? 'enso' : 'enso-dev'}${PARTITION_SUFFIX}`;
-}
-
-/** clear* 前再校验一遍：只准动我们自己的罐。 */
-export function isBrowserPartition(name: string): boolean {
-  return name.startsWith('persist:') && name.endsWith(PARTITION_SUFFIX);
-}
 
 export type PageScreenshotClip = {
   x: number;

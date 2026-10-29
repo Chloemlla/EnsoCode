@@ -1,14 +1,6 @@
-import type {
-  CatalogEntry,
-  HostAppearance,
-  ProjectEntry,
-  ProjectGroupEntry,
-  ProviderEntry,
-  TerminalPalette,
-} from '@enso/pair';
-import { normalizeTimelinePrefs } from '@shared/pair/timelinePrefs';
+import { ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
+import { parsePairCatalogPayload } from '../services/pairCatalogStore';
 import {
   cancelPairing,
   getPairStatus,
@@ -32,36 +24,36 @@ import {
   resumePairSessionHeadless,
 } from '../services/pairSessionHost';
 import { hasMainRenderer } from '../services/remoteRenderer';
-import { sendToAllWindows } from '../windows/createAppWindow';
+import { broadcastToRenderers } from '../services/renderers';
 
 export function registerPairHandlers(): void {
   // 状态变化广播回设置页（配对成功、手机上下线、重连）
   setPairStatusListener(() => {
     const status = getPairStatus();
-    sendToAllWindows(IPC_CHANNELS.PAIR_STATUS_CHANGED, status);
+    broadcastToRenderers(IPC_CHANNELS.PAIR_STATUS_CHANGED, status);
   });
 
   // 手机订阅历史会话时，请渲染层按桌面同路径恢复（worker 里才有投影可发）
   setPairResumeListener((sessionId) => {
-    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_RESUME_SESSION, sessionId);
+    if (hasMainRenderer()) broadcastToRenderers(IPC_CHANNELS.PAIR_RESUME_SESSION, sessionId);
     else void resumePairSessionHeadless(sessionId);
   });
 
   // 手机新建会话后请渲染层登记，否则桌面列表看不到它、其事件也会被丢弃
   setPairSessionCreatedListener((session) => {
-    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CREATED, session);
+    if (hasMainRenderer()) broadcastToRenderers(IPC_CHANNELS.PAIR_SESSION_CREATED, session);
     else adoptPairSessionHeadless(session);
   });
 
   // 手机改会话模型/推理档位：交给渲染层的 store 方法，与桌面选择器同一路径
   setPairSessionConfigListener((config) => {
-    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_SESSION_CONFIG, config);
+    if (hasMainRenderer()) broadcastToRenderers(IPC_CHANNELS.PAIR_SESSION_CONFIG, config);
     else applyPairSessionConfigHeadless(config);
   });
 
   // 手机操作排队消息 / 会话目标：状态只在 renderer store，交给它处理
   setPairQueueActionListener((action) => {
-    if (hasMainRenderer()) sendToAllWindows(IPC_CHANNELS.PAIR_QUEUE_ACTION, action);
+    if (hasMainRenderer()) broadcastToRenderers(IPC_CHANNELS.PAIR_QUEUE_ACTION, action);
     else applyPairQueueActionHeadless(action);
   });
 
@@ -93,44 +85,7 @@ export function registerPairHandlers(): void {
   // renderer 推目录：会话标题/项目/provider 只在 renderer 有，main 与 worker 都没有。
   // providers 必须已剥 apiKey/baseUrl；projectPaths 留在 main 侧用于 spawn 反查 cwd。
   ipcMain.on(IPC_CHANNELS.PAIR_CATALOG, (_event, payload: unknown) => {
-    const p = payload as {
-      catalog?: CatalogEntry[];
-      pinnedOrder?: string[];
-      projects?: ProjectEntry[];
-      projectGroups?: ProjectGroupEntry[];
-      providers?: ProviderEntry[];
-      providersSettled?: boolean;
-      projectPaths?: { id: string; path: string }[];
-      theme?: HostAppearance;
-      terminal?: TerminalPalette;
-      terminalFontFamily?: string;
-      compactReadOnlyTools?: boolean;
-      expandLiveEdits?: boolean;
-      expandLiveReasoning?: boolean;
-      autoCollapseTurns?: boolean;
-      collapseCompletedActivity?: boolean;
-      pinUnfinishedTodos?: boolean;
-    };
-    if (!p || typeof p !== 'object') return;
-    updatePairCatalog({
-      catalog: Array.isArray(p.catalog) ? p.catalog : [],
-      pinnedOrder: Array.isArray(p.pinnedOrder) ? p.pinnedOrder : [],
-      projects: Array.isArray(p.projects) ? p.projects : [],
-      projectGroups: Array.isArray(p.projectGroups) ? p.projectGroups : [],
-      providers: Array.isArray(p.providers) ? p.providers : [],
-      ...(p.providersSettled === false ? { providersSettled: false as const } : {}),
-      projectPaths: Array.isArray(p.projectPaths) ? p.projectPaths : [],
-      theme:
-        p.theme === 'light' || p.theme === 'dark' || p.theme === 'sync-terminal'
-          ? p.theme
-          : 'system',
-      ...(p.terminal ? { terminal: p.terminal } : {}),
-      ...(typeof p.terminalFontFamily === 'string' && p.terminalFontFamily
-        ? { terminalFontFamily: p.terminalFontFamily }
-        : {}),
-      compactReadOnlyTools: p.compactReadOnlyTools !== false,
-      expandLiveEdits: p.expandLiveEdits !== false,
-      ...normalizeTimelinePrefs(p),
-    });
+    const parsed = parsePairCatalogPayload(payload);
+    if (parsed) updatePairCatalog(parsed);
   });
 }

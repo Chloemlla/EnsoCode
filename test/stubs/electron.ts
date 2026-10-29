@@ -25,6 +25,15 @@ export const safeStorage = {
 };
 
 export const shell = { openExternal: () => {} };
+export const clipboard = {
+  writeText: () => {},
+  writeBuffer: () => {},
+  readText: () => '',
+};
+export const systemPreferences = {
+  getMediaAccessStatus: () => 'granted',
+  askForMediaAccess: async () => true,
+};
 /** 默认转给 global fetch，便于现有 vi.stubGlobal('fetch') 用例继续工作。 */
 export const net = {
   fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
@@ -32,10 +41,19 @@ export const net = {
 };
 export class WebContentsView {}
 export const session = {
-  fromPartition: () => ({}),
+  fromPartition: () => ({
+    setProxy: async () => {},
+    resolveProxy: async () => 'DIRECT',
+    clearCache: async () => {},
+    clearCodeCaches: async () => {},
+    clearStorageData: async () => {},
+  }),
   defaultSession: {
     setProxy: async () => {},
     resolveProxy: async () => 'DIRECT',
+    clearCache: async () => {},
+    clearCodeCaches: async () => {},
+    clearStorageData: async () => {},
   },
 };
 export const Menu = { buildFromTemplate: () => ({ popup: () => {} }) };

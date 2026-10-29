@@ -1,6 +1,5 @@
 import { app, type BrowserWindow } from 'electron';
 import { attachAppCloseConfirm } from '../services/appCloseConfirm';
-import { setConversationsMainWindowGetter } from '../services/remoteRenderer/conversationSync';
 import { isRemoteMainSender } from '../services/remoteRenderer/senders';
 import { createAppWindow, getWindowWebContents, sendToWindow } from './createAppWindow';
 
@@ -49,7 +48,6 @@ function refreshRemoteLeadership(): void {
 export function getMainWindow(): BrowserWindow | null {
   return mainWindow;
 }
-setConversationsMainWindowGetter(getMainWindow);
 
 export function isMainWindowAlive(): boolean {
   return Boolean(mainWindow && !mainWindow.isDestroyed());

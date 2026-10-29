@@ -12,7 +12,10 @@ vi.mock('electron', () => ({
   ipcMain: { on: mocks.on },
 }));
 
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: mocks.isMainWebContents }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: mocks.isMainWebContents,
+}));
 
 import { registerAppBadgeHandlers, toBadgeCount } from './appBadge';
 

@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { app, ipcMain, type RendererContents } from '@platform';
 import {
   type ContextMenuOpen,
   type FileOpenRule,
@@ -21,7 +22,7 @@ import {
 import { collectPresetPromptIds } from '@shared/presetPrompts';
 import { normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import { IPC_CHANNELS, isEditMode, resolveEditMode } from '@shared/types';
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { appDesktop } from '../services/desktopHooks';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
 import {
   parseTrayPreventDisplaySleep,
@@ -34,8 +35,9 @@ import {
   noteConversationsRead,
 } from '../services/remoteRenderer/conversationSync';
 import { sendToRemoteRenderers } from '../services/remoteRenderer/senders';
+import { broadcastToRenderers } from '../services/renderers';
 import { deleteSystemPrompt } from '../services/systemPromptStore';
-import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
+import { localUi } from '../services/uiHost';
 
 function getSettingsPath(): string {
   return join(app.getPath('userData'), 'settings.json');
@@ -243,9 +245,7 @@ function notifyMemoryEmbeddingSettings(settings: Record<string, unknown>): void 
 
 function notifyTrayToggleShortcut(settings: Record<string, unknown>): void {
   const keybindings = settingsStateOf(settings).keybindings;
-  void import('../services/trayToggleShortcut')
-    .then(({ syncTrayToggleShortcut }) => syncTrayToggleShortcut(keybindings))
-    .catch(() => {});
+  appDesktop().syncTrayToggleShortcut(keybindings);
 }
 
 function notifySpeechSettings(settings: Record<string, unknown>): void {
@@ -376,7 +376,7 @@ function snapshotBeforeDestructiveWrite(fields: string[]): void {
 /** 更新缓存、广播窗口、debounce 落盘（SETTINGS_WRITE / WRITE_KEY / Gateway 共用） */
 function scheduleWrite(
   data: Record<string, unknown>,
-  sender?: Electron.WebContents,
+  sender?: RendererContents,
   broadcast: SettingsBroadcast = 'exclude-sender',
   /** 远端主界面已经通过会话补丁拿到这次变化：不再让它经中继整份重读 settings */
   patchedRemoteMain = false
@@ -425,11 +425,9 @@ function scheduleWrite(
     }
 
     // 普通 store 写排除 sender；Gateway 写显式选择 all-renderers。
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed()) continue;
-      const ui = getWindowWebContents(win);
-      if (broadcast === 'all-renderers' || !sender || ui !== sender) {
-        sendToWindow(win, IPC_CHANNELS.SETTINGS_CHANGED);
+    for (const contents of localUi()?.allContents() ?? []) {
+      if (broadcast === 'all-renderers' || !sender || contents !== sender) {
+        contents.send(IPC_CHANNELS.SETTINGS_CHANGED);
       }
     }
     sendToRemoteRenderers(
@@ -588,11 +586,7 @@ export function commitSettingsTransaction(
   notifyTrayToggleShortcut(next);
   notifySpeechSettings(next);
   try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed()) continue;
-      sendToWindow(win, IPC_CHANNELS.SETTINGS_CHANGED);
-    }
-    sendToRemoteRenderers(IPC_CHANNELS.SETTINGS_CHANGED, []);
+    broadcastToRenderers(IPC_CHANNELS.SETTINGS_CHANGED);
   } catch {
     // Durable write already succeeded; a dead renderer must not fail the import.
   }
@@ -629,7 +623,7 @@ export function commitSettingsTransaction(
 export function patchSettingsState(
   field: string,
   value: unknown,
-  sender?: Electron.WebContents,
+  sender?: RendererContents,
   broadcast: SettingsBroadcast = 'all-renderers'
 ): SettingsPatchResult {
   if (!SETTINGS_STATE_FIELDS.includes(field as SettingsStateField)) {
@@ -781,7 +775,7 @@ export function readPersistedConversation(sessionId: string): Record<string, unk
 /** 删除项目及其会话元数据；两个 zustand store 在同一次顶层按键合并中原子更新。 */
 export function removeProjectAndConversations(
   projectId: string,
-  sender?: Electron.WebContents,
+  sender?: RendererContents,
   broadcast: SettingsBroadcast = 'all-renderers'
 ): SettingsPatchResult {
   const current = readSettings() ?? {};

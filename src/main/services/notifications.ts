@@ -44,10 +44,9 @@ const settingsState = (): { language?: string; notifyMainAgentOnly?: boolean } =
 const texts = (): Record<keyof (typeof TEXTS)['zh'], string> =>
   (settingsState().language ?? 'zh').toLowerCase().startsWith('zh') ? TEXTS.zh : TEXTS.en;
 
-/** 缺省 true：只为主 agent 弹完成/失败通知 */
-export function readNotifyMainAgentOnly(): boolean {
-  return settingsState().notifyMainAgentOnly !== false;
-}
+import { readNotifyMainAgentOnly } from './notifyPolicy';
+
+export { readNotifyMainAgentOnly };
 
 const mainWindowFocused = (): boolean =>
   BrowserWindow.getAllWindows().some((win) => win.isFocused());

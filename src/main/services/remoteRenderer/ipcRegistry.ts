@@ -1,7 +1,7 @@
-import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
+import type { IpcEvent, IpcInvokeEvent } from '@platform';
 
-type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
-type Listener = (event: IpcMainEvent, ...args: unknown[]) => void;
+type Handler = (event: IpcInvokeEvent, ...args: unknown[]) => unknown;
+type Listener = (event: IpcEvent, ...args: unknown[]) => void;
 
 interface IpcMainLike {
   handle(channel: string, handler: Handler): void;

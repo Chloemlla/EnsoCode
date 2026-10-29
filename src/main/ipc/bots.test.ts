@@ -41,8 +41,11 @@ vi.mock('electron', () => ({
   app: { getPath: () => mocks.root },
   shell: { openPath: async () => '' },
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: mocks.isMain }));
-vi.mock('../windows/createAppWindow', () => ({ sendToAllWindows: vi.fn() }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: mocks.isMain,
+  broadcastToRenderers: vi.fn(),
+}));
 vi.mock('../services/notifications', () => ({ notifyBotChat: vi.fn(async () => {}) }));
 vi.mock('../services/oauthProviders', () => ({
   readStoredOauthCredentialKeys: async () => new Set<string>(),

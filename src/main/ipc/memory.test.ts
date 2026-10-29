@@ -51,10 +51,11 @@ vi.mock('./agent', () => ({
   getSourceAuthorityRegistry: () => mocks.registry,
 }));
 vi.mock('./settings', () => ({ readSettings: () => mocks.settings }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: (id: number) => id === 1 }));
-vi.mock('../windows/SettingsWindow', () => ({ isSettingsWebContents: () => false }));
-vi.mock('../windows/createAppWindow', () => ({
-  sendToAllWindows: (channel: string, ...args: unknown[]) => mocks.send(channel, ...args),
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: (id: number) => id === 1,
+  isSettingsRenderer: () => false,
+  broadcastToRenderers: (channel: string, ...args: unknown[]) => mocks.send(channel, ...args),
 }));
 vi.mock('../services/memoryAdmin', () => ({
   openExistingMemoryDb: mocks.openExistingMemoryDb,

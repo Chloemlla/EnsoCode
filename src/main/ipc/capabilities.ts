@@ -1,10 +1,11 @@
+import { app, ipcMain, type RendererContents } from '@platform';
 import { parseCapabilityAskResponse } from '@shared/capabilities/types';
 import { IPC_CHANNELS } from '@shared/types';
 import type { AgentWorkerEvent } from '@shared/types/agent';
-import { app, BrowserWindow, ipcMain } from 'electron';
 import { appendSessionCustomEntry, sendCapabilityResultToSession } from '../services/agentHost';
 import { AgentSessionIndex } from '../services/agentSessionIndex';
 import { CapabilityGateway, type CapabilityGatewayTransport } from '../services/capabilityGateway';
+import { appDesktop } from '../services/desktopHooks';
 import { deleteInstruction, readInstruction, writeInstruction } from '../services/instructionStore';
 import { queryModelMeta } from '../services/modelMeta';
 import {
@@ -24,9 +25,10 @@ import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { remoteSenderById } from '../services/remoteRenderer/senders';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { sshProbeLogin } from '../services/sshProbe';
+import { localUi } from '../services/uiHost';
 import { patchSettingsState, readSettings, removeProjectAndConversations } from './settings';
 
-function senderById(webContentsId?: number): Electron.WebContents | undefined {
+function senderById(webContentsId?: number): RendererContents | undefined {
   if (webContentsId === undefined || webContentsId < 0) return undefined;
   const sender = webContentsOrRemote(webContentsId);
   if (sender && remoteSenderById(webContentsId) && !watchedRemotes.has(webContentsId)) {
@@ -40,10 +42,6 @@ function senderById(webContentsId?: number): Electron.WebContents | undefined {
 }
 
 const watchedRemotes = new Set<number>();
-
-function updaterAvailable(): boolean {
-  return !(process.platform === 'linux' && !process.env.APPIMAGE);
-}
 
 export const agentSessionIndex = new AgentSessionIndex({ readSettings });
 
@@ -118,15 +116,9 @@ export const capabilityGateway = new CapabilityGateway(
     writeInstruction,
     deleteInstruction,
     getRecentProjects,
-    updaterAvailable,
-    checkForUpdates: async () => {
-      const { autoUpdaterService } = await import('../services/updater/AutoUpdater');
-      await autoUpdaterService.checkForUpdates();
-    },
-    downloadUpdate: async () => {
-      const { autoUpdaterService } = await import('../services/updater/AutoUpdater');
-      await autoUpdaterService.downloadUpdate();
-    },
+    updaterAvailable: () => appDesktop().updaterAvailable(),
+    checkForUpdates: () => appDesktop().checkForUpdates(),
+    downloadUpdate: () => appDesktop().downloadUpdate(),
     sessionIndex: agentSessionIndex,
     listSshConnections: () => getSshConnectionStore().list(),
     deleteSshConnection: async (id) => {
@@ -184,18 +176,11 @@ export function registerCapabilityHandlers(): void {
     return capabilityGateway.respond(event.sender.id, response);
   });
 
-  app.on('browser-window-created', (_event, window) => {
-    // closed 触发时窗口已销毁，届时再读 webContents 会抛 Object has been
-    // destroyed：id 必须在创建时捕获，回调里只用值
-    const webContentsId = window.webContents.id;
-    window.once('closed', () => capabilityGateway.releaseWindow(webContentsId));
-  });
+  localUi()?.onWindowClosed((webContentsId) => capabilityGateway.releaseWindow(webContentsId));
   app.on('before-quit', () => capabilityGateway.denyAll('Application is exiting.'));
 }
 
 /** 测试/关闭路径使用；普通窗口生命周期由 browser-window-created 接线。 */
 export function liveCapabilityWindowIds(): number[] {
-  return BrowserWindow.getAllWindows()
-    .filter((window) => !window.isDestroyed() && !window.webContents.isDestroyed())
-    .map((window) => window.webContents.id);
+  return localUi()?.windowContentIds() ?? [];
 }

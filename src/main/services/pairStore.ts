@@ -6,7 +6,7 @@ import {
   type RelayHostAddress,
   serializeRelayHostCache,
 } from '@enso/pair';
-import { app, safeStorage } from 'electron';
+import { app, safeStorage } from '@platform';
 
 /**
  * 已配对设备凭据落盘。contentKey 是端到端密钥，必须加密存储：

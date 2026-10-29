@@ -1,6 +1,6 @@
+import { ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import type { McpStatusEvent } from '@shared/types/agent';
-import { ipcMain } from 'electron';
 import { pushMcpWarmup } from '../services/agentHost';
 import {
   authorizeMcpServer,
@@ -9,12 +9,11 @@ import {
 } from '../services/mcpOAuth';
 import { getMcpOAuthStore } from '../services/mcpOAuthStore';
 import { mcpStatusSnapshot, recordMcpStatus } from '../services/mcpStatusCache';
-import { isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
+import { isMainRenderer, isSettingsRenderer } from '../services/renderers';
 import { pushMcpStatus } from './agent';
 
 function isTrustedWindow(webContentsId: number): boolean {
-  return isMainWebContents(webContentsId) || isSettingsWebContents(webContentsId);
+  return isMainRenderer(webContentsId) || isSettingsRenderer(webContentsId);
 }
 
 function emitStatus(event: McpStatusEvent): void {

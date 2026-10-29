@@ -36,4 +36,17 @@ describe('isRemoteChannelAllowed', () => {
     expect(isRemoteChannelAllowed(IPC_CHANNELS.PAIR_CATALOG, false)).toBe(false);
     expect(isRemoteChannelAllowed(IPC_CHANNELS.PAIR_CATALOG, true)).toBe(true);
   });
+
+  it('opens host update/restart only when the host allows remote control', () => {
+    for (const ch of [
+      IPC_CHANNELS.UPDATER_GET_STATE,
+      IPC_CHANNELS.UPDATER_CHECK,
+      IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL,
+      IPC_CHANNELS.UPDATER_RESTART,
+    ]) {
+      expect(isRemoteChannelAllowed(ch, true)).toBe(false);
+      expect(isRemoteChannelAllowed(ch, false, true)).toBe(true);
+    }
+    expect(isRemoteChannelAllowed(IPC_CHANNELS.WINDOW_OPEN_SETTINGS, true, true)).toBe(false);
+  });
 });

@@ -1,6 +1,6 @@
+import { ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import { isUsageRangeDays } from '@shared/usage/types';
-import { ipcMain } from 'electron';
 import { getUsageSummary } from '../services/usage/usageService';
 
 export function registerUsageHandlers(): void {

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { app, safeStorage } from '@platform';
 import type { SshAuth, SshConnection } from '@shared/types';
-import { app, safeStorage } from 'electron';
 
 export interface SshConnectionSecret {
   id: string;

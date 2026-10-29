@@ -1,4 +1,5 @@
 import { statSync } from 'node:fs';
+import { ipcMain } from '@platform';
 import type { GitDiffResult } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import type {
@@ -11,15 +12,14 @@ import type {
   GitPathsRequest,
   GitRequest,
 } from '@shared/types/git';
-import { ipcMain } from 'electron';
 import { diffHead, localGitDiffHost } from '../services/gitDiff';
 import {
   GitOperationError,
   GitPreviewUnavailable,
   GitRepository,
 } from '../services/gitVersionControl';
+import { isMainRenderer } from '../services/renderers';
 import { pickSessionCwd } from '../services/terminalService';
-import { isMainWebContents } from '../windows/MainWindow';
 import { getSourceAuthorityRegistry } from './agent';
 import { sessionWorktree, withSessionGitWorkspace } from './worktree';
 
@@ -135,7 +135,7 @@ function register<T extends GitRequest, R>(
   action: (repository: GitRepository, request: T) => Promise<R>
 ): void {
   ipcMain.handle(channel, async (event, value: unknown) => {
-    if (!isMainWebContents(event.sender.id)) {
+    if (!isMainRenderer(event.sender.id)) {
       return { ok: false, code: 'unavailable', error: '无权访问 Git 工作区。' };
     }
     const request = parse(value);

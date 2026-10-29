@@ -1,3 +1,4 @@
+import type { RendererContents } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,20 +27,13 @@ vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn(), on: vi.fn() },
 }));
 
-vi.mock('../windows/createAppWindow', () => ({
-  getWindowWebContents: vi.fn(() => mocks.uiContents),
-  sendToWindow: vi.fn((_win: unknown, channel: string, ...args: unknown[]) => {
-    mocks.uiContents.send(channel, ...args);
-  }),
-  sendToAllWindows: vi.fn((channel: string, ...args: unknown[]) => {
-    mocks.uiContents.send(channel, ...args);
-  }),
-}));
-
-vi.mock('../windows/MainWindow', () => ({
-  // 与真实实现同口径：比较的是 UI webContents 的 id，不是 win.webContents.id
-  isMainWebContents: vi.fn((id: number) => id === mocks.uiContents.id),
-}));
+// 桌面 LocalUi 负责把窗口解析成 UI webContents（见 desktop/localUi）；这里直接给出解析结果
+vi.mock('../services/uiHost', async () =>
+  (await import('../../../test/helpers/localUi')).mockUiHost(
+    () => [{ isDestroyed: () => false, webContents: mocks.uiContents }],
+    { mainContents: () => mocks.uiContents as unknown as RendererContents }
+  )
+);
 
 vi.mock('../services/pairGuest', () => ({
   getNodesStatus: vi.fn(),

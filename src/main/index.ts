@@ -1,8 +1,14 @@
 import path from 'node:path';
 import { electronApp, optimizer } from '@electron-toolkit/utils';
 import { app, type BrowserWindow } from 'electron';
-
+import {
+  registerLocalImageProtocolHandler,
+  registerLocalImageSchemePrivileges,
+} from './desktop/localImageScheme';
+import { installDesktopLocalUi } from './desktop/localUi';
+import { openBotPdfWindow, openDesktopPdfWindow } from './desktop/pdfWindow';
 import { registerIpcHandlers } from './ipc';
+import { registerDesktopIpcHandlers } from './ipc/desktop';
 import { consumeTrayReenterAfterUpdate, readSettings } from './ipc/settings';
 import { agentWorkerAlive, startAgentWorker, stopAgentWorkerForQuit } from './services/agentHost';
 import { installAppMenu } from './services/appMenu';
@@ -18,12 +24,9 @@ import {
 } from './services/appServerMode';
 import { browserHost } from './services/browserHost';
 import { computerHost } from './services/computerHost';
+import { installDesktopHooks } from './services/desktopHooks';
 import { releaseLocalChatSlot } from './services/llama/chat';
 import { disposeLlamaRuntime, llamaRuntimeActive } from './services/llama/runtime';
-import {
-  registerLocalImageProtocolHandler,
-  registerLocalImageSchemePrivileges,
-} from './services/localImageProtocol';
 import {
   awaitMemoryEmbeddingClose,
   closeMemoryDb,
@@ -31,6 +34,12 @@ import {
   syncMemoryEmbeddingFromSettings,
   syncMemoryKgFromSettings,
 } from './services/memoryHost';
+import {
+  maybeNotify,
+  maybeNotifyBot,
+  notifyBotChat,
+  setViewedSession,
+} from './services/notifications';
 import { startPairGuest, stopPairGuest } from './services/pairGuest';
 import { startPairHost, stopPairHost } from './services/pairHost';
 import { getProxyConfig } from './services/proxyConfig';
@@ -112,7 +121,38 @@ if (!gotTheLock) {
 
     // 先装 ipcMain 镜像表：远程浏览器 renderer 复用同一批 handler
     setupRemoteRenderer();
+    installDesktopLocalUi();
+    installDesktopHooks({
+      session: {
+        closeBrowser: (sessionId, options) => void browserHost.closeForSession(sessionId, options),
+        releaseBrowserActor: (sessionId) => browserHost.releaseActor(sessionId),
+        forgetBrowserActor: (sessionId) => browserHost.forgetActor(sessionId),
+        closeComputer: (sessionId) => computerHost.close(sessionId),
+        closeAllComputers: () => computerHost.closeAll(),
+        invokeBrowser: (...args) => browserHost.invoke(...args),
+        invokeComputer: (...args) => computerHost.invoke(...args),
+      },
+      bot: {
+        closeBrowser: (key) => browserHost.closeSession(key),
+        notifyChat: (chatId, build) => notifyBotChat(chatId, build),
+      },
+      notify: { maybeNotify, maybeNotifyBot, setViewedSession },
+      file: { openPdf: openBotPdfWindow, openWorkspacePdf: openDesktopPdfWindow },
+      app: {
+        updaterAvailable: () => !(process.platform === 'linux' && !process.env.APPIMAGE),
+        checkForUpdates: async () => {
+          const { autoUpdaterService } = await import('./services/updater/AutoUpdater');
+          await autoUpdaterService.checkForUpdates();
+        },
+        downloadUpdate: async () => {
+          const { autoUpdaterService } = await import('./services/updater/AutoUpdater');
+          await autoUpdaterService.downloadUpdate();
+        },
+        syncTrayToggleShortcut,
+      },
+    });
     registerIpcHandlers();
+    registerDesktopIpcHandlers();
     setTrayToggleHandler(() => {
       if (isServerMode()) leaveServerMode();
       else void enterServerMode();

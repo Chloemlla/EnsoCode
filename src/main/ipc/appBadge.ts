@@ -1,6 +1,6 @@
+import { app, ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, ipcMain } from 'electron';
-import { isMainWebContents } from '../windows/MainWindow';
+import { isMainRenderer } from '../services/renderers';
 
 export function toBadgeCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 999
@@ -10,7 +10,7 @@ export function toBadgeCount(value: unknown): number | null {
 
 export function registerAppBadgeHandlers(): void {
   ipcMain.on(IPC_CHANNELS.APP_SET_BADGE_COUNT, (event, value: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return;
+    if (!isMainRenderer(event.sender.id)) return;
     const count = toBadgeCount(value);
     if (count !== null) app.setBadgeCount(count);
   });

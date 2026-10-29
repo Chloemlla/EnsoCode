@@ -1,15 +1,15 @@
 import { statSync } from 'node:fs';
 import os from 'node:os';
+import type { RendererContents } from '@platform';
 import { resolveTerminalShellFile, type TerminalShell } from '@shared/terminalShell';
 import type { TerminalCreateRequest, TerminalCreateResult } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
-import type { WebContents } from 'electron';
 import type { IPty } from 'node-pty';
 import { spawn } from 'node-pty';
 
 interface TerminalEntry {
   pty: IPty;
-  sender: WebContents;
+  sender: RendererContents;
 }
 
 const terminals = new Map<string, TerminalEntry>();
@@ -101,7 +101,7 @@ export function resolvePtySize(cols?: number, rows?: number): { cols: number; ro
 
 export function createTerminal(
   request: TerminalCreateRequest,
-  sender: WebContents,
+  sender: RendererContents,
   spec: TerminalSpawnSpec
 ): TerminalCreateResult {
   const existing = terminals.get(request.termId);

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { agentWorkerPath, app, resourcesPath, utilityProcess, type WorkerProcess } from '@platform';
 import { normalizeAutoRetryLimit } from '@shared/autoRetry';
 import {
   type AgentTypeKey,
@@ -88,6 +89,7 @@ import type { AgentDispatchTask } from '@shared/types/mentions';
 import { parseDisabledWorkflowPresets } from '@shared/types/workflow';
 import {
   canBeVirtualMember,
+  classifierBaseUrlFor,
   classifierProviderFor,
   directMemberRef,
   findVirtualModel,
@@ -99,9 +101,7 @@ import {
 } from '@shared/virtualModels';
 import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
-import { app, type UtilityProcess, utilityProcess } from 'electron';
 import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
-import agentWorkerPath from '../../agent/index?modulePath';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import { type MemberAgentType, memberSpawnDescription } from './bots/botAgentType';
@@ -145,7 +145,7 @@ export type AgentTypeResolution =
   | { ok: false; error: string };
 
 /** 管理 agent worker（utilityProcess）的生命周期与命令下发。故障域 A：一个 worker 装全部会话。 */
-let worker: UtilityProcess | null = null;
+let worker: WorkerProcess | null = null;
 
 /**
  * worker 每次请求都向 Main 选号。账号成员、启用状态、模型目录和真实 OAuth 存储实时核验，失败原因只影响该账号的有限窗口。
@@ -295,7 +295,7 @@ export function startAgentWorker(): void {
       PI_CODING_AGENT_DIR: path.join(app.getPath('userData'), 'agent', 'pi-agent'),
       ENSO_RTK_PATH: bundledRtkPath({
         packaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
+        resourcesPath,
         appPath: app.getAppPath(),
         platform: process.platform,
         arch: process.arch,
@@ -439,7 +439,7 @@ export function isAgentWorkerRunning(): boolean {
 let workspaceBusy: (id: string) => boolean = () => false;
 
 const workspaceLocks = new WorkspaceLockRequests(sendAgentCommand);
-const workspaceWorkers = new Map<string, UtilityProcess | null>();
+const workspaceWorkers = new Map<string, WorkerProcess | null>();
 
 export async function freezeWorkspace(
   requestId: string,
@@ -636,6 +636,7 @@ export function resolveVirtualClassifier(
   if (!provider?.enabled) return undefined;
   const piProvider = classifierProviderFor(provider);
   if (!piProvider) return undefined;
+  const baseUrl = classifierBaseUrlFor(provider);
   if (provider.oauthAccountKey) {
     if (!authenticatedAccountKeys.has(provider.oauthAccountKey)) return undefined;
   } else if (!provider.apiKey) {
@@ -648,6 +649,7 @@ export function resolveVirtualClassifier(
       provider: piProvider,
       modelId: classifier.model.modelId,
       ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
+      ...(baseUrl ? { baseUrl } : {}),
     },
   };
 }

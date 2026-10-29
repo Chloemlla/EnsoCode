@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { PairedDevice } from '@enso/pair';
-import { app, safeStorage } from 'electron';
+import { app, safeStorage } from '@platform';
 
 /**
  * 「连接到节点」的凭据（本机作为 guest 连别的桌面）。

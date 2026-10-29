@@ -1,5 +1,5 @@
+import { ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
-import { BrowserWindow, ipcMain } from 'electron';
 import {
   getNodesStatus,
   pairNode,
@@ -10,8 +10,7 @@ import {
   setNodesStatusListener,
 } from '../services/pairGuest';
 import { parseGuestOutbound } from '../services/pairGuestPolicy';
-import { getWindowWebContents, sendToAllWindows, sendToWindow } from '../windows/createAppWindow';
-import { isMainWebContents } from '../windows/MainWindow';
+import { broadcastToRenderers, isMainRenderer, sendToLocalMain } from '../services/renderers';
 
 /**
  * 「连接到节点」：本机作为 guest 连别的 EnsoCode 桌面。
@@ -20,15 +19,11 @@ import { isMainWebContents } from '../windows/MainWindow';
  */
 export function registerNodesHandlers(): void {
   setNodesStatusListener((status) => {
-    sendToAllWindows(IPC_CHANNELS.NODES_STATUS_CHANGED, status);
+    broadcastToRenderers(IPC_CHANNELS.NODES_STATUS_CHANGED, status);
   });
   // 下行帧只给主窗口：设置窗口不渲染会话
   setNodesMessageListener((message) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed()) continue;
-      if (!isMainWebContents(getWindowWebContents(win).id)) continue;
-      sendToWindow(win, IPC_CHANNELS.NODES_MESSAGE, message);
-    }
+    sendToLocalMain(IPC_CHANNELS.NODES_MESSAGE, message);
   });
 
   ipcMain.handle(IPC_CHANNELS.NODES_LIST, () => getNodesStatus());
@@ -47,7 +42,7 @@ export function registerNodesHandlers(): void {
     return renameNode(nodeId, label);
   });
   ipcMain.handle(IPC_CHANNELS.NODES_SEND, (event, nodeId: unknown, command: unknown) => {
-    if (!isMainWebContents(event.sender.id)) {
+    if (!isMainRenderer(event.sender.id)) {
       return { ok: false, error: 'Only MainWindow can talk to nodes.' };
     }
     if (typeof nodeId !== 'string' || !nodeId) return { ok: false, error: 'invalid nodeId' };

@@ -3,8 +3,8 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { app } from '@platform';
 import type { OpenInApp } from '@shared/types';
-import { app } from 'electron';
 
 interface OpenInAppDefinition {
   id: string;

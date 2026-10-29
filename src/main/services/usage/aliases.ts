@@ -1,6 +1,6 @@
 import path from 'node:path';
+import { app } from '@platform';
 import { type PricingTable, parseUsageModelPricing } from '@shared/usage/pricing';
-import { app } from 'electron';
 import { readSettings } from '../../ipc/settings';
 import { getSharedWorktreeRegistry } from '../worktree/registry';
 import {

@@ -1,6 +1,6 @@
 import path from 'node:path';
+import { app } from '@platform';
 import type { PrivacyMaskRecord } from '@shared/privacyMask/report';
-import { app } from 'electron';
 import { appendLedger, collectRecords } from './records';
 
 const DAY = 86_400_000;

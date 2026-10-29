@@ -16,3 +16,15 @@ export interface UpdateStatus {
   };
   error?: string;
 }
+
+/** 无界面服务端的更新途径：npm 为全局安装可自更新；manual（npx、不可写前缀）只报告新版本 */
+export type ServerUpdateMode = 'npm' | 'manual';
+
+/** 设置页打开时拉取一次（状态只靠推送的话，后连上的远端看不到已下载等状态） */
+export interface UpdaterState {
+  host: 'desktop' | 'server';
+  status: UpdateStatus | null;
+  mode?: ServerUpdateMode;
+  /** 有进程守护（systemd）时才允许远程重启 */
+  canRestart?: boolean;
+}

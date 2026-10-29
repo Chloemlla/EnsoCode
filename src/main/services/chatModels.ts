@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import path from 'node:path';
+import { app } from '@platform';
 import type { ChatModelDto, EmbeddingDownloadProgressDto } from '@shared/memory/dto';
-import { app } from 'electron';
 import { releaseLocalChatSlot } from './llama/chat';
 import {
   type ChatModelSpec,

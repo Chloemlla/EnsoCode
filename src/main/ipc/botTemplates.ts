@@ -1,14 +1,12 @@
 import path from 'node:path';
+import { app, ipcMain } from '@platform';
 import { parseTemplateLibrary } from '@shared/bots/templateLibrary';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, ipcMain } from 'electron';
 import { readJson, writeJsonAtomic } from '../services/bots/files';
-import { sendToAllWindows } from '../windows/createAppWindow';
-import { isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
+import { broadcastToRenderers, isMainRenderer, isSettingsRenderer } from '../services/renderers';
 
 const libraryPath = () => path.join(app.getPath('userData'), 'bot-templates.json');
-const trusted = (id: number) => isMainWebContents(id) || isSettingsWebContents(id);
+const trusted = (id: number) => isMainRenderer(id) || isSettingsRenderer(id);
 
 export function registerBotTemplateHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.BOT_TEMPLATES_GET, (event) => {
@@ -25,7 +23,7 @@ export function registerBotTemplateHandlers(): void {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    sendToAllWindows(IPC_CHANNELS.BOT_TEMPLATES_CHANGED, library);
+    broadcastToRenderers(IPC_CHANNELS.BOT_TEMPLATES_CHANGED, library);
     return { ok: true, library };
   });
 }

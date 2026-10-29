@@ -193,6 +193,12 @@ async function main(): Promise<void> {
     iframe.className = kind;
     iframe.allow = 'clipboard-read; clipboard-write; microphone';
     iframe.src = `${base}/${kind === 'main' ? 'index' : 'settings'}.html`;
+    if (kind === 'settings') {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'settings-backdrop';
+      backdrop.addEventListener('click', () => closeSettings());
+      frames.appendChild(backdrop);
+    }
     frames.appendChild(iframe);
     iframes[kind] = iframe;
     return iframe;
@@ -201,6 +207,7 @@ async function main(): Promise<void> {
   const closeSettings = () => {
     iframes.settings?.remove();
     delete iframes.settings;
+    frames.querySelector('.settings-backdrop')?.remove();
   };
 
   const bridge: RemoteBridge = {
@@ -437,7 +444,9 @@ async function main(): Promise<void> {
     revealFrames();
     void coverWithSnapshot();
   }
-  watchDeskChrome(() => iframes.settings ?? iframes.main);
+  // 设置是弹窗时不铺满，状态栏 / 安全区底色仍跟主界面
+  const settingsModal = matchMedia('(min-width: 800px) and (min-height: 560px)');
+  watchDeskChrome(() => (settingsModal.matches ? undefined : iframes.settings) ?? iframes.main);
 
   const timeout = launched
     ? undefined

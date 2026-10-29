@@ -46,7 +46,9 @@ vi.mock('./ipc/settings', () => ({
   readSettings: vi.fn(() => null),
   consumeTrayReenterAfterUpdate: () => mocks.consumeTrayReenter(),
 }));
-vi.mock('./services/localImageProtocol', () => ({
+vi.mock('./ipc/desktop', () => ({ registerDesktopIpcHandlers: vi.fn() }));
+vi.mock('./desktop/localUi', () => ({ installDesktopLocalUi: vi.fn() }));
+vi.mock('./desktop/localImageScheme', () => ({
   registerLocalImageProtocolHandler: vi.fn(),
   registerLocalImageSchemePrivileges: vi.fn(),
 }));

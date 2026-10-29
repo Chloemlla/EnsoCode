@@ -1,14 +1,13 @@
+import { ipcMain } from '@platform';
 import { resolveSshTarget } from '@shared/ssh';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
+import { isMainRenderer, isSettingsRenderer } from '../services/renderers';
 import { getSshConnectionStore, type SshConnectionUpsert } from '../services/sshConnectionStore';
 import { sshListRemoteDirs, sshProbeLogin } from '../services/sshProbe';
-import { isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
 import { getSourceAuthorityRegistry } from './agent';
 
 function isTrustedWindow(webContentsId: number): boolean {
-  return isMainWebContents(webContentsId) || isSettingsWebContents(webContentsId);
+  return isMainRenderer(webContentsId) || isSettingsRenderer(webContentsId);
 }
 
 function parseUpsert(value: unknown): SshConnectionUpsert | null {

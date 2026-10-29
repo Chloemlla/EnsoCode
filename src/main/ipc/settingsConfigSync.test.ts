@@ -23,6 +23,12 @@ vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
 }));
 
+vi.mock('../services/uiHost', async () =>
+  (await import('../../../test/helpers/localUi')).mockUiHost(() => [
+    { isDestroyed: () => false, webContents: { id: 1, ...webContents } },
+  ])
+);
+
 let settings: typeof import('./settings');
 
 beforeAll(async () => {

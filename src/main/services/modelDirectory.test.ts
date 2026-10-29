@@ -30,6 +30,10 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => mocks.windows },
 }));
 
+vi.mock('./uiHost', async () =>
+  (await import('../../../test/helpers/localUi')).mockUiHost(() => mocks.windows)
+);
+
 vi.mock('../ipc/settings', () => ({
   readSettings: () => mocks.settings,
 }));

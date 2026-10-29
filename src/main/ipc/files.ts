@@ -1,11 +1,11 @@
 import { readdir } from 'node:fs/promises';
 import path, { join } from 'node:path';
+import { app, ipcMain } from '@platform';
 import { isMediaPath } from '@shared/localImage';
 import type { PastedTextFileResult } from '@shared/pastedText';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, ipcMain } from 'electron';
 import { savePastedTextFile } from '../services/pastedTextFiles';
-import { isMainWebContents } from '../windows/MainWindow';
+import { isMainRenderer } from '../services/renderers';
 import { getSourceAuthorityRegistry } from './agent';
 
 export function registerFileHandlers(): void {
@@ -26,7 +26,7 @@ export function registerFileHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.FILES_SAVE_PASTED_TEXT,
     async (event, request: unknown): Promise<PastedTextFileResult> => {
-      if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'unavailable' };
+      if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'unavailable' };
       const input =
         request && typeof request === 'object' ? (request as Record<string, unknown>) : {};
       const { conversationId, text } = input;

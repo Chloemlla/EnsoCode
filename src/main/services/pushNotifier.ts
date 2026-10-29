@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { PushSubscriptionJson } from '@enso/pair';
+import { app, safeStorage } from '@platform';
 import { shouldMuteCoworkerCompletionNotification } from '@shared/coworkerNotification';
 import type { ApprovalRequestInfo } from '@shared/types/agent';
-import { app, safeStorage } from 'electron';
 import webPush from 'web-push';
 import { isSecureStorageAvailable } from './pairStore';
 

@@ -8,7 +8,8 @@
     "types": ["node"],
     "moduleResolution": "bundler",
     "paths": {
-      "@shared/*": ["./src/shared/*"]
+      "@shared/*": ["./src/shared/*"],
+      "@platform": ["./src/main/platform/api.ts"]
     }
   },
   "include": [

@@ -32,7 +32,10 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/tmp' },
 }));
 
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: mocks.isMainWebContents }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: mocks.isMainWebContents,
+}));
 vi.mock('./settings', () => ({ readSettings: mocks.readSettings }));
 vi.mock('../services/oauthProviders', () => ({
   readStoredOauthCredentialKeys: mocks.credentials,

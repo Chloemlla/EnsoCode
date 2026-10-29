@@ -25,7 +25,10 @@ vi.mock('electron', () => ({
     handle: (key: string, handler: (...args: any[]) => any) => mocks.handlers.set(key, handler),
   },
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: (id: number) => id === 1 }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: (id: number) => id === 1,
+}));
 vi.mock('./agent', () => ({
   getSourceAuthorityRegistry: () => ({
     project: (id: string) => mocks.projects.get(id),

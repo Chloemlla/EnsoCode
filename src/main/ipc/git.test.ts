@@ -28,7 +28,10 @@ vi.mock('electron', () => ({
       mocks.handlers.set(channel, handler),
   },
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: (id: number) => id === 1 }));
+vi.mock('../services/renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/renderers')>()),
+  isMainRenderer: (id: number) => id === 1,
+}));
 vi.mock('../services/terminalService', () => ({ pickSessionCwd: vi.fn() }));
 vi.mock('./agent', () => ({
   getSourceAuthorityRegistry: () => ({

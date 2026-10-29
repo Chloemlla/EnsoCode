@@ -9,6 +9,7 @@ import {
   type OAuthTokens,
   stepUpScope,
 } from '@earendil-works/pi-mcp/oauth';
+import { shell } from '@platform';
 import {
   type OauthCallbackServer,
   type OauthCallbackServerOptions,
@@ -16,7 +17,6 @@ import {
 } from '@shared/providers/callbackServer';
 import type { McpOAuthTokens, McpScopeChallenge } from '@shared/types/agent';
 import { MCP_TRANSPORTS, type McpServerEntry } from '@shared/types/assets';
-import { shell } from 'electron';
 import { readSettings } from '../ipc/settings';
 import { getMcpOAuthStore, type McpOAuthStore } from './mcpOAuthStore';
 import { mcpStatusFor } from './mcpStatusCache';

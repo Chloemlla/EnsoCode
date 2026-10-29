@@ -15,6 +15,7 @@
     "paths": {
       "@/*": ["./src/renderer/*"],
       "@shared/*": ["./src/shared/*"],
+      "@platform": ["./src/main/platform/api.ts"],
       "@enso/pair": ["./packages/pair/src/index.ts"]
     }
   },

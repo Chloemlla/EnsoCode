@@ -13,6 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openDesktopPdfWindow } from '../desktop/pdfWindow';
+import { installDesktopHooks } from './desktopHooks';
 import {
   canOpenWorkspaceFileExternally,
   launchWorkspaceFileApplication,
@@ -21,6 +23,10 @@ import {
   openWorkspacePdfWindow,
   type WorkspaceFileOpeningDependencies,
 } from './workspaceFileOpening';
+
+installDesktopHooks({
+  file: { openPdf() {}, openWorkspacePdf: openDesktopPdfWindow },
+});
 
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),

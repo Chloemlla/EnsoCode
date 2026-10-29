@@ -1,12 +1,12 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { app } from '@platform';
 import type { ChildSessionIdentity, SessionIdentity } from '@shared/builtinAgents';
 import { normalizeMemoryModelIdleMinutes } from '@shared/memory/modelIdle';
 import { effectiveDisabledBuiltinTools } from '@shared/types';
 import type { MemoryOp } from '@shared/types/agent';
 import { hasProviderCredentials, type ModelProvider } from '@shared/types/llm';
 import type Database from 'better-sqlite3';
-import { app } from 'electron';
 import { holdLocalChat, syncLocalChatFromSettings } from './llama/chat';
 import { executeMemoryOp } from './memory/bridge';
 import { openMemoryDb } from './memory/db';

@@ -1,0 +1,45 @@
+import type { RendererContents } from '@platform';
+import {
+  hasRemoteMain,
+  isRemoteMainSender,
+  isRemoteSettingsSender,
+  sendToRemoteRenderers,
+} from './remoteRenderer/senders';
+import { localUi } from './uiHost';
+
+/** 本地主窗口的 renderer；服务器上恒为 null */
+export function localMainContents(): RendererContents | null {
+  return localUi()?.mainContents() ?? null;
+}
+
+export function isMainRendererAlive(): boolean {
+  return localMainContents() !== null || hasRemoteMain();
+}
+
+/** 桌面主窗口与远程浏览器里的主界面 renderer 同权 */
+export function isMainRenderer(webContentsId: number): boolean {
+  if (isRemoteMainSender(webContentsId)) return true;
+  return localMainContents()?.id === webContentsId;
+}
+
+export function isSettingsRenderer(webContentsId: number): boolean {
+  if (isRemoteSettingsSender(webContentsId)) return true;
+  return localUi()?.settingsContents()?.id === webContentsId;
+}
+
+export function sendToLocalMain(channel: string, ...args: unknown[]): void {
+  localMainContents()?.send(channel, ...args);
+}
+
+export function broadcastToRenderers(channel: string, ...args: unknown[]): void {
+  for (const contents of localUi()?.allContents() ?? []) contents.send(channel, ...args);
+  sendToRemoteRenderers(channel, args);
+}
+
+export function anyRendererFocused(): boolean {
+  return localUi()?.anyFocused() ?? false;
+}
+
+export function focusMainRenderer(): void {
+  localUi()?.focusMain();
+}

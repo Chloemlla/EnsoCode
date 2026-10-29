@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { HostToPhone, PairBotRunState } from '@enso/pair';
+import { app } from '@platform';
 import { INBOX_DISMISSIBLE, visibleInbox } from '@shared/bots/inbox';
 import type { RendererAgentEvent } from '@shared/types/agent';
 import type { BotChat } from '@shared/types/bot';
-import { app } from 'electron';
 import { requestSnapshot } from '../services/agentHost';
 import { BotActivityTracker } from '../services/bots/activityTracker';
 import {

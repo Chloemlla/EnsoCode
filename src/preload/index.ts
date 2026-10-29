@@ -99,6 +99,7 @@ import type {
   GitPathsRequest,
   GitRequest,
   GitStatusResult,
+  HostDirListing,
   InstalledPluginInfo,
   ListModelsResult,
   LocalAssetScanResult,
@@ -236,7 +237,7 @@ import type {
   SpeechStatusDto,
   SpeechTranscribeResult,
 } from '@shared/types/speech';
-import type { UpdateStatus } from '@shared/types/updater';
+import type { UpdaterState, UpdateStatus } from '@shared/types/updater';
 import type {
   WorkflowPresetDraft,
   WorkflowPresetSaveResult,
@@ -611,6 +612,12 @@ const electronAPI = {
   projects: {
     /** 从本机编辑器 / 编程应用读取最近打开的目录 */
     getRecent: (): Promise<RecentProject[]> => ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GET_RECENT),
+    /** 列出宿主机目录的可见子目录；不传或路径不存在时从家目录 / 最近的已存在祖先开始 */
+    listHostDirs: (path?: string): Promise<HostDirListing> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_LIST_HOST_DIRS, path),
+    /** 在宿主机 parent 目录下新建子文件夹，成功时返回新目录的列表 */
+    createHostDir: (parent: string, name: string): Promise<HostDirListing> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_CREATE_HOST_DIR, parent, name),
     /** 在系统文件管理器（或 appId 指定的应用）里打开项目或会话的实际工作目录；ssh 项目返回 unsupported */
     reveal: (request: {
       projectId: string;
@@ -1116,6 +1123,15 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.PROXY_APPLY, settings),
   },
 
+  compaction: {
+    getReserveTokens: (): Promise<number | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMPACTION_RESERVE_TOKENS_GET),
+    setReserveTokens: (
+      value: number | null
+    ): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMPACTION_RESERVE_TOKENS_SET, value),
+  },
+
   updater: {
     checkForUpdates: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
     downloadUpdate: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_DOWNLOAD_UPDATE),
@@ -1124,6 +1140,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_AUTO_UPDATE_ENABLED, enabled),
     setAutoRestartWhenIdle: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_AUTO_RESTART_WHEN_IDLE, enabled),
+    getState: (): Promise<UpdaterState> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_GET_STATE),
+    restart: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_RESTART),
     onStatus: (callback: (status: UpdateStatus) => void): (() => void) => {
       const listener = (_: unknown, status: UpdateStatus) => callback(status);
       ipcRenderer.on(IPC_CHANNELS.UPDATER_STATUS, listener);

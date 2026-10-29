@@ -1,5 +1,5 @@
 import type { DirectCandidate, DirectPeer, DirectPeerFactory, IceServerEntry } from '@enso/pair';
-import { app } from 'electron';
+import { app } from '@platform';
 
 /**
  * Electron main 侧的 WebRTC 对端：node-datachannel（libdatachannel N-API 绑定）。

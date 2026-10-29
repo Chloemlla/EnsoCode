@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { ipcMain, shell } from '@platform';
 import {
   isCleanableStorageCategory,
   parseSessionCleanRequest,
   type StorageScanProgress,
 } from '@shared/resources';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain, shell } from 'electron';
+import { isMainRenderer, isSettingsRenderer, localMainContents } from '../services/renderers';
 import {
   cancelStorageScan,
   cleanStorage,
@@ -14,15 +15,12 @@ import {
   sampleResources,
   scanStorage,
 } from '../services/resourceMonitor';
-import { sendToWindow } from '../windows/createAppWindow';
-import { getMainWindow, isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
 
 const CLEAN_TIMEOUT_MS = 60_000;
 const pendingCleans = new Map<string, (removed: number) => void>();
 
 function assertTrusted(webContentsId: number): void {
-  if (!isMainWebContents(webContentsId) && !isSettingsWebContents(webContentsId)) {
+  if (!isMainRenderer(webContentsId) && !isSettingsRenderer(webContentsId)) {
     throw new Error('Untrusted sender');
   }
 }
@@ -69,8 +67,8 @@ export function registerResourceHandlers(): void {
     assertTrusted(event.sender.id);
     const parsed = parseSessionCleanRequest(request);
     if (!parsed) throw new Error('Invalid session clean request');
-    const window = getMainWindow();
-    if (!window || window.isDestroyed()) throw new Error('Main window is not open');
+    const main = localMainContents();
+    if (!main) throw new Error('Main window is not open');
     const requestId = randomUUID();
     const removed = await new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -81,7 +79,7 @@ export function registerResourceHandlers(): void {
         clearTimeout(timer);
         resolve(count);
       });
-      sendToWindow(window, IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_REQUEST, {
+      main.send(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_REQUEST, {
         requestId,
         request: parsed,
       });
@@ -91,7 +89,7 @@ export function registerResourceHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_DONE,
     (event, requestId: unknown, removed: unknown) => {
-      if (!isMainWebContents(event.sender.id) || typeof requestId !== 'string') return;
+      if (!isMainRenderer(event.sender.id) || typeof requestId !== 'string') return;
       const resolve = pendingCleans.get(requestId);
       pendingCleans.delete(requestId);
       resolve?.(typeof removed === 'number' && removed >= 0 ? removed : 0);

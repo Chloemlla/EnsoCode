@@ -6,6 +6,7 @@ import type {
   ModelRuntime as ModelRuntimeType,
   SettingsManager as SettingsManagerType,
 } from '@earendil-works/pi-coding-agent';
+import { app, type RendererContents, shell } from '@platform';
 import { isSameChildSessionIdentity } from '@shared/builtinAgents';
 import type {
   OauthFlowEvent,
@@ -49,10 +50,9 @@ import type {
   OauthUsageWindow,
 } from '@shared/types';
 import { IPC_CHANNELS, providerIdOfAccountKey, sanitizeOauthLabel } from '@shared/types';
-import { app, BrowserWindow, shell, type WebContents } from 'electron';
-import { getWindowWebContents, sendToWindow } from '../windows/createAppWindow';
 import { OauthQuotaCoordinator } from './oauthQuotaCoordinator';
 import { sendToRemoteRenderers } from './remoteRenderer/senders';
+import { localUi } from './uiHost';
 
 // pi-ai 不在依赖树顶层，auth 交互类型从 ModelRuntime.login 签名结构化提取
 type AuthInteraction = Parameters<ModelRuntimeType['login']>[2];
@@ -476,12 +476,10 @@ interface ActiveLogin {
 // 同一时刻只允许一个进行中的登录流程
 let activeLogin: ActiveLogin | null = null;
 /** 通知除发起窗口外的 renderer：auth.json 账号集合已变化，需要重拉真值快照。 */
-export function broadcastOauthCredentialsChanged(source?: WebContents): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    const ui = getWindowWebContents(win);
-    if (ui === source || ui.isDestroyed()) continue;
-    sendToWindow(win, IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
+export function broadcastOauthCredentialsChanged(source?: RendererContents): void {
+  for (const contents of localUi()?.allContents() ?? []) {
+    if (contents === source || contents.isDestroyed()) continue;
+    contents.send(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
   }
   sendToRemoteRenderers(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED, [], source?.id);
 }
@@ -516,7 +514,11 @@ function sameFlow(left: OauthFlowLocator, right: OauthFlowLocator): boolean {
         left.requestId === right.requestId &&
         isSameChildSessionIdentity(left.child, right.child);
 }
-function emitOauthEvent(login: ActiveLogin, sender: WebContents, event: OauthLoginEvent): void {
+function emitOauthEvent(
+  login: ActiveLogin,
+  sender: RendererContents,
+  event: OauthLoginEvent
+): void {
   if (!sender.isDestroyed()) {
     const flowEvent: OauthFlowEvent = { locator: login.locator, event };
     sender.send(IPC_CHANNELS.OAUTH_LOGIN_EVENT, flowEvent);
@@ -530,7 +532,7 @@ function emitOauthEvent(login: ActiveLogin, sender: WebContents, event: OauthLog
 /** 同一入口服务 wizard 与 Enso child；locator 完整绑定 owner/host/generation/request。 */
 export function beginOauthLogin(
   providerId: string,
-  sender: WebContents,
+  sender: RendererContents,
   locator: OauthFlowLocator,
   signal?: AbortSignal
 ): OauthLoginHandle {
@@ -563,7 +565,7 @@ export function beginOauthLogin(
 }
 
 /** Provider wizard 入口；Main 生成 exact locator，完成仅经 OauthFlowEvent 收敛。 */
-export function startOauthLogin(providerId: string, sender: WebContents): StartOauthResult {
+export function startOauthLogin(providerId: string, sender: RendererContents): StartOauthResult {
   const locator: OauthFlowLocator = {
     flowId: crypto.randomUUID(),
     ownerWebContentsId: sender.id,
@@ -574,7 +576,7 @@ export function startOauthLogin(providerId: string, sender: WebContents): StartO
 
 async function runOauthLogin(
   providerId: string,
-  sender: WebContents,
+  sender: RendererContents,
   login: ActiveLogin,
   ownerSignal?: AbortSignal
 ): Promise<void> {
@@ -732,7 +734,7 @@ export function reopenOauthLogin(locator: OauthFlowLocator): boolean {
  * 它与凭证无关，auth.json 全空时依然存在（实测 probe3）。而新账号的 key 由
  * `nextAccountKey` 递增分配、不回收空位，所以裸 key 空着也不会撞号。
  */
-export async function oauthLogout(accountKey: string, sender?: WebContents): Promise<void> {
+export async function oauthLogout(accountKey: string, sender?: RendererContents): Promise<void> {
   const runtime = await getRuntime();
   // accountKey 来自 Renderer，只接受 auth.json 里真实存在的键：
   // 任意字符串都能当键传进 pi 的 logout/getAuth，先按已存凭证收窄
@@ -771,7 +773,7 @@ function storedCodexAccountId(credential: { access: string; accountId?: unknown 
  * provider 克隆即可，写完立刻注销、再按 auth.json 现状重建正常克隆。
  */
 export async function importCodexOauthCredential(
-  sender?: WebContents,
+  sender?: RendererContents,
   codexAuthPath: string = defaultCodexAuthPath()
 ): Promise<OauthCodexImportResult> {
   let raw: string;

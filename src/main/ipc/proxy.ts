@@ -1,6 +1,6 @@
+import { ipcMain } from '@platform';
 import { isValidProxyUrl, normalizeProxyMode } from '@shared/proxy';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
 import { getProxyConfig } from '../services/proxyConfig';
 
 export function registerProxyHandlers(): void {

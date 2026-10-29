@@ -1,12 +1,16 @@
 import { formatUiElementRefLine, parseUiElementRefLine } from '@shared/browser/designMode';
+import { splitPastedTextRefs } from '@shared/pastedText';
 import {
-  PASTED_TEXT_FILE_NAME,
-  splitPastedTextRefs,
-  stripPastedTextRefs,
-} from '@shared/pastedText';
+  cleanTitleSummarySource,
+  extractRepresentativeTitle,
+  INLINE_CHAT_REF,
+  INLINE_UI_REF,
+  mentionDisplayText,
+} from '@shared/titleSource';
 import type { AttachedImage } from '@shared/types/agent';
 import type { AgentTypeMentionCandidate, MentionCandidate } from '@shared/types/mentions';
-import { parseWorkflowPresetMessage } from '@shared/workflowPresetMessage';
+
+export { cleanTitleSummarySource, extractRepresentativeTitle, mentionDisplayText };
 
 export interface ComposerPayload {
   text: string;
@@ -132,87 +136,20 @@ export type MentionSegment =
   | { type: 'chat'; label: string; sessionFile: string }
   | { type: 'ui-element'; id: string; label: string; path: string; text: string; imageId: string };
 
-/** 编辑器段 → wire text：文件原位 @path，会话/选区原位内联引用块 */
+/** 编辑器段 → wire text：文件原位 @path（含空白时 @"path"），会话/选区原位内联引用块 */
 export function serializeSegments(segments: readonly MentionSegment[]): string {
   return segments
     .map((segment) => {
       if (segment.type === 'text') return segment.text;
-      if (segment.type === 'file') return `@${segment.path}`;
+      if (segment.type === 'file') {
+        return /\s/.test(segment.path) && !segment.path.includes('"')
+          ? `@"${segment.path}"`
+          : `@${segment.path}`;
+      }
       if (segment.type === 'chat') return chatRefLine(segment.label, segment.sessionFile);
       return formatUiElementRefLine(segment);
     })
     .join('');
-}
-
-const INLINE_CHAT_REF =
-  /\[Referenced past chat "(.+?)" — transcript file: (.+?) \(pi session jsonl; read it if relevant\)\]/g;
-const INLINE_UI_REF = /\[Selected UI element "([^"]*)" — path: (.*?); text: (.*?)\]/g;
-
-/** 把引用块折叠成 @标题，供标题/纯文本展示用（引用块原文不得污染标题） */
-export function mentionDisplayText(text: string): string {
-  return text
-    .replace(INLINE_CHAT_REF, (_match, label: string) => `@${label}`)
-    .replace(INLINE_UI_REF, (_match, label: string) => `@${label}`);
-}
-
-const CONTINUATION_LINE = /^(?:从这里继续|继续|continue(?:\s+here)?)\s*[:：]?\s*$/i;
-
-/** 清洗送给标题总结模型的输入文本：剥离内部引用块与跳转引导词，返回纯净的用户自然语言或被引标题 */
-export function cleanTitleSummarySource(text: string): string {
-  const trimmed = stripPastedTextRefs(text).trim();
-  if (!trimmed) return '';
-
-  const chatLabels: string[] = [];
-  for (const match of trimmed.matchAll(INLINE_CHAT_REF)) {
-    if (match[1]?.trim()) chatLabels.push(match[1].trim());
-  }
-
-  const stripped = trimmed.replace(INLINE_CHAT_REF, '').replace(INLINE_UI_REF, '');
-
-  const lines = stripped
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  while (lines.length > 1 && CONTINUATION_LINE.test(lines[0])) {
-    lines.shift();
-  }
-  const cleanBody = lines.join('\n').trim();
-
-  if (cleanBody && !CONTINUATION_LINE.test(cleanBody)) {
-    return cleanBody;
-  }
-
-  if (chatLabels.length > 0) {
-    return chatLabels[0];
-  }
-
-  return cleanBody;
-}
-
-/**
- * 从首条消息中提取代表行作为暂存标题（截断到 40 字符）。
- * 跳过像「从这里继续:」这类无实质意义的引导行，优先选用后续自然语言；
- * 引用块折叠成 @标题；空则兜底 '[image]'。
- */
-export function extractRepresentativeTitle(text: string): string {
-  const workflow = parseWorkflowPresetMessage(text);
-  if (workflow) return workflow.name.slice(0, 40);
-  const withoutPasted = stripPastedTextRefs(text);
-  const displayed = mentionDisplayText(withoutPasted);
-  const lines = displayed
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  if (lines.length === 0) return withoutPasted === text ? '[image]' : PASTED_TEXT_FILE_NAME;
-
-  let selected = lines[0];
-  if (CONTINUATION_LINE.test(selected) && lines.length > 1) {
-    const nonRef = lines.slice(1).find((l) => !l.startsWith('@') && !CONTINUATION_LINE.test(l));
-    selected = nonRef ?? lines[1];
-  }
-
-  return (selected || '[image]').slice(0, 40);
 }
 
 /**
@@ -271,8 +208,12 @@ export function splitInlineMentions(text: string): MentionSegment[] {
 }
 
 /** 内联文件 token：带扩展名才算（@src/main.ts、@.DS_Store、@.gitignore），
- * 目录以尾 / 识别（@src/、@src/components/）。避免误伤 @types/node 这类 npm scope（无点） */
-const INLINE_FILE_TOKEN = /^(?:[\w./-]*\.[\w-]{1,16}(?:#L\d+(?:-L\d+)?)?|[\w./-]+\/)$/;
+ * 目录以尾 / 识别（@src/、@src/components/）。避免误伤 @types/node 这类 npm scope（无点）。
+ * 兼容拖入的 Windows 绝对路径（盘符 + \ 分隔、含中文名） */
+const INLINE_FILE_TOKEN =
+  /^(?:[A-Za-z]:[\\/])?(?:[\p{L}\p{N}_./\\-]*\.[\w-]{1,16}(?:#L\d+(?:-L\d+)?)?|[\p{L}\p{N}_./\\-]+[\\/])$/u;
+/** @"..." 引号形态（含空格的路径）：引号内同样要求带扩展名或尾分隔符 */
+const QUOTED_FILE_TOKEN = /^"([^"\n]*(?:\.[\w-]{1,16}(?:#L\d+(?:-L\d+)?)?|[\\/]))"/;
 const FILE_LINE_REF = /#L\d+(?:-L\d+)?$/;
 
 export function stripFileLineRef(path: string): string {
@@ -307,6 +248,18 @@ function splitHeuristicFileTokens(text: string): InlineSegment[] {
       break;
     }
     const previous = at > 0 ? text[at - 1] : ' ';
+    const quoted =
+      previous === ' ' || previous === '\n' ? QUOTED_FILE_TOKEN.exec(text.slice(at + 1)) : null;
+    if (quoted) {
+      plain += text.slice(index, at);
+      if (plain) {
+        segments.push({ type: 'text', text: plain });
+        plain = '';
+      }
+      segments.push({ type: 'file', path: quoted[1] });
+      index = at + 1 + quoted[0].length;
+      continue;
+    }
     const raw = /^\S*/.exec(text.slice(at + 1))?.[0] ?? '';
     const token = raw.replace(/[),.;!?]+$/, '');
     if ((previous === ' ' || previous === '\n') && token && INLINE_FILE_TOKEN.test(token)) {

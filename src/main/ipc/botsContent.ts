@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { app, shell } from '@platform';
 import { type BotMediaItem, sendImageItems } from '@shared/bots/sendImage';
 import type { ProjectedMessage } from '@shared/types/agent';
 import type {
@@ -11,7 +12,6 @@ import type {
   BotArtifactTarget,
   BotSearchResult,
 } from '@shared/types/botIpc';
-import { app, BrowserWindow, shell } from 'electron';
 import {
   artifactCandidates,
   isOpenableArtifact,
@@ -27,6 +27,7 @@ import type { BotChatStore } from '../services/bots/chatStore';
 import { mediaFile } from '../services/bots/media';
 import { fitDataUrl, mediaMime } from '../services/bots/mediaImage';
 import { readBotSessionMessages } from '../services/bots/sessionMessages';
+import { fileDesktop } from '../services/desktopHooks';
 import { getSourceAuthorityRegistry } from './agent';
 
 interface ContentServices {
@@ -276,23 +277,8 @@ export async function phoneArtifactImage(
   return dataUrl ? { dataUrl } : { error: 'too-large' };
 }
 
-/** PDF 走独立窗口的内置查看器：无 preload、沙箱、禁止新窗口与跳转 */
 function openPdfWindow(file: string, title: string): void {
-  const win = new BrowserWindow({
-    width: 900,
-    height: 1100,
-    title,
-    autoHideMenuBar: true,
-    webPreferences: {
-      plugins: true,
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (event) => event.preventDefault());
-  void win.loadFile(file);
+  fileDesktop().openPdf(file, title);
 }
 
 export async function openArtifact(

@@ -1,0 +1,8 @@
+**/node_modules
+out
+dist
+.git
+packages/relay-go/frontend
+packages/phone/dist
+resources/rtk/*-*
+*.log

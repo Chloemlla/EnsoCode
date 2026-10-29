@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { app, clipboard, type IpcInvokeEvent, ipcMain, shell } from '@platform';
 import { sniffImageMime } from '@shared/imageSniff';
 import { PREVIEW_IMAGE_MAX_BYTES, previewImageMime } from '@shared/markdownPreviewImage';
 import { resolveSshTarget } from '@shared/ssh';
@@ -19,7 +20,6 @@ import type {
 } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { parseWorkspaceFileSearchRequest } from '@shared/workspaceFileSearch';
-import { app, clipboard, type IpcMainInvokeEvent, ipcMain, shell } from 'electron';
 import { createSshExecutor } from '../../agent/ssh/executor';
 import { resolveLocalCwdForBrowser } from '../services/browserFileRoot';
 import {
@@ -171,7 +171,7 @@ async function resolveRemoteUnderCwd(
   return result.code === 0 ? abs : null;
 }
 
-function hookDestroyed(event: IpcMainInvokeEvent): void {
+function hookDestroyed(event: IpcInvokeEvent): void {
   const id = event.sender.id;
   if (hookedSenders.has(id)) return;
   hookedSenders.add(id);
@@ -189,7 +189,7 @@ function watchKey(senderId: number, conversationId: string, rel: string): string
 export function registerFilesWorkspaceHandlers(): void {
   const handle = (
     channel: string,
-    handler: (event: IpcMainInvokeEvent, request: unknown) => Promise<unknown>
+    handler: (event: IpcInvokeEvent, request: unknown) => Promise<unknown>
   ) => {
     ipcMain.handle(channel, async (event, request: unknown) => {
       try {

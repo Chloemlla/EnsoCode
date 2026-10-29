@@ -1,3 +1,4 @@
+import { shouldAbortStalledGeneration } from '@shared/stallTimeout';
 import type { RendererAgentEvent, SessionSnapshot } from '@shared/types/agent';
 import { PROJECTED_FILE_TEXT_LIMIT } from '@shared/types/fileChanges';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +14,6 @@ import {
   truncatedNeedsSnapshotResync,
   upsertOutOfRange,
 } from './reducer';
-import { shouldAbortStalledGeneration } from './stallTimeout';
 
 const identity = (generation = 'g1') => ({ sessionId: 's1', generation });
 const base: SessionProjection = { ...emptyProjection };

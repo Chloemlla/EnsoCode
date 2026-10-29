@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { app } from '@platform';
 import type { McpServerEntry } from '@shared/types';
-import { app } from 'electron';
 
 interface CatalogRow {
   signature: string;

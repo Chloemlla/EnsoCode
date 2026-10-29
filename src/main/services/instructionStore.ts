@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { app } from 'electron';
+import { app } from '@platform';
 import { readSettings } from '../ipc/settings';
 
 /** 本地副本目录：userData/instructions/<id>.md */

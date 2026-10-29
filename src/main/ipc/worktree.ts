@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { app, ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import type { GitRequest } from '@shared/types/git';
 import type {
@@ -16,7 +17,6 @@ import type {
   WorktreeStatus,
 } from '@shared/types/worktree';
 import { resolveWorktreeRoot } from '@shared/worktreeRoot';
-import { app, ipcMain } from 'electron';
 import {
   freezeWorkspace,
   readSettingsState,
@@ -33,6 +33,7 @@ import {
   workspaceIdentityPath,
 } from '../services/gitBranches';
 import { GitOperationError } from '../services/gitVersionControl';
+import { isMainRenderer } from '../services/renderers';
 import { getSharedWorktreeRegistry, type WorktreeRegistry } from '../services/worktree/registry';
 import {
   createSessionWorktree,
@@ -41,7 +42,6 @@ import {
   repoIsClean,
   worktreeStatus,
 } from '../services/worktree/service';
-import { isMainWebContents } from '../windows/MainWindow';
 import { getSourceAuthorityRegistry } from './agent';
 import { agentSessionIndex } from './capabilities';
 
@@ -363,7 +363,7 @@ export function registerWorktreeHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.WORKTREE_BRANCHES,
     async (event, conversationId: unknown): Promise<WorkspaceBranchesResult> => {
-      if (!isMainWebContents(event.sender.id) || !isNonEmptyString(conversationId))
+      if (!isMainRenderer(event.sender.id) || !isNonEmptyString(conversationId))
         return { ok: false, code: 'unavailable', error: 'Invalid workspace request.' };
       const context = workspaceContext(conversationId);
       if (!context)
@@ -383,7 +383,7 @@ export function registerWorktreeHandlers(): void {
     IPC_CHANNELS.WORKTREE_SWITCH_BRANCH,
     async (event, request: unknown): Promise<WorkspaceBranchSwitchResult> => {
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !request ||
         typeof request !== 'object' ||
         Array.isArray(request) ||
@@ -538,7 +538,7 @@ export function registerWorktreeHandlers(): void {
       sourceId: unknown
     ): Promise<WorktreeResult<SessionWorktree>> => {
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !isNonEmptyString(conversationId) ||
         !isNonEmptyString(sourceId) ||
         conversationId === sourceId
@@ -577,7 +577,7 @@ export function registerWorktreeHandlers(): void {
     IPC_CHANNELS.WORKTREE_RENAME,
     (event, conversationId: unknown, name: unknown): WorktreeResult<SessionWorktree[]> => {
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !isNonEmptyString(conversationId) ||
         typeof name !== 'string'
       ) {
@@ -604,7 +604,7 @@ export function registerWorktreeHandlers(): void {
     IPC_CHANNELS.WORKTREE_CREATE,
     async (event, request: unknown): Promise<WorktreeResult<SessionWorktree>> => {
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !request ||
         typeof request !== 'object' ||
         !('conversationId' in request) ||
@@ -676,7 +676,7 @@ export function registerWorktreeHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.WORKTREE_REMOVE,
     async (event, conversationId: unknown): Promise<WorktreeResult<null>> => {
-      if (!isMainWebContents(event.sender.id) || !isNonEmptyString(conversationId)) {
+      if (!isMainRenderer(event.sender.id) || !isNonEmptyString(conversationId)) {
         return { ok: false, error: 'invalid worktree remove request' };
       }
       try {
@@ -691,7 +691,7 @@ export function registerWorktreeHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.WORKTREE_REBUILD,
     async (event, conversationId: unknown): Promise<WorktreeResult<SessionWorktree>> => {
-      if (!isMainWebContents(event.sender.id) || !isNonEmptyString(conversationId)) {
+      if (!isMainRenderer(event.sender.id) || !isNonEmptyString(conversationId)) {
         return { ok: false, error: 'invalid worktree rebuild request' };
       }
       const record = ensureRegistry().get(conversationId);

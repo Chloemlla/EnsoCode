@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { app, ipcMain, shell } from '@platform';
 import { botBrowserKey } from '@shared/bots/browser';
 import { checkAvatarImage } from '@shared/bots/cardPng';
 import { applyChatFlags, wakeOnActivity } from '@shared/bots/chatFlags';
@@ -44,7 +45,6 @@ import type {
   BotWriteIpcResult,
 } from '@shared/types/botIpc';
 import { isUsageRangeDays } from '@shared/usage/types';
-import { app, ipcMain, shell } from 'electron';
 import {
   abortCompleteText,
   abortSession,
@@ -123,12 +123,11 @@ import {
 import { createSmartRouter, type SmartRouterDeps } from '../services/bots/smartRouter';
 import { createTeam } from '../services/bots/teamCreate';
 import { ThreadTitler } from '../services/bots/threadTitler';
-import { browserHost } from '../services/browserHost';
+import { type BotDesktop, botDesktop } from '../services/desktopHooks';
 import { searchFiles } from '../services/fileSearch';
 import { resolveGlobalInstruction } from '../services/instructionStore';
 import { setBotAvatarResolver } from '../services/localImageProtocol';
 import { listMemories } from '../services/memory/store';
-import { notifyBotChat } from '../services/notifications';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
 import {
   botChatPasteOwner,
@@ -136,11 +135,10 @@ import {
   savePastedTextFile,
 } from '../services/pastedTextFiles';
 import { resolveRemoteModels } from '../services/remoteModels';
+import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import { botAssistantModelCandidates, titleModelCandidates } from '../services/titleSummary';
 import { getUsagePricing, loadUsageSession } from '../services/usage/usageService';
-import { sendToAllWindows } from '../windows/createAppWindow';
-import { isMainWebContents } from '../windows/MainWindow';
 import {
   getSourceAuthorityRegistry,
   readSessionHistoryFile,
@@ -223,7 +221,7 @@ export function emitBotEvent(event: BotEvent): void {
   if (event.kind === 'chat') services?.snooze.refresh();
   if (event.kind !== 'inbox') services?.inbox.onBotEvent(event);
   try {
-    sendToAllWindows(IPC_CHANNELS.BOT_EVENT, event);
+    broadcastToRenderers(IPC_CHANNELS.BOT_EVENT, event);
   } catch {
     // renderer 已销毁
   }
@@ -246,10 +244,10 @@ export function observeBotEvents(observer: (event: BotEvent) => void): () => voi
 
 const sessionDir = () => path.join(app.getPath('userData'), 'agent', 'sessions');
 
-function notifyQuietly(chatId: string, build: Parameters<typeof notifyBotChat>[1]): void {
-  void notifyBotChat(chatId, build).catch((error) =>
-    console.warn('[bots] notification failed', error)
-  );
+function notifyQuietly(chatId: string, build: Parameters<BotDesktop['notifyChat']>[1]): void {
+  void botDesktop()
+    .notifyChat(chatId, build)
+    .catch((error) => console.warn('[bots] notification failed', error));
 }
 
 /** 新消息让已搁置的聊天回到进行中 */
@@ -985,7 +983,7 @@ function handle(
   whenDisabled: unknown = DISABLED
 ): void {
   ipcMain.handle(channel, async (event, request: unknown) => {
-    if (kind === 'write' && !isMainWebContents(event.sender.id)) return UNAVAILABLE;
+    if (kind === 'write' && !isMainRenderer(event.sender.id)) return UNAVAILABLE;
     if (!botModeEnabled()) return whenDisabled;
     try {
       const bots = getBotServices();
@@ -1878,7 +1876,7 @@ export function registerBotHandlers(): void {
       for (const thread of threads)
         removePastedTextFiles(sessionDir(), botChatPasteOwner(thread.id));
       tasks.forget(chatId);
-      await browserHost.closeSession(botBrowserKey(chatId));
+      await botDesktop().closeBrowser(botBrowserKey(chatId));
       await removeBotMemorySpace(app.getPath('userData'), `chat:${chatId}`);
       return { ok: true };
     }

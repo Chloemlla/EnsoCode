@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { closeSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { shell } from '@platform';
 import {
   type ContextMenuOpenTarget,
   type FileOpenRule,
@@ -13,13 +12,9 @@ import {
   resolveFileOpenTarget,
 } from '@shared/fileOpening';
 import type { FilesMutateResult, FilesOpenResult } from '@shared/types/filesWorkspace';
-import { BrowserWindow, shell } from 'electron';
+import { fileDesktop } from './desktopHooks';
 import { resolveLocalUnderCwd } from './filesWorkspace';
 import { openInApps } from './openInApps';
-
-const PDF_VIEWER_URL = 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html';
-const PDF_STREAM_URL =
-  /^chrome-extension:\/\/mhjfbmdgcfjbbpaeojofohoefgiehjai\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface WorkspaceFileOpeningDependencies {
   platform: NodeJS.Platform;
@@ -67,47 +62,7 @@ function isPdfFile(file: string): boolean {
  */
 export async function openWorkspacePdfWindow(file: string): Promise<void> {
   if (!isPdfFile(file)) throw new Error('unsupported-viewer');
-  const win = new BrowserWindow({
-    width: 900,
-    height: 1100,
-    title: path.basename(file),
-    autoHideMenuBar: true,
-    webPreferences: {
-      plugins: true,
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      webviewTag: false,
-      partition: `workspace-pdf-${randomUUID()}`,
-    },
-  });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (event) => event.preventDefault());
-  const pdfUrl = pathToFileURL(file).href;
-  win.webContents.on('will-frame-navigate', (event) => {
-    const viewer = event.frame?.parent;
-    const initialPdfStream =
-      !event.isMainFrame &&
-      event.frame?.url === '' &&
-      viewer?.url === PDF_VIEWER_URL &&
-      event.initiator === viewer &&
-      viewer.parent === win.webContents.mainFrame &&
-      win.webContents.mainFrame.url === pdfUrl &&
-      PDF_STREAM_URL.test(event.url);
-    if (!initialPdfStream) event.preventDefault();
-  });
-  win.webContents.on('will-redirect', (event) => event.preventDefault());
-  win.webContents.on('will-attach-webview', (event) => event.preventDefault());
-  win.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) =>
-    callback(false)
-  );
-  win.webContents.session.setPermissionCheckHandler(() => false);
-  try {
-    await win.loadFile(file);
-  } catch (error) {
-    win.destroy();
-    throw error;
-  }
+  await fileDesktop().openWorkspacePdf(file);
 }
 
 /**

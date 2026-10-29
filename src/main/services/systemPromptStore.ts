@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { app } from 'electron';
+import { app } from '@platform';
 import { DEFAULT_PERSONA_PROMPT } from '../../shared/systemPrompt';
 import { isSystemPromptId } from '../../shared/systemPromptId';
 

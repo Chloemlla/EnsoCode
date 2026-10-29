@@ -38,6 +38,7 @@ import {
   toBase64Url,
   toWebSocketUrl,
 } from '@enso/pair';
+import { app, powerMonitor, powerSaveBlocker } from '@platform';
 import {
   catalogSyncFingerprint,
   channelsForMetaPush,
@@ -67,14 +68,14 @@ import type {
   PairStatus,
 } from '@shared/types/pair';
 import type { SpeechTranscribeResult } from '@shared/types/speech';
-import { app, powerMonitor, powerSaveBlocker } from 'electron';
 import { readTrayPreventDisplaySleep, readTraySleepPolicy } from '../ipc/settings';
 // 会话命令一律走 agentBridge（身份解析留在 ipc/agent.ts），这里只留无需身份的 snapshot。
 import { requestSnapshot, setPinnedSessions } from './agentHost';
 import { ApprovalNotificationGate } from './approvalNotificationGate';
 import { MacosSystemSleepAssertion } from './macosSystemSleepAssertion';
-import { readNotifyMainAgentOnly } from './notifications';
+import { readNotifyMainAgentOnly } from './notifyPolicy';
 import type { BotSessionAccess } from './pairBotFrames';
+import { builtinRelayUrl, dialRelayUrl, publicRelayUrl } from './pairBuiltinRelay';
 import { PAIR_DIRECT_ENABLED, PAIR_STUN_SERVERS } from './pairDirectConfig';
 import { isDirectPeerAvailable, mainDirectPeerFactory, preloadDirectPeer } from './pairDirectPeer';
 import { flushChangedMeta, requestPairMeta } from './pairMetaFlush';
@@ -487,6 +488,8 @@ export function stopPairHost(): void {
 let relayUrlOverride: string | null | undefined;
 
 export function getRelayUrl(): string {
+  const builtin = builtinRelayUrl();
+  if (builtin) return builtin;
   if (relayUrlOverride === undefined) relayUrlOverride = loadRelayUrl();
   return relayUrlOverride ?? DEFAULT_RELAY_URL;
 }
@@ -504,7 +507,7 @@ export async function startPairing(): Promise<{ ok: boolean; inviteUri?: string;
   cancelPairing();
   try {
     const relay = getRelayUrl();
-    pairingSession = await startHostPairing(relay);
+    pairingSession = await startHostPairing(dialRelayUrl(relay));
     pairingInviteUri = buildPairLink({
       relay,
       publicKey: fromBase64Url(pairingSession.publicKeyB64),
@@ -547,7 +550,7 @@ function pollPairing(): void {
           token: result.hostToken,
           contentKey: toBase64Url(result.contentKey),
           deviceName: result.deviceName,
-          relayUrl: session.relayUrl,
+          relayUrl: publicRelayUrl(session.relayUrl),
           pairedAt: Date.now(),
         };
         saveDevices(upsertDevice(loadDevices(), device));
@@ -601,7 +604,7 @@ export async function revokeDevice(pairId: string): Promise<void> {
   forgetDevice(pairId);
   if (device) {
     try {
-      await revokePairing(device.relayUrl, pairId, device.token);
+      await revokePairing(dialRelayUrl(device.relayUrl), pairId, device.token);
     } catch {}
   }
   notifyStatus();
@@ -715,7 +718,7 @@ function openConnection(device: PairedDevice): void {
 function connect(conn: Connection): void {
   if (conn.closed) return;
   const generation = ++conn.generation;
-  const base = toWebSocketUrl(conn.device.relayUrl);
+  const base = toWebSocketUrl(dialRelayUrl(conn.device.relayUrl));
   const url = `${base}/v1/pair/${encodeURIComponent(conn.device.pairId)}?role=host&token=${encodeURIComponent(conn.device.token)}`;
   void openPairRelayWebSocket(url)
     .then((ws) => attachHostSocket(conn, ws, generation))
@@ -1613,6 +1616,16 @@ export function forwardAgentEvent(event: RendererAgentEvent): void {
 }
 
 /** renderer 推来的目录/项目/provider（provider 已剥 apiKey/baseUrl） */
+let lastCatalogPayload: Parameters<typeof updatePairCatalog>[0] | null = null;
+let catalogSink: ((payload: Parameters<typeof updatePairCatalog>[0]) => void) | null = null;
+
+/** 目录每次变化都交给 sink（无界面宿主据此落盘） */
+export function setPairCatalogSink(
+  sink: ((payload: Parameters<typeof updatePairCatalog>[0]) => void) | null
+): void {
+  catalogSink = sink;
+}
+
 export function updatePairCatalog(payload: {
   catalog: CatalogEntry[];
   pinnedOrder?: string[];
@@ -1634,6 +1647,8 @@ export function updatePairCatalog(payload: {
 }): void {
   catalog = payload.catalog;
   catalogReady = true;
+  lastCatalogPayload = payload;
+  catalogSink?.(payload);
   pinnedOrder = payload.pinnedOrder ?? [];
   projects = payload.projects;
   projectGroups = payload.projectGroups ?? [];
@@ -1671,6 +1686,10 @@ export function getPairProjects(): ProjectEntry[] {
 export function mutatePairCatalog(mutate: (entries: CatalogEntry[]) => CatalogEntry[]): void {
   if (!catalogReady) return;
   catalog = mutate(catalog);
+  if (lastCatalogPayload) {
+    lastCatalogPayload = { ...lastCatalogPayload, catalog };
+    catalogSink?.(lastCatalogPayload);
+  }
   for (const conn of connections.values()) {
     if (conn.phoneOnline) requestMeta(conn);
   }

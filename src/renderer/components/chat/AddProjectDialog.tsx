@@ -34,57 +34,66 @@ import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
 import { useSettingsStore } from '@/stores/settings';
 
-/** 内嵌远程目录浏览：逐级钻取，选中回填路径输入框（避免嵌套 Dialog） */
-function RemoteDirBrowser({
-  connectionId,
+type DirPage = { path: string; parent: string | null; dirs: string[] };
+
+/** 拿不到列表时：error 显示在浏览器里，null 表示已另行处理（如弹出主机指纹确认） */
+type ListDirs = (
+  target: string | undefined,
+  retry: boolean
+) => Promise<DirPage | { error: string } | null>;
+
+type CreateDir = (parent: string, name: string) => Promise<DirPage | { error: string }>;
+
+const posixParent = (dir: string) => (dir === '/' ? null : dir.replace(/\/[^/]+$/, '') || '/');
+
+function childPath(dir: string, name: string): string {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+}
+
+/** 内嵌目录浏览：逐级钻取，选中回填路径输入框（避免嵌套 Dialog）；reloadKey 变化时以 retry 重载当前目录 */
+function DirBrowser({
+  list,
+  create,
   initialPath,
-  hostKeyRetry = 0,
-  fallbackHost,
+  reloadKey = 0,
   onSelect,
   onClose,
-  onHostKey,
 }: {
-  connectionId: string;
+  list: ListDirs;
+  /** 提供时显示“新建文件夹”，建好后直接进入新目录 */
+  create?: CreateDir;
   initialPath?: string;
-  hostKeyRetry?: number;
-  fallbackHost?: { host: string; port?: number };
+  reloadKey?: number;
   onSelect: (path: string) => void;
   onClose: () => void;
-  onHostKey: (challenge: SshHostKeyChallenge) => void;
 }) {
   const { t } = useI18n();
-  const [path, setPath] = React.useState<string | null>(null);
-  const [dirs, setDirs] = React.useState<string[]>([]);
+  const [page, setPage] = React.useState<DirPage | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
+  const [newName, setNewName] = React.useState<string | null>(null);
+  const [createError, setCreateError] = React.useState('');
   const requestSeq = React.useRef(0);
   const pathRef = React.useRef<string | null>(null);
-  const onHostKeyRef = React.useRef(onHostKey);
-  onHostKeyRef.current = onHostKey;
-  const fallbackHostRef = React.useRef(fallbackHost);
-  fallbackHostRef.current = fallbackHost;
+  const listRef = React.useRef(list);
+  listRef.current = list;
 
   const load = React.useCallback(
-    (target?: string, promptHostKey = true) => {
+    (target?: string, retry = false) => {
       const seq = ++requestSeq.current;
       setLoading(true);
       setError('');
-      window.electronAPI.sshConnections
-        .listDirs(connectionId, target)
+      listRef
+        .current(target, retry)
         .then((result) => {
-          if (seq !== requestSeq.current) return;
-          if (result.ok) {
-            setPath(result.path);
-            pathRef.current = result.path;
-            setDirs(result.dirs);
+          if (seq !== requestSeq.current || !result) return;
+          if ('error' in result) {
+            setError(result.error);
             return;
           }
-          const challenge = hostKeyFromSshFailure(result, fallbackHostRef.current);
-          if (challenge && promptHostKey) {
-            onHostKeyRef.current(challenge);
-            return;
-          }
-          setError(result.error);
+          setPage(result);
+          pathRef.current = result.path;
         })
         .catch(() => {
           if (seq === requestSeq.current) setError(t('Failed to list remote directory.'));
@@ -93,28 +102,50 @@ function RemoteDirBrowser({
           if (seq === requestSeq.current) setLoading(false);
         });
     },
-    [connectionId, t]
+    [t]
   );
 
-  // 仅挂载/切换连接时以当前输入为起点；后续导航由 load 驱动，不跟随输入框变化
+  // 仅挂载时以当前输入为起点；后续导航由 load 驱动，不跟随输入框变化
   const initialRef = React.useRef(initialPath);
   React.useEffect(() => {
-    const initial = initialRef.current;
-    load(initial?.startsWith('/') ? initial : undefined);
+    load(initialRef.current);
   }, [load]);
 
   React.useEffect(() => {
-    if (!hostKeyRetry) return;
-    load(
-      pathRef.current ?? (initialRef.current?.startsWith('/') ? initialRef.current : undefined),
-      false
-    );
-  }, [hostKeyRetry, load]);
+    if (reloadKey) load(pathRef.current ?? initialRef.current, true);
+  }, [reloadKey, load]);
 
-  const parent = path && path !== '/' ? path.replace(/\/[^/]+$/, '') || '/' : null;
+  const path = page?.path ?? null;
+  const dirs = page?.dirs ?? [];
+  const parent = page?.parent ?? null;
+
+  const submitNewFolder = () => {
+    if (!create || !path || newName === null || !newName.trim()) return;
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    setCreateError('');
+    create(path, newName)
+      .then((result) => {
+        if (seq !== requestSeq.current) return;
+        if ('error' in result) {
+          setCreateError(t(result.error));
+          return;
+        }
+        setNewName(null);
+        setError('');
+        setPage(result);
+        pathRef.current = result.path;
+      })
+      .catch(() => {
+        if (seq === requestSeq.current) setCreateError(t('Failed to list remote directory.'));
+      })
+      .finally(() => {
+        if (seq === requestSeq.current) setLoading(false);
+      });
+  };
 
   return (
-    <div className="space-y-1.5 rounded-md border bg-muted/30 p-2">
+    <div className="w-full space-y-1.5 rounded-md border bg-muted/30 p-2">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground text-xs">
           {path ?? '…'}
@@ -129,6 +160,21 @@ function RemoteDirBrowser({
         >
           {t('Up')}
         </Button>
+        {create && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            disabled={!path || loading || newName !== null}
+            onClick={() => {
+              setNewName('');
+              setCreateError('');
+            }}
+          >
+            {t('New Folder')}
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -139,7 +185,53 @@ function RemoteDirBrowser({
           {t('Close')}
         </Button>
       </div>
-      <div className="relative min-h-16 max-h-40 overflow-y-auto">
+      {newName !== null && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5">
+            <Input
+              autoFocus
+              size="sm"
+              className="min-w-0 flex-1 font-mono text-xs"
+              placeholder={t('Folder name')}
+              value={newName}
+              disabled={loading}
+              onChange={(event) => setNewName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  submitNewFolder();
+                } else if (event.key === 'Escape') {
+                  // 只收起输入框，不关整个对话框
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setNewName(null);
+                }
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={loading || !newName.trim()}
+              onClick={submitNewFolder}
+            >
+              {t('Create')}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={loading}
+              onClick={() => setNewName(null)}
+            >
+              {t('Cancel')}
+            </Button>
+          </div>
+          {createError && <p className="px-1 text-destructive text-xs">{createError}</p>}
+        </div>
+      )}
+      <div className="relative min-h-16 max-h-56 overflow-y-auto">
         {error ? (
           <p className="px-1 py-2 text-destructive text-xs">{error}</p>
         ) : dirs.length === 0 && !loading ? (
@@ -152,7 +244,7 @@ function RemoteDirBrowser({
                 type="button"
                 className="block w-full truncate rounded px-1.5 py-1 text-left font-mono text-xs hover:bg-muted"
                 disabled={loading}
-                onClick={() => path && load(path === '/' ? `/${dir}` : `${path}/${dir}`)}
+                onClick={() => path && load(childPath(path, dir))}
               >
                 {dir}/
               </button>
@@ -266,10 +358,50 @@ export function AddProjectDialog({
     );
   }, []);
 
+  // 远端客户端没有系统目录选择框：在对话框内浏览宿主机目录
+  const hostBrowse = Boolean(window.electronAPI.remote);
+
   const handleBrowse = async () => {
+    if (hostBrowse) {
+      setBrowserOpen((value) => !value);
+      return;
+    }
     const selected = await window.electronAPI.dialog.selectDirectory();
     if (selected) setPathValue(selected);
   };
+
+  const listHostDirs = React.useCallback<ListDirs>(
+    (target) =>
+      window.electronAPI.projects
+        .listHostDirs(target)
+        .then((result) => (result.ok ? result : { error: result.error })),
+    []
+  );
+
+  const createHostDir = React.useCallback<CreateDir>(
+    (parent, name) =>
+      window.electronAPI.projects
+        .createHostDir(parent, name)
+        .then((result) => (result.ok ? result : { error: result.error })),
+    []
+  );
+
+  const listSshDirs = React.useCallback<ListDirs>(
+    async (target, retry) => {
+      const result = await window.electronAPI.sshConnections.listDirs(sshConnectionId, target);
+      if (result.ok)
+        return { path: result.path, parent: posixParent(result.path), dirs: result.dirs };
+      const challenge = hostKeyFromSshFailure(
+        result,
+        connections.find((item) => item.id === sshConnectionId)
+      );
+      if (!challenge || retry) return { error: result.error };
+      setAfterTrust('browse');
+      setHostKey(challenge);
+      return null;
+    },
+    [sshConnectionId, connections]
+  );
 
   const canSubmit =
     mode === 'local'
@@ -345,7 +477,13 @@ export function AddProjectDialog({
           </DialogHeader>
 
           <DialogPanel className="space-y-4">
-            <Tabs value={mode} onValueChange={(value) => setMode(value as 'local' | 'ssh')}>
+            <Tabs
+              value={mode}
+              onValueChange={(value) => {
+                setMode(value as 'local' | 'ssh');
+                setBrowserOpen(false);
+              }}
+            >
               <TabsList>
                 <TabsTab value="local">{t('Local directory')}</TabsTab>
                 <TabsTab value="ssh">{t('Remote (SSH)')}</TabsTab>
@@ -409,20 +547,16 @@ export function AddProjectDialog({
                   </div>
                 </Field>
                 {browserOpen && sshConnectionId && (
-                  <RemoteDirBrowser
-                    connectionId={sshConnectionId}
-                    initialPath={sshPath.trim() || undefined}
-                    hostKeyRetry={hostKeyRetry}
-                    fallbackHost={connections.find((item) => item.id === sshConnectionId)}
+                  <DirBrowser
+                    key={sshConnectionId}
+                    list={listSshDirs}
+                    initialPath={sshPath.trim().startsWith('/') ? sshPath.trim() : undefined}
+                    reloadKey={hostKeyRetry}
                     onSelect={(selected) => {
                       setSshPath(selected);
                       setBrowserOpen(false);
                     }}
                     onClose={() => setBrowserOpen(false)}
-                    onHostKey={(challenge) => {
-                      setAfterTrust('browse');
-                      setHostKey(challenge);
-                    }}
                   />
                 )}
                 <p className="text-xs text-muted-foreground">
@@ -468,6 +602,18 @@ export function AddProjectDialog({
                     </AutocompleteList>
                   </AutocompletePopup>
                 </Autocomplete>
+                {browserOpen && hostBrowse && (
+                  <DirBrowser
+                    list={listHostDirs}
+                    create={createHostDir}
+                    initialPath={pathValue.trim() || undefined}
+                    onSelect={(selected) => {
+                      setPathValue(selected);
+                      setBrowserOpen(false);
+                    }}
+                    onClose={() => setBrowserOpen(false)}
+                  />
+                )}
               </Field>
             )}
             {groups.length > 0 && (

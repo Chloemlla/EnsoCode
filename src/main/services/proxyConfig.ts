@@ -1,3 +1,4 @@
+import { type PlatformSession, session } from '@platform';
 import {
   DEFAULT_NO_PROXY,
   isValidProxyUrl,
@@ -8,7 +9,6 @@ import {
   parseResolveProxy,
   proxyEnvPatch,
 } from '@shared/proxy';
-import { type Session, session } from 'electron';
 import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { sendAgentCommand } from './agentHost';
 
@@ -42,15 +42,15 @@ export class ProxyConfig {
   private customProxyUrl = '';
   private proxyUrl: string | null = null;
   private resolutionPromise: Promise<boolean> = Promise.resolve(true);
-  private readonly sessions = new Set<Session>();
+  private readonly sessions = new Set<PlatformSession>();
   private readonly inheritedNoProxy = process.env.no_proxy || process.env.NO_PROXY || '';
   private dispatcherInstalled = false;
 
-  constructor(defaultSession?: Session) {
+  constructor(defaultSession?: PlatformSession) {
     if (defaultSession) this.sessions.add(defaultSession);
   }
 
-  attachSession(target: Session): void {
+  attachSession(target: PlatformSession): void {
     this.sessions.add(target);
     void this.applySessionRules(target);
   }
@@ -160,15 +160,15 @@ export class ProxyConfig {
     sendAgentCommand({ type: 'set-proxy-env', env });
   }
 
-  private primarySession(): Session | undefined {
+  private primarySession(): PlatformSession | undefined {
     return [...this.sessions][0];
   }
 
-  private async setSessionProxy(config: Parameters<Session['setProxy']>[0]): Promise<void> {
+  private async setSessionProxy(config: Parameters<PlatformSession['setProxy']>[0]): Promise<void> {
     await Promise.all([...this.sessions].map((target) => target.setProxy(config)));
   }
 
-  private async applySessionRules(target: Session): Promise<void> {
+  private async applySessionRules(target: PlatformSession): Promise<void> {
     if (this.mode === 'none') {
       await target.setProxy({ mode: 'direct' });
       return;

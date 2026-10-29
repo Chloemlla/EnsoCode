@@ -19,6 +19,8 @@
     "build:mac:dir": "pnpm build && electron-builder --mac --arm64 --dir -c.mac.notarize=false",
     "build:win": "pnpm build && electron-builder --win",
     "build:linux": "pnpm build && electron-builder --linux",
+    "build:server": "pnpm build && vite build -c vite.server.config.ts",
+    "pack:server": "node scripts/pack-server.mjs",
     "generate:themes": "npx tsx scripts/generate-themes.ts",
     "rtk:prepare": "node scripts/prepare-rtk.mjs",
     "knowledge:check": "npx tsx scripts/knowledge.ts check",
@@ -84,6 +86,7 @@
     "@types/react-dom": "^19.2.5",
     "@types/turndown": "^5.0.6",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^5.0.4",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
@@ -123,6 +126,7 @@
     "unist-util-visit": "^5.1.0",
     "vite": "^7.1.9",
     "vitest": "^4.1.11",
+    "ws": "^8.21.3",
     "zustand": "^5.0.15"
   },
   "engines": {

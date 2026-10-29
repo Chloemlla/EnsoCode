@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { app, ipcMain } from '@platform';
 import {
   BTW_DISABLED_TOOLS,
   btwModelCandidates,
@@ -10,7 +11,6 @@ import {
 } from '@shared/btw';
 import { IPC_CHANNELS } from '@shared/types';
 import { type SpawnModelConfig, TITLE_SUMMARY_MAX_CANDIDATES } from '@shared/types/agent';
-import { app, ipcMain } from 'electron';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
 import {
   abortCompleteText,
@@ -22,8 +22,8 @@ import {
   spawnSession,
 } from '../services/agentHost';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
+import { isMainRenderer } from '../services/renderers';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
-import { isMainWebContents } from '../windows/MainWindow';
 import { getSourceAuthorityRegistry, resolveConversationWorkspace } from './agent';
 import { agentSessionIndex } from './capabilities';
 import { readSettings } from './settings';
@@ -35,7 +35,7 @@ function settingsState(): Record<string, unknown> | undefined {
 
 export function registerBtwHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.BTW_PROMPT, async (event, request: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'not authorized' };
+    if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'not authorized' };
     const parsed = parseBtwPromptRequest(request);
     if (!parsed) return { ok: false, error: 'invalid request' };
     if (!isAgentWorkerReady()) return { ok: false, error: 'Agent worker is not running.' };
@@ -78,14 +78,14 @@ export function registerBtwHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.BTW_ABORT, (event, request: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'not authorized' };
+    if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'not authorized' };
     const parsed = parseBtwAbortRequest(request);
     if (!parsed) return { ok: false, error: 'invalid request' };
     return abortCompleteText(parsed.requestId);
   });
 
   ipcMain.handle(IPC_CHANNELS.BTW_SPAWN, async (event, request: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'not authorized' };
+    if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'not authorized' };
     const parsed = parseBtwSpawnRequest(request);
     if (!parsed) return { ok: false, error: 'invalid request' };
     if (getSourceAuthorityRegistry()?.conversation(parsed.sessionId)) {
@@ -133,7 +133,7 @@ export function registerBtwHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.BTW_DISPOSE, async (event, request: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'not authorized' };
+    if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'not authorized' };
     const parsed = parseBtwDisposeRequest(request);
     if (!parsed) return { ok: false, error: 'invalid request' };
     if (getSourceAuthorityRegistry()?.conversation(parsed.sessionId)) {

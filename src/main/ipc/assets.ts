@@ -1,9 +1,9 @@
 import path from 'node:path';
+import { ipcMain } from '@platform';
 import { fetchPresetImport } from '@shared/presetImport';
 import type { InstructionEntry, McpServerEntry, SkillEntry } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { projectTrustedCode } from '@shared/types/project';
-import { ipcMain } from 'electron';
 import { snapshotBuiltinOccupancyTools } from '../../agent/builtinOccupancy';
 import {
   deleteCustomWorkflowPreset,

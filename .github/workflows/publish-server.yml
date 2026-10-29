@@ -1,0 +1,101 @@
+name: Publish Server
+
+# 无界面服务端 npm 包 @ensocode/server，独立于桌面端发版、手动触发。
+# 经 npm Trusted Publishing（OIDC）发布，无需 token；npm 上登记的 workflow 文件名就是本文件。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 发布版本（如 0.2.13 或 0.3.0-beta.1），留空用 package.json 的版本
+        required: false
+        type: string
+      dist-tag:
+        description: npm dist-tag，留空时预发布版本用 next、其余用 latest
+        required: false
+        type: string
+      dry-run:
+        description: 只打包上传 artifact，不发布
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-server
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Get pnpm store directory
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Restore pnpm cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-
+
+      - name: Resolve version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TAG: ${{ inputs.dist-tag }}
+        run: |
+          VERSION="${INPUT_VERSION#v}"
+          if [ -n "$VERSION" ]; then
+            npm pkg set version="$VERSION"
+          else
+            VERSION="$(node -p 'require("./package.json").version')"
+          fi
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG=latest
+            case "$VERSION" in *-*) TAG=next ;; esac
+          fi
+          if npm view "@ensocode/server@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::@ensocode/server@$VERSION 已发布过，换一个版本号"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "DIST_TAG=$TAG" >> "$GITHUB_ENV"
+
+      # 只需 vite 与打过补丁的依赖，跳过 Electron 下载等安装脚本
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts && pnpm rebuild esbuild
+
+      - name: Build and pack
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: node scripts/pack-server.mjs --out dist
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: ensocode-server-${{ env.VERSION }}
+          path: dist/*.tgz
+          retention-days: 7
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry-run }}
+        run: |
+          # Trusted Publishing 需要 npm >= 11.5.1；Node 22 自带 npm 10，原地 npm i -g npm 会把自己装坏，改用 npx
+          npx --yes npm@^11.5.1 publish "./dist/ensocode-server-$VERSION.tgz" --access public --tag "$DIST_TAG"
+          echo "已发布 @ensocode/server@$VERSION（$DIST_TAG）" >> "$GITHUB_STEP_SUMMARY"

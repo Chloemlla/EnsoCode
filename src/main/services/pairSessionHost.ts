@@ -14,7 +14,20 @@ import {
   onHeadlessIdle,
 } from '@shared/pair/headlessQueue';
 import { type PersistedPairConversation, planPairResume } from '@shared/pair/headlessResume';
-import type { AgentSpawnRequest, AttachedImage, RendererAgentEvent } from '@shared/types/agent';
+import { splitPlanPrefix } from '@shared/planMode';
+import {
+  hasLiveGenerationWork,
+  nextStallWatchAction,
+  shouldAbortStalledGeneration,
+} from '@shared/stallTimeout';
+import { cleanTitleSummarySource, extractRepresentativeTitle } from '@shared/titleSource';
+import type {
+  AgentActionResult,
+  AgentSpawnRequest,
+  AttachedImage,
+  RendererAgentEvent,
+  TitleSummaryInput,
+} from '@shared/types/agent';
 import type { PairCreatedSession, PairQueueAction, PairSessionConfig } from '@shared/types/pair';
 import { patchConversationsState, readPersistedConversation } from '../ipc/settings';
 import { getPairCatalog, getPairProjects, mutatePairCatalog } from './pairHost';
@@ -39,12 +52,30 @@ export interface PairSessionHostAgent {
   worktreeMissing(sessionId: string): boolean;
   projectPath(projectId: string): string | undefined;
   loadLocalSkills(): boolean;
+  summarizeTitle(
+    sessionId: string,
+    input: TitleSummaryInput,
+    sessionModel?: { providerId: string; modelId: string }
+  ): Promise<AgentActionResult>;
+  /** 生成卡顿超时；<=0 关闭 */
+  stallTimeoutMs(): number;
+}
+
+/** 无渲染器时接管 leader 的卡顿看门狗：心跳取最近事件与前台命令截止时间的较大者 */
+interface StallBeat {
+  at: number;
+  deadline?: number;
+  attempts: number;
+  pendingRetry: boolean;
 }
 
 let agent: PairSessionHostAgent | null = null;
 let headless = false;
 const runtimes = new Map<string, HeadlessSessionRuntime>();
 const pendingInterrupt = new Map<string, string>();
+const beats = new Map<string, StallBeat>();
+const titleBaselines = new Map<string, string>();
+let stallTimer: ReturnType<typeof setInterval> | null = null;
 
 export function configurePairSessionHost(next: PairSessionHostAgent): void {
   agent = next;
@@ -52,12 +83,18 @@ export function configurePairSessionHost(next: PairSessionHostAgent): void {
 
 export function setPairHeadless(active: boolean): void {
   headless = active;
+  if (stallTimer) clearInterval(stallTimer);
+  stallTimer = null;
+  beats.clear();
+  titleBaselines.clear();
   if (!active) {
     runtimes.clear();
     pendingInterrupt.clear();
     return;
   }
   seedRuntimes();
+  stallTimer = setInterval(stallTick, 1000);
+  stallTimer.unref?.();
 }
 
 export function isPairHeadless(): boolean {
@@ -330,6 +367,10 @@ export function applyPairQueueActionHeadless(action: PairQueueAction): void {
 
 export function handlePairHeadlessAgentEvent(event: RendererAgentEvent): void {
   if (!headless) return;
+  if (event.type === 'title-generated' || event.type === 'title-failed') {
+    settleTitle(event.conversationId, event.type === 'title-generated' ? event.title : '');
+    return;
+  }
   const sessionId =
     'identity' in event && event.identity && 'sessionId' in event.identity
       ? event.identity.sessionId
@@ -338,6 +379,10 @@ export function handlePairHeadlessAgentEvent(event: RendererAgentEvent): void {
         : undefined;
   if (typeof sessionId !== 'string' || !sessionId) return;
   const runtime = runtimeOf(sessionId);
+  touchBeat(sessionId, event, runtime.status);
+  if (event.type === 'message-upsert' && event.message.role === 'user') {
+    titleFromFirstMessage(sessionId, event.message.content);
+  }
   if (event.type === 'approval-request') {
     setRuntime(sessionId, { ...runtime, pendingApprovals: runtime.pendingApprovals + 1 });
     return;
@@ -383,4 +428,119 @@ function finishTurn(sessionId: string, runtime: HeadlessSessionRuntime): void {
   persistRuntime(sessionId, next);
   pushCatalog(sessionId, next);
   if (delivery) deliver(sessionId, delivery);
+}
+
+function touchBeat(sessionId: string, event: RendererAgentEvent, status: string): void {
+  const beat = beats.get(sessionId) ?? { at: 0, attempts: 0, pendingRetry: false };
+  beat.at = Date.now();
+  if (event.type === 'tool-output' && typeof event.deadlineAt === 'number') {
+    beat.deadline = Math.max(beat.deadline ?? 0, event.deadlineAt);
+  }
+  if (event.type === 'turn-completed' || event.type === 'turn-failed') beat.deadline = undefined;
+  if (status === 'running' && event.type !== 'status' && !beat.pendingRetry) beat.attempts = 0;
+  beats.set(sessionId, beat);
+}
+
+function heartbeatAt(sessionId: string): number | undefined {
+  const own = beats.get(sessionId);
+  let at = own ? Math.max(own.at, own.deadline ?? 0) : undefined;
+  const coworkerIds = readPersistedConversation(sessionId)?.coworkerIds;
+  if (!Array.isArray(coworkerIds)) return at;
+  for (const id of coworkerIds) {
+    if (typeof id !== 'string' || runtimes.get(id)?.status !== 'running') continue;
+    const child = beats.get(id);
+    const childAt = child ? Math.max(child.at, child.deadline ?? 0) : undefined;
+    if (childAt !== undefined && (at === undefined || childAt > at)) at = childAt;
+  }
+  return at;
+}
+
+function stallTick(): void {
+  const timeoutMs = agent?.stallTimeoutMs() ?? 0;
+  if (!agent || timeoutMs <= 0) return;
+  const now = Date.now();
+  for (const [sessionId, runtime] of runtimes) {
+    const beat = beats.get(sessionId) ?? { at: now, attempts: 0, pendingRetry: false };
+    beats.set(sessionId, beat);
+    if (beat.pendingRetry && runtime.status === 'running') continue;
+    const action = nextStallWatchAction({
+      shouldAbort: shouldAbortStalledGeneration({
+        status: runtime.status,
+        lastOutputAt: heartbeatAt(sessionId),
+        now,
+        timeoutMs,
+        hasLiveWork: hasLiveGenerationWork({
+          pendingApprovals: runtime.pendingApprovals,
+          pendingAsks: runtime.pendingAsks,
+        }),
+      }),
+      status: runtime.status,
+      pendingRetry: beat.pendingRetry,
+      attempts: beat.attempts,
+    });
+    if (action === 'abort') {
+      beat.pendingRetry = true;
+      agent.abort(sessionId);
+    } else if (action === 'retry') {
+      beat.pendingRetry = false;
+      beat.attempts += 1;
+      agent.retry(sessionId);
+    } else if (action === 'give-up') {
+      beat.pendingRetry = false;
+      beat.attempts = 0;
+      console.warn(`[pair] ${sessionId}: stopped after repeated stalls`);
+    }
+  }
+}
+
+function writeTitle(sessionId: string, title: string): void {
+  patchConversationsState((state) => {
+    const current = state.conversations[sessionId];
+    if (current) state.conversations[sessionId] = { ...current, title };
+  });
+  pushCatalog(sessionId, runtimeOf(sessionId), { title });
+}
+
+/** 手机建的冷会话没有标题：取首条用户消息代表行，再请求模型总结（与 leader 渲染器同口径） */
+function titleFromFirstMessage(sessionId: string, content: ReadonlyArray<unknown>): void {
+  const row = readPersistedConversation(sessionId);
+  if (!row || row.titleLocked === true || (typeof row.title === 'string' && row.title.trim())) {
+    return;
+  }
+  const raw = splitPlanPrefix(
+    content
+      .flatMap((part) =>
+        part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+          ? [String((part as { text?: unknown }).text ?? '')]
+          : []
+      )
+      .join(' ')
+      .trim()
+  ).rest;
+  if (!raw) return;
+  const title = extractRepresentativeTitle(raw);
+  writeTitle(sessionId, title);
+  const source = cleanTitleSummarySource(raw);
+  if (!agent || !source.trim()) return;
+  titleBaselines.set(sessionId, title);
+  const model =
+    typeof row.lastProviderId === 'string' && typeof row.lastModelId === 'string'
+      ? { providerId: row.lastProviderId, modelId: row.lastModelId }
+      : undefined;
+  void agent
+    .summarizeTitle(sessionId, { kind: 'initial', text: source }, model)
+    .then((result) => {
+      if (!result.ok) titleBaselines.delete(sessionId);
+    })
+    .catch(() => titleBaselines.delete(sessionId));
+}
+
+function settleTitle(sessionId: string, generated: string): void {
+  const baseline = titleBaselines.get(sessionId);
+  if (baseline === undefined) return;
+  titleBaselines.delete(sessionId);
+  const title = generated.trim().slice(0, 80);
+  const row = readPersistedConversation(sessionId);
+  if (!title || !row || row.titleLocked === true || row.title !== baseline) return;
+  if (title !== baseline) writeTitle(sessionId, title);
 }

@@ -14,6 +14,7 @@ import {
   createEditorPayload,
   extractMentionQuery,
   extractRepresentativeTitle,
+  fileMentionBasename,
   mentionDisplayText,
   mentionPopupLayout,
   resolvePopupKeyAction,
@@ -464,6 +465,26 @@ describe('typed multi-entity mentions', () => {
     ]);
   });
 
+  it('拖入的 Windows 绝对路径（含中文目录）渲染成文件卡片', () => {
+    expect(fileMentionBasename('C:\\Users\\me\\Desktop\\a.pdf')).toBe('a.pdf');
+    expect(fileMentionBasename('src/components/')).toBe('components');
+    const pdf = 'C:\\Users\\me\\Desktop\\224fde15-dedd.pdf';
+    expect(splitInlineFileTokens(`@${pdf} 这是什么？`)).toEqual([
+      { type: 'file', path: pdf },
+      { type: 'text', text: ' 这是什么？' },
+    ]);
+    expect(splitInlineFileTokens('看 @D:\\资料\\报告.docx 和 @/home/me/a.png')).toEqual([
+      { type: 'text', text: '看 ' },
+      { type: 'file', path: 'D:\\资料\\报告.docx' },
+      { type: 'text', text: ' 和 ' },
+      { type: 'file', path: '/home/me/a.png' },
+    ]);
+    // 盘符只认行首单字母，不误伤 @a:b.c 这类文本
+    expect(splitInlineFileTokens('ping @host:8080.x ok')).toEqual([
+      { type: 'text', text: 'ping @host:8080.x ok' },
+    ]);
+  });
+
   it('round-trips editor segments through wire text: files and chats keep inline positions', () => {
     const segments = [
       { type: 'text' as const, text: 'compare ' },
@@ -484,6 +505,22 @@ describe('typed multi-entity mentions', () => {
     );
     // 气泡侧全文扫描解回同样的段：两端同一套格式约定，位置/顺序无损
     expect(splitInlineMentions(wire)).toEqual(segments);
+  });
+
+  it('含空格的文件路径加引号序列化，气泡整体解回一个卡片', () => {
+    const segments = [
+      { type: 'file' as const, path: 'C:\\Program Files\\My App\\a b.pdf' },
+      { type: 'text' as const, text: ' 和 ' },
+      { type: 'file' as const, path: 'src/main.ts' },
+      { type: 'text' as const, text: ' 对比' },
+    ];
+    const wire = serializeSegments(segments);
+    expect(wire).toBe('@"C:\\Program Files\\My App\\a b.pdf" 和 @src/main.ts 对比');
+    expect(splitInlineMentions(wire)).toEqual(segments);
+    // 引号内不像文件路径时按普通文本处理
+    expect(splitInlineFileTokens('say @"hello world" ok')).toEqual([
+      { type: 'text', text: 'say @"hello world" ok' },
+    ]);
   });
 
   it('splitInlineMentions tolerates plain text and does not touch npm scopes or emails', () => {

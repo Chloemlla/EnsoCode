@@ -450,6 +450,7 @@ jobs:
             echo "- Windows: \`EnsoCode-Setup-${VERSION}.exe\`"
             echo "- Linux: \`.AppImage\` / \`.deb\`"
             echo "- 自建中继: \`enso-relay-linux-amd64\` / \`enso-relay-linux-arm64\`"
+            echo "- 无界面服务端: \`npm i -g @ensocode/server\`"
             echo ""
             echo "---"
             echo ""

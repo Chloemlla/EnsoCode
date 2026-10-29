@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { app } from '@platform';
 import { collectPresetPromptIds } from '@shared/presetPrompts';
 import type {
   ConfigSyncCommitResult,
@@ -23,7 +24,6 @@ import type {
 } from '@shared/types';
 import { resolveEditMode } from '@shared/types';
 import { persistedSettingsState } from '@shared/types/builtinTools';
-import { app } from 'electron';
 import {
   commitSettingsTransaction,
   readSettings,

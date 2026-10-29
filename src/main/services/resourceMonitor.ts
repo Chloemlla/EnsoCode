@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Worker } from 'node:worker_threads';
+import { app, processMetrics, session } from '@platform';
 import { projectDisplayName } from '@shared/projectName';
 import {
   AGENT_SERVICE_NAME,
@@ -27,12 +28,10 @@ import {
   type StorageSnapshot,
 } from '@shared/resources';
 import { resolveWorktreeRoot } from '@shared/worktreeRoot';
-import { app, session, webContents } from 'electron';
 import { readSettings } from '../ipc/settings';
-import { isMainWebContents } from '../windows/MainWindow';
-import { isSettingsWebContents } from '../windows/SettingsWindow';
-import { partitionName } from './browserHost';
+import { partitionName } from './browserPartition';
 import type { ScanRootSpec, StorageWorkerData, StorageWorkerMessage } from './storageScanWorker';
+import { localUi } from './uiHost';
 
 const execFileAsync = promisify(execFile);
 
@@ -95,29 +94,20 @@ function listProcesses(): Promise<PsRow[]> {
 }
 
 function chromiumKinds(): { kinds: ChromiumPidKinds; titles: Map<number, string> } {
-  const browserSession = session.fromPartition(partitionName(app.isPackaged));
-  const kinds = {
-    main: new Set<number>(),
-    settings: new Set<number>(),
-    browser: new Set<number>(),
+  const info = localUi()?.chromiumRenderers();
+  return {
+    kinds: {
+      main: new Set(info?.mainPids ?? []),
+      settings: new Set(info?.settingsPids ?? []),
+      browser: new Set(info?.browserPids ?? []),
+    },
+    titles: new Map(info?.titles ?? []),
   };
-  const titles = new Map<number, string>();
-  for (const wc of webContents.getAllWebContents()) {
-    if (wc.isDestroyed()) continue;
-    const pid = wc.getOSProcessId();
-    if (pid <= 0) continue;
-    if (isMainWebContents(wc.id)) kinds.main.add(pid);
-    else if (isSettingsWebContents(wc.id)) kinds.settings.add(pid);
-    else if (wc.session === browserSession) kinds.browser.add(pid);
-    const title = wc.getTitle() || wc.getURL();
-    if (title && !titles.has(pid)) titles.set(pid, title);
-  }
-  return { kinds, titles };
 }
 
 export async function sampleResources(): Promise<ResourceSnapshot> {
   const cores = Math.max(1, os.cpus().length);
-  const metrics = app.getAppMetrics();
+  const metrics = processMetrics();
   const { kinds, titles } = chromiumKinds();
   const rows = await listProcesses();
   const now = Date.now();

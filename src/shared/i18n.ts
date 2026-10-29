@@ -164,6 +164,17 @@ export const zhTranslations: Record<string, string> = {
     '新版本 {{version}} 已就绪 —— 重启以更新。',
   'Update check failed': '检查更新失败',
   'Restart to update': '重启更新',
+  'Update failed: {{error}}': '更新失败：{{error}}',
+  'Download update': '下载更新',
+  Restart: '重启',
+  'Restart server': '重启服务端',
+  'Restart server?': '重启服务端？',
+  'Running tasks are interrupted; this page reconnects after the server is back.':
+    '正在运行的任务会被中断，服务端起来后本页会自动重连。',
+  'Server updates install the new version with npm and restart.':
+    '服务端（npm 全局安装）：用 npm 安装新版本后重启。',
+  'This server must be updated on the machine itself.':
+    '这台服务端无法远程更新，请在服务器上执行 npm i -g @ensocode/server。',
   'Automatic updates': '自动更新',
   'Download and install updates automatically': '自动下载并安装更新',
   'Restart and apply when idle': '空闲时重启并应用更新',
@@ -411,6 +422,13 @@ export const zhTranslations: Record<string, string> = {
     '超过此时长没有 token 或工具结果就中止并重试。思考输出也算有输出。',
   Never: '永不',
   '{{count}} min': '{{count}} 分钟',
+  'Compaction reserve tokens': '压缩预留 token',
+  'Compaction runs when context exceeds the model window minus this value. Larger values compact earlier. Do not set it close to the window of small-context models, or every request compacts first. Leave empty for the default.':
+    '上下文超过「模型窗口 − 此值」时触发压缩，值越大压缩越早。小窗口模型请勿设得过大，接近窗口会导致每次请求前都先压缩。留空使用默认值。',
+  'Enter a whole number between {{min}} and {{max}}, or leave it empty.':
+    '请输入 {{min}} 到 {{max}} 之间的整数，或留空。',
+  'Could not save. Check that pi-agent/settings.json is valid JSON.':
+    '保存失败，请检查 pi-agent/settings.json 是否为合法 JSON。',
   'Keep in Active after last message': '活跃中留存时长',
   'Stays in Active for about {{count}} more min': '活跃中还会保留约 {{count}} 分钟',
   'Viewed conversations stay in Active for this long after their last message or your last open while still in Active, then leave. Unviewed ones stay until you open them.':
@@ -1007,6 +1025,8 @@ export const zhTranslations: Record<string, string> = {
   Up: '上级',
   'Use this directory': '选择此目录',
   'No subdirectories': '没有子目录',
+  'Invalid folder name.': '文件夹名称无效。',
+  'Folder name': '文件夹名称',
   'Failed to list remote directory.': '远程目录列取失败。',
   'Requires key-based SSH access. Tools run on the remote host; chat history stays local.':
     '需要免密钥 SSH 访问。工具在远端主机执行,聊天记录保存在本地。',
@@ -2137,6 +2157,10 @@ export const zhTranslations: Record<string, string> = {
   'Click to switch: view-only devices cannot send, approve or stop.':
     '点击切换：只读设备不能发送、审批或停止。',
   Copied: '已复制',
+  'Copy image': '复制图片',
+  'Image copied': '图片已复制',
+  'Could not copy image': '复制图片失败',
+  'Copy failed': '复制失败',
   'Browse and drive conversations on another EnsoCode desktop. Its agent, keys and history stay there.':
     '浏览并操控另一台 EnsoCode 桌面上的会话。agent、密钥与历史都留在对方机器上。',
   'Connected nodes': '已连接的节点',

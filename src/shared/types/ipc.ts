@@ -249,6 +249,10 @@ export const IPC_CHANNELS = {
 
   // Recent projects from local apps
   PROJECTS_GET_RECENT: 'projects:get-recent',
+  /** 列出宿主机某目录的子目录（远端客户端没有系统目录选择框，用它浏览添加项目） */
+  PROJECTS_LIST_HOST_DIRS: 'projects:list-host-dirs',
+  /** 在宿主机目录下新建子文件夹（添加项目的目录浏览里用） */
+  PROJECTS_CREATE_HOST_DIR: 'projects:create-host-dir',
   /** 在系统文件管理器或指定 appId 的应用里打开项目根目录或会话 worktree（仅本地项目） */
   PROJECTS_REVEAL: 'projects:reveal',
   PROJECTS_CODE_SOURCES: 'projects:code-sources',
@@ -362,9 +366,15 @@ export const IPC_CHANNELS = {
   UPDATER_SET_AUTO_UPDATE_ENABLED: 'updater:setAutoUpdateEnabled',
   UPDATER_SET_AUTO_RESTART_WHEN_IDLE: 'updater:setAutoRestartWhenIdle',
   UPDATER_STATUS: 'updater:status',
+  UPDATER_GET_STATE: 'updater:getState',
+  UPDATER_RESTART: 'updater:restart',
 
   // Network proxy
   PROXY_APPLY: 'proxy:apply',
+
+  // pi 全局 settings.json 的 compaction.reserveTokens
+  COMPACTION_RESERVE_TOKENS_GET: 'compaction:reserve-tokens-get',
+  COMPACTION_RESERVE_TOKENS_SET: 'compaction:reserve-tokens-set',
 
   // Phone second screen (pairing + relay)
   PAIR_START: 'pair:start',

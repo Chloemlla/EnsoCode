@@ -32,8 +32,11 @@ vi.mock('electron', () => ({
     ) => ipcHandlers.set(channel, handler),
   },
 }));
-vi.mock('../windows/MainWindow', () => ({ isMainWebContents: (id: number) => id === 1 }));
-vi.mock('../windows/SettingsWindow', () => ({ isSettingsWebContents: () => false }));
+vi.mock('./renderers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./renderers')>()),
+  isMainRenderer: (id: number) => id === 1,
+  isSettingsRenderer: () => false,
+}));
 vi.mock('../ipc/settings', () => ({ readSettings: () => null }));
 vi.mock('./chatModels', () => ({
   setChatModelProgressSink: vi.fn(),

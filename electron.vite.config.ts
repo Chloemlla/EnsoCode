@@ -28,6 +28,7 @@ export default defineConfig({
       alias: {
         '@shared': path.resolve(__dirname, 'src/shared'),
         '@enso/pair': pairAlias,
+        '@platform': path.resolve(__dirname, 'src/main/desktop/platform.ts'),
       },
     },
   },

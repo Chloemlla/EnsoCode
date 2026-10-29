@@ -22,6 +22,10 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => electronMocks.windows },
   shell: { openExternal: electronMocks.openExternal },
 }));
+
+vi.mock('./uiHost', async () =>
+  (await import('../../../test/helpers/localUi')).mockUiHost(() => electronMocks.windows)
+);
 vi.mock('./proxyConfig', () => ({
   getProxyConfig: () => ({ whenReady: async () => true }),
 }));

@@ -1,5 +1,5 @@
+import { ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
 import {
   listPrivacyMaskRecords,
   PRIVACY_RECORD_DAYS,

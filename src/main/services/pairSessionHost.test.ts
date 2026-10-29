@@ -1,0 +1,203 @@
+import type { CatalogEntry } from '@enso/pair';
+import type { RendererAgentEvent } from '@shared/types/agent';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  rows: {} as Record<string, Record<string, unknown>>,
+  catalog: [] as unknown[],
+}));
+
+vi.mock('../ipc/settings', () => ({
+  readPersistedConversation: (id: string) => mocks.rows[id] ?? null,
+  patchConversationsState: (
+    mutate: (state: { conversations: Record<string, Record<string, unknown>> }) => void
+  ) => {
+    mutate({ conversations: mocks.rows });
+    return true;
+  },
+}));
+vi.mock('./pairHost', () => ({
+  getPairCatalog: () => mocks.catalog,
+  getPairProjects: () => [],
+  mutatePairCatalog: (fn: (catalog: unknown[]) => unknown[]) => {
+    mocks.catalog = fn(mocks.catalog);
+  },
+}));
+
+import {
+  applyPairQueueActionHeadless,
+  configurePairSessionHost,
+  handlePairHeadlessAgentEvent,
+  type PairSessionHostAgent,
+  setPairHeadless,
+} from './pairSessionHost';
+
+const SID = 's1';
+
+function fakeAgent(overrides: Partial<PairSessionHostAgent> = {}) {
+  const agent = {
+    isAlive: () => true,
+    requestSnapshot: vi.fn(),
+    spawn: vi.fn(async () => ({ ok: true })),
+    prompt: vi.fn(),
+    steer: vi.fn(),
+    abort: vi.fn(),
+    setModel: vi.fn(),
+    setReasoning: vi.fn(),
+    setThinking: vi.fn(),
+    compact: vi.fn(),
+    rewind: vi.fn(),
+    retry: vi.fn(),
+    stopTask: vi.fn(),
+    stopSubagent: vi.fn(),
+    createAuthority: vi.fn(),
+    worktreePath: () => undefined,
+    worktreeMissing: () => false,
+    projectPath: () => undefined,
+    loadLocalSkills: () => false,
+    summarizeTitle: vi.fn(async () => ({ ok: true })),
+    stallTimeoutMs: () => 60_000,
+    ...overrides,
+  };
+  configurePairSessionHost(agent);
+  return agent;
+}
+
+const status = (value: string) =>
+  ({
+    type: 'status',
+    status: value,
+    identity: { sessionId: SID },
+  }) as unknown as RendererAgentEvent;
+const event = (body: Record<string, unknown>) =>
+  ({ identity: { sessionId: SID }, ...body }) as unknown as RendererAgentEvent;
+
+const userMessage = (text: string) =>
+  event({
+    type: 'message-upsert',
+    message: { role: 'user', content: [{ type: 'text', text }] },
+  });
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  mocks.rows = { [SID]: { id: SID, title: '', projectId: 'p' } };
+  mocks.catalog = [{ id: SID, title: '', status: 'idle' } as unknown as CatalogEntry];
+});
+
+afterEach(() => {
+  setPairHeadless(false);
+  vi.useRealTimers();
+});
+
+describe('headless stall watchdog', () => {
+  it('aborts a silent running turn, then retries once it settles', () => {
+    const agent = fakeAgent();
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(status('running'));
+
+    vi.advanceTimersByTime(59_000);
+    expect(agent.abort).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2_000);
+    expect(agent.abort).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(5_000);
+    expect(agent.abort).toHaveBeenCalledTimes(1);
+
+    handlePairHeadlessAgentEvent(status('idle'));
+    vi.advanceTimersByTime(1_000);
+    expect(agent.retry).toHaveBeenCalledWith(SID);
+  });
+
+  it('treats output and running tool deadlines as heartbeats', () => {
+    const agent = fakeAgent();
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(status('running'));
+    vi.advanceTimersByTime(50_000);
+    handlePairHeadlessAgentEvent(
+      event({ type: 'tool-output', toolCallId: 't', output: 'x', deadlineAt: Date.now() + 120_000 })
+    );
+    vi.advanceTimersByTime(150_000);
+    expect(agent.abort).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(40_000);
+    expect(agent.abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays off when the timeout setting is 0 or approvals are pending', () => {
+    const off = fakeAgent({ stallTimeoutMs: () => 0 });
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(status('running'));
+    vi.advanceTimersByTime(600_000);
+    expect(off.abort).not.toHaveBeenCalled();
+    setPairHeadless(false);
+
+    const agent = fakeAgent();
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(status('running'));
+    handlePairHeadlessAgentEvent(event({ type: 'approval-request' }));
+    vi.advanceTimersByTime(600_000);
+    expect(agent.abort).not.toHaveBeenCalled();
+  });
+
+  it('gives up after repeated stalls', () => {
+    const agent = fakeAgent();
+    setPairHeadless(true);
+    for (let round = 0; round < 4; round++) {
+      handlePairHeadlessAgentEvent(status('running'));
+      vi.advanceTimersByTime(61_000);
+      handlePairHeadlessAgentEvent(status('idle'));
+      vi.advanceTimersByTime(1_000);
+    }
+    expect(agent.abort).toHaveBeenCalledTimes(4);
+    expect(agent.retry).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('headless first-message title', () => {
+  it('titles sessions started through the headless queue too', () => {
+    fakeAgent();
+    setPairHeadless(true);
+    applyPairQueueActionHeadless({ type: 'enqueue', sessionId: SID, text: 'queued hello' });
+    handlePairHeadlessAgentEvent(userMessage('queued hello'));
+    expect(mocks.rows[SID].title).toBe('queued hello');
+  });
+
+  it('titles an untitled session from its first prompt and applies the summary', async () => {
+    const agent = fakeAgent();
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(userMessage('继续\nFix the login redirect loop'));
+
+    expect(mocks.rows[SID].title).toBe('Fix the login redirect loop');
+    expect((mocks.catalog[0] as { title: string }).title).toBe('Fix the login redirect loop');
+    expect(agent.summarizeTitle).toHaveBeenCalledWith(
+      SID,
+      { kind: 'initial', text: 'Fix the login redirect loop' },
+      undefined
+    );
+
+    handlePairHeadlessAgentEvent({
+      type: 'title-generated',
+      conversationId: SID,
+      title: 'Login redirect fix',
+    } as unknown as RendererAgentEvent);
+    expect(mocks.rows[SID].title).toBe('Login redirect fix');
+    expect((mocks.catalog[0] as { title: string }).title).toBe('Login redirect fix');
+  });
+
+  it('keeps existing, locked or user-renamed titles', () => {
+    const agent = fakeAgent();
+    mocks.rows[SID].title = 'Existing';
+    setPairHeadless(true);
+    handlePairHeadlessAgentEvent(userMessage('hello'));
+    expect(mocks.rows[SID].title).toBe('Existing');
+    expect(agent.summarizeTitle).not.toHaveBeenCalled();
+
+    mocks.rows[SID].title = '';
+    handlePairHeadlessAgentEvent(userMessage('second'));
+    mocks.rows[SID].title = 'Renamed by user';
+    handlePairHeadlessAgentEvent({
+      type: 'title-generated',
+      conversationId: SID,
+      title: 'Model title',
+    } as unknown as RendererAgentEvent);
+    expect(mocks.rows[SID].title).toBe('Renamed by user');
+  });
+});

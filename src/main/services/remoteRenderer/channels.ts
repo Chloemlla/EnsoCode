@@ -29,10 +29,26 @@ const DENIED: ReadonlySet<string> = new Set([
   IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME,
 ]);
 
+/** 宿主自身的更新/重启：只有无界面服务端开放（桌面宿主是用户本机，不让远端替它装更新） */
+const HOST_CONTROL: ReadonlySet<string> = new Set([
+  IPC_CHANNELS.UPDATER_GET_STATE,
+  IPC_CHANNELS.UPDATER_CHECK,
+  IPC_CHANNELS.UPDATER_DOWNLOAD_UPDATE,
+  IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL,
+  IPC_CHANNELS.UPDATER_SET_AUTO_UPDATE_ENABLED,
+  IPC_CHANNELS.UPDATER_SET_AUTO_RESTART_WHEN_IDLE,
+  IPC_CHANNELS.UPDATER_RESTART,
+]);
+
 /** leader renderer 才需要的宿主桥接（pair 目录推送）；其余 pair:* 属配对管理，远端不可调 */
 const LEADER_ONLY: ReadonlySet<string> = new Set([IPC_CHANNELS.PAIR_CATALOG]);
 
-export function isRemoteChannelAllowed(channel: string, leader: boolean): boolean {
+export function isRemoteChannelAllowed(
+  channel: string,
+  leader: boolean,
+  hostControl = false
+): boolean {
+  if (HOST_CONTROL.has(channel)) return hostControl;
   if (LEADER_ONLY.has(channel)) return leader;
   if (DENIED.has(channel)) return false;
   return !DENIED_PREFIXES.some((prefix) => channel.startsWith(prefix));

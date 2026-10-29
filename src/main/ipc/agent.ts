@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { app, ipcMain, powerMonitor, type RendererContents } from '@platform';
 import { browserSessionKey } from '@shared/bots/browser';
 import type { ChildSessionIdentity, SessionIdentity } from '@shared/builtinAgents';
 import { conversationCwd } from '@shared/conversationCwd';
@@ -26,6 +27,7 @@ import type {
   RendererAgentEvent,
   SpawnModelConfig,
   ThinkingLevel,
+  TitleSummaryInput,
 } from '@shared/types/agent';
 import {
   APPROVAL_MODES,
@@ -44,7 +46,6 @@ import {
   parseParentModelSelectionRequest,
   parseParentSourceBindingRequest,
 } from '@shared/types/mentions';
-import { app, ipcMain, powerMonitor, type WebContents } from 'electron';
 import { EnsoSafeJournal } from '../../agent/ensoSafeJournal';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
 import { ActiveConversationRegistry } from '../services/activeConversationRegistry';
@@ -99,11 +100,10 @@ import { validateAgentRun } from '../services/agentRunValidation';
 import { AgentService } from '../services/agentService';
 import { HumanRequestTimeouts } from '../services/bots/humanRequestTimeouts';
 import { pickBrowserFileRoot, setBrowserFileRootResolver } from '../services/browserFileRoot';
-import { browserHost } from '../services/browserHost';
 import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
-import { computerHost } from '../services/computerHost';
 import { reloadConversation } from '../services/conversationReload';
+import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
 import { searchFiles } from '../services/fileSearch';
 import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
 import {
@@ -121,7 +121,6 @@ import {
   rootSessionId,
   scheduleMemoryDistill,
 } from '../services/memoryHost';
-import { maybeNotify, maybeNotifyBot, setViewedSession } from '../services/notifications';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
 import { forwardAgentEvent, setPairAgentBridge } from '../services/pairHost';
 import {
@@ -130,6 +129,7 @@ import {
 } from '../services/pairSessionHost';
 import { remoteCandidates } from '../services/remoteModels';
 import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
+import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import {
   projectParentHistoryPage,
@@ -148,8 +148,6 @@ import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { SubagentProgressPush } from '../services/subagentProgressPush';
 import { titleModelCandidates } from '../services/titleSummary';
 import { ingestSessionJsonl } from '../services/usage/ledgerStore';
-import { sendToAllWindows } from '../windows/createAppWindow';
-import { isMainWebContents } from '../windows/MainWindow';
 import {
   botModeEnabled,
   botScreenshots,
@@ -209,9 +207,9 @@ let sourceBindings: ActiveConversationRegistry | null = null;
 let sourceAuthority: SourceAuthorityRegistry | null = null;
 let botWorkerObserver: ((event: AgentWorkerEvent | { type: 'worker-exited' }) => void) | null =
   null;
-const selectionClockOwners = new WeakSet<WebContents>();
+const selectionClockOwners = new WeakSet<RendererContents>();
 
-function watchSelectionClock(sender: WebContents): void {
+function watchSelectionClock(sender: RendererContents): void {
   if (selectionClockOwners.has(sender)) return;
   selectionClockOwners.add(sender);
   sender.once('destroyed', () => {
@@ -241,7 +239,7 @@ export function setBotWorkerEventObserver(
 
 function broadcastAgentEvent(event: RendererAgentEvent): void {
   try {
-    sendToAllWindows(IPC_CHANNELS.AGENT_EVENT, event);
+    broadcastToRenderers(IPC_CHANNELS.AGENT_EVENT, event);
   } catch {
     // renderer 已崩但 webContents 对象还在：Render frame was disposed
   }
@@ -258,14 +256,16 @@ function broadcastAgentEvent(event: RendererAgentEvent): void {
       event.type === 'ask-request')
   ) {
     const enabled = botModeEnabled();
-    void maybeNotifyBot(event, {
-      enabled,
-      chatId: binding.chatId,
-      conversationId,
-      name: (enabled ? getBotServices()?.bots.get(binding.botId)?.name : undefined) ?? '成员',
-    }).catch((error) => console.warn('[bots] notification failed', error));
+    void notifyDesktop()
+      .maybeNotifyBot(event, {
+        enabled,
+        chatId: binding.chatId,
+        conversationId,
+        name: (enabled ? getBotServices()?.bots.get(binding.botId)?.name : undefined) ?? '成员',
+      })
+      .catch((error) => console.warn('[bots] notification failed', error));
     // bot 会话的回合完成 / 失败由 Bot 服务按聊天发带成员名的通知（群接力整批合并）
-  } else if (!binding) maybeNotify(event);
+  } else if (!binding) notifyDesktop().maybeNotify(event);
   // 手机第二屏：按订阅过滤后加密下发（host 在 main，不依赖窗口焦点）
   forwardAgentEvent(event);
   handlePairHeadlessAgentEvent(event);
@@ -273,7 +273,7 @@ function broadcastAgentEvent(event: RendererAgentEvent): void {
 
 export function pushMcpStatus(push: McpStatusPush): void {
   try {
-    sendToAllWindows(IPC_CHANNELS.MCP_STATUS_EVENT, push);
+    broadcastToRenderers(IPC_CHANNELS.MCP_STATUS_EVENT, push);
   } catch {
     // renderer 已崩但 webContents 对象还在
   }
@@ -281,7 +281,7 @@ export function pushMcpStatus(push: McpStatusPush): void {
 
 const subagentProgressPush = new SubagentProgressPush((sessionId, runs) => {
   try {
-    sendToAllWindows(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, { sessionId, runs });
+    broadcastToRenderers(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, { sessionId, runs });
   } catch {
     // renderer 已崩但 webContents 对象还在
   }
@@ -297,7 +297,7 @@ function rootIdentity(sessionId: unknown): SessionIdentity | undefined {
 }
 
 function persistedRootSpawn(request: AgentSpawnRequest, ownerWebContentsId: number): boolean {
-  if (!isMainWebContents(ownerWebContentsId) || request.sessionId.includes('::cw-')) return false;
+  if (!isMainRenderer(ownerWebContentsId) || request.sessionId.includes('::cw-')) return false;
   const cwd = authoritativeSpawnCwd(request.sessionId);
   return cwd !== null && cwd === request.cwd;
 }
@@ -692,6 +692,33 @@ function wirePairAgentBridge(): void {
   });
 }
 
+/** 开关与模型以 Main 自读的设置为准；回退链上全部可解析的候选一次性下发，worker 依次尝试 */
+async function requestTitleSummary(
+  conversationId: string,
+  input: TitleSummaryInput,
+  sessionModel?: { providerId: string; modelId: string }
+): Promise<AgentActionResult> {
+  const state = (
+    readSettings()?.['enso-settings'] as { state?: Record<string, unknown> } | undefined
+  )?.state;
+  if (state?.titleSummaryEnabled !== true) {
+    return { ok: false, error: 'title summary disabled' };
+  }
+  let credentialKeys: ReadonlySet<string>;
+  try {
+    credentialKeys = await readStoredOauthCredentialKeys();
+  } catch {
+    return { ok: false, error: 'model credentials unavailable' };
+  }
+  const candidates: SpawnModelConfig[] = [];
+  for (const candidate of titleModelCandidates(state, sessionModel)) {
+    const resolved = resolveModelSelection(candidate.providerId, candidate.modelId, credentialKeys);
+    if (resolved.ok && resolved.selection) candidates.push(resolved.selection.config);
+  }
+  if (candidates.length === 0) return { ok: false, error: 'no usable title model' };
+  return summarizeConversationTitle(conversationId, input, candidates);
+}
+
 function wirePairSessionHost(): void {
   configurePairSessionHost({
     isAlive: (sessionId) => agentSessionIndex.isAlive(sessionId),
@@ -790,6 +817,15 @@ function wirePairSessionHost(): void {
         projectVersion: project.version,
         conversationId: sessionId,
       });
+    },
+    summarizeTitle: (sessionId, input, sessionModel) =>
+      requestTitleSummary(sessionId, input, sessionModel),
+    stallTimeoutMs: () => {
+      const state = (
+        readSettings()?.['enso-settings'] as { state?: Record<string, unknown> } | undefined
+      )?.state;
+      const minutes = Number(state?.generationStallTimeoutMin);
+      return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : 0;
     },
     worktreePath: (sessionId) => sessionWorktree(sessionId)?.path,
     worktreeMissing: (sessionId) => {
@@ -915,7 +951,7 @@ export function registerAgentHandlers(): void {
       return row ? { host: row.host, user: row.user, name: row.name } : null;
     },
     onChanged: (projection) => {
-      sendToAllWindows(IPC_CHANNELS.SOURCE_AUTHORITY_CHANGED, projection);
+      broadcastToRenderers(IPC_CHANNELS.SOURCE_AUTHORITY_CHANGED, projection);
     },
   });
   sourceAuthority.ensureScratchProject(path.join(app.getPath('userData'), 'scratch'));
@@ -937,7 +973,7 @@ export function registerAgentHandlers(): void {
   sourceBindings = new ActiveConversationRegistry({
     authority: sourceAuthority,
     sessionIndex: agentSessionIndex,
-    isMainWebContents,
+    isMainWebContents: isMainRenderer,
     resolveDefaultModel: () => {
       const state = asRecord(asRecord(readSettings()?.['enso-settings'])?.state);
       const selection = asRecord(state?.defaultModel);
@@ -1076,7 +1112,7 @@ export function registerAgentHandlers(): void {
       pendingAgentControl.clear();
       for (const controller of pendingComputer.values()) controller.abort();
       pendingComputer.clear();
-      computerHost.closeAll();
+      sessionDesktop().closeAllComputers();
       for (const targetId of pendingWorktreeForks.keys()) discardForkWorktree(targetId);
       // worker 死后连接全部失效：清掉残留状态，避免设置页长期显示假 ready
       clearMcpStatuses();
@@ -1172,17 +1208,17 @@ export function registerAgentHandlers(): void {
       (workerEvent.type === 'turn-completed' || workerEvent.type === 'turn-failed') &&
       !sharesBrowser(workerEvent.identity.sessionId)
     ) {
-      void browserHost.closeForSession(workerEvent.identity.sessionId);
+      void sessionDesktop().closeBrowser(workerEvent.identity.sessionId);
     }
     if (workerEvent.type === 'turn-completed' || workerEvent.type === 'turn-failed') {
-      browserHost.releaseActor(workerEvent.identity.sessionId);
+      sessionDesktop().releaseBrowserActor(workerEvent.identity.sessionId);
     }
     if (workerEvent.type === 'parent-ended') {
       forgetParentToolProfile(workerEvent.identity.sessionId);
-      browserHost.forgetActor(workerEvent.identity.sessionId);
+      sessionDesktop().forgetBrowserActor(workerEvent.identity.sessionId);
       if (!sharesBrowser(workerEvent.identity.sessionId))
-        void browserHost.closeForSession(workerEvent.identity.sessionId, { force: true });
-      computerHost.close(workerEvent.identity.sessionId);
+        void sessionDesktop().closeBrowser(workerEvent.identity.sessionId, { force: true });
+      sessionDesktop().closeComputer(workerEvent.identity.sessionId);
       distillSessionMemory(workerEvent.identity);
     }
     // 压缩成功：jsonl 原文仍在，按水位提前整理记忆；群聊成员下次投递补群状态
@@ -1202,19 +1238,30 @@ export function registerAgentHandlers(): void {
     }
     if (workerEvent.type === 'browser-invoke') {
       const { identity, requestId, op, params } = workerEvent;
-      void browserHost
-        .invoke(browserKeyFor(identity.sessionId), op, params, browserActorFor(identity.sessionId))
-        .then(
-          (result) => {
-            if (op === 'screenshot') cacheBotScreenshots(identity, [result], 'web');
-            sendBrowserResultToSession(identity, requestId, { ok: true, result });
-          },
-          (error: unknown) =>
-            sendBrowserResultToSession(identity, requestId, {
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            })
-        );
+      const invoke = sessionDesktop().invokeBrowser;
+      if (!invoke) {
+        sendBrowserResultToSession(identity, requestId, {
+          ok: false,
+          error: 'Browser is not available on this host',
+        });
+        return;
+      }
+      void invoke(
+        browserKeyFor(identity.sessionId),
+        op,
+        params,
+        browserActorFor(identity.sessionId)
+      ).then(
+        (result) => {
+          if (op === 'screenshot') cacheBotScreenshots(identity, [result], 'web');
+          sendBrowserResultToSession(identity, requestId, { ok: true, result });
+        },
+        (error: unknown) =>
+          sendBrowserResultToSession(identity, requestId, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+      );
       return;
     }
     if (workerEvent.type === 'memory-invoke') {
@@ -1370,8 +1417,16 @@ export function registerAgentHandlers(): void {
       }
       const controller = new AbortController();
       pendingComputer.set(requestId, controller);
-      void computerHost
-        .invoke(identity.sessionId, op, params, controller.signal)
+      const invoke = sessionDesktop().invokeComputer;
+      if (!invoke) {
+        pendingComputer.delete(requestId);
+        sendComputerResultToSession(identity, requestId, {
+          ok: false,
+          error: 'Computer is not available on this host',
+        });
+        return;
+      }
+      void invoke(identity.sessionId, op, params, controller.signal)
         .then(
           (result) => {
             cacheBotScreenshots(identity, result.screenshots, 'desktop');
@@ -1431,7 +1486,7 @@ export function registerAgentHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SOURCE_AUTHORITY_READ, () => sourceAuthority!.rendererProjection());
 
   ipcMain.handle(IPC_CHANNELS.SOURCE_CONVERSATION_CREATE, (event, request: unknown) => {
-    if (!isMainWebContents(event.sender.id))
+    if (!isMainRenderer(event.sender.id))
       return { accepted: false, error: 'Only MainWindow can create conversations.' };
     const parsed = parseCreateConversationAuthorityRequest(request);
     return parsed
@@ -1440,7 +1495,7 @@ export function registerAgentHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.SOURCE_CONVERSATION_SELECT, (event, request: unknown) => {
     const parsed = parseConversationAuthorityRequest(request);
-    if (!parsed || !isMainWebContents(event.sender.id))
+    if (!parsed || !isMainRenderer(event.sender.id))
       return { accepted: false, error: 'Invalid conversation selection.' };
     const result = sourceAuthority!.selectConversation(parsed);
     if (!result.accepted) return result;
@@ -1455,7 +1510,7 @@ export function registerAgentHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.SOURCE_CONVERSATION_END, (event, request: unknown) => {
     const parsed = parseConversationAuthorityRequest(request);
-    if (!parsed || !isMainWebContents(event.sender.id))
+    if (!parsed || !isMainRenderer(event.sender.id))
       return { accepted: false, error: 'Invalid conversation request.' };
     const result = sourceAuthority!.endConversation(parsed);
     if (result.accepted) sourceBindings!.invalidateConversation(parsed.conversationId);
@@ -1463,7 +1518,7 @@ export function registerAgentHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.SOURCE_CONVERSATION_REMOVE, (event, request: unknown) => {
     const parsed = parseConversationAuthorityRequest(request);
-    if (!parsed || !isMainWebContents(event.sender.id))
+    if (!parsed || !isMainRenderer(event.sender.id))
       return { accepted: false, error: 'Invalid conversation request.' };
     const result = sourceAuthority!.removeConversation(parsed);
     if (result.accepted) {
@@ -1476,7 +1531,7 @@ export function registerAgentHandlers(): void {
     IPC_CHANNELS.SOURCE_CONVERSATION_UPDATE_SELECTION,
     async (event, request: unknown) => {
       const parsed = parseUpdateConversationSelectionRequest(request);
-      if (!parsed || !isMainWebContents(event.sender.id))
+      if (!parsed || !isMainRenderer(event.sender.id))
         return { accepted: false, error: 'Invalid model selection request.' };
       try {
         const keys = await readStoredOauthCredentialKeys();
@@ -1569,30 +1624,7 @@ export function registerAgentHandlers(): void {
               modelId: sessionModelRecord.modelId,
             }
           : undefined;
-      const state = (
-        readSettings()?.['enso-settings'] as { state?: Record<string, unknown> } | undefined
-      )?.state;
-      // 开关以 Main 自读的设置为准，不采信渲染层的调用时机
-      if (state?.titleSummaryEnabled !== true) {
-        return { ok: false, error: 'title summary disabled' };
-      }
-      let credentialKeys: ReadonlySet<string>;
-      try {
-        credentialKeys = await readStoredOauthCredentialKeys();
-      } catch {
-        return { ok: false, error: 'model credentials unavailable' };
-      }
-      const candidates: SpawnModelConfig[] = [];
-      for (const candidate of titleModelCandidates(state, sessionModel)) {
-        const resolved = resolveModelSelection(
-          candidate.providerId,
-          candidate.modelId,
-          credentialKeys
-        );
-        if (resolved.ok && resolved.selection) candidates.push(resolved.selection.config);
-      }
-      if (candidates.length === 0) return { ok: false, error: 'no usable title model' };
-      return summarizeConversationTitle(conversationId, input, candidates);
+      return requestTitleSummary(conversationId, input, sessionModel);
     }
   );
 
@@ -1767,7 +1799,7 @@ export function registerAgentHandlers(): void {
     IPC_CHANNELS.AGENT_RELEASE,
     async (event, sessionId: unknown): Promise<AgentActionResult> => {
       // 仅主窗口可释放；等 parent-ended 回流才返回（避免与后续 spawn 竞态）
-      if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'not authorized' };
+      if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'not authorized' };
       const identity = exactIdentity(sessionId);
       return identity
         ? await releaseParentSession(identity)
@@ -1803,7 +1835,7 @@ export function registerAgentHandlers(): void {
       // 手动雇佣走 Main dispatch（与 Enso team.hire 同款守卫：reservation/容量/
       // name 去重/exact 握手）；渲染层只交 conversationId + 名字 + 类型。
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !isNonEmptyString(parentConversationId) ||
         !isNonEmptyString(name) ||
         (agentType !== undefined && !isNonEmptyString(agentType))
@@ -2007,7 +2039,7 @@ export function registerAgentHandlers(): void {
       const userIndexFromEnd =
         typeof record?.userIndexFromEnd === 'number' ? record.userIndexFromEnd : undefined;
       if (
-        !isMainWebContents(event.sender.id) ||
+        !isMainRenderer(event.sender.id) ||
         !identity ||
         'parent' in identity ||
         typeof targetConversationId !== 'string' ||
@@ -2056,8 +2088,8 @@ export function registerAgentHandlers(): void {
 
   // 系统通知抑制依据：renderer 上报当前正在查看的会话（null = 没在看任何会话）
   ipcMain.on(IPC_CHANNELS.NOTIFICATION_ACTIVE_SESSION, (event, sessionId: unknown) => {
-    if (!isMainWebContents(event.sender.id)) return;
-    setViewedSession(isNonEmptyString(sessionId) ? sessionId : null);
+    if (!isMainRenderer(event.sender.id)) return;
+    notifyDesktop().setViewedSession(isNonEmptyString(sessionId) ? sessionId : null);
     // 正在查看的会话不参与 worker 侧闲置回收，否则 release 后 ChatView 会立刻 resume 形成拉锯
     setPinnedSessions('viewed', isNonEmptyString(sessionId) ? [sessionId] : []);
   });

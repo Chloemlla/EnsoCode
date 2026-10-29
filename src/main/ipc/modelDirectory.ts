@@ -1,5 +1,5 @@
+import { app, ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, ipcMain } from 'electron';
 import {
   flushModelDirectoryCache,
   getModelDirectorySnapshot,

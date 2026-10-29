@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { app, safeStorage } from '@platform';
 import type { McpOAuthAccess, McpOAuthTokens } from '@shared/types/agent';
-import { app, safeStorage } from 'electron';
 
 /** 单个 MCP server 的授权状态：DCR 注册信息与 token 都按 McpServerEntry.id 归属 */
 export interface McpOAuthRecord {

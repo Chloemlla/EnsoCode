@@ -37,6 +37,10 @@ vi.mock('electron', () => ({
   },
 }));
 
+vi.mock('../services/uiHost', async () =>
+  (await import('../../../test/helpers/localUi')).mockUiHost(() => mocks.windows)
+);
+
 beforeAll(() => {
   mocks.windows.push(
     {

@@ -1,15 +1,15 @@
-import { useEffect } from 'react';
-import { addToast } from '@/components/ui/toast';
-import { useI18n } from '@/i18n';
-import { isLeaderRenderer } from '@/lib/rendererRole';
-import { useSessionsStore } from '@/stores/sessions';
 import {
   hasLiveGenerationWork,
   nextStallWatchAction,
   shouldAbortStalledGeneration,
   stallHeartbeatAt,
   stallLiveWorkFlags,
-} from '@/stores/sessions/stallTimeout';
+} from '@shared/stallTimeout';
+import { useEffect } from 'react';
+import { addToast } from '@/components/ui/toast';
+import { useI18n } from '@/i18n';
+import { isLeaderRenderer } from '@/lib/rendererRole';
+import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 
 export function useGenerationStallTimeout(): void {

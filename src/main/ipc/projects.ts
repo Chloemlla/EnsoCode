@@ -1,5 +1,6 @@
 import { mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { app, ipcMain, shell } from '@platform';
 import { conversationCwd } from '@shared/conversationCwd';
 import { resolveSshTarget } from '@shared/ssh';
 import { IPC_CHANNELS } from '@shared/types';
@@ -8,14 +9,14 @@ import {
   parseRemoveProjectAuthorityRequest,
   parseSelectProjectAuthorityRequest,
 } from '@shared/types/agent';
-import { app, ipcMain, shell } from 'electron';
 import { listProjectCodeSources } from '../../agent/projectCode';
+import { createHostDir, listHostDirs } from '../services/hostDirs';
 import { openInApps } from '../services/openInApps';
 import { getRecentProjects } from '../services/recentProjects';
+import { isMainRenderer } from '../services/renderers';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { sshProbeDirectory } from '../services/sshProbe';
-import { isMainWebContents } from '../windows/MainWindow';
 import { getSourceAuthorityRegistry } from './agent';
 import { sessionWorktree } from './worktree';
 
@@ -118,11 +119,30 @@ export function registerProjectHandlers(): void {
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.PROJECTS_LIST_HOST_DIRS, async (event, target: unknown) => {
+    if (!isMainRenderer(event.sender.id) || (target !== undefined && typeof target !== 'string'))
+      return { ok: false, error: 'Invalid request.' };
+    return listHostDirs(target);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECTS_CREATE_HOST_DIR,
+    async (event, parent: unknown, name: unknown) => {
+      if (
+        !isMainRenderer(event.sender.id) ||
+        typeof parent !== 'string' ||
+        typeof name !== 'string'
+      )
+        return { ok: false, error: 'Invalid request.' };
+      return createHostDir(parent, name);
+    }
+  );
+
   // 渲染层只传标识符，磁盘路径由 Main 从权威记录推导，不接受任意路径
   ipcMain.handle(
     IPC_CHANNELS.PROJECTS_REVEAL,
     async (event, request: unknown): Promise<{ ok: boolean; error?: string }> => {
-      if (!isMainWebContents(event.sender.id)) return { ok: false, error: 'unavailable' };
+      if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'unavailable' };
       const parsed = parseRevealRequest(request);
       if (!parsed) return { ok: false, error: 'invalid' };
       const resolved = resolveLocalCwd(parsed);
@@ -142,12 +162,12 @@ export function registerProjectHandlers(): void {
   );
 
   ipcMain.handle(IPC_CHANNELS.PROJECTS_OPEN_IN_APPS, async (event) =>
-    isMainWebContents(event.sender.id) ? openInApps.list() : []
+    isMainRenderer(event.sender.id) ? openInApps.list() : []
   );
 
   // 项目内会被 pi 当代码加载的来源；只读，信任记录由渲染层写入项目设置
   ipcMain.handle(IPC_CHANNELS.PROJECTS_CODE_SOURCES, (event, request: unknown): string[] => {
-    if (!isMainWebContents(event.sender.id)) return [];
+    if (!isMainRenderer(event.sender.id)) return [];
     const parsed = parseRevealRequest(request);
     if (!parsed || parsed.appId) return [];
     const resolved = resolveLocalCwd(parsed);
@@ -157,7 +177,7 @@ export function registerProjectHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SOURCE_PROJECT_CREATE, async (event, request: unknown) => {
     const parsed = parseCreateProjectAuthorityRequest(request);
     const registry = getSourceAuthorityRegistry();
-    if (!parsed || !registry || !isMainWebContents(event.sender.id)) {
+    if (!parsed || !registry || !isMainRenderer(event.sender.id)) {
       return { accepted: false, error: 'Invalid project request.' };
     }
     // ssh 项目：registry 是同步契约，远端目录存在性在这里异步预校验
@@ -177,14 +197,14 @@ export function registerProjectHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SOURCE_PROJECT_SELECT, (event, request: unknown) => {
     const parsed = parseSelectProjectAuthorityRequest(request);
     const registry = getSourceAuthorityRegistry();
-    return parsed && registry && isMainWebContents(event.sender.id)
+    return parsed && registry && isMainRenderer(event.sender.id)
       ? registry.selectProject(parsed)
       : { accepted: false, error: 'Invalid project request.' };
   });
   ipcMain.handle(IPC_CHANNELS.SOURCE_PROJECT_REMOVE, (event, request: unknown) => {
     const parsed = parseRemoveProjectAuthorityRequest(request);
     const registry = getSourceAuthorityRegistry();
-    if (!parsed || !registry || !isMainWebContents(event.sender.id)) {
+    if (!parsed || !registry || !isMainRenderer(event.sender.id)) {
       return { accepted: false, error: 'Invalid project request.' };
     }
     // 删除前先快照该项目的会话：渲染层逐会话的 removeConversation 与 removeProject

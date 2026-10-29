@@ -9,8 +9,8 @@ bootstrapWorkerProxyFromEnv();
 // pi-cursor 的 h2-bridge spawn 改进程内 HTTP/2；qi/Kg 挂本进程
 installPiCursorExecHook();
 
-// agent worker 入口：跑在 utilityProcess 里，与 Main 通过 parentPort 通信。
-const port = process.parentPort;
+// 桌面走 utilityProcess.parentPort；服务器走 child_process.fork 的 IPC。
+const port = workerPort();
 
 const dataDir = process.env.ENSO_AGENT_DATA_DIR;
 if (!dataDir) {
@@ -24,12 +24,12 @@ const supervisor = new SessionSupervisor({
   workflowDir: path.join(dataDir, 'workflows'),
 });
 
-port.on('message', (event) => {
-  const command = parseAgentCommand(event.data);
+port.onMessage((data) => {
+  const command = parseAgentCommand(data);
   if (!command) {
     // 静默丢弃会让 Main 只能等到 ready 握手超时，且无任何诊断信息。
     // 契约漂移（如 spawn 字段白名单与生产端不一致）必须在这里就看得见。
-    const type = (event.data as { type?: unknown } | null)?.type;
+    const type = (data as { type?: unknown } | null)?.type;
     console.warn(
       `[agent] dropped unparsable command: ${typeof type === 'string' ? type : '<unknown>'}`
     );
@@ -46,3 +46,26 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 port.postMessage({ type: 'ready' });
+
+function workerPort(): {
+  postMessage(message: unknown): void;
+  onMessage(listener: (data: unknown) => void): void;
+} {
+  const parent = process.parentPort;
+  if (parent) {
+    return {
+      postMessage: (message) => parent.postMessage(message),
+      onMessage: (listener) => parent.on('message', (event) => listener(event.data)),
+    };
+  }
+  if (typeof process.send === 'function') {
+    const send = process.send.bind(process);
+    return {
+      postMessage: (message) => {
+        send(message);
+      },
+      onMessage: (listener) => process.on('message', listener),
+    };
+  }
+  throw new Error('agent worker has no parent channel');
+}

@@ -1,3 +1,4 @@
+import { ipcMain } from '@platform';
 import {
   parseOauthFlowControlRequest,
   parseOauthFlowPromptResponse,
@@ -5,7 +6,6 @@ import {
 } from '@shared/capabilities/types';
 import type { ModelMetaQuery, ProviderApiConfig } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
-import { ipcMain } from 'electron';
 import { listClassifierModels } from '../services/classifierModels';
 import { queryModelMeta } from '../services/modelMeta';
 import {

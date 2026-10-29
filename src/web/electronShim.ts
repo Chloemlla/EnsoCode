@@ -128,11 +128,12 @@ const channelOff = new Map<string, () => void>();
 /** 编解码都在本 iframe 的 realm 内完成；每个通道只订阅一次、解码一次再分发（同 Electron 语义） */
 export const remoteFrame = {
   invoke(channel: string, args: unknown[]): Promise<unknown> {
-    if (!isRemoteChannelAllowed(channel, true)) return Promise.reject(unavailable(channel));
+    // 宿主控制通道交给宿主裁决（只有服务端开放）
+    if (!isRemoteChannelAllowed(channel, true, true)) return Promise.reject(unavailable(channel));
     return invokeEncoded(channel, args);
   },
   send(channel: string, args: unknown[]): void {
-    if (!isRemoteChannelAllowed(channel, true)) return;
+    if (!isRemoteChannelAllowed(channel, true, true)) return;
     frame.send(channel, JSON.stringify(encodeRemoteValue(args)));
   },
   on(channel: string, listener: (...args: unknown[]) => void): () => void {

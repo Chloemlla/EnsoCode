@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { app } from '@platform';
 import type {
   DirectoryModel,
   DirectoryProvider,
@@ -12,9 +13,8 @@ import type {
 import { parseModelDirectorySnapshot } from '@shared/modelDirectory';
 import { expandOauthCatalog } from '@shared/oauthCatalog';
 import { IPC_CHANNELS, type ModelProvider, persistedSettingsState } from '@shared/types';
-import { app, BrowserWindow } from 'electron';
 import { readSettings } from '../ipc/settings';
-import { sendToWindow } from '../windows/createAppWindow';
+import { localUi } from './uiHost';
 
 export interface DirectoryOAuthSource {
   id: string;
@@ -164,10 +164,8 @@ function semanticKey(providers: readonly DirectoryProvider[]): string {
 }
 
 function broadcast(next: ModelDirectorySnapshot): void {
-  const windows = BrowserWindow?.getAllWindows?.() ?? [];
-  for (const win of windows) {
-    if (win.isDestroyed?.()) continue;
-    sendToWindow(win, IPC_CHANNELS.MODEL_DIRECTORY_CHANGED, next);
+  for (const contents of localUi()?.allContents() ?? []) {
+    contents.send(IPC_CHANNELS.MODEL_DIRECTORY_CHANGED, next);
   }
 }
 

@@ -1,17 +1,17 @@
 import path from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { app, ipcMain } from '@platform';
 import { IPC_CHANNELS } from '@shared/types';
 import { parseWorkspaceSearchQueryRequest } from '@shared/workspaceSearchQuery';
-import { app, ipcMain } from 'electron';
+import { isMainRenderer } from '../services/renderers';
 import { queryWorkspaceSearchIndex } from '../services/workspaceSearchIndex';
-import { isMainWebContents } from '../windows/MainWindow';
 import { getSourceAuthorityRegistry } from './agent';
 
 export function registerWorkspaceSearchHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_SEARCH_QUERY, async (event, request: unknown) => {
     const parsed = parseWorkspaceSearchQueryRequest(request);
     const registry = getSourceAuthorityRegistry();
-    if (!parsed || !registry || !isMainWebContents(event.sender.id)) {
+    if (!parsed || !registry || !isMainRenderer(event.sender.id)) {
       return { hits: [] };
     }
     const projection = registry.rendererProjection();

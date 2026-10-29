@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { app } from '@platform';
 import {
   DEFAULT_SPEECH_MODEL_ID,
   SPEECH_MAX_SECONDS,
@@ -13,7 +14,6 @@ import {
   type SpeechTranscribeResult,
   type VoiceSession,
 } from '@shared/types/speech';
-import { app } from 'electron';
 import { downloadedBytes, downloadModel, isModelReady } from '../memory/embedding/downloader';
 import { downloadArchiveModel } from './archive';
 import type { SpeechEngine, SpeechEngineStream } from './engine';

@@ -1,10 +1,12 @@
 import { AUTO_RETRY_LIMIT_OPTIONS, UNLIMITED_AUTO_RETRY } from '@shared/autoRetry';
 import { isValidProxyUrl, type ProxyMode } from '@shared/proxy';
+import { GENERATION_STALL_TIMEOUT_MINUTES } from '@shared/stallTimeout';
 import { type TerminalShell, terminalShellsForPlatform } from '@shared/terminalShell';
-import type { UpdateStatus } from '@shared/types/updater';
+import type { ServerUpdateMode, UpdaterState, UpdateStatus } from '@shared/types/updater';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import { isAbsolutePathLike } from '@shared/worktreeRoot';
 import * as React from 'react';
+import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -16,13 +18,13 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
-import { GENERATION_STALL_TIMEOUT_MINUTES } from '@/stores/sessions/stallTimeout';
 import { useSettingsStore } from '@/stores/settings';
 import { ACTIVE_RETENTION_MINUTES } from '@/stores/settings/activeRetention';
 import {
   AUTO_ARCHIVE_IDLE_DAYS,
   AUTO_DELETE_ARCHIVED_DAYS,
 } from '@/stores/settings/autoArchiveIdleDays';
+import { CompactReserveTokensSection } from './CompactReserveTokensSection';
 import { ConfigSyncSettings } from './ConfigSyncSettings';
 import { FileOpeningSettings } from './FileOpeningSettings';
 import { NewSessionBadge } from './NewSessionBadge';
@@ -71,6 +73,7 @@ export function GeneralSettings() {
       <SidePanelSection />
       <FileOpeningSettings />
       <SmartCompactPicker />
+      <CompactReserveTokensSection />
       <WindowsLocalShellSection />
       <TerminalShellSection />
       <WorktreeRootSection />
@@ -660,10 +663,27 @@ function UpdateSection() {
   const autoRestartWhenIdle = useSettingsStore((s) => s.autoRestartWhenIdle);
   const setAutoRestartWhenIdle = useSettingsStore((s) => s.setAutoRestartWhenIdle);
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
+  const [host, setHost] = React.useState<UpdaterState | null>(null);
+  const [confirmRestart, setConfirmRestart] = React.useState(false);
 
   React.useEffect(() => {
-    return window.electronAPI.updater.onStatus(setStatus);
+    let alive = true;
+    // 远端连桌面宿主时 updater:* 被拒，保持原行为
+    window.electronAPI.updater
+      .getState()
+      .then((state) => {
+        if (!alive) return;
+        setHost(state);
+        if (state.status) setStatus((current) => current ?? state.status);
+      })
+      .catch(() => {});
+    const off = window.electronAPI.updater.onStatus(setStatus);
+    return () => {
+      alive = false;
+      off();
+    };
   }, []);
+  const server = host?.host === 'server' ? host : null;
 
   const statusText = (): string | null => {
     if (!status) return null;
@@ -683,7 +703,9 @@ function UpdateSection() {
           version: status.info?.version ?? '',
         });
       case 'error':
-        return t('Update check failed');
+        return server && status.error
+          ? t('Update failed: {{error}}', { error: status.error })
+          : t('Update check failed');
       default:
         return null;
     }
@@ -695,7 +717,9 @@ function UpdateSection() {
     <div className="space-y-3" data-settings-row="general.updates">
       <div>
         <h4 className="text-sm font-medium">{t('Updates')}</h4>
-        <p className="text-xs text-muted-foreground">{t('Application update settings')}</p>
+        <p className="text-xs text-muted-foreground">
+          {server ? serverModeText(server.mode, t) : t('Application update settings')}
+        </p>
       </div>
       <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
         <div className="min-w-0">
@@ -712,6 +736,14 @@ function UpdateSection() {
           >
             {t('Restart to update')}
           </Button>
+        ) : server && server.mode !== 'manual' && status?.status === 'available' ? (
+          <Button
+            size="sm"
+            onClick={() => void window.electronAPI.updater.downloadUpdate()}
+            className="shrink-0"
+          >
+            {t('Download update')}
+          </Button>
         ) : (
           <Button
             variant="outline"
@@ -724,6 +756,37 @@ function UpdateSection() {
           </Button>
         )}
       </div>
+      {server?.canRestart && (
+        <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm">{t('Restart server')}</p>
+            <p className="text-xs text-muted-foreground">
+              {t('Running tasks are interrupted; this page reconnects after the server is back.')}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmRestart(true)}
+            className="shrink-0"
+          >
+            {t('Restart')}
+          </Button>
+          <ConfirmDialog
+            open={confirmRestart}
+            onOpenChange={setConfirmRestart}
+            title={t('Restart server?')}
+            description={t(
+              'Running tasks are interrupted; this page reconnects after the server is back.'
+            )}
+            confirmLabel={t('Restart')}
+            onConfirm={() => {
+              setConfirmRestart(false);
+              void window.electronAPI.updater.restart();
+            }}
+          />
+        </div>
+      )}
       <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
         <div className="min-w-0">
           <p className="text-sm">{t('Automatic updates')}</p>
@@ -761,6 +824,14 @@ function UpdateSection() {
       </div>
     </div>
   );
+}
+
+function serverModeText(
+  mode: ServerUpdateMode | undefined,
+  t: ReturnType<typeof useI18n>['t']
+): string {
+  if (mode === 'npm') return t('Server updates install the new version with npm and restart.');
+  return t('This server must be updated on the machine itself.');
 }
 
 /** 打包时由 vite 注入的 app 版本(见 electron.vite.config.ts define);dev 下取 package.json */

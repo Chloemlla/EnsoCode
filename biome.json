@@ -77,6 +77,43 @@
     {
       "includes": ["build/**/*.svg"],
       "linter": { "rules": { "a11y": { "noSvgWithoutTitle": "off" } } }
+    },
+    {
+      "includes": ["src/main/ipc/**", "src/main/services/**", "src/main/platform/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "electron": "核心代码不能直接依赖 Electron，改从 @platform 取进程能力"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/main/**/*.test.ts",
+        "src/main/ipc/desktop.ts",
+        "src/main/ipc/window.ts",
+        "src/main/ipc/browser.ts",
+        "src/main/ipc/computer.ts",
+        "src/main/ipc/updater.ts",
+        "src/main/ipc/configSync.ts",
+        "src/main/services/computer/**",
+        "src/main/services/updater/**",
+        "src/main/services/notifications.ts",
+        "src/main/services/browserHost.ts",
+        "src/main/services/appServerMode.ts",
+        "src/main/services/appMenu.ts",
+        "src/main/services/trayToggleShortcut.ts",
+        "src/main/services/appCloseConfirm.ts"
+      ],
+      "linter": { "rules": { "style": { "noRestrictedImports": "off" } } }
     }
   ]
 }

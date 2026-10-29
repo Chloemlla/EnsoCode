@@ -1,5 +1,6 @@
 import { classify } from '@earendil-works/pi-ai/api/typesafe-system-one';
 import { typesafeProvider } from '@earendil-works/pi-ai/providers/typesafe';
+import { net } from '@platform';
 import { positiveFiniteNumber } from '@shared/modelCatalog';
 import {
   DEFAULT_BASE_URLS,
@@ -13,7 +14,6 @@ import type {
   ProviderApiConfig,
   TestProviderResult,
 } from '@shared/types';
-import { net } from 'electron';
 import { createSecretSet } from './secretRedactor';
 
 const ANTHROPIC_VERSION = '2023-06-01';
