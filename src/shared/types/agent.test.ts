@@ -855,6 +855,87 @@ describe('parent/child commands', () => {
     }
     // 辅助用途（代审、压缩摘要）只收真实模型
     expect(parseAgentCommand({ type: 'set-approval-reviewer', model: virtualModel })).toBeNull();
+    // 代审可改用分类器；与 model 互斥，凭证字段严格校验
+    const classifier = { provider: 'typesafe', modelId: 'jev-latest', apiKey: 'k' };
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', classifier })).toEqual({
+      type: 'set-approval-reviewer',
+      classifier,
+    });
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', model, classifier })).toBeNull();
+    expect(
+      parseAgentCommand({ type: 'set-approval-reviewer', classifier: { ...classifier, x: 1 } })
+    ).toBeNull();
+    expect(parseAgentCommand({ ...base, model, approvalReviewerClassifier: classifier })).toEqual({
+      ...base,
+      model,
+      approvalReviewerClassifier: classifier,
+    });
+    expect(
+      parseAgentCommand({
+        ...base,
+        model,
+        approvalReviewer: model,
+        approvalReviewerClassifier: classifier,
+      })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ ...base, model, approvalReviewerClassifier: { provider: '' } })
+    ).toBeNull();
+    // 托管只随分类器下发
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', classifier, managed: true })).toEqual(
+      { type: 'set-approval-reviewer', classifier, managed: true }
+    );
+    expect(parseAgentCommand({ type: 'set-approval-reviewer', model, managed: true })).toBeNull();
+    expect(
+      parseAgentCommand({ type: 'set-approval-reviewer', classifier, managed: 'yes' })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({
+        ...base,
+        model,
+        approvalReviewerClassifier: classifier,
+        approvalReviewerManaged: true,
+      })
+    ).toMatchObject({ approvalReviewerManaged: true });
+    expect(
+      parseAgentCommand({ ...base, model, approvalReviewer: model, approvalReviewerManaged: true })
+    ).toBeNull();
+    // 放行阈值只随分类器下发，只认三档
+    expect(
+      parseAgentCommand({
+        ...base,
+        model,
+        approvalReviewerClassifier: classifier,
+        approvalReviewerAllowThreshold: 0.85,
+      })
+    ).toMatchObject({ approvalReviewerAllowThreshold: 0.85 });
+    for (const bad of [0.5, '0.85']) {
+      expect(
+        parseAgentCommand({
+          ...base,
+          model,
+          approvalReviewerClassifier: classifier,
+          approvalReviewerAllowThreshold: bad,
+        })
+      ).toBeNull();
+    }
+    expect(
+      parseAgentCommand({
+        ...base,
+        model,
+        approvalReviewer: model,
+        approvalReviewerAllowThreshold: 0.95,
+      })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ type: 'set-approval-reviewer', classifier, allowThreshold: 0.95 })
+    ).toEqual({ type: 'set-approval-reviewer', classifier, allowThreshold: 0.95 });
+    expect(
+      parseAgentCommand({ type: 'set-approval-reviewer', classifier, allowThreshold: 0.7 })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ type: 'set-approval-reviewer', model, allowThreshold: 0.95 })
+    ).toBeNull();
     expect(
       parseAgentCommand({ ...base, model, smartCompactSummaryModel: virtualModel })
     ).toBeNull();
@@ -938,6 +1019,33 @@ describe('parent/child commands', () => {
     ).toBeNull();
     const moved = { ...event, message: { ...event.message, backgroundTaskId: 'task-1-abc' } };
     expect(parseAgentWorkerEvent(moved)).toEqual(moved);
+    const reviewed = {
+      ...event,
+      message: {
+        ...event.message,
+        approvalReview: { verdict: 'allow', model: 'jev', allow: 0.95, ask: 0.05, block: 0 },
+      },
+    };
+    expect(parseAgentWorkerEvent(reviewed)).toEqual(reviewed);
+    expect(
+      parseAgentWorkerEvent({
+        ...event,
+        message: { ...event.message, approvalReview: { verdict: 'allow' } },
+      })
+    ).toBeNull();
+    const request = {
+      type: 'approval-request',
+      identity: parent,
+      seq: 1,
+      request: { requestId: 'r', tool: 'bash', kind: 'command', summary: 'ls' },
+    };
+    for (const reviewFallback of ['timeout', 'error', 'invalid']) {
+      const withFallback = { ...request, request: { ...request.request, reviewFallback } };
+      expect(parseAgentWorkerEvent(withFallback)).toEqual(withFallback);
+    }
+    expect(
+      parseAgentWorkerEvent({ ...request, request: { ...request.request, reviewFallback: 'x' } })
+    ).toBeNull();
     for (const backgroundTaskId of ['', 1, 'x'.repeat(129)]) {
       expect(
         parseAgentWorkerEvent({ ...event, message: { ...event.message, backgroundTaskId } })

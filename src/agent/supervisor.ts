@@ -20,6 +20,7 @@ import {
   SessionManager,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
+import type { ApprovalAllowThreshold } from '@shared/approvalReviewRecord';
 import { autoRetryOverrides, DEFAULT_AUTO_RETRY_LIMIT } from '@shared/autoRetry';
 import {
   type ChildSessionIdentity,
@@ -82,6 +83,7 @@ import type {
   SpawnModelConfig,
   SubagentModelOption,
   ThinkingLevel,
+  VirtualClassifierCredentials,
 } from '@shared/types/agent';
 import { parseAgentSessionCustomEntry, STALE_SESSION_ERROR } from '@shared/types/agent';
 import { type EditMode, resolveEditMode } from '@shared/types/editMode';
@@ -98,15 +100,24 @@ import {
   validateApplyPatchTargets,
 } from './applyPatch';
 import { applyPatchResultExtension } from './applyPatchResultExtension';
-import { ApprovalGate, withApproval, withProtectedFloor } from './approval';
+import {
+  ApprovalGate,
+  type ApprovalReviewResult,
+  withApproval,
+  withProtectedFloor,
+} from './approval';
 import {
   APPROVAL_REVIEW_TIMEOUT_MS,
+  buildApprovalClassifierRequest,
   buildApprovalReviewSystemPrompt,
   buildApprovalReviewUserPrompt,
   computeApprovalActionHash,
+  decideFromApprovalClassifier,
+  decideManagedApproval,
   normalizeReviewDecision,
   recentReviewMessages,
 } from './approvalReview';
+import { approvalReviewResultExtension } from './approvalReviewRecords';
 import { AskManager, createAskTool } from './ask';
 import { ensureAssistantUsage } from './assistantUsage';
 import {
@@ -540,6 +551,7 @@ function createSessionResourceLoader(options: {
       ...(options.oauthPoolRecovery ? [options.oauthPoolRecovery] : []),
       options.branchContext,
       applyPatchResultExtension,
+      approvalReviewResultExtension,
       promptCatalogExtension,
       {
         name: 'image-context',
@@ -693,6 +705,7 @@ function createEnsoResourceLoader(
     extensionFactories: [
       branchContext,
       applyPatchResultExtension,
+      approvalReviewResultExtension,
       silentTurnRecovery,
       ...(oauthPoolRecovery ? [oauthPoolRecovery] : []),
     ],
@@ -900,7 +913,8 @@ export class SessionSupervisor {
   /** 不可回收的会话（桌面正在查看 / 手机订阅），由 Main 全量下发 */
   private pinned: ReadonlySet<string> = new Set();
   private readonly evictionTimer: ReturnType<typeof setInterval>;
-  private approvalReviewer: SpawnModelConfig | undefined;
+  /** 代审来源：聊天模型走 JSON 契约，分类器（System One）走三选一概率 */
+  private approvalReviewer: ApprovalReviewerSource | undefined;
   /** 所有已打开会话的压缩摘要路线；设置变更时原地改 */
   private readonly compactRoute: EnsoCompactOptions = {};
   private maxActiveCoworkers = DEFAULT_MAX_ACTIVE_COWORKERS;
@@ -1268,7 +1282,12 @@ export class SessionSupervisor {
       return;
     }
     if (command.type === 'set-approval-reviewer') {
-      this.approvalReviewer = command.model;
+      this.approvalReviewer = approvalReviewerSource(
+        command.model,
+        command.classifier,
+        command.managed,
+        command.allowThreshold
+      );
       return;
     }
     if (command.type === 'set-compact-route') {
@@ -1439,7 +1458,12 @@ export class SessionSupervisor {
           command.skillPaths,
           command.mcpServers,
           command.approvalMode,
-          command.approvalReviewer,
+          approvalReviewerSource(
+            command.approvalReviewer,
+            command.approvalReviewerClassifier,
+            command.approvalReviewerManaged,
+            command.approvalReviewerAllowThreshold
+          ),
           command.agentTypes,
           command.disabledTools,
           command.instruction,
@@ -1692,7 +1716,12 @@ export class SessionSupervisor {
         return;
       }
       case 'set-approval-reviewer':
-        this.approvalReviewer = command.model;
+        this.approvalReviewer = approvalReviewerSource(
+          command.model,
+          command.classifier,
+          command.managed,
+          command.allowThreshold
+        );
         return;
       case 'ask-respond':
         this.must(command.identity).asks.respond(command.requestId, command.answer);
@@ -1961,7 +1990,7 @@ export class SessionSupervisor {
     skillPaths: string[] = [],
     mcpServers: McpServerSpawnConfig[] = [],
     approvalMode: ApprovalMode = 'full',
-    approvalReviewer?: SpawnModelConfig,
+    approvalReviewer?: ApprovalReviewerSource,
     agentTypes: AgentTypeSpawnConfig[] = [],
     disabledTools: string[] = [],
     instruction?: { path: string; content: string },
@@ -4681,11 +4710,15 @@ export class SessionSupervisor {
   private async reviewApproval(
     info: import('@shared/types/agent').ApprovalRequestInfo,
     signal: AbortSignal | undefined
-  ): Promise<{ decision: 'auto_allow' | 'ask_user' | 'block'; rationale?: string }> {
-    const reviewer = this.approvalReviewer;
-    if (!reviewer) {
+  ): Promise<ApprovalReviewResult> {
+    const source = this.approvalReviewer;
+    if (!source) {
       return { decision: 'ask_user', rationale: 'No approval reviewer model is configured.' };
     }
+    if ('classifier' in source) {
+      return this.classifyApproval(source, info, signal);
+    }
+    const reviewer = source.model;
     const actionHash = computeApprovalActionHash({
       version: 1,
       kind: 'enso_tool_permission_review',
@@ -4741,6 +4774,54 @@ export class SessionSupervisor {
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', onParentAbort);
+    }
+  }
+
+  /**
+   * 分类器代审：只问三选一；超时、出错、缺概率都交人工。结果由 gate 按 requestId 闭包绑定。
+   * 托管：allow 达阈值放行，其余只拒这一条并交回模型；判定无效时退回人工并标明原因。
+   */
+  private async classifyApproval(
+    source: Extract<ApprovalReviewerSource, { classifier: unknown }>,
+    info: import('@shared/types/agent').ApprovalRequestInfo,
+    signal: AbortSignal | undefined
+  ): Promise<ApprovalReviewResult> {
+    const { classifier: credentials, allowThreshold } = source;
+    const managed = source.managed === true;
+    const timeout = AbortSignal.timeout(APPROVAL_REVIEW_TIMEOUT_MS);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      const runtime = await this.getRuntime();
+      const model = resolveClassifierModel(runtime, credentials);
+      const recentMessages = recentReviewMessages(
+        [...this.sessions.values()].find((session) =>
+          session.gate.snapshot().some((item) => item.requestId === info.requestId)
+        )?.messages ?? []
+      );
+      const result = await runtime.classify(
+        model,
+        buildApprovalClassifierRequest(
+          { tool: info.tool, kind: info.kind, summary: info.summary, recentMessages },
+          { managed }
+        ),
+        { signal: combined, ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}) }
+      );
+      if (result.stopReason !== 'stop') {
+        return {
+          decision: 'ask_user',
+          rationale: 'Auto-review failed.',
+          ...(managed ? { fallback: timeout.aborted ? 'timeout' : 'error' } : {}),
+        };
+      }
+      return managed
+        ? decideManagedApproval(result.answers, credentials.modelId, allowThreshold)
+        : decideFromApprovalClassifier(result.answers.decision, allowThreshold);
+    } catch {
+      return {
+        decision: 'ask_user',
+        rationale: 'Auto-review failed.',
+        ...(managed ? { fallback: timeout.aborted ? 'timeout' : 'error' } : {}),
+      };
     }
   }
 
@@ -5350,4 +5431,27 @@ function collectSlashCommands(session: AgentSession): SlashCommand[] {
     // 资源加载失败不阻塞会话，命令列表为空即可
   }
   return commands;
+}
+
+type ApprovalReviewerSource =
+  | { model: SpawnModelConfig }
+  | {
+      classifier: VirtualClassifierCredentials;
+      managed?: boolean;
+      allowThreshold?: ApprovalAllowThreshold;
+    };
+
+function approvalReviewerSource(
+  model: SpawnModelConfig | undefined,
+  classifier: VirtualClassifierCredentials | undefined,
+  managed: boolean | undefined,
+  allowThreshold: ApprovalAllowThreshold | undefined
+): ApprovalReviewerSource | undefined {
+  if (model) return { model };
+  if (!classifier) return undefined;
+  return {
+    classifier,
+    ...(managed ? { managed: true } : {}),
+    ...(allowThreshold === undefined ? {} : { allowThreshold }),
+  };
 }

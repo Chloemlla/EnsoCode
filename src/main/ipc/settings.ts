@@ -19,6 +19,7 @@ import {
   parseContextMenuOpen,
   parseFileOpenRules,
 } from '@shared/fileOpening';
+import { type Locale, normalizeLocale } from '@shared/i18n';
 import { collectPresetPromptIds } from '@shared/presetPrompts';
 import { normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import { IPC_CHANNELS, isEditMode, resolveEditMode } from '@shared/types';
@@ -125,6 +126,8 @@ export const SETTINGS_STATE_FIELDS = [
   'memoryChatModel',
   'memoryLanguage',
   'approvalReviewer',
+  'approvalAutoManage',
+  'approvalAllowThreshold',
   'lastApprovalMode',
   'defaultReasoningEnabled',
   'defaultThinkingLevel',
@@ -175,6 +178,8 @@ export type SettingsStateField = (typeof SETTINGS_STATE_FIELDS)[number];
 /** Device-local keys that config-sync must never fingerprint or write back. */
 const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'hashlineEditEnabled',
+  'approvalAutoManage',
+  'approvalAllowThreshold',
   'privacyMasking',
   'virtualModels',
   'windowsLocalShell',
@@ -704,6 +709,11 @@ export function readSshTimeoutSeconds(): number {
  */
 export function readFileOpenRules(): FileOpenRule[] {
   return normalizeFileOpenRules(settingsStateOf(readSettings()).fileOpenRules);
+}
+
+export function readLocale(): Locale {
+  const language = settingsStateOf(readSettings()).language;
+  return normalizeLocale(typeof language === 'string' ? language : undefined);
 }
 
 export function readContextMenuOpen(): ContextMenuOpen {

@@ -41,6 +41,7 @@ import {
   readSettingsState,
   rememberParentToolProfile,
   resolveAgentTypeSpawnConfig,
+  resolveApprovalReviewer,
   resolveModelSelection,
   resolvePresetSystemPrompt,
   resolveSubagentModelSelection,
@@ -763,5 +764,111 @@ describe('resolveAgentTypeSpawnConfig 类型级推理预设', () => {
     if (!resolved.ok) return;
     expect(resolved.config).not.toHaveProperty('reasoning');
     expect(resolved.config).not.toHaveProperty('thinkingLevel');
+  });
+});
+
+describe('resolveApprovalReviewer', () => {
+  const jev: ModelProvider = {
+    id: 'jev',
+    name: 'Jev',
+    api: 'typesafe-system-one',
+    baseUrl: 'https://api.typesafe.ai/v1/',
+    apiKey: 'jev-key',
+    enabled: true,
+    models: [{ id: 'jev-latest' }],
+  };
+  const chat: ModelProvider = {
+    id: 'chat',
+    name: 'Chat',
+    api: 'openai-completions',
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'chat-key',
+    enabled: true,
+    models: [{ id: 'chat-model' }],
+  };
+  const withReviewer = (providers: ModelProvider[], approvalReviewer: unknown) => {
+    settingsMock.value = { 'enso-settings': { state: { providers, approvalReviewer } } };
+  };
+
+  it('未选为 null；聊天模型走 model 来源', () => {
+    withReviewer([chat], null);
+    expect(resolveApprovalReviewer(new Set())).toEqual({ ok: true, source: null });
+    withReviewer([chat], { providerId: 'chat', modelId: 'chat-model' });
+    const resolved = resolveApprovalReviewer(new Set());
+    expect(resolved.ok && resolved.source && 'model' in resolved.source).toBe(true);
+  });
+
+  it('分类器专用供应商走 classifier 来源，只带 provider、模型与 key', () => {
+    withReviewer([jev], { providerId: 'jev', modelId: 'jev-latest' });
+    expect(resolveApprovalReviewer(new Set())).toEqual({
+      ok: true,
+      source: { classifier: { provider: 'typesafe', modelId: 'jev-latest', apiKey: 'jev-key' } },
+    });
+  });
+
+  it('托管开关只对分类器代审生效', () => {
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [jev, chat],
+          approvalReviewer: { providerId: 'jev', modelId: 'jev-latest' },
+          approvalAutoManage: true,
+        },
+      },
+    };
+    expect(resolveApprovalReviewer(new Set())).toMatchObject({
+      ok: true,
+      source: { classifier: { modelId: 'jev-latest' }, managed: true },
+    });
+    settingsMock.value = {
+      'enso-settings': {
+        state: {
+          providers: [jev, chat],
+          approvalReviewer: { providerId: 'chat', modelId: 'chat-model' },
+          approvalAutoManage: true,
+        },
+      },
+    };
+    const chatSource = resolveApprovalReviewer(new Set());
+    expect(chatSource.ok && chatSource.source).not.toHaveProperty('managed');
+    withReviewer([jev], { providerId: 'jev', modelId: 'jev-latest' });
+    const off = resolveApprovalReviewer(new Set());
+    expect(off.ok && off.source).not.toHaveProperty('managed');
+  });
+
+  it('放行阈值只对分类器代审下发，非 0.9 档才带；非法值按 0.9', () => {
+    const withThreshold = (reviewer: { providerId: string; modelId: string }, value: unknown) => {
+      settingsMock.value = {
+        'enso-settings': {
+          state: {
+            providers: [jev, chat],
+            approvalReviewer: reviewer,
+            approvalAllowThreshold: value,
+          },
+        },
+      };
+      return resolveApprovalReviewer(new Set());
+    };
+    const jevRef = { providerId: 'jev', modelId: 'jev-latest' };
+    expect(withThreshold(jevRef, 0.85)).toMatchObject({
+      ok: true,
+      source: { allowThreshold: 0.85 },
+    });
+    for (const value of [0.9, 0.5, '0.85', undefined]) {
+      const result = withThreshold(jevRef, value);
+      expect(result.ok && result.source).not.toHaveProperty('allowThreshold');
+    }
+    const chatSource = withThreshold({ providerId: 'chat', modelId: 'chat-model' }, 0.95);
+    expect(chatSource.ok && chatSource.source).not.toHaveProperty('allowThreshold');
+  });
+
+  it('分类器缺 key 或停用时明确失败，不回退聊天模型', () => {
+    for (const provider of [
+      { ...jev, apiKey: '' },
+      { ...jev, enabled: false },
+    ]) {
+      withReviewer([provider, chat], { providerId: 'jev', modelId: 'jev-latest' });
+      expect(resolveApprovalReviewer(new Set()).ok).toBe(false);
+    }
   });
 });

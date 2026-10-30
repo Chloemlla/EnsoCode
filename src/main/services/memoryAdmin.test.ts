@@ -1,11 +1,13 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { SearchLlmGate } from '@shared/memory/searchAssist';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openMemoryDb } from './memory/db';
 import { ensureDistillJob, listResumableDistillJobs } from './memory/distill';
 import { applyExtraction } from './memory/kg';
+import { createSearchAssist } from './memory/searchLlm';
 import { createMemory, getMemory } from './memory/store';
 import type { Embedder } from './memory/types';
 import {
@@ -119,6 +121,14 @@ describe('memory admin — 语义搜索模式', () => {
     expect(exact.items.map((i) => i.id)).toEqual([literal.id]);
   });
 
+  it('列表项带被检索次数（appearances），不用从不写入的 access_count（#169）', async () => {
+    const m = await add('Redis 缓存策略');
+    db.prepare('UPDATE memories SET appearances = 7 WHERE id = ?').run(m.id);
+    const [item] = listMemoriesForAdmin(db, { limit: 10, offset: 0 }).items;
+    expect(item).toMatchObject({ id: m.id, appearances: 7 });
+    expect(item).not.toHaveProperty('accessCount');
+  });
+
   it('空查询不跑检索；unitType 在结果上后过滤', async () => {
     await add('Postgres 主库决策');
     expect(
@@ -130,6 +140,45 @@ describe('memory admin — 语义搜索模式', () => {
       embedder
     );
     expect(filtered.items).toEqual([]);
+  });
+
+  it('fast 为 assist off；deep 成功为 llm，调用失败为 fallback', async () => {
+    await add('我们决定用 Postgres 做主库');
+    let fastCalls = 0;
+    const fast = await searchMemoriesForAdmin(
+      db,
+      { query: 'Postgres', limit: 10, offset: 0, mode: 'fast' },
+      null,
+      createSearchAssist(async () => {
+        fastCalls += 1;
+        throw new Error('fast must not call the model');
+      })
+    );
+    expect(fastCalls).toBe(0);
+    expect(fast.assist).toBe('off');
+    expect(fast.assistReason).toBeUndefined();
+
+    const llm = await searchMemoriesForAdmin(
+      db,
+      { query: 'Postgres', limit: 10, offset: 0, mode: 'deep' },
+      null,
+      createSearchAssist(async () => '{"intent":"factual_query","confidence":1}')
+    );
+    expect(llm.assist).toBe('llm');
+    expect(llm.assistReason).toBeUndefined();
+
+    const failed = await searchMemoriesForAdmin(
+      db,
+      { query: 'Postgres', limit: 10, offset: 0, mode: 'deep' },
+      null,
+      createSearchAssist(
+        async () => {
+          throw new Error('down');
+        },
+        { gate: new SearchLlmGate() }
+      )
+    );
+    expect(failed).toMatchObject({ assist: 'fallback', assistReason: 'error' });
   });
 });
 

@@ -2,6 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { agentWorkerPath, app, resourcesPath, utilityProcess, type WorkerProcess } from '@platform';
+import {
+  type ApprovalAllowThreshold,
+  DEFAULT_APPROVAL_ALLOW_THRESHOLD,
+  parseApprovalAllowThreshold,
+} from '@shared/approvalReviewRecord';
 import { normalizeAutoRetryLimit } from '@shared/autoRetry';
 import {
   type AgentTypeKey,
@@ -34,6 +39,7 @@ import { materializeProviders } from '@shared/modelDirectory';
 import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthAccountPool';
 import { ensureAccountProvider } from '@shared/piAccounts';
 import { parsePrivacyMaskSettings } from '@shared/privacyMask/settings';
+import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { providerKeyFor } from '@shared/providers/providerKey';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
@@ -632,7 +638,21 @@ export function resolveVirtualClassifier(
       ? { source: 'judge', timeoutMs: classifier.timeoutMs, model: resolved.selection.config }
       : undefined;
   }
-  const provider = providersFromSettings().find((item) => item.id === classifier.model.providerId);
+  const credentials = classifierCredentialsFor(
+    providersFromSettings().find((item) => item.id === classifier.model.providerId),
+    classifier.model.modelId,
+    authenticatedAccountKeys
+  );
+  return credentials
+    ? { source: 'pi-classifier', timeoutMs: classifier.timeoutMs, classifier: credentials }
+    : undefined;
+}
+
+function classifierCredentialsFor(
+  provider: ModelProvider | undefined,
+  modelId: string,
+  authenticatedAccountKeys: ReadonlySet<string>
+): VirtualClassifierCredentials | undefined {
   if (!provider?.enabled) return undefined;
   const piProvider = classifierProviderFor(provider);
   if (!piProvider) return undefined;
@@ -643,14 +663,10 @@ export function resolveVirtualClassifier(
     return undefined;
   }
   return {
-    source: 'pi-classifier',
-    timeoutMs: classifier.timeoutMs,
-    classifier: {
-      provider: piProvider,
-      modelId: classifier.model.modelId,
-      ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
-      ...(baseUrl ? { baseUrl } : {}),
-    },
+    provider: piProvider,
+    modelId,
+    ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
+    ...(baseUrl ? { baseUrl } : {}),
   };
 }
 
@@ -879,10 +895,10 @@ export function spawnSession(
   if (!reviewer.ok) {
     if (request.approvalMode === 'assistant') return { ok: false, error: reviewer.error };
   }
-  if (request.approvalMode === 'assistant' && (!reviewer.ok || !reviewer.selection)) {
+  if (request.approvalMode === 'assistant' && (!reviewer.ok || !reviewer.source)) {
     return { ok: false, error: 'Select an assistant approval model in Settings first.' };
   }
-  const approvalReviewerConfig = reviewer.ok ? reviewer.selection?.config : undefined;
+  const approvalReviewerSource = reviewer.ok ? reviewer.source : null;
   const bot = options?.bot;
   const preset: Preset | undefined = bot
     ? { id: 'bot', name: 'bot', skillIds: bot.skillIds, mcpServerIds: bot.mcpServerIds }
@@ -977,7 +993,7 @@ export function spawnSession(
     ...(pluginHooks.length > 0 ? { pluginHooks } : {}),
     ...(request.approvalMode ? { approvalMode: request.approvalMode } : {}),
     ...(request.planMode !== undefined ? { planMode: request.planMode } : {}),
-    ...(approvalReviewerConfig ? { approvalReviewer: approvalReviewerConfig } : {}),
+    ...approvalReviewerSpawnFields(approvalReviewerSource),
     ...(agentTypes.length > 0 ? { agentTypes } : {}),
     ...(subagentModels.length > 0 ? { subagentModels } : {}),
     ...(disabledTools.length > 0 ? { disabledTools } : {}),
@@ -1286,28 +1302,38 @@ export function completeText(input: {
   reasoning?: ThinkingLevel | 'off';
   /** 连通性探测：模型已响应但正文为空（被预算截断 / 只输出思考）也算完成 */
   probe?: boolean;
+  signal?: AbortSignal;
 }): Promise<string> {
   if (!worker || !workerReady) return Promise.reject(new Error('Agent worker is not running.'));
+  if (input.signal?.aborted) return Promise.reject(new Error('aborted'));
   const requestId = input.requestId?.trim() || randomUUID();
-  const { requestId: _requestId, stream, reasoning, probe, ...rest } = input;
+  const { requestId: _requestId, stream, reasoning, probe, signal, ...rest } = input;
   return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
     // 每个候选各自 timeoutMs，整体再留一点余量做兑底
     const timer = setTimeout(
       () => {
         pendingCompletions.delete(requestId);
-        reject(new Error('completion timed out'));
+        finish(() => reject(new Error('completion timed out')));
       },
       rest.timeoutMs * rest.candidates.length + 5_000
     );
+    const onAbort = () => {
+      if (!pendingCompletions.delete(requestId)) return;
+      finish(() => reject(new Error('aborted')));
+      sendAgentCommand({ type: 'abort-complete-text', requestId });
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     pendingCompletions.set(requestId, {
-      resolve: (text) => {
-        clearTimeout(timer);
-        resolve(text);
-      },
-      reject: (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
+      resolve: (text) => finish(() => resolve(text)),
+      reject: (error) => finish(() => reject(error)),
     });
     const posted = sendAgentCommand({
       type: 'complete-text',
@@ -1579,7 +1605,7 @@ export function setSessionApprovalMode(
   if (mode === 'assistant') {
     const reviewer = resolveApprovalReviewer(authenticatedAccountKeys);
     if (!reviewer.ok) return reviewer;
-    if (!reviewer.selection) {
+    if (!reviewer.source) {
       return { ok: false, error: 'Select an assistant approval model in Settings first.' };
     }
     pushApprovalReviewer(authenticatedAccountKeys);
@@ -1862,22 +1888,74 @@ function asModelRef(value: unknown): DefaultModelRef | null {
     : null;
 }
 
+export type ApprovalReviewerSource =
+  | { model: SpawnModelConfig }
+  | {
+      classifier: VirtualClassifierCredentials;
+      managed?: true;
+      allowThreshold?: ApprovalAllowThreshold;
+    };
+
+/** 代审来源：分类器专用供应商（如 Jev）走分类器，其余按聊天模型解析 */
 export function resolveApprovalReviewer(
   authenticatedAccountKeys: ReadonlySet<string>
-): ModelSelectionResult | { ok: true; selection: null } {
+): { ok: false; error: string } | { ok: true; source: ApprovalReviewerSource | null } {
   const ref = asModelRef(readSettingsState()?.approvalReviewer);
-  if (!ref) return { ok: true, selection: null };
-  return resolveModelSelection(ref.providerId, ref.modelId, authenticatedAccountKeys);
+  if (!ref) return { ok: true, source: null };
+  const provider = providersFromSettings().find((item) => item.id === ref.providerId);
+  if (provider && isClassifierOnlyProvider(provider)) {
+    const classifier = classifierCredentialsFor(provider, ref.modelId, authenticatedAccountKeys);
+    const state = readSettingsState();
+    const managed = state?.approvalAutoManage === true;
+    const allowThreshold = parseApprovalAllowThreshold(state?.approvalAllowThreshold);
+    return classifier
+      ? {
+          ok: true,
+          source: {
+            classifier,
+            ...(managed ? { managed: true as const } : {}),
+            ...(allowThreshold === DEFAULT_APPROVAL_ALLOW_THRESHOLD ? {} : { allowThreshold }),
+          },
+        }
+      : { ok: false, error: 'The assistant approval classifier is unavailable.' };
+  }
+  const resolved = resolveModelSelection(ref.providerId, ref.modelId, authenticatedAccountKeys);
+  return resolved.ok
+    ? { ok: true, source: { model: resolved.selection.config } }
+    : { ok: false, error: resolved.error };
+}
+
+function approvalReviewerSpawnFields(source: ApprovalReviewerSource | null | undefined) {
+  if (!source) return {};
+  return 'model' in source
+    ? { approvalReviewer: source.model }
+    : {
+        approvalReviewerClassifier: source.classifier,
+        ...(source.managed ? { approvalReviewerManaged: true as const } : {}),
+        ...(source.allowThreshold === undefined
+          ? {}
+          : { approvalReviewerAllowThreshold: source.allowThreshold }),
+      };
 }
 
 export function pushApprovalReviewer(authenticatedAccountKeys?: ReadonlySet<string>): void {
   if (!worker || !workerReady) return;
   const keys = authenticatedAccountKeys ?? new Set<string>();
   const resolved = resolveApprovalReviewer(keys);
-  const model = resolved.ok ? resolved.selection?.config : undefined;
+  const source = resolved.ok ? resolved.source : null;
   worker.postMessage({
     type: 'set-approval-reviewer',
-    ...(model ? { model } : {}),
+    ...(source
+      ? 'model' in source
+        ? { model: source.model }
+        : {
+            classifier: source.classifier,
+            ...(source.managed ? { managed: true as const } : {}),
+            ...(source.allowThreshold === undefined
+              ? {}
+              : { allowThreshold: source.allowThreshold }),
+          }
+      : {}),
   } satisfies AgentCommand);
 }
 

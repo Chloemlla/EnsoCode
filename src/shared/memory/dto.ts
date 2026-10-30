@@ -1,4 +1,5 @@
 import { isUnitType, type UnitType } from './constants';
+import type { SearchAssistReason, SearchAssistState } from './searchAssist';
 import type { TemporalPrecision } from './temporal';
 
 export type MemoryLifecycleState = 'active' | 'archived' | 'deleted';
@@ -19,7 +20,8 @@ export interface MemoryListItem {
   lifecycleState: MemoryLifecycleState;
   createdAt: string;
   updatedAt: string;
-  accessCount: number;
+  /** 被检索返回的次数；不代表被真正用上 */
+  appearances: number;
 }
 
 export interface EvolvesEdgeDto {
@@ -76,6 +78,9 @@ export interface MemoryListResult {
   approximate?: boolean;
   /** fast/deep 模式实际是否用上了向量（模型未就绪时自动降级为 FTS + 实体） */
   vectorsUsed?: boolean;
+  /** off=fast 或无模型；llm=deep 至少一步成功；fallback=超时、报错、不可解析或退避 */
+  assist?: SearchAssistState;
+  assistReason?: SearchAssistReason;
 }
 
 export interface DistillJobDto {
@@ -109,6 +114,8 @@ export interface KgJobDto {
   attempts: number;
   total: number;
   done: number;
+  /** 1 = 抽取失败终态；成功为 0 */
+  failed: number;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -131,6 +138,8 @@ export interface MemoryJobsSnapshot {
   distill: DistillJobDto[];
   kg: KgJobDto[];
   reembed: ReembedJobDto | null;
+  /** kind=kg 的失败终态条数，不受任务列表 limit 截断 */
+  kgFailed: number;
 }
 
 export interface MemoryStats {

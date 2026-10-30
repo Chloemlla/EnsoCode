@@ -121,6 +121,8 @@ export const SETTINGS_DATA_COVERAGE = {
   memoryLanguage: excluded('Memory output language preference; not an Enso capability.'),
   memoryChatModel: excluded('Memory local/remote chat model preference; not an Enso capability.'),
   approvalReviewer: excluded('Assistant approval reviewer model; desktop settings only.'),
+  approvalAutoManage: excluded('Assistant approval auto-manage opt-in; desktop settings only.'),
+  approvalAllowThreshold: excluded('Assistant approval allow threshold; desktop settings only.'),
   lastApprovalMode: excluded('Last used approval mode is a desktop session preference.'),
   skills: surfaces('skills.list'),
   plugins: excluded('Desktop-only Claude Code plugin import; plugin code runs on this device.'),
@@ -284,6 +286,8 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Memory local/remote chat model preference; not an Enso capability.'
   ),
   setApprovalReviewer: excluded('Assistant approval reviewer model; desktop settings only.'),
+  setApprovalAutoManage: excluded('Assistant approval auto-manage opt-in; desktop settings only.'),
+  setApprovalAllowThreshold: excluded('Assistant approval allow threshold; desktop settings only.'),
   setLastApprovalMode: excluded('Last used approval mode is a desktop session preference.'),
   revalidateDefaultModel: surfaces('providers.default-model'),
   addProviders: surfaces('providers.add', 'providers.import-local'),
@@ -655,6 +659,9 @@ export const IPC_PRODUCT_COVERAGE = {
   FILES_COPY_PATH: excluded('Side panel Files copy path text to clipboard.'),
   FILES_COPY_FILE: excluded('Side panel Files copy local file to OS clipboard.'),
   FILES_REVEAL: excluded('Side panel Files reveal in system file manager.'),
+  FILES_REVEAL_EXTERNAL: excluded(
+    'Chat link reveal of out-of-workspace files in the local file manager.'
+  ),
   FILES_OPEN: excluded('User-clicked workspace file opening; not an autonomous model capability.'),
   FILES_OPEN_CONTEXT: excluded('User right-clicks a chat file link; not a model capability.'),
   FILES_SEARCH_WORKSPACE: excluded(
@@ -761,6 +768,7 @@ export const IPC_PRODUCT_COVERAGE = {
   MEMORY_STATS: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_JOBS: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_JOBS_CLEAR: excluded('Memory desktop UI; not an Enso capability.'),
+  MEMORY_KG_RETRY_FAILED: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_EVOLVES_PENDING: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_EVOLVES_REVIEW: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_PENDING_WRITES: excluded('Memory desktop UI; not an Enso capability.'),

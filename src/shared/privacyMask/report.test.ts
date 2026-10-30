@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type MaskHit, mergeMaskReports, parseMaskReport, strongestAction } from './report';
+import {
+  groupMaskHits,
+  type MaskHit,
+  mergeMaskReports,
+  parseMaskReport,
+  strongestAction,
+} from './report';
 
 const hit: MaskHit = {
   kind: 'API_KEY',
@@ -49,5 +55,27 @@ describe('mask report', () => {
       ['warn', 1],
     ]);
     expect(strongestAction(merged)).toBe('warn');
+  });
+
+  it('groups hits by action, kind and where, counting distinct values', () => {
+    const groups = groupMaskHits([
+      { ...hit, where: 'tool_result', kind: 'IP', token: 'aaaa', preview: '…(13)', count: 30 },
+      { ...hit, where: 'tool_result', kind: 'IP', token: 'bbbb', preview: '…(14)', count: 60 },
+      { ...hit, where: 'tool_result', kind: 'IP', token: 'aaaa', rule: 'ipv4b', count: 5 },
+      { ...hit, where: 'tool_args', kind: 'IP', token: 'aaaa', count: 1 },
+      { ...hit, action: 'warn', where: 'tool_result', kind: 'IP', token: 'cccc', count: 1 },
+    ]);
+    expect(groups).toEqual([
+      { action: 'mask', kind: 'IP', where: 'tool_result', values: 2, count: 95, preview: '…(13)' },
+      { action: 'mask', kind: 'IP', where: 'tool_args', values: 1, count: 1, preview: 'sk-…(51)' },
+      {
+        action: 'warn',
+        kind: 'IP',
+        where: 'tool_result',
+        values: 1,
+        count: 1,
+        preview: 'sk-…(51)',
+      },
+    ]);
   });
 });

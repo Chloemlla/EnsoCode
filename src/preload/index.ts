@@ -394,6 +394,8 @@ const electronAPI = {
     stats: (): Promise<MemoryStats> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_STATS),
     jobs: (): Promise<MemoryJobsSnapshot> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_JOBS),
     clearJobs: (): Promise<number> => ipcRenderer.invoke(IPC_CHANNELS.MEMORY_JOBS_CLEAR),
+    retryFailedKgJobs: (): Promise<number> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MEMORY_KG_RETRY_FAILED),
     evolvesPending: (): Promise<EvolvesEdgeDto[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.MEMORY_EVOLVES_PENDING),
     evolvesReview: (id: string, state: 'accepted' | 'rejected'): Promise<MemoryMutationResult> =>
@@ -763,6 +765,13 @@ const electronAPI = {
       projectId: string;
       rel?: string;
     }): Promise<FilesMutateResult> => ipcRenderer.invoke(IPC_CHANNELS.FILES_REVEAL, request),
+    /** 工作区外文件只定位：Main 按真实路径与本会话写入记录校验，未写过的先弹确认 */
+    revealExternal: (request: {
+      conversationId: string;
+      projectId: string;
+      path: string;
+    }): Promise<FilesMutateResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.FILES_REVEAL_EXTERNAL, request),
     search: (request: FilesSearchRequest): Promise<FilesSearchResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.FILES_SEARCH_WORKSPACE, request),
   },

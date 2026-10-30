@@ -1,6 +1,6 @@
 import type { UnitTypeSource } from '@shared/memory/classify';
 import type { EvolvesRelation, UnitType } from '@shared/memory/constants';
-import type { SearchAnalysis } from '@shared/memory/searchAssist';
+import type { SearchAnalysis, SearchAssistReport } from '@shared/memory/searchAssist';
 import type { TemporalPrecision } from '@shared/memory/temporal';
 import { isBotChatId, isBotId } from '@shared/types/bot';
 
@@ -159,7 +159,10 @@ export interface Embedder {
 
 export interface MemorySearchHit {
   memory: Memory;
+  /** 候选池内归一化后的混分，只用于排序，不是相关度，不要展示 */
   score: number;
+  /** 原始相关度：查询与记忆向量的余弦；未经向量通道命中时为 null */
+  relevance: number | null;
   rrf: number;
   decay: number;
 }
@@ -167,6 +170,7 @@ export interface MemorySearchHit {
 export interface SearchAssist {
   analyze(query: string): Promise<SearchAnalysis | null>;
   rerank(query: string, items: { title: string; content: string }[]): Promise<number[] | null>;
+  outcome?: () => SearchAssistReport;
 }
 
 export interface SearchOptions {

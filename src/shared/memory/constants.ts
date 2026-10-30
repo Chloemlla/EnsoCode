@@ -48,6 +48,8 @@ export const FREQUENCY_MAX_COUNT = 100;
 export const MIN_FLOOR = 0.3;
 export const IMP_MULT = 0.2;
 export const DECAY_WEIGHT = 0.15;
+/** 查询年份与记忆 event_start 年份一致时的加分上限；只作同分附近的次要依据，不能压过语义 */
+export const TEMPORAL_YEAR_BOOST = 0.1;
 
 export const RRF_K = 60;
 // MMR = λ·relevance − (1−λ)·max(sim to selected)
@@ -88,7 +90,7 @@ export const KG_MAX_DESCRIPTION_CHARS = 300;
 export const KG_MAX_LABEL_CHARS = 40;
 // 与 DISTILL_MAX_ATTEMPTS 同理：暂时性失败重试上限
 export const KG_MAX_ATTEMPTS = 3;
-export const KG_EXTRACT_MAX_TOKENS = 1536;
+export const KG_EXTRACT_MAX_TOKENS = 4096;
 // Level 2：分析最多 15 个实体，保留 confidence≥0.7，最多 10 个名字；上下文 >2000 字取头 1000 + 尾 800
 export const KG_L2_MAX_ANALYZE = 15;
 export const KG_L2_MIN_CONFIDENCE = 0.7;

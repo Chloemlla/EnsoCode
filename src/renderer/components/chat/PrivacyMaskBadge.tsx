@@ -1,4 +1,4 @@
-import { type MaskReport, strongestAction } from '@shared/privacyMask/report';
+import { groupMaskHits, type MaskReport, strongestAction } from '@shared/privacyMask/report';
 import type { MaskAction } from '@shared/privacyMask/settings';
 import { Shield, ShieldAlert, ShieldX } from 'lucide-react';
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from '@/components/ui/preview-card';
@@ -46,16 +46,18 @@ export function PrivacyMaskBadge({ report }: { report: MaskReport }) {
         <Icon className="size-3.5" />
         <span className="tabular-nums">{total}</span>
       </PreviewCardTrigger>
-      <PreviewCardPopup className="w-72 text-xs">
+      <PreviewCardPopup className="max-h-(--available-height) w-72 flex-col overflow-y-auto overscroll-contain text-xs">
         <p className="mb-1.5 font-medium">{t('Privacy masking')}</p>
         <ul className="space-y-1">
-          {report.hits.map((h) => (
-            <li key={`${h.token}-${h.action}-${h.where}`} className="flex flex-wrap gap-x-2">
-              <span className={TONE[h.action]}>{t(ACTION_LABEL[h.action])}</span>
-              <span>{h.kind}</span>
-              <span className="text-muted-foreground">{t(WHERE_LABEL[h.where] ?? h.where)}</span>
-              <span className="text-muted-foreground">{h.preview}</span>
-              {h.count > 1 && <span className="text-muted-foreground">×{h.count}</span>}
+          {groupMaskHits(report.hits).map((g) => (
+            <li key={`${g.action}-${g.kind}-${g.where}`} className="flex flex-wrap gap-x-2">
+              <span className={TONE[g.action]}>{t(ACTION_LABEL[g.action])}</span>
+              <span>{g.kind}</span>
+              <span className="text-muted-foreground">{t(WHERE_LABEL[g.where] ?? g.where)}</span>
+              <span className="text-muted-foreground">
+                {g.values > 1 ? t('{{count}} values', { count: g.values }) : g.preview}
+              </span>
+              {g.count > 1 && <span className="text-muted-foreground">×{g.count}</span>}
             </li>
           ))}
         </ul>

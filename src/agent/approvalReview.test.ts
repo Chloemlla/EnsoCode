@@ -1,6 +1,11 @@
+import { APPROVAL_REVIEW_REASONS } from '@shared/approvalReviewRecord';
 import { describe, expect, it } from 'vitest';
 import {
+  APPROVAL_CLASSIFIER_THRESHOLD,
+  buildApprovalClassifierRequest,
   computeApprovalActionHash,
+  decideFromApprovalClassifier,
+  decideManagedApproval,
   extractJsonObjectText,
   normalizeReviewDecision,
   recentReviewMessages,
@@ -186,5 +191,188 @@ describe('recentReviewMessages', () => {
     expect(recent.some((message) => message.role === 'system')).toBe(false);
     expect(recent[0]).toEqual({ role: 'assistant', content: 'm1' });
     expect(recent.at(-1)).toEqual({ role: 'assistant', content: 'a\n\nb' });
+  });
+});
+
+describe('decideFromApprovalClassifier', () => {
+  const choice = (probabilities: Record<string, unknown>) => ({
+    type: 'choice',
+    choice: 'allow',
+    probabilities,
+    confidence: 1,
+  });
+
+  it('allow / block 概率达到阈值才放行或拦截', () => {
+    expect(
+      decideFromApprovalClassifier(choice({ allow: 0.95, ask: 0.04, block: 0.01 }))
+    ).toMatchObject({ decision: 'auto_allow' });
+    expect(
+      decideFromApprovalClassifier(choice({ allow: APPROVAL_CLASSIFIER_THRESHOLD, block: 0 }))
+    ).toMatchObject({ decision: 'auto_allow' });
+    expect(
+      decideFromApprovalClassifier(choice({ allow: 0.01, ask: 0.02, block: 0.97 }))
+    ).toMatchObject({ decision: 'block' });
+  });
+
+  it('未达阈值、ask 占优一律交人工', () => {
+    for (const probabilities of [
+      { allow: 0.89, ask: 0.1, block: 0.01 },
+      { allow: 0.05, ask: 0.9, block: 0.05 },
+      { allow: 0.5, ask: 0, block: 0.5 },
+    ]) {
+      expect(decideFromApprovalClassifier(choice(probabilities))).toMatchObject({
+        decision: 'ask_user',
+      });
+    }
+  });
+
+  it('缺概率、非数值、非 choice 答案交人工', () => {
+    for (const answer of [
+      undefined,
+      null,
+      { type: 'boolean', value: true },
+      { type: 'choice', choice: 'allow' },
+      choice({ allow: '0.99' }),
+      choice({ allow: Number.NaN }),
+      choice({ allow: 1.5 }),
+      choice({ block: Number.POSITIVE_INFINITY }),
+    ]) {
+      expect(decideFromApprovalClassifier(answer)).toMatchObject({ decision: 'ask_user' });
+    }
+  });
+
+  it('理由带上三档概率，便于排查', () => {
+    expect(
+      decideFromApprovalClassifier(choice({ allow: 0.95, ask: 0.04, block: 0.01 })).rationale
+    ).toContain('allow 0.95');
+  });
+});
+
+describe('buildApprovalClassifierRequest', () => {
+  it('只问三选一，截断过长的摘要与上下文', () => {
+    const request = buildApprovalClassifierRequest({
+      tool: 'bash',
+      kind: 'command',
+      summary: 'x'.repeat(5000),
+      recentMessages: [{ role: 'user', content: 'y'.repeat(5000) }],
+    });
+    const question = request.questions.decision;
+    expect(question.type).toBe('choice');
+    expect(Object.keys(question.criteria).sort()).toEqual(['allow', 'ask', 'block']);
+    expect(request.state.tool).toBe('bash');
+    expect(String(request.state.action).length).toBeLessThan(2100);
+    expect(JSON.stringify(request.state.recentMessages).length).toBeLessThan(2200);
+  });
+});
+
+describe('放行阈值可选档位', () => {
+  const choice = (allow: number) => ({
+    type: 'choice',
+    choice: 'allow',
+    probabilities: { allow, ask: 1 - allow, block: 0 },
+    confidence: 1,
+  });
+  const managed = (allow: number) => ({ decision: choice(allow) });
+
+  it('0.85 档：0.86 放行，0.84 非托管问人、托管拒绝', () => {
+    expect(decideFromApprovalClassifier(choice(0.86), 0.85).decision).toBe('auto_allow');
+    expect(decideFromApprovalClassifier(choice(0.84), 0.85).decision).toBe('ask_user');
+    expect(decideManagedApproval(managed(0.86), 'jev', 0.85).decision).toBe('auto_allow');
+    const denied = decideManagedApproval(managed(0.84), 'jev', 0.85);
+    expect(denied.decision).toBe('deny');
+    expect(denied.decision === 'deny' && denied.message).toContain('allow >= 0.85');
+  });
+
+  it('非法阈值按 0.9；拦截阈值固定 0.9 不随放行档位变化', () => {
+    expect(decideFromApprovalClassifier(choice(0.86), 0.5).decision).toBe('ask_user');
+    expect(decideManagedApproval(managed(0.86), 'jev', 0.5).decision).toBe('deny');
+    expect(decideFromApprovalClassifier(choice(0.92), 0.95).decision).toBe('ask_user');
+    const block = { ...choice(0), probabilities: { allow: 0.05, ask: 0.07, block: 0.88 } };
+    expect(decideFromApprovalClassifier(block, 0.85).decision).toBe('ask_user');
+  });
+});
+
+describe('decideManagedApproval（托管）', () => {
+  const answers = (probabilities: Record<string, unknown>, reason?: string) => ({
+    decision: { type: 'choice', choice: 'allow', probabilities, confidence: 1 },
+    ...(reason
+      ? { reason: { type: 'choice', choice: reason, probabilities: {}, confidence: 1 } }
+      : {}),
+  });
+
+  it('allow ≥ 0.9 才放行，并带判定记录', () => {
+    expect(
+      decideManagedApproval(answers({ allow: 0.95, ask: 0.04, block: 0.01 }, 'read_only'), 'jev')
+    ).toEqual({
+      decision: 'auto_allow',
+      record: {
+        verdict: 'allow',
+        model: 'jev',
+        allow: 0.95,
+        ask: 0.04,
+        block: 0.01,
+        reason: 'read_only',
+      },
+    });
+  });
+
+  it('allow 低于阈值（即使 choice 是 allow）、ask 或 block 占优：拒绝并把英文理由交回模型', () => {
+    for (const probabilities of [
+      { allow: 0.67, ask: 0.1, block: 0.23 },
+      { allow: 0.89, ask: 0.11, block: 0 },
+      { allow: 0.05, ask: 0.9, block: 0.05 },
+      { allow: 0, ask: 0, block: 1 },
+    ]) {
+      const result = decideManagedApproval(answers(probabilities, 'unclear_target'), 'jev');
+      expect(result.decision).toBe('deny');
+      if (result.decision !== 'deny') continue;
+      expect(result.record).toMatchObject({
+        verdict: 'deny',
+        model: 'jev',
+        reason: 'unclear_target',
+      });
+      expect(result.message).toContain('was not run');
+      expect(result.message).toContain('jev');
+      expect(result.message).toMatch(/^[\x20-\x7E]+$/);
+    }
+  });
+
+  it('理由缺失或不在固定分类里时不影响判定，记录里不带 reason', () => {
+    const result = decideManagedApproval(
+      {
+        ...answers({ allow: 0.2, ask: 0.3, block: 0.5 }),
+        reason: { type: 'choice', choice: 'pwned' },
+      },
+      'jev'
+    );
+    expect(result.decision).toBe('deny');
+    if (result.decision === 'deny') expect(result.record).not.toHaveProperty('reason');
+  });
+
+  it('缺判定、缺概率或数值非法：判定无效，退回人工', () => {
+    for (const bad of [
+      undefined,
+      {},
+      { decision: { type: 'choice', choice: 'allow' } },
+      answers({ allow: '0.99' }),
+      answers({ allow: 1.5 }),
+    ]) {
+      expect(decideManagedApproval(bad, 'jev')).toMatchObject({
+        decision: 'ask_user',
+        fallback: 'invalid',
+      });
+    }
+  });
+});
+
+describe('buildApprovalClassifierRequest 托管模式', () => {
+  it('托管时多问一个固定分类的 reason，不托管时只问三选一', () => {
+    const params = { tool: 'bash', kind: 'command', summary: 'ls', recentMessages: [] };
+    expect(Object.keys(buildApprovalClassifierRequest(params).questions)).toEqual(['decision']);
+    const managed = buildApprovalClassifierRequest(params, { managed: true });
+    expect(Object.keys(managed.questions)).toEqual(['decision', 'reason']);
+    expect(Object.keys(managed.questions.reason?.criteria ?? {}).sort()).toEqual(
+      [...APPROVAL_REVIEW_REASONS].sort()
+    );
   });
 });

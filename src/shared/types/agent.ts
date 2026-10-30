@@ -1,3 +1,11 @@
+import {
+  APPROVAL_REVIEW_FALLBACKS,
+  type ApprovalAllowThreshold,
+  type ApprovalReviewFallback,
+  type ApprovalReviewRecord,
+  isApprovalAllowThreshold,
+  parseApprovalReviewRecord,
+} from '../approvalReviewRecord';
 import { parseAutoRetryLimit } from '../autoRetry';
 import {
   type AgentTypeKey,
@@ -249,6 +257,8 @@ export interface ApprovalRequestInfo {
   protected?: ProtectedActionCategory;
   /** 等人处理的截止时间（ms）；到期由 Main 按超时拒绝 */
   expiresAt?: number;
+  /** 托管判定无效（超时 / 出错 / 缺字段）退回人工的原因 */
+  reviewFallback?: ApprovalReviewFallback;
 }
 
 /** agent 向用户的提问（ask_user 工具,阻塞等答复） */
@@ -1136,6 +1146,12 @@ export type AgentCommand =
       approvalMode?: ApprovalMode;
       /** 助手代审模型；仅 approvalMode=assistant 时有意义 */
       approvalReviewer?: SpawnModelConfig;
+      /** 代审改用分类器（System One）；与 approvalReviewer 互斥 */
+      approvalReviewerClassifier?: VirtualClassifierCredentials;
+      /** 分类器代审托管；只随 approvalReviewerClassifier 下发 */
+      approvalReviewerManaged?: true;
+      /** 分类器代审放行阈值（0.85 / 0.95）；缺省 0.9，只随 approvalReviewerClassifier 下发 */
+      approvalReviewerAllowThreshold?: ApprovalAllowThreshold;
       agentTypes?: AgentTypeSpawnConfig[];
       subagentModels?: SubagentModelOption[];
       disabledTools?: string[];
@@ -1255,7 +1271,16 @@ export type AgentCommand =
       action: PlanRespondAction;
       feedback?: string;
     }
-  | { type: 'set-approval-reviewer'; model?: SpawnModelConfig }
+  | {
+      type: 'set-approval-reviewer';
+      model?: SpawnModelConfig;
+      /** 与 model 互斥 */
+      classifier?: VirtualClassifierCredentials;
+      /** 托管：只随 classifier 下发 */
+      managed?: true;
+      /** 放行阈值；缺省 0.9，只随 classifier 下发 */
+      allowThreshold?: ApprovalAllowThreshold;
+    }
   /** 已打开会话的压缩摘要模型。缺省 model 表示改跟会话模型 */
   | { type: 'set-compact-route'; model?: SpawnModelConfig; mode?: SmartCompactMode }
   | { type: 'set-max-active-coworkers'; limit: number }
@@ -1478,6 +1503,8 @@ export interface ProjectedMessage {
   editDiff?: { oldText: string; newText: string };
   /** apply_patch toolResult 中已确实落盘的物理文件操作 */
   fileChanges?: ProjectedFileChange[];
+  /** 托管代审判定记录（放行或拒绝） */
+  approvalReview?: ApprovalReviewRecord;
   /** apply_patch 完整终态清单，不依赖普通 content 截断预算 */
   applyPatchOutcome?: ProjectedApplyPatchOutcome;
   /** codemode toolResult 的嵌套调用摘要（details.calls） */
@@ -2088,6 +2115,8 @@ function isProjectedCodemodeCalls(value: unknown): value is ProjectedCodemodeCal
 
 function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
   if (value.rtk !== undefined && !parseRtkToolStats(value.rtk)) return false;
+  if (value.approvalReview !== undefined && !parseApprovalReviewRecord(value.approvalReview))
+    return false;
   if (value.privacyMask !== undefined && !parseMaskReport(value.privacyMask)) return false;
   if (value.codemodeCalls !== undefined && !isProjectedCodemodeCalls(value.codemodeCalls)) {
     return false;
@@ -3034,6 +3063,9 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'instruction',
           'approvalMode',
           'approvalReviewer',
+          'approvalReviewerClassifier',
+          'approvalReviewerManaged',
+          'approvalReviewerAllowThreshold',
           'agentTypes',
           'subagentModels',
           'disabledTools',
@@ -3094,6 +3126,15 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
             value.subagentModels.some((entry) => parseSubagentModelOption(entry) === null))) ||
         (value.approvalReviewer !== undefined &&
           parseSpawnModelConfig(value.approvalReviewer) === null) ||
+        (value.approvalReviewerAllowThreshold !== undefined &&
+          (!isApprovalAllowThreshold(value.approvalReviewerAllowThreshold) ||
+            value.approvalReviewerClassifier === undefined)) ||
+        (value.approvalReviewerManaged !== undefined &&
+          (value.approvalReviewerManaged !== true ||
+            value.approvalReviewerClassifier === undefined)) ||
+        (value.approvalReviewerClassifier !== undefined &&
+          (value.approvalReviewer !== undefined ||
+            !parseClassifierCredentials(value.approvalReviewerClassifier))) ||
         (value.rolePrompt !== undefined && !isNonEmptyString(value.rolePrompt)) ||
         (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt)) ||
         (value.systemPromptAppend !== undefined && !isNonEmptyString(value.systemPromptAppend)) ||
@@ -3340,8 +3381,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-approval-reviewer':
-      return hasOnlyKeys(value, ['type', 'model']) &&
-        (value.model === undefined || parseSpawnModelConfig(value.model))
+      return hasOnlyKeys(value, ['type', 'model', 'classifier', 'managed', 'allowThreshold']) &&
+        (value.allowThreshold === undefined ||
+          (isApprovalAllowThreshold(value.allowThreshold) && value.classifier !== undefined)) &&
+        (value.model === undefined || parseSpawnModelConfig(value.model)) &&
+        (value.classifier === undefined ||
+          (value.model === undefined && parseClassifierCredentials(value.classifier))) &&
+        (value.managed === undefined || (value.managed === true && value.classifier !== undefined))
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-compact-route':
@@ -3894,7 +3940,9 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
             value.request.filePaths.every(isNonEmptyString))) &&
         (value.request.protected === undefined ||
           (PROTECTED_ACTION_CATEGORIES as readonly unknown[]).includes(value.request.protected)) &&
-        isOptionalTimestamp(value.request.expiresAt)
+        isOptionalTimestamp(value.request.expiresAt) &&
+        (value.request.reviewFallback === undefined ||
+          APPROVAL_REVIEW_FALLBACKS.includes(value.request.reviewFallback as never))
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'approval-resolved':

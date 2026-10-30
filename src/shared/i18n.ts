@@ -59,6 +59,7 @@ export const zhTranslations: Record<string, string> = {
   'Earlier replies': '之前的回复',
   'Tool descriptions': '工具说明',
   'Restored {{count}} in the reply': '回复中已还原 {{count}} 处',
+  '{{count}} values': '{{count}} 个值',
   'Privacy masking blocks {{kinds}}. Remove it, or change the action or allow list in Settings → Privacy.':
     '隐私脱敏拦截了 {{kinds}}。请删掉它，或到「设置 → 隐私」调整动作或允许名单。',
   'Will be blocked: {{kinds}}': '将被拦截：{{kinds}}',
@@ -423,6 +424,31 @@ export const zhTranslations: Record<string, string> = {
   Never: '永不',
   '{{count}} min': '{{count}} 分钟',
   'Compaction reserve tokens': '压缩预留 token',
+  'Decision models only allow or block when highly confident. Everything else asks you.':
+    '决策模型只在把握很高时才自动放行或拦截，其余都交给你审批。',
+  'The assistant approval classifier is unavailable.': '助手代审的决策模型不可用。',
+  'Auto-manage approvals': '全自动托管',
+  'Auto-allow threshold': '自动放行阈值',
+  '0.85 (looser)': '0.85（偏松）',
+  '0.9 (default)': '0.9（默认）',
+  '0.95 (stricter)': '0.95（偏严）',
+  'Only runs automatically when the allow probability reaches this value. Operations near the threshold may be allowed one time and not the next.':
+    '放行概率达到该值才自动执行。概率在阈值附近的操作，可能这次放行、下次不放行。',
+  'Auto-managed: runs only when the decision model is highly confident it is safe. Everything else is denied and the agent tries another way. Protected actions still ask you.':
+    '托管中：只有决策模型高度确信安全的操作才会执行，其余直接拒绝，由 AI 换一种做法继续。受保护操作仍会问你。',
+  'Auto-managed · allowed': '托管 · 已放行',
+  'Auto-managed · denied': '托管 · 已拒绝',
+  'Read-only': '只读',
+  'Regenerable output': '可再生成',
+  'Reversible workspace change': '工作区内可回退的改动',
+  'Possible data loss': '可能丢失数据',
+  'Changes system state': '改动系统状态',
+  'Sends data externally': '向外发送数据',
+  'Unclear target or intent': '目标或意图不明',
+  'Auto-managed review timed out. Please decide.': '托管判定超时，请你来决定。',
+  'Auto-managed review failed. Please decide.': '托管判定出错，请你来决定。',
+  'Auto-managed review returned no valid decision. Please decide.':
+    '托管判定结果无效，请你来决定。',
   'Compaction runs when context exceeds the model window minus this value. Larger values compact earlier. Do not set it close to the window of small-context models, or every request compacts first. Leave empty for the default.':
     '上下文超过「模型窗口 − 此值」时触发压缩，值越大压缩越早。小窗口模型请勿设得过大，接近窗口会导致每次请求前都先压缩。留空使用默认值。',
   'Enter a whole number between {{min}} and {{max}}, or leave it empty.':
@@ -488,6 +514,7 @@ export const zhTranslations: Record<string, string> = {
   // Model providers
   Search: '搜索',
   'No results': '无匹配结果',
+  'Semantic similarity': '语义相似度',
   'Preset is locked after the conversation starts': '对话开始后预设已锁定，不能中途替换',
   Path: '路径',
   // Onboarding
@@ -714,6 +741,8 @@ export const zhTranslations: Record<string, string> = {
   Terminals: '终端',
   'Open Containing Folder': '打开所在文件夹',
   'Reveal in File Explorer': '在资源管理器中显示',
+  'This file is outside the workspace and was not written by this conversation. Show it anyway?':
+    '该文件在工作区外，且不是本会话写入的。仍要在文件管理器中显示吗？',
   'A file or folder with that name already exists.': '已存在同名文件或文件夹。',
   'Invalid name.': '名称无效。',
   'Could not complete the file action.': '无法完成该文件操作。',
@@ -1426,6 +1455,7 @@ export const zhTranslations: Record<string, string> = {
   'Distilling…': '提炼中…',
   'Background tasks': '后台任务',
   'Clear finished tasks': '清空历史任务',
+  'Retry failed extractions ({{count}})': '重试失败项（{{count}}）',
   'Removes completed and cancelled jobs. Running tasks are kept. Sessions will show as not distilled again, since that flag is derived from job history — re-distilling is deduplicated, so it will not create duplicate memories.':
     '清除已完成和已作废的任务，进行中的保留。清除后会话会重新显示为「未提炼」——该标记是由任务历史推导的；重新提炼有去重，不会产生重复记忆。',
   'Removes completed and cancelled jobs. Running tasks are kept.':
@@ -1502,7 +1532,7 @@ export const zhTranslations: Record<string, string> = {
   'No memories match these filters.': '没有符合当前筛选条件的记忆。',
   'Type a query to search by meaning.': '输入关键词后按语义检索。',
   Crystal: '结晶',
-  '{{count}} hits': '命中 {{count}} 次',
+  'Retrieved {{count}} times': '被检索 {{count}} 次',
   Previous: '上一页',
   'Needs review': '待审阅',
   'Reviewing only records your judgement. Nothing is deleted and no memory is superseded.':
@@ -1729,7 +1759,6 @@ export const zhTranslations: Record<string, string> = {
   'Built-in': '内置',
   'Follows the conversation model, full toolset': '跟随会话模型,全部工具',
   'Follows the conversation model': '跟随会话模型',
-  'Read-only': '只读',
   'Overrides built-in': '覆盖内置',
   'Edit agent type': '编辑类型',
   'Name (slug)': '名称(slug)',

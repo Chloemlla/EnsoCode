@@ -196,32 +196,49 @@ describe('searchMemories — 双时间检索', () => {
     ).rejects.toMatchObject({ code: 'date_range' });
   });
 
-  it('时间意图（正则门）：年份匹配的记忆获得 temporal boost，进入 finalScore 第三参', async () => {
-    const hit = await add('postgres decision made', 'global', undefined, { eventStart: '2020' });
-    const other = await add('postgres decision revisited', 'global', undefined, {
-      eventStart: '2023',
-    });
-    const plain = await add('postgres decision undated');
-    const hits = await searchMemories(db, {
-      q: 'postgres decision 2020',
+  it('查询带年份：相关记忆不被年份对得上的无关记忆压下去（#166）', async () => {
+    const answer = await add('Cloudflare MCP direct http config');
+    const dated = { eventStart: '2026-10-29' };
+    const others = [
+      await add('relay migrated config', 'global', undefined, dated),
+      await add('browser path config', 'global', undefined, dated),
+      await add('cleanup scan config', 'global', undefined, dated),
+    ];
+    const withYear = await searchMemories(db, {
+      q: '2026 Cloudflare MCP config',
       spaceIds: ['global'],
       now: NOW,
     });
-    expect(hits).toHaveLength(3);
-    expect(hits[0].memory.id).toBe(hit.id);
-    expect(hits[0].score).toBeGreaterThan(1);
-    // 无 event_start 的记忆 boost=0，走无意图公式，不可能超过 1
-    expect(hits.find((h) => h.memory.id === plain.id)!.score).toBeLessThanOrEqual(1);
-    expect(hits.find((h) => h.memory.id === other.id)!.score).toBeLessThan(hits[0].score);
-    // 单结果 semantic=1：年份匹配的精确公式 0.7 + decay*0.15 + (recency*0.3 + 0.8*conf*0.7)
-    const [only] = await searchMemories(db, { q: 'made 2020', spaceIds: ['global'], now: NOW });
-    expect(only.memory.id).toBe(hit.id);
-    const days = (NOW.getTime() - Date.parse('2020-01-01T00:00:00Z')) / 86_400_000;
-    const boost = (1 / (1 + days / 365)) * 0.3 + 0.8 * 1 * 0.7;
-    expect(only.score).toBeCloseTo(0.7 + 0.15 * only.decay + boost, 9);
-    // 没有时间意图时不加 boost
-    const [plainHit] = await searchMemories(db, { q: 'made', spaceIds: ['global'], now: NOW });
-    expect(plainHit.score).toBeCloseTo(0.85 + 0.15 * plainHit.decay, 9);
+    const withoutYear = await searchMemories(db, {
+      q: 'Cloudflare MCP config',
+      spaceIds: ['global'],
+      now: NOW,
+    });
+    expect(withYear[0].memory.id).toBe(answer.id);
+    expect(withoutYear[0].memory.id).toBe(answer.id);
+    for (const hit of withYear) expect(hit.score).toBeLessThanOrEqual(1.1);
+    // 年份一致的同分记忆只多出年份加分
+    const year = withYear.find((h) => h.memory.id === others[0].id)!;
+    const plain = withoutYear.find((h) => h.memory.id === others[0].id)!;
+    expect(year.score - plain.score).toBeLessThanOrEqual(0.1 + 1e-9);
+  });
+
+  it('相对时间词既不加分也不过滤（#166）', async () => {
+    await add('parameter sweep paired design', 'global', undefined, { eventStart: '2026-10-29' });
+    await add('parameter sweep notes');
+    const plain = await searchMemories(db, {
+      q: 'parameter sweep',
+      spaceIds: ['global'],
+      now: NOW,
+    });
+    const before = await searchMemories(db, {
+      q: '之前 parameter sweep',
+      spaceIds: ['global'],
+      now: NOW,
+    });
+    expect(before.map((h) => [h.memory.id, h.score])).toEqual(
+      plain.map((h) => [h.memory.id, h.score])
+    );
   });
 });
 
@@ -241,17 +258,42 @@ describe('searchMemories — hybrid', () => {
       ...emb,
       embed: async () => Float32Array.from([0, 1]),
     });
-    // 只有 FTS 能召回：正文含 cache，但向量与查询正交
-    const ftsOnly = await add('cache invalidation strategy', 'global', {
-      ...emb,
-      embed: async () => Float32Array.from([1, 0]),
-    });
+    // 只有 FTS 能召回：正文含 cache，没有向量（向量通道不再按余弦截断，正交向量也会进候选）
+    const ftsOnly = await add('cache invalidation strategy');
     // 两路都命中
     const both = await add('Redis cache eviction policy', 'global', emb);
     const hits = await searchMemories(db, { q: 'cache', spaceIds: ['global'], embedder: emb });
     expect(hits[0].memory.id).toBe(both.id);
     expect(ids(hits)).toEqual(expect.arrayContaining([vecOnly.id, ftsOnly.id]));
     expect(hits).toHaveLength(3);
+  });
+
+  it('原始相关度是向量余弦；只靠全文命中的留空；余弦为负的候选不再被丢弃（#168）', async () => {
+    const emb: Embedder = {
+      model: 'kw',
+      dim: 2,
+      embed: async (text, kind) => {
+        if (kind === 'query') return Float32Array.from([1, 0]);
+        if (text.includes('opposite')) return Float32Array.from([-1, 0]);
+        if (text.includes('diagonal')) return Float32Array.from([Math.SQRT1_2, Math.SQRT1_2]);
+        return Float32Array.from([1, 0]);
+      },
+    };
+    const aligned = await add('cache aligned', 'global', emb);
+    const diagonal = await add('cache diagonal', 'global', emb);
+    const opposite = await add('opposite note', 'global', emb);
+    const ftsOnly = await add('cache without vector');
+    const hits = await searchMemories(db, {
+      q: 'cache',
+      spaceIds: ['global'],
+      embedder: emb,
+      mmr: false,
+    });
+    const relevance = new Map(hits.map((h) => [h.memory.id, h.relevance]));
+    expect(relevance.get(aligned.id)).toBeCloseTo(1, 6);
+    expect(relevance.get(diagonal.id)).toBeCloseTo(Math.SQRT1_2, 6);
+    expect(relevance.get(opposite.id)).toBeCloseTo(-1, 6);
+    expect(relevance.get(ftsOnly.id)).toBeNull();
   });
 
   it('ignores vectors from a different embedding model', async () => {
@@ -400,7 +442,7 @@ describe('searchMemories — MMR 去冗余', () => {
     const r2 = await add('note redis cache replica', 'global', emb);
     const r3 = await add('note redis cluster cache', 'global', emb);
     const k = await add('note kafka broker topic', 'global', emb);
-    const filler = await add('note misc misc misc misc misc misc misc misc', 'global', emb);
+    const filler = await add('note misc misc misc misc misc misc misc misc');
     return { redis: [r1.id, r2.id, r3.id], kafka: k.id, filler: filler.id };
   }
 

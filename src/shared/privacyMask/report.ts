@@ -105,6 +105,41 @@ export function mergeMaskReports(a: MaskReport | undefined, b: MaskReport): Mask
   return builder.build();
 }
 
+export interface MaskHitGroup {
+  action: MaskAction;
+  kind: string;
+  where: MaskWhere;
+  /** 不同值的个数 */
+  values: number;
+  count: number;
+  /** 首个值的预览，仅 values 为 1 时有意义 */
+  preview: string;
+}
+
+/** 展示用：同动作 / 类型 / 位置合并为一行 */
+export function groupMaskHits(hits: MaskHit[]): MaskHitGroup[] {
+  const groups = new Map<string, MaskHitGroup & { tokens: Set<string> }>();
+  for (const h of hits) {
+    const key = `${h.action}\0${h.kind}\0${h.where}`;
+    const g = groups.get(key);
+    if (g) {
+      g.tokens.add(h.token);
+      g.count += h.count;
+    } else {
+      groups.set(key, {
+        action: h.action,
+        kind: h.kind,
+        where: h.where,
+        values: 0,
+        count: h.count,
+        preview: h.preview,
+        tokens: new Set([h.token]),
+      });
+    }
+  }
+  return [...groups.values()].map(({ tokens, ...g }) => ({ ...g, values: tokens.size }));
+}
+
 // warn 意味着原文已发出，比 mask 更需要注意
 const SEVERITY: Record<MaskAction, number> = { mask: 1, warn: 2, block: 3 };
 export function strongestAction(report: MaskReport): MaskAction | undefined {
