@@ -9,6 +9,7 @@ import {
   looksLikeShellCommand,
   nestedToolCallParent,
   renderMcpServersSection,
+  withCodemodeInputs,
   withCodemodeTimeout,
 } from './codemode';
 
@@ -82,6 +83,49 @@ describe('withCodemodeTimeout', () => {
   it('坏 options 原样返回，交给 pi 报错', () => {
     const bad = '// @options: {oops\nreturn 1;';
     expect(withCodemodeTimeout(bad)).toBe(bad);
+  });
+});
+
+describe('withCodemodeInputs', () => {
+  const evalInputs = (declaration: string) => new Function(`${declaration} return inputs;`)();
+
+  it('没有输入块时原样返回', () => {
+    expect(withCodemodeInputs('return 1;')).toEqual({ code: 'return 1;' });
+  });
+
+  it('heredoc 原文不转义地进 inputs，块行替换为空行以保持行号', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: 原文块里的模板字面量正是要验证的场景
+    const patch = "*** Begin Patch\nconst x = `${a}` + '\\n';\n*** End Patch";
+    const code = [
+      '// @options: {"timeout_ms": 1000}',
+      "// @input: patch <<'EOF'",
+      ...patch.split('\n'),
+      'EOF',
+      '// @input: note <<END',
+      'line "one"',
+      'END',
+      'return inputs.patch;',
+    ].join('\n');
+    const out = withCodemodeInputs(code);
+    if (!('code' in out)) throw new Error(out.error);
+    const lines = out.code.split('\n');
+    expect(lines).toHaveLength(code.split('\n').length);
+    expect(lines[0]).toBe('// @options: {"timeout_ms": 1000}');
+    expect(lines.at(-1)).toBe('return inputs.patch;');
+    expect(lines[1].startsWith('const inputs = Object.freeze(')).toBe(true);
+    expect(evalInputs(lines[1])).toEqual({ patch, note: 'line "one"' });
+  });
+
+  it('未闭合、重名或非法名字返回错误', () => {
+    expect(withCodemodeInputs("// @input: a <<'EOF'\nx")).toMatchObject({
+      error: expect.stringContaining('EOF'),
+    });
+    expect(
+      withCodemodeInputs("// @input: a <<'E'\n1\nE\n// @input: a <<'E'\n2\nE\nreturn 1;")
+    ).toMatchObject({ error: expect.stringContaining('a') });
+    expect(withCodemodeInputs("// @input: 1bad <<'E'\nx\nE")).toMatchObject({
+      error: expect.stringContaining('1bad'),
+    });
   });
 });
 
@@ -165,6 +209,26 @@ describe('CodemodeHost', () => {
       await emit('tool_call', { toolName: 'codemode', toolCallId: 'c', input })
     ).toBeUndefined();
     expect(input.code.startsWith('// @options:')).toBe(true);
+  });
+
+  it('tool_call 展开 @input 块，坏块直接拦下；工具描述写明用法', async () => {
+    const { emit, registered } = install(new CodemodeHost({ codemode: true, deferredServers: [] }));
+    expect(registered.find((t) => t.name === 'codemode')?.description).toContain('// @input:');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: 原文块里的模板字面量正是要验证的场景
+    const input = { code: "// @input: body <<'EOF'\n`raw` ${x}\nEOF\nreturn inputs.body;" };
+    expect(
+      await emit('tool_call', { toolName: 'codemode', toolCallId: 'c', input })
+    ).toBeUndefined();
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: 同上
+    expect(input.code).toContain('const inputs = Object.freeze({"body":"`raw` ${x}"});');
+    expect(input.code).not.toContain('@input');
+    expect(
+      await emit('tool_call', {
+        toolName: 'codemode',
+        toolCallId: 'c',
+        input: { code: "// @input: body <<'EOF'\nunterminated" },
+      })
+    ).toMatchObject({ block: true, reason: expect.stringContaining('EOF') });
   });
 
   it('嵌套调用禁止编排类工具，并按父调用限次；父调用结束清零', async () => {

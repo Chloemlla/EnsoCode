@@ -8,6 +8,7 @@ import { registerBtwHandlers } from './btw';
 import { registerCapabilityHandlers } from './capabilities';
 import { registerChangesHandlers } from './changes';
 import { registerCompactionHandlers } from './compaction';
+import { registerExtensionPluginHandlers } from './extensionPlugins';
 import { registerFileHandlers } from './files';
 import { registerFilesWorkspaceHandlers } from './filesWorkspace';
 import { registerGitHandlers } from './git';
@@ -35,6 +36,7 @@ export function registerIpcHandlers(): void {
   registerModelDirectoryHandlers();
   registerProviderHandlers();
   registerAssetHandlers();
+  registerExtensionPluginHandlers();
   registerCapabilityHandlers();
   registerAgentHandlers();
   registerProxyHandlers();

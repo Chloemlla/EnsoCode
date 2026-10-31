@@ -15,6 +15,7 @@ import {
   stopAgentWorkerForQuit,
 } from '../main/services/agentHost';
 import { attachAppQuitDrain } from '../main/services/appQuitDrain';
+import { getExtensionPlugins } from '../main/services/extensionPlugins';
 import {
   closeMemoryDb,
   syncMemoryDistillFromSettings,
@@ -46,7 +47,7 @@ import {
 } from '../main/services/terminalService';
 import { isRunning, runCommand, USAGE } from './cli';
 import { applyConfigEnv, readServerConfig } from './config';
-import { parseControlCommand } from './control';
+import { type PluginControlCommand, parseControlCommand } from './control';
 import { registerServerUpdater } from './update/ipc';
 import type { ServerUpdater } from './update/serverUpdater';
 import { startWeb } from './web';
@@ -64,6 +65,38 @@ async function update(updater: ServerUpdater): Promise<unknown> {
   return { ok: true, status, applying: true };
 }
 
+/** 控制 socket（0600，仅本机同用户）上的插件管理；路径是服务器本地路径 */
+async function handlePlugin(command: PluginControlCommand): Promise<unknown> {
+  const plugins = getExtensionPlugins();
+  switch (command.action) {
+    case 'list':
+      return { ok: true, plugins: plugins.list() };
+    case 'stage':
+      return plugins.stage({
+        kind: command.path.toLowerCase().endsWith('.zip') ? 'zip' : 'dir',
+        path: command.path,
+      });
+    case 'commit':
+      return plugins.commit(command.token);
+    case 'discard':
+      plugins.discard(command.token);
+      return { ok: true };
+    case 'enable':
+    case 'disable':
+      return plugins.setEnabled(command.id, command.action === 'enable');
+    case 'approve':
+      return plugins.approvePending(command.id);
+    case 'reject':
+      return plugins.rejectPending(command.id);
+    case 'uninstall':
+      return plugins.uninstall(command.id);
+    case 'config-get':
+      return plugins.configView(command.id);
+    case 'config-set':
+      return plugins.setConfig(command.id, command.values);
+  }
+}
+
 async function handle(
   line: string,
   updater: ServerUpdater,
@@ -71,6 +104,7 @@ async function handle(
 ): Promise<unknown> {
   const command = parseControlCommand(line);
   if ('error' in command) return { ok: false, error: command.error };
+  if (command.cmd === 'plugin') return handlePlugin(command);
   if (command.cmd === 'pair') return startPairing();
   if (command.cmd === 'devices') return { ok: true, status: getPairStatus() };
   if (command.cmd === 'update') return update(updater);

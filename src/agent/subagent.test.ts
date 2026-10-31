@@ -76,6 +76,14 @@ describe('subagent unified control', () => {
     expect(guidelines).toMatch(/Once you've delegated/);
     expect(guidelines).toMatch(/smart colleague/);
   });
+
+  it('工具指引默认反扇出：小活自己做、不为复核开子代理、并行时同一条消息里一起发', () => {
+    const tool = createUnifiedSubagentTool({ agentTypes: [], models: [], invoke: vi.fn() });
+    const guidelines = (tool.promptGuidelines ?? []).join('\n');
+    expect(guidelines).toMatch(/Default to doing the work yourself/);
+    expect(guidelines).toMatch(/review or re-check/);
+    expect(guidelines).toMatch(/same message/);
+  });
 });
 
 describe('CoworkerIdleReminder', () => {

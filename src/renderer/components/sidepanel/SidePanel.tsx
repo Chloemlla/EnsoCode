@@ -17,6 +17,7 @@ import {
   MessageCircle,
   Minimize2,
   Plus,
+  Puzzle,
   SquareTerminal,
   Workflow,
   X,
@@ -51,6 +52,8 @@ import {
   SIDE_PANEL_HANDLE_WIDTH,
 } from '@/stores/sidePanel/width';
 import { useWorkflowRunsStore } from '@/stores/workflowRuns';
+import { PluginView } from '../../plugins/PluginView';
+import { type PluginViewRef, usePluginViews } from '../../plugins/viewBridge';
 import { BrowserView } from './BrowserView';
 import { BtwView } from './BtwView';
 import { ChangesView } from './ChangesView';
@@ -218,6 +221,36 @@ function useWorkflowAvailable(projectId: string | undefined): boolean {
   return useSettingsStore((state) => selectWorkflowAvailable(state, projectId));
 }
 
+function addPluginViewPanel(
+  api: DockviewApi,
+  conversationId: string | undefined,
+  projectId: string | undefined,
+  view: PluginViewRef,
+  group?: IDockviewHeaderActionsProps['group']
+): void {
+  const id = `plugin:${view.pluginId}:${view.id}`;
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({
+    id,
+    component: 'plugin',
+    title: view.title,
+    params: { conversationId, projectId, pluginId: view.pluginId, viewId: view.id },
+    ...(group ? { position: { referenceGroup: group } } : {}),
+  });
+}
+
+function PluginViewPanel(
+  props: IDockviewPanelProps<{ conversationId?: string; pluginId?: string; viewId?: string }>
+) {
+  const { conversationId, pluginId, viewId } = props.params;
+  if (!pluginId || !viewId) return null;
+  return <PluginView pluginId={pluginId} viewId={viewId} sessionId={conversationId ?? null} />;
+}
+
 function WorkflowPanel(
   props: IDockviewPanelProps<{ conversationId?: string; projectId?: string }>
 ) {
@@ -277,6 +310,8 @@ function SidePanelTab(props: IDockviewPanelHeaderProps<{ favicon?: string | null
         <MessageCircle className="h-3 w-3 shrink-0" />
       ) : props.api.id === 'workflow' ? (
         <Workflow className="h-3 w-3 shrink-0" />
+      ) : props.api.id.startsWith('plugin:') ? (
+        <Puzzle className="h-3 w-3 shrink-0" />
       ) : isBrowser && favicon && !faviconBroken ? (
         <img
           src={favicon}
@@ -331,6 +366,7 @@ function NewTabMenu({
   onNewBrowser,
   onNewBtw,
   onNewWorkflow,
+  onNewPluginView,
   compact,
 }: {
   onNewTerminal: () => void;
@@ -340,9 +376,11 @@ function NewTabMenu({
   onNewBtw: () => void;
   /** 缺省 = 该项目没开 workflow 工具，不给入口 */
   onNewWorkflow?: () => void;
+  onNewPluginView?: (view: PluginViewRef) => void;
   compact?: boolean;
 }) {
   const { t } = useI18n();
+  const pluginViews = usePluginViews();
   return (
     <Menu>
       <MenuTrigger
@@ -384,6 +422,14 @@ function NewTabMenu({
             {t('Workflow')}
           </MenuItem>
         ) : null}
+        {onNewPluginView
+          ? pluginViews.map((view) => (
+              <MenuItem key={`${view.pluginId}:${view.id}`} onClick={() => onNewPluginView(view)}>
+                <Puzzle className="h-4 w-4" />
+                {view.title}
+              </MenuItem>
+            ))
+          : null}
       </MenuPopup>
     </Menu>
   );
@@ -453,6 +499,9 @@ function SidePanelHeaderActions({
             ? () => addWorkflowPanel(containerApi, conversationId, projectId, t('Workflow'))
             : undefined
         }
+        onNewPluginView={(view) =>
+          addPluginViewPanel(containerApi, conversationId, projectId, view, group)
+        }
       />
     </div>
   );
@@ -491,6 +540,9 @@ function Watermark(props: IWatermarkPanelProps) {
               ? () => addWorkflowPanel(props.containerApi, conversationId, projectId, t('Workflow'))
               : undefined
           }
+          onNewPluginView={(view) =>
+            addPluginViewPanel(props.containerApi, conversationId, projectId, view)
+          }
         />
       </div>
     </div>
@@ -509,6 +561,7 @@ const DOCK_COMPONENTS = {
   browser: BrowserPanel,
   btw: BtwPanel,
   workflow: WorkflowPanel,
+  plugin: PluginViewPanel,
 };
 
 /** 跟随应用暗色模式(applyAppTheme 切换 documentElement 的 dark class) */
@@ -579,7 +632,7 @@ function ConversationDock({
     });
     // 只有用户关 tab 才回收;dock 本身不随切会话卸载
     event.api.onDidRemovePanel((panel) => {
-      if (panel.id === 'changes' || panel.id === 'files') return;
+      if (panel.id === 'changes' || panel.id === 'files' || panel.id.startsWith('plugin:')) return;
       if (panel.id === 'browser' || panel.id.startsWith('browser:')) {
         void window.electronAPI.browser.closeTab(panel.id);
         return;

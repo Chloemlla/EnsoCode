@@ -18,6 +18,7 @@ import {
   utilityProcess,
 } from 'electron';
 import agentWorkerPath from '../../agent/index?modulePath';
+import pluginHostPath from '../../pluginHost/index?modulePath';
 import type { DecodedImage, ProcessMetric } from '../platform/types';
 
 export const hostKind = 'desktop' as const;
@@ -28,6 +29,7 @@ export {
   clipboard,
   ipcMain,
   net,
+  pluginHostPath,
   powerMonitor,
   powerSaveBlocker,
   safeStorage,

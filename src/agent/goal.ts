@@ -41,7 +41,9 @@ export function createGoalTools(
       'goal_complete',
       'complete',
       'Mark the active session goal as COMPLETE. Only call when a goal is active (its text appears ' +
-        'in your context) and the objective is genuinely done — include concrete evidence.',
+        'in your context) and the objective is genuinely done — include concrete evidence. ' +
+        'While a goal runs, nobody is watching each step: do not stop at analysis or a plan; ' +
+        'when something is ambiguous, take the most likely reading, state the assumption, and keep going.',
       'summary',
       'What was accomplished, with concrete evidence (files changed, tests passing, etc.)'
     ),
@@ -49,7 +51,9 @@ export function createGoalTools(
       'goal_blocked',
       'blocked',
       'Mark the active session goal as BLOCKED: you cannot proceed without user input or an ' +
-        'external change. Only call when a goal is active.',
+        'external change. Only call when a goal is active. Blocked means missing access, credentials, ' +
+        'or a decision only the user can make — not ambiguity you can resolve yourself. Finish every ' +
+        'part that is not blocked first, and lead the reason with what exactly is stuck.',
       'reason',
       'What is blocking progress and what is needed to unblock'
     ),

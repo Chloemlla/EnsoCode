@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "enso.example.wordstats",
+  "name": "Word Stats",
+  "version": "1.0.0",
+  "description": "统计项目里文本文件的字数、行数与高频词，结果以卡片展示；提供条形图代码块。",
+  "main": "main.mjs",
+  "renderer": "ui.js",
+  "permissions": ["agent.tool", "fs.read", "ui.slot"],
+  "fs": { "read": ["."] },
+  "contributes": {
+    "agentTools": [
+      {
+        "name": "count_words",
+        "description": "Count words, lines and characters of a UTF-8 text file in the current project, and list the most frequent words. Path is relative to the project root.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "File path relative to the project root" },
+            "top": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "description": "How many frequent words to list (default 5)"
+            }
+          },
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "skills": ["skills/bar-chart"]
+  }
+}

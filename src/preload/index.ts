@@ -1594,11 +1594,86 @@ const electronAPI = {
     > => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_CAPABILITIES),
     openPermissions: (kind: 'screen' | 'accessibility'): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_OPEN_PERMISSIONS, kind),
+    allowedApps: (): Promise<ComputerAllowedApp[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_ALLOWED_APPS),
+    /** key 为 bundle id（无 bundle id 的 app 用其路径） */
+    revokeApp: (key: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_REVOKE_APP, key),
   },
 
   workspaceSearch: {
     query: (request: WorkspaceSearchQueryRequest): Promise<WorkspaceSearchQueryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_SEARCH_QUERY, request),
+  },
+
+  extensionPlugins: {
+    list: (): Promise<ExtensionPluginSummary[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_LIST),
+    onChanged: (callback: () => void): (() => void) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_CHANGED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.EXTENSION_PLUGINS_CHANGED, listener);
+    },
+    pickAndStage: (
+      kind: 'dir' | 'zip'
+    ): Promise<
+      | { ok: true; preview: ExtensionPluginInstallPreview }
+      | { ok: true; cancelled: true }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_PICK_AND_STAGE, kind),
+    commit: (token: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_COMMIT, token),
+    discard: (token: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_DISCARD, token),
+    setEnabled: (id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_SET_ENABLED, id, enabled),
+    approvePending: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_APPROVE_PENDING, id),
+    rejectPending: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_REJECT_PENDING, id),
+    uninstall: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_UNINSTALL, id),
+    configGet: (
+      id: string
+    ): Promise<{ ok: true; fields: ExtensionPluginConfigField[] } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CONFIG_GET, id),
+    /** 省略的键不变，null 清除 */
+    configSet: (
+      id: string,
+      patch: Record<string, string | null>
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CONFIG_SET, id, patch),
+    call: (request: {
+      pluginId: string;
+      method: 'command.run' | 'trigger.candidates' | 'trigger.pick' | 'renderer.call';
+      payload: Record<string, unknown>;
+      sessionId: string | null;
+    }): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CALL, request),
+    asset: (
+      pluginId: string,
+      rel: string
+    ): Promise<{ ok: true; mime: string; base64: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_ASSET, pluginId, rel),
+    onDraftRequest: (
+      callback: (request: {
+        requestId: string;
+        sessionId: string;
+        op: 'readDraft' | 'insertText' | 'replaceDraft';
+        payload: Record<string, unknown>;
+      }) => void
+    ): (() => void) => {
+      const listener = (_e: unknown, request: Parameters<typeof callback>[0]) => callback(request);
+      ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_DRAFT_REQUEST, listener);
+      return () =>
+        ipcRenderer.removeListener(IPC_CHANNELS.EXTENSION_PLUGINS_DRAFT_REQUEST, listener);
+    },
+    respondDraft: (
+      response:
+        | { requestId: string; ok: true; value: unknown }
+        | { requestId: string; ok: false; code: string; error: string }
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_DRAFT_RESPONSE, response),
   },
 
   /** 仅远程浏览器里的 web-preload 提供 */
@@ -1609,4 +1684,9 @@ export type ElectronAPI = typeof electronAPI;
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 
-import type { ComputerCapabilities } from '@shared/computer/types';
+import type { ComputerAllowedApp, ComputerCapabilities } from '@shared/computer/types';
+import type {
+  ExtensionPluginConfigField,
+  ExtensionPluginInstallPreview,
+  ExtensionPluginSummary,
+} from '@shared/extensionPlugins/types';

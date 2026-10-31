@@ -52,6 +52,7 @@ import {
 } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
+import { PluginUiHost } from '@/plugins/PluginUiHost';
 import { useBotsStore } from '@/stores/bots';
 import {
   isBotModeActive,
@@ -485,6 +486,7 @@ export default function App() {
               className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
             >
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <PluginUiHost />
                 <ChatView />
               </div>
               {sideOpen && !sideFullscreen && !isMobile && (

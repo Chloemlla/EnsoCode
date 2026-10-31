@@ -123,6 +123,15 @@ function session(options: Record<string, unknown>) {
     compact: vi.fn(async () => undefined),
     dispose: vi.fn(),
     setThinkingLevel: vi.fn(),
+    activeTools: ((options.customTools as Array<{ name: string }> | undefined) ?? []).map(
+      (tool) => tool.name
+    ),
+    getActiveToolNames(this: { activeTools: string[] }) {
+      return [...this.activeTools];
+    },
+    setActiveToolsByName: vi.fn(function (this: { activeTools: string[] }, names: string[]) {
+      this.activeTools = [...names];
+    }),
     navigateTree: vi.fn(async () => ({ cancelled: false })),
     isStreaming: false,
     isRetrying: false,

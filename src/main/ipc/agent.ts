@@ -82,6 +82,7 @@ import {
   sendComputerResultToSession,
   sendDelegationResultToSession,
   sendMemoryResultToSession,
+  sendPluginToolResultToSession,
   setAgentEventListener,
   setPinnedSessions,
   setSessionApprovalMode,
@@ -104,6 +105,7 @@ import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
 import { reloadConversation } from '../services/conversationReload';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
+import { getExtensionPlugins } from '../services/extensionPlugins';
 import { searchFiles } from '../services/fileSearch';
 import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
 import {
@@ -203,6 +205,7 @@ let dispatchService: AgentDispatchService | null = null;
 let agentService: AgentService | null = null;
 const pendingAgentControl = new Map<string, AbortController>();
 const pendingComputer = new Map<string, AbortController>();
+const pendingPluginTools = new Map<string, AbortController>();
 let sourceBindings: ActiveConversationRegistry | null = null;
 let sourceAuthority: SourceAuthorityRegistry | null = null;
 let botWorkerObserver: ((event: AgentWorkerEvent | { type: 'worker-exited' }) => void) | null =
@@ -322,6 +325,14 @@ function authoritativeSpawnCwd(sessionId: string): string | null {
         ? undefined
         : sessionWorktree(sessionId)?.path,
   });
+}
+
+/** 插件 fs 代办的项目根：只认权威记录；SSH 会话的目录不在本机，返回 null */
+export function pluginProjectRoot(sessionId: string): string | null {
+  const conversation = sourceAuthority?.conversation(sessionId);
+  const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
+  if (project?.kind === 'ssh') return null;
+  return authoritativeSpawnCwd(sessionId);
 }
 
 function removeConversationFiles(conversation: {
@@ -1113,6 +1124,8 @@ export function registerAgentHandlers(): void {
       pendingAgentControl.clear();
       for (const controller of pendingComputer.values()) controller.abort();
       pendingComputer.clear();
+      for (const controller of pendingPluginTools.values()) controller.abort();
+      pendingPluginTools.clear();
       sessionDesktop().closeAllComputers();
       for (const targetId of pendingWorktreeForks.keys()) discardForkWorktree(targetId);
       // worker 死后连接全部失效：清掉残留状态，避免设置页长期显示假 ready
@@ -1127,6 +1140,7 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'oauth-pool-select' ||
       workerEvent.type === 'privacy-mask-ledger' ||
       workerEvent.type === 'mcp-oauth-refresh' ||
+      workerEvent.type === 'plugin-mcp-result' ||
       workerEvent.type === 'workspace-unlock-result'
     )
       return;
@@ -1387,6 +1401,33 @@ export function registerAgentHandlers(): void {
     }
     if (workerEvent.type === 'computer-cancel') {
       pendingComputer.get(workerEvent.requestId)?.abort();
+      return;
+    }
+    if (workerEvent.type === 'plugin-tool-cancel') {
+      pendingPluginTools.get(workerEvent.requestId)?.abort();
+      return;
+    }
+    if (workerEvent.type === 'plugin-tool-invoke') {
+      const { identity, requestId, toolName, args } = workerEvent;
+      const controller = new AbortController();
+      pendingPluginTools.set(requestId, controller);
+      void getExtensionPlugins()
+        .callTool({
+          toolName,
+          args,
+          sessionId: identity.sessionId,
+          projectRoot: pluginProjectRoot(identity.sessionId),
+          signal: controller.signal,
+        })
+        .then(
+          (result) => sendPluginToolResultToSession(identity, requestId, { ok: true, result }),
+          (error: unknown) =>
+            sendPluginToolResultToSession(identity, requestId, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+        )
+        .finally(() => pendingPluginTools.delete(requestId));
       return;
     }
     if (workerEvent.type === 'computer-invoke') {

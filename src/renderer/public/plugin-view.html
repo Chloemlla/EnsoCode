@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:"
+    />
+    <script>
+      // Enso 插件侧栏页面壳：在 sandbox iframe（不同源）里运行，只认父窗口发来的第一条初始化消息。
+      (() => {
+        let port = null;
+        let seq = 0;
+        let theme = 'light';
+        const pending = new Map();
+        Object.defineProperty(window, 'enso', {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: Object.freeze({
+            get theme() {
+              return theme;
+            },
+            call(method, args) {
+              if (!port) return Promise.reject(new Error('bridge not ready'));
+              const id = ++seq;
+              return new Promise((resolve, reject) => {
+                pending.set(id, { resolve, reject });
+                port.postMessage({ id, method: String(method), args: args === undefined ? null : args });
+              });
+            },
+          }),
+        });
+        const onInit = (event) => {
+          const data = event.data;
+          if (port || event.source !== window.parent || !data || data.type !== 'enso-view-init') return;
+          if (!event.ports?.[0]) return;
+          window.removeEventListener('message', onInit);
+          port = event.ports[0];
+          theme = data.theme === 'dark' ? 'dark' : 'light';
+          port.onmessage = (message) => {
+            const reply = message.data;
+            const entry = reply && pending.get(reply.id);
+            if (!entry) return;
+            pending.delete(reply.id);
+            if (reply.ok) entry.resolve(reply.value);
+            else entry.reject(new Error(String(reply.error)));
+          };
+          document.open();
+          document.write(String(data.html));
+          document.close();
+          document.documentElement.dataset.theme = theme;
+        };
+        window.addEventListener('message', onInit);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>

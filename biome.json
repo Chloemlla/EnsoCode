@@ -100,6 +100,7 @@
         "src/main/**/*.test.ts",
         "src/main/ipc/desktop.ts",
         "src/main/ipc/window.ts",
+        "src/main/ipc/extensionPlugins.desktop.ts",
         "src/main/ipc/browser.ts",
         "src/main/ipc/computer.ts",
         "src/main/ipc/updater.ts",

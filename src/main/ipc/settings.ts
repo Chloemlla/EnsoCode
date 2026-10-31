@@ -72,6 +72,7 @@ export const SETTINGS_STATE_FIELDS = [
   'windowsLocalShell',
   'exploreFoldEnabled',
   'rtkEnabled',
+  'computerPreview',
   'editMode',
   'hashlineEditEnabled',
   'compactStrategy',
@@ -183,6 +184,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'privacyMasking',
   'virtualModels',
   'windowsLocalShell',
+  'computerPreview',
   'terminalShell',
   'worktreeRoot',
   'fileOpenRules',
@@ -478,6 +480,7 @@ function scheduleWrite(
           pushAutoRetryLimit,
           pushPrivacyMasking,
           pushDisabledWorkflowPresets,
+          pushBuiltinTools,
           pushModelDirectory,
           pushWebSearchConfig,
         }) => {
@@ -487,6 +490,7 @@ function scheduleWrite(
           pushAutoRetryLimit();
           pushPrivacyMasking();
           pushDisabledWorkflowPresets();
+          pushBuiltinTools();
           pushModelDirectory();
           pushWebSearchConfig();
         }
@@ -604,6 +608,7 @@ export function commitSettingsTransaction(
         pushAutoRetryLimit,
         pushPrivacyMasking,
         pushDisabledWorkflowPresets,
+        pushBuiltinTools,
         pushModelDirectory,
         pushWebSearchConfig,
       }) => {
@@ -613,6 +618,7 @@ export function commitSettingsTransaction(
         pushAutoRetryLimit();
         pushPrivacyMasking();
         pushDisabledWorkflowPresets();
+        pushBuiltinTools();
         pushModelDirectory();
         pushWebSearchConfig();
       }

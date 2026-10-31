@@ -26,6 +26,8 @@ import { useI18n } from '@/i18n';
 import { openSidePanelFile } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
+import { parsePluginFence } from '../../plugins/registry';
+import { PluginBlock } from '../../plugins/slots';
 import { CodeBlock } from './CodeBlock';
 import { CopyButton } from './CopyButton';
 import { highlightNode } from './highlightQuery';
@@ -621,6 +623,10 @@ export const markdownComponents: Components = {
     const raw = textNode && 'value' in textNode ? String(textNode.value) : '';
     const source = raw.replace(/\n$/, '');
     const language = parseFenceLang(info);
+    const fence = parsePluginFence(language);
+    if (fence) {
+      return <PluginBlock pluginId={fence.pluginId} lang={fence.lang} source={source} />;
+    }
     if (language?.toLowerCase() === 'mermaid') {
       return <MermaidRenderer code={source} streaming={streaming} />;
     }

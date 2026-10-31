@@ -11,6 +11,7 @@ import { ResizeHandle } from '@/components/chat/ResizeHandle';
 import { sidePanelWidthTransition } from '@/components/sidepanel/sidePanelWidthAnim';
 import { addToast } from '@/components/ui/toast';
 import { useSpeechStatus } from '@/hooks/useSpeechStatus';
+import { useIsMobile } from '@/hooks/useViewport';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { startDesktopVoiceSession } from '@/lib/voiceSession';
@@ -86,6 +87,8 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
     speechStatus?.models.find((model) => model.id === voiceModel)?.state === 'ready';
   const [resizing, setResizing] = useState(false);
   const [workspaceW, setWorkspaceW] = useState(0);
+  // 窄屏没有并排空间：打开即全屏盖住聊天区
+  const isMobile = useIsMobile();
   const asideRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const parent = asideRef.current?.parentElement;
@@ -96,7 +99,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
     ro.observe(parent);
     return () => ro.disconnect();
   }, []);
-  const width = resolveSidePanelWidth(panelWidth, workspaceW);
+  const width = isMobile ? workspaceW : resolveSidePanelWidth(panelWidth, workspaceW);
   const targetW = panelOpen ? width : 0;
   const resizePanel = useCallback((deltaX: number) => {
     const parent = asideRef.current?.parentElement;
@@ -265,7 +268,7 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
   };
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1">
+    <div className="relative flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
         <header className="@container flex h-[52px] shrink-0 items-center gap-2.5 border-b px-4">
           {direct ? (
@@ -396,14 +399,23 @@ export function BotChatView({ chat, group = chat }: { chat: BotChat; group?: Bot
         </div>
       </div>
 
-      {panelOpen && <ResizeHandle onResize={resizePanel} onResizingChange={setResizing} />}
+      {panelOpen && !isMobile && (
+        <ResizeHandle onResize={resizePanel} onResizingChange={setResizing} />
+      )}
       <motion.aside
         ref={asideRef}
         initial={false}
         animate={{ width: targetW }}
-        style={{ maxWidth: `max(0px, calc(100% - ${CHAT_MIN_WIDTH + SIDE_PANEL_HANDLE_WIDTH}px))` }}
-        transition={sidePanelWidthTransition({ skip: resizing, cover: false, targetW })}
-        className="relative flex min-h-0 shrink-0 flex-col overflow-hidden bg-background"
+        style={
+          isMobile
+            ? undefined
+            : { maxWidth: `max(0px, calc(100% - ${CHAT_MIN_WIDTH + SIDE_PANEL_HANDLE_WIDTH}px))` }
+        }
+        transition={sidePanelWidthTransition({ skip: resizing, cover: isMobile, targetW })}
+        className={cn(
+          'flex min-h-0 shrink-0 flex-col overflow-hidden bg-background',
+          isMobile ? 'absolute inset-y-0 right-0 z-10' : 'relative'
+        )}
       >
         {/* 内容固定目标宽度，开合动画只裁切不重排 */}
         <div

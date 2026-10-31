@@ -107,6 +107,22 @@ describe('removeConversationSessionFiles', () => {
     expect(existsSync(other)).toBe(true);
   });
 
+  it('删除该会话及其子会话未投递的通知文件，保留其他会话的', () => {
+    const pendingRoot = path.join(sessionDir, 'pending-notifications');
+    mkdirSync(pendingRoot, { recursive: true });
+    const file = (id: string) => path.join(pendingRoot, `${encodeURIComponent(id)}.json`);
+    const own = file(CONVERSATION_ID);
+    const child = file(`${CONVERSATION_ID}::cw-abc`);
+    const other = file('22222222-2222-4222-8222-222222222222');
+    for (const target of [own, child, other]) writeFileSync(target, '["x"]');
+
+    removeConversationSessionFiles({ sessionDir, conversationId: CONVERSATION_ID });
+
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(child)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+  });
+
   it('删除 scratch 会话目录，不越界删到根目录或其他会话', () => {
     const scratchRoot = path.join(root, 'scratch');
     const own = path.join(scratchRoot, CONVERSATION_ID);

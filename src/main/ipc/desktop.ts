@@ -2,6 +2,7 @@ import { app, type BrowserWindow } from 'electron';
 import { registerBrowserHandlers } from './browser';
 import { registerComputerHandlers } from './computer';
 import { registerConfigSyncHandlers } from './configSync';
+import { registerExtensionPluginDesktopHandlers } from './extensionPlugins.desktop';
 import { registerUpdaterHandlers } from './updater';
 import { attachWindowStateEvents, registerWindowHandlers } from './window';
 
@@ -11,6 +12,7 @@ export function registerDesktopIpcHandlers(): void {
   registerConfigSyncHandlers();
   registerUpdaterHandlers();
   registerBrowserHandlers();
+  registerExtensionPluginDesktopHandlers();
   registerComputerHandlers();
   app.on('browser-window-created', (_event, win: BrowserWindow) => {
     attachWindowStateEvents(win);

@@ -1,0 +1,93 @@
+import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '@/i18n';
+import { createViewBridge, decodeUtf8Base64, usePluginViews } from './viewBridge';
+
+const SHELL = 'plugin-view.html';
+
+/**
+ * 插件侧栏页面：sandbox="allow-scripts" 的 iframe（不同源、无 preload），
+ * 壳页面收到 HTML 后写入文档，页面只能经 MessagePort 调本插件的 renderer.call。
+ */
+export function PluginView({
+  pluginId,
+  viewId,
+  sessionId,
+}: {
+  pluginId: string;
+  viewId: string;
+  sessionId: string | null;
+}) {
+  const { t } = useI18n();
+  const view = usePluginViews().find((v) => v.pluginId === pluginId && v.id === viewId);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const entry = view?.entry;
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || !entry) return;
+    setError(null);
+    let disposed = false;
+    const channel = new MessageChannel();
+    const handle = createViewBridge(async (method, args) => {
+      const res = await window.electronAPI.extensionPlugins.call({
+        pluginId,
+        method: 'renderer.call',
+        payload: { method, args },
+        sessionId: sessionRef.current,
+      });
+      if (!res.ok) throw new Error(res.error);
+      return res.value;
+    });
+    channel.port1.onmessage = (event) => {
+      void handle(event.data).then((reply) => {
+        if (reply && !disposed) channel.port1.postMessage(reply);
+      });
+    };
+    const onLoad = async () => {
+      const res = await window.electronAPI.extensionPlugins.asset(pluginId, entry);
+      if (disposed) return;
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      frame.contentWindow?.postMessage(
+        {
+          type: 'enso-view-init',
+          html: decodeUtf8Base64(res.base64),
+          theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
+        },
+        '*',
+        [channel.port2]
+      );
+    };
+    frame.addEventListener('load', onLoad, { once: true });
+    frame.src = new URL(SHELL, document.baseURI).href;
+    return () => {
+      disposed = true;
+      frame.removeEventListener('load', onLoad);
+      channel.port1.close();
+      frame.removeAttribute('src');
+    };
+  }, [pluginId, entry]);
+
+  if (!view)
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+        {t('Plugin is not enabled')}
+      </div>
+    );
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {error && <div className="shrink-0 px-3 py-2 text-xs text-destructive">{error}</div>}
+      <iframe
+        ref={frameRef}
+        title={view.title}
+        sandbox="allow-scripts"
+        className="min-h-0 w-full flex-1 border-0 bg-background"
+      />
+    </div>
+  );
+}

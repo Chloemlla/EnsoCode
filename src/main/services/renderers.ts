@@ -3,6 +3,7 @@ import {
   hasRemoteMain,
   isRemoteMainSender,
   isRemoteSettingsSender,
+  remoteSenderById,
   sendToRemoteRenderers,
 } from './remoteRenderer/senders';
 import { localUi } from './uiHost';
@@ -29,6 +30,17 @@ export function isSettingsRenderer(webContentsId: number): boolean {
 
 export function sendToLocalMain(channel: string, ...args: unknown[]): void {
   localMainContents()?.send(channel, ...args);
+}
+
+/** 按 webContents id 找本机窗口或远端页面 */
+export function rendererById(id: number): RendererContents | null {
+  return (
+    localUi()
+      ?.allContents()
+      .find((contents) => contents.id === id) ??
+    remoteSenderById(id) ??
+    null
+  );
 }
 
 export function broadcastToRenderers(channel: string, ...args: unknown[]): void {

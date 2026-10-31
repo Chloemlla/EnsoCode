@@ -161,6 +161,15 @@ function session(options: Record<string, unknown>) {
     waitForIdle: vi.fn(async () => undefined),
     dispose: vi.fn(),
     setThinkingLevel: vi.fn(),
+    activeTools: ((options.customTools as Array<{ name: string }> | undefined) ?? []).map(
+      (tool) => tool.name
+    ),
+    getActiveToolNames(this: { activeTools: string[] }) {
+      return [...this.activeTools];
+    },
+    setActiveToolsByName: vi.fn(function (this: { activeTools: string[] }, names: string[]) {
+      this.activeTools = [...names];
+    }),
     navigateTree: vi.fn(async () => ({ cancelled: false })),
     isStreaming: false,
     isRetrying: false,
@@ -278,6 +287,117 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       await supervisor.shutdown();
     }
   );
+
+  it('内置工具热开关：禁用的只注册不激活，set-builtin-tools 增删激活集并联动 plan', async () => {
+    const events: AgentWorkerEvent[] = [];
+    const supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-hot-')),
+    });
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+      disabledTools: ['memory', 'plan'],
+    });
+    // spawn 未注册完就到达的推送：注册后补用，以它为准
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: parent,
+      disabledTools: ['memory', 'plan', 'web'],
+    });
+    await waitFor(events, 'parent-ready');
+    const live = mocks.sessions.at(-1) as unknown as { getActiveToolNames(): string[] };
+    const spawnOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as {
+      customTools: Array<{ name: string }>;
+    };
+    const registered = spawnOptions.customTools.map((tool) => tool.name);
+    expect(registered).toEqual(
+      expect.arrayContaining(['memory_search', 'submit_plan', 'web_search', 'todo'])
+    );
+    let active = live.getActiveToolNames();
+    expect(active).toContain('todo');
+    expect(active).not.toContain('memory_search');
+    expect(active).not.toContain('submit_plan');
+    expect(active).not.toContain('web_search');
+    expect(events.some((event) => event.type === 'plan-state')).toBe(false);
+
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: parent,
+      disabledTools: ['todo'],
+    });
+    active = live.getActiveToolNames();
+    expect(active).toEqual(expect.arrayContaining(['memory_search', 'submit_plan', 'web_search']));
+    expect(active).not.toContain('todo');
+    expect(events.some((event) => event.type === 'plan-state')).toBe(true);
+
+    supervisor.handleCommand({ type: 'set-plan-mode', identity: parent, active: true });
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === 'plan-state').at(-1)).toMatchObject({
+        state: { active: true },
+      })
+    );
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: parent,
+      disabledTools: ['plan'],
+    });
+    expect(live.getActiveToolNames()).not.toContain('submit_plan');
+    expect(events.filter((event) => event.type === 'plan-state').at(-1)).toMatchObject({
+      state: { active: false },
+    });
+
+    // 旧代际的推送不生效
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: { ...parent, generation: 'stale-generation' },
+      disabledTools: [],
+    });
+    expect(live.getActiveToolNames()).not.toContain('submit_plan');
+    await supervisor.shutdown();
+  });
+
+  it('内置工具热开关：回合进行中只攒着，回合收口后才换工具表，避免回合中途缓存失效', async () => {
+    const events: AgentWorkerEvent[] = [];
+    const supervisor = new SessionSupervisor({
+      emit: (event) => events.push(event),
+      agentDir: '/tmp/agent',
+      sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-hot-busy-')),
+    });
+    supervisor.handleCommand({ type: 'spawn-parent', identity: parent, cwd: '/w', model });
+    await waitFor(events, 'parent-ready');
+    const live = mocks.sessions.at(-1) as ReturnType<typeof session> & {
+      isStreaming?: boolean;
+      getActiveToolNames(): string[];
+    };
+    expect(live.getActiveToolNames()).toContain('web_search');
+
+    live.isStreaming = true;
+    live.emit({ type: 'agent_start' });
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: parent,
+      disabledTools: ['web'],
+    });
+    supervisor.handleCommand({
+      type: 'set-builtin-tools',
+      identity: parent,
+      disabledTools: ['todo'],
+    });
+    expect(live.getActiveToolNames()).toContain('web_search');
+    expect(live.getActiveToolNames()).toContain('todo');
+
+    live.isStreaming = false;
+    live.emit({ type: 'agent_end', messages: [] });
+    live.emit({ type: 'agent_settled' });
+    // 只应用最后一次推送
+    expect(live.getActiveToolNames()).toContain('web_search');
+    expect(live.getActiveToolNames()).not.toContain('todo');
+    await supervisor.shutdown();
+  });
 
   it('按需 MCP 不在 spawn 与预热时连接，首次 codemode 调用才注册为 deferred 并按真实工具名审批', async () => {
     const events: AgentWorkerEvent[] = [];

@@ -733,3 +733,67 @@ describe('McpManager insufficient_scope · 连接失败', () => {
     }
   });
 });
+
+describe('McpManager 插件调用', () => {
+  const bce: McpServerSpawnConfig = { name: 'bce', transport: 'stdio', command: 'bce-tool' };
+  beforeEach(() => {
+    clientState.listTools = vi.fn(async () => ({
+      tools: [
+        { name: 'enhance_prompt', description: '改写提示词', inputSchema: { type: 'object' } },
+        { name: 'search_context', inputSchema: { type: 'object' } },
+      ],
+    }));
+  });
+
+  it('按原始工具名列出各服务的工具', async () => {
+    const { manager } = makeManager();
+    await expect(manager.pluginTools([bce])).resolves.toEqual([
+      { server: 'bce', name: 'enhance_prompt', description: '改写提示词' },
+      { server: 'bce', name: 'search_context', description: '' },
+    ]);
+  });
+
+  it('按服务名与原始工具名调用，返回拼好的文本', async () => {
+    clientState.callTool = vi.fn(async () => ({
+      content: [
+        { type: 'text', text: 'line 1' },
+        { type: 'text', text: 'line 2' },
+      ],
+    }));
+    const { manager } = makeManager();
+    const result = await manager.callPluginTool(
+      [bce],
+      'bce',
+      'enhance_prompt',
+      { prompt: 'x' },
+      new AbortController().signal
+    );
+    expect(result).toEqual({ content: 'line 1\nline 2', isError: false });
+    expect(clientState.callTool).toHaveBeenCalledWith(
+      { name: 'enhance_prompt', arguments: { prompt: 'x' } },
+      undefined,
+      expect.anything()
+    );
+  });
+
+  it('服务或工具不存在时报错', async () => {
+    const { manager } = makeManager();
+    const signal = new AbortController().signal;
+    await expect(
+      manager.callPluginTool([bce], 'other', 'enhance_prompt', {}, signal)
+    ).rejects.toThrow(/other/);
+    await expect(manager.callPluginTool([bce], 'bce', 'missing', {}, signal)).rejects.toThrow(
+      /missing/
+    );
+  });
+
+  it('中止信号让调用立即失败', async () => {
+    clientState.callTool = vi.fn(() => new Promise(() => {})) as never;
+    const { manager } = makeManager();
+    const controller = new AbortController();
+    const pending = manager.callPluginTool([bce], 'bce', 'enhance_prompt', {}, controller.signal);
+    await new Promise((r) => setTimeout(r, 10));
+    controller.abort();
+    await expect(pending).rejects.toThrow(/abort/i);
+  });
+});

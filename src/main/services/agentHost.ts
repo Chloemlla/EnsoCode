@@ -33,6 +33,7 @@ import {
   modelUsability,
 } from '@shared/defaultModel';
 import { normalizeMaxActiveCoworkers } from '@shared/maxActiveCoworkers';
+import { mcpHeaders } from '@shared/mcpConfig';
 import { mcpTimeoutsForSpawn } from '@shared/mcpTimeout';
 import { pickModelCapabilityOverrides } from '@shared/modelCatalog';
 import { materializeProviders } from '@shared/modelDirectory';
@@ -111,8 +112,11 @@ import { ENSO_SYSTEM_PROMPT } from '../../agent/ensoPrompt';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import { type MemberAgentType, memberSpawnDescription } from './bots/botAgentType';
+import { BuiltinToolScopes, sessionDisabledTools } from './builtinToolScopes';
 import type { ResolvedPlugins } from './claudePlugins';
 import { isComputerPlatformSupported } from './computer/support';
+import { getExtensionPlugins, setPluginMcpBridge } from './extensionPlugins';
+import { PluginMcpRequests } from './extensionPlugins/mcpRequests';
 import { resolveGlobalInstruction } from './instructionStore';
 import { refreshMcpOAuthAccess } from './mcpOAuthRefresh';
 import { getMcpOAuthStore } from './mcpOAuthStore';
@@ -376,7 +380,8 @@ export function startAgentWorker(): void {
       resolveReleaseWaiters(event);
       // 手动重读结果只回给发起 invoke 的等待者，不进普通事件流（renderer 的通用
       // snapshot 分支会顺手改 started / 清 asks，手动刷新不能有这些副作用）
-      if (pendingReloads.settle(event) || workspaceLocks.settle(event)) return;
+      if (pendingReloads.settle(event) || workspaceLocks.settle(event) || pluginMcp.settle(event))
+        return;
       if (settleCompletion(event) || settleChoice(event)) return;
       onEvent?.(event);
     }
@@ -389,6 +394,7 @@ export function startAgentWorker(): void {
     }
     pendingReloads.failAll('agent worker exited');
     workspaceLocks.failAll('agent worker exited');
+    pluginMcp.failAll('agent worker exited');
     for (const [id, p] of pendingCompletions) {
       pendingCompletions.delete(id);
       p.reject(new Error('agent worker exited'));
@@ -403,6 +409,7 @@ export function startAgentWorker(): void {
 
 export function stopAgentWorker(): void {
   workspaceLocks.failAll('agent worker stopped');
+  pluginMcp.failAll('agent worker stopped');
   worker?.kill();
   worker = null;
   workerReady = false;
@@ -445,6 +452,19 @@ export function isAgentWorkerRunning(): boolean {
 let workspaceBusy: (id: string) => boolean = () => false;
 
 const workspaceLocks = new WorkspaceLockRequests(sendAgentCommand);
+
+/** 插件调宿主 MCP：用用户已启用的 MCP 配置（凭据随配置下发给 worker，不经插件） */
+const pluginMcp = new PluginMcpRequests((command) => sendAgentCommand(command).ok);
+function pluginMcpServers(): McpServerSpawnConfig[] {
+  const state = readSettingsState();
+  const servers = Array.isArray(state?.mcpServers) ? state.mcpServers.filter(isMcpServerEntry) : [];
+  return servers.filter((server) => server.enabled !== false).map(toMcpSpawnConfig);
+}
+setPluginMcpBridge({
+  mcpTools: (_target, signal) => pluginMcp.list(pluginMcpServers(), signal),
+  mcpCall: (_target, server, tool, args, signal) =>
+    pluginMcp.call(pluginMcpServers(), server, tool, args, signal),
+});
 const workspaceWorkers = new Map<string, WorkerProcess | null>();
 
 export async function freezeWorkspace(
@@ -697,6 +717,7 @@ function resolvePhysicalModelSelection(
 }
 
 const parentToolProfiles = new Map<string, ChildProfileToolOptions>();
+const builtinToolScopes = new BuiltinToolScopes();
 
 export interface AgentTypeProfileContext {
   parentSessionId?: string;
@@ -714,6 +735,7 @@ export function rememberParentToolProfile(
 
 export function forgetParentToolProfile(sessionId: string): void {
   parentToolProfiles.delete(sessionId);
+  builtinToolScopes.forget(sessionId);
 }
 
 export function expectedAgentTypeToolIds(
@@ -915,13 +937,23 @@ export function spawnSession(
   const state = readSettingsState();
   // Claude 插件：按各自开关现读安装目录，不受预设影响
   const plugins = enabledPlugins(state);
-  const skillPaths = [...enabledSkillPaths(preset), ...(bot ? [] : plugins.skillPaths)];
+  // Enso 插件：顺序在预设、Claude 插件之后；Bot 会话不合并
+  const extensionPlugins = bot ? null : getExtensionPlugins();
+  const skillPaths = [
+    ...enabledSkillPaths(preset),
+    ...(bot ? [] : plugins.skillPaths),
+    ...(extensionPlugins?.skillPathsForSpawn() ?? []),
+  ];
   const mcpServers = enabledMcpServers(preset);
   const mcpNames = new Set(mcpServers.map((server) => server.name));
-  for (const server of bot ? [] : plugins.mcpServers) {
+  for (const server of [
+    ...(bot ? [] : plugins.mcpServers),
+    ...(extensionPlugins?.mcpServersForSpawn() ?? []),
+  ]) {
     if (!mcpNames.has(server.name)) mcpServers.push(server);
     mcpNames.add(server.name);
   }
+  const pluginTools = extensionPlugins?.toolsForSpawn() ?? [];
   // hooks 在本机起进程，远程会话的 cwd 不在本机
   const pluginHooks = remote ? [] : plugins.hooks;
   const subagentModels = options?.omitDispatchTools
@@ -930,16 +962,14 @@ export function spawnSession(
   const agentTypes = options?.omitDispatchTools
     ? []
     : configuredAgentTypes(authenticatedAccountKeys, subagentModels.length > 0, plugins);
-  const disabledTools = resolveDisabledBuiltinTools(state?.disabledBuiltinTools, {
-    disabledBuiltinTools: projectDisabledBuiltinTools(state?.projects, projectId),
-  });
-  for (const id of options?.extraDisabledTools ?? []) {
-    if (!disabledTools.includes(id)) disabledTools.push(id);
-  }
-  // 当前平台不能操作桌面时不下发 computer，避免模型反复调用必失败的工具
-  if (!isComputerPlatformSupported() && !disabledTools.includes('computer')) {
-    disabledTools.push('computer');
-  }
+  // 当前平台不能操作桌面时禁用 computer，避免模型反复调用必失败的工具
+  const extraDisabledTools = options?.extraDisabledTools ?? [];
+  const disabledTools = sessionDisabledTools(
+    state,
+    projectId,
+    extraDisabledTools,
+    isComputerPlatformSupported()
+  );
   const loadHarnessAssets = state?.loadHarnessAssets === true;
   const trustedProjectCode = projectTrustedCode(state?.projects, projectId);
   const windowsLocalShell = parseWindowsLocalShell(state?.windowsLocalShell);
@@ -986,11 +1016,13 @@ export function spawnSession(
     ...(smartCompactEnabled ? { smartCompactEnabled: true } : {}),
     ...(smartCompactSummaryModel ? { smartCompactSummaryModel } : {}),
     ...(smartCompactMode ? { smartCompactMode } : {}),
-    ...(disabledTools.includes('memory') ? {} : { memoryLanguage }),
+    // 记忆可在会话中途打开，语言始终下发
+    memoryLanguage,
     ...(skillPaths.length > 0 ? { skillPaths } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
     ...(plugins.commands.length > 0 ? { pluginCommands: plugins.commands } : {}),
     ...(pluginHooks.length > 0 ? { pluginHooks } : {}),
+    ...(pluginTools.length > 0 ? { pluginTools } : {}),
     ...(request.approvalMode ? { approvalMode: request.approvalMode } : {}),
     ...(request.planMode !== undefined ? { planMode: request.planMode } : {}),
     ...approvalReviewerSpawnFields(approvalReviewerSource),
@@ -1012,6 +1044,7 @@ export function spawnSession(
     ...(options?.bot || state?.protectedActionsInCode === true ? { protectedActions: true } : {}),
   });
   if (sent.ok) {
+    builtinToolScopes.remember(identity, projectId, extraDisabledTools, disabledTools);
     rememberParentToolProfile(identity.sessionId, {
       editMode,
       shell: childProfileShell({
@@ -1204,6 +1237,14 @@ export function sendComputerResultToSession(
   outcome: { ok: true; result: unknown } | { ok: false; error: string }
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({ type: 'computer-result', identity, requestId, ...outcome });
+}
+
+export function sendPluginToolResultToSession(
+  identity: SessionIdentity,
+  requestId: string,
+  outcome: { ok: true; result: unknown } | { ok: false; error: string }
+): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'plugin-tool-result', identity, requestId, ...outcome });
 }
 
 export function sendCapabilityResultToSession(
@@ -1851,7 +1892,11 @@ function mcpServerById(serverId: string): McpServerSpawnConfig[] {
 }
 
 function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
-  const oauth = server.transport === 'stdio' ? undefined : getMcpOAuthStore().access(server.id);
+  const headers = server.transport === 'stdio' ? undefined : mcpHeaders(server.headers);
+  // 自配 Authorization 优先：worker 那边也不会再注入 OAuth token
+  const ownAuth = Object.keys(headers ?? {}).some((name) => name.toLowerCase() === 'authorization');
+  const oauth =
+    server.transport === 'stdio' || ownAuth ? undefined : getMcpOAuthStore().access(server.id);
   return {
     ...(server.id ? { id: server.id } : {}),
     name: server.name,
@@ -1861,6 +1906,7 @@ function toMcpSpawnConfig(server: McpServerEntry): McpServerSpawnConfig {
     ...(server.args?.length ? { args: server.args } : {}),
     ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {}),
     ...(server.url ? { url: server.url } : {}),
+    ...(headers ? { headers } : {}),
     ...(oauth ? { oauth } : {}),
     ...mcpTimeoutsForSpawn(server),
   };
@@ -2008,6 +2054,17 @@ export function pushDisabledWorkflowPresets(): void {
     type: 'set-disabled-workflow-presets',
     ids: parseDisabledWorkflowPresets(readSettingsState()?.disabledWorkflowPresets),
   } satisfies AgentCommand);
+}
+
+/** 内置工具开关变化后推给已开的父会话；只推结果变了的会话 */
+export function pushBuiltinTools(): void {
+  if (!worker || !workerReady) return;
+  for (const change of builtinToolScopes.changes(
+    readSettingsState(),
+    isComputerPlatformSupported()
+  )) {
+    worker.postMessage({ type: 'set-builtin-tools', ...change } satisfies AgentCommand);
+  }
 }
 
 export function resolveWebSearchConfig(): { chain: WebSearchChainEntry[]; configured: boolean } {

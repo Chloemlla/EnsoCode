@@ -5,6 +5,7 @@ import type {
 } from '@shared/types/mentions';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
 import { cn } from '@/lib/utils';
+import { extractTriggerQuery } from '../../plugins/triggers';
 import { extractMentionQuery, fileMentionBasename, type MentionSegment } from './mentionComposer';
 import { extractSkillQuery } from './skillCompletion';
 
@@ -26,6 +27,8 @@ export interface MentionEditorState {
   slashQuery: string | null;
   /** 光标处的 $query(null = 无活动技能 token) */
   skillQuery: string | null;
+  /** 光标处的 #query，给插件补全(null = 无) */
+  pluginQuery: string | null;
 }
 
 export interface MentionEditorHandle {
@@ -38,8 +41,8 @@ export interface MentionEditorHandle {
   insertMention(
     candidate: FileMentionCandidate | ChatMentionCandidate | UiElementMentionCandidate
   ): void;
-  /** 仅移除光标处的 @token、/token 或 $token */
-  consumeToken(prefix: '@' | '/' | '$'): void;
+  /** 仅移除光标处的 @token、/token、$token 或 #token */
+  consumeToken(prefix: '@' | '/' | '$' | '#'): void;
   /** 在光标处插入文件卡片(拖拽文件用,无 token 语义) */
   insertFileChip(path: string, label?: string): void;
   /** 在光标处插入纯文本 */
@@ -354,27 +357,42 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       let mentionQuery: string | null = null;
       let slashQuery: string | null = null;
       let skillQuery: string | null = null;
+      let pluginQuery: string | null = null;
       const caret = caretContext(root);
       if (caret) {
         const before = caret.node.textContent?.slice(0, caret.offset) ?? '';
         mentionQuery = extractMentionQuery(before, before.length);
         if (mentionQuery === null) skillQuery = extractSkillQuery(before, before.length);
+        if (mentionQuery === null && skillQuery === null) pluginQuery = extractTriggerQuery(before);
         // slash 仅当光标在首个文本节点、且 token 从 0 开始
         if (mentionQuery === null && caret.node === root.firstChild && /^\/[^\s]*$/.test(before)) {
           slashQuery = before.slice(1);
         }
       }
-      onStateChange({ plainText, hasMentions, segments, mentionQuery, slashQuery, skillQuery });
+      onStateChange({
+        plainText,
+        hasMentions,
+        segments,
+        mentionQuery,
+        slashQuery,
+        skillQuery,
+        pluginQuery,
+      });
     }, [onStateChange]);
 
-    /** 光标处活动 token 的范围(@、/ 或 $) */
+    /** 光标处活动 token 的范围(@、/、$ 或 #) */
     const activeTokenRange = useCallback(
-      (prefix: '@' | '/' | '$'): { node: Text; start: number; end: number } | null => {
+      (prefix: '@' | '/' | '$' | '#'): { node: Text; start: number; end: number } | null => {
         const root = rootRef.current;
         if (!root) return null;
         const caret = caretContext(root);
         if (!caret) return null;
         const before = caret.node.textContent?.slice(0, caret.offset) ?? '';
+        if (prefix === '#') {
+          const query = extractTriggerQuery(before);
+          if (query === null) return null;
+          return { node: caret.node, start: before.length - query.length - 1, end: caret.offset };
+        }
         if (prefix === '@' || prefix === '$') {
           const query =
             prefix === '@'

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "enso.example.snippets",
+  "name": "Snippets",
+  "version": "1.0.0",
+  "description": "在输入框里用 # 插入常用片段；输入框右侧按钮插入时间戳；消息上的按钮把回复引用进草稿。",
+  "main": "main.mjs",
+  "renderer": "ui.js",
+  "permissions": ["ui.slot", "composer.draft"],
+  "contributes": {
+    "triggers": [{ "symbol": "#", "name": "snippet" }]
+  }
+}

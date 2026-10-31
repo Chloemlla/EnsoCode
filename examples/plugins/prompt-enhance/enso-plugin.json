@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "enso.example.bce",
+  "name": "Prompt Enhance",
+  "version": "1.0.0",
+  "description": "移植自 dsh-bce：输入框左侧按钮经已配置的 Better Context Engine MCP（bce-tool）增量索引当前项目，再把草稿改写成带上下文的提示词，可一键恢复原文。",
+  "main": "main.mjs",
+  "renderer": "ui.js",
+  "permissions": ["ui.slot", "composer.draft", "mcp.call"],
+  "mcp": { "tools": ["search_context", "enhance_prompt"] },
+  "contributes": {
+    "methods": [{ "name": "enhance", "timeoutMs": 120000 }],
+    "configuration": [
+      {
+        "key": "server",
+        "title": "MCP 服务名",
+        "description": "留空时自动选择：名字含 bce 的服务优先。"
+      }
+    ]
+  }
+}

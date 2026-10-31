@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "enso.example.notes",
+  "name": "Notes",
+  "version": "1.0.0",
+  "description": "侧栏里的便签：存在插件自己的数据目录，可一键插入输入框。",
+  "main": "main.mjs",
+  "permissions": ["ui.view", "composer.draft"],
+  "contributes": {
+    "views": [{ "id": "notes", "title": "Notes", "entry": "notes.html" }]
+  }
+}

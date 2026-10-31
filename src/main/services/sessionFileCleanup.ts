@@ -60,6 +60,25 @@ export function removeConversationSessionFiles(
     } catch {}
   }
   removePastedTextFiles(root, id);
+  // 未投递的完成通知：pending-notifications/<encodeURIComponent(sessionId)>.json
+  const pendingRoot = path.join(root, 'pending-notifications');
+  let pendingEntries: string[] = [];
+  try {
+    pendingEntries = readdirSync(pendingRoot);
+  } catch {}
+  for (const entry of pendingEntries) {
+    let sessionId: string;
+    try {
+      sessionId = decodeURIComponent(entry.replace(/\.json$/, ''));
+    } catch {
+      continue;
+    }
+    if (sessionId !== id && !sessionId.startsWith(`${id}::`) && !sessionId.startsWith(`${id}-`))
+      continue;
+    try {
+      rmSync(path.join(pendingRoot, entry), { force: true });
+    } catch {}
+  }
   if (!options.scratchRoot) return;
   const scratchDir = conversationCwd({
     kind: 'scratch',

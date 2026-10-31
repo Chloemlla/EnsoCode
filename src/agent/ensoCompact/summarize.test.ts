@@ -73,6 +73,22 @@ describe('compact summary prompts', () => {
   it('导出固定的进度与下一步摘要段', () => {
     expect(SUMMARY_SECTIONS).toEqual(expect.arrayContaining(['## Progress', '## Next Steps']));
   });
+  it('摘要为续作而写：保留最新请求、审批边界、用户纠正与未答问题，区分用户决定与助手提议', () => {
+    expect(SUMMARY_SECTIONS).toContain('## User Context');
+    for (const prompt of [compactSummaryPrompt(facts(), 'T'), assemblePrompt(facts(), ['c'])]) {
+      for (const text of [
+        '## User Context',
+        'Latest request',
+        'Approvals',
+        'Corrections',
+        'Unanswered questions',
+        'user decisions from assistant proposals',
+        'not a chronological log',
+      ])
+        expect(prompt).toContain(text);
+    }
+    expect(chunkSummaryPrompt(facts(), 'C', 0, 2)).toContain('**User**');
+  });
   it('失败组装嵌入旧摘要而不重复顶层目标段', () => {
     const result = assembleFallback(
       facts({ goal: 'ship' }),

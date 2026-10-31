@@ -25,6 +25,9 @@ const INSTRUCTIONS_MAX = 2000;
 interface Connection {
   client: Client;
   tools: ToolDefinition[];
+  /** 与 tools 同序的 MCP 原始工具名（插件按原始名调用） */
+  rawNames: string[];
+  descriptions: string[];
 }
 
 export interface McpManagerOptions {
@@ -182,6 +185,7 @@ const connectionKey = (server: McpServerSpawnConfig): string =>
     server.args,
     server.env,
     server.url,
+    ...(server.headers ? [server.headers] : []),
   ]);
 
 /** token 指纹：token 明文不入内存索引，只用 hash 前缀判断「Main 是否换了下发的 token」 */
@@ -342,6 +346,68 @@ export class McpManager {
     const server = this.withoutRetired(key, dispatched);
     this.latestOAuth.set(key, server.oauth);
     if (this.connections.has(key)) void this.connectionFor(server);
+  }
+
+  /** 插件经 Main 列宿主 MCP 工具：按原始工具名，单个 server 失败只跳过 */
+  async pluginTools(
+    servers: McpServerSpawnConfig[]
+  ): Promise<{ server: string; name: string; description: string }[]> {
+    const connections = await Promise.all(
+      servers.map((server) => this.connectionFor(this.withLatestOAuth(server)))
+    );
+    return connections.flatMap((connection, index) =>
+      connection
+        ? connection.rawNames.map((name, i) => ({
+            server: servers[index]?.name ?? '',
+            name,
+            description: connection.descriptions[i] ?? '',
+          }))
+        : []
+    );
+  }
+
+  /** 插件经 Main 调宿主 MCP 工具；中止只让本次等待失败，底层请求由 MCP 调用超时兜底 */
+  async callPluginTool(
+    servers: McpServerSpawnConfig[],
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<{ content: string; isError: boolean }> {
+    const server = servers.find((s) => s.name === serverName);
+    if (!server) throw new Error(`MCP server not found: ${serverName}`);
+    const aborted = new Promise<never>((_, reject) => {
+      const fail = () => reject(new Error('MCP call aborted'));
+      if (signal.aborted) fail();
+      else signal.addEventListener('abort', fail, { once: true });
+    });
+    const run = async () => {
+      const connection = await this.connectionFor(this.withLatestOAuth(server));
+      if (!connection) {
+        const failed = this.failedUntil.get(connectionKey(this.withLatestOAuth(server)));
+        throw new Error(
+          `MCP server ${serverName} unavailable: ${failed?.error ?? 'connection failed'}`
+        );
+      }
+      const index = connection.rawNames.indexOf(toolName);
+      const tool = connection.tools[index];
+      if (index < 0 || !tool) throw new Error(`MCP tool not found: ${serverName}/${toolName}`);
+      const result = (await tool.execute(
+        'plugin',
+        args,
+        signal,
+        undefined,
+        undefined as never
+      )) as {
+        content: { type: string; text?: string }[];
+        isError?: boolean;
+      };
+      const content = result.content
+        .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
+        .join('\n');
+      return { content, isError: result.isError === true };
+    };
+    return Promise.race([run(), aborted]);
   }
 
   private withLatestOAuth(server: McpServerSpawnConfig): McpServerSpawnConfig {
@@ -521,6 +587,8 @@ export class McpManager {
       : undefined;
     return {
       client,
+      rawNames: tools.map((tool) => tool.name),
+      descriptions: tools.map((tool) => tool.description ?? ''),
       tools: (() => {
         const names = assignMcpToolNames(
           server.name,

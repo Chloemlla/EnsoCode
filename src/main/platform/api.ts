@@ -38,6 +38,8 @@ export declare const mediaAccess: PlatformMediaAccess;
 export declare const notification: PlatformNotification;
 /** agent worker 入口脚本的绝对路径 */
 export declare const agentWorkerPath: string;
+/** 插件宿主进程入口脚本的绝对路径 */
+export declare const pluginHostPath: string;
 /** 打包资源目录（rtk 等随包二进制） */
 export declare const resourcesPath: string;
 /** 主进程自身的进程指标；服务器上只有 Node 进程 */

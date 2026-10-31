@@ -362,6 +362,9 @@ export const IPC_CHANNELS = {
   // Auto updater
   COMPUTER_CAPABILITIES: 'computer:capabilities',
   COMPUTER_OPEN_PERMISSIONS: 'computer:open-permissions',
+  // computer 按 app 授权名单（只读列出 / 撤销）
+  COMPUTER_ALLOWED_APPS: 'computer:allowed-apps',
+  COMPUTER_REVOKE_APP: 'computer:revoke-app',
   UPDATER_CHECK: 'updater:check',
   UPDATER_DOWNLOAD_UPDATE: 'updater:downloadUpdate',
   UPDATER_QUIT_AND_INSTALL: 'updater:quitAndInstall',
@@ -499,6 +502,28 @@ export const IPC_CHANNELS = {
   BOT_TEMPLATES_GET: 'bots:templates-get',
   BOT_TEMPLATES_SAVE: 'bots:templates-save',
   BOT_TEMPLATES_CHANGED: 'bots:templates-changed',
+  /** Enso 插件：管理操作只能在本机界面或服务端 CLI 上做 */
+  EXTENSION_PLUGINS_LIST: 'extension-plugins:list',
+  EXTENSION_PLUGINS_CHANGED: 'extension-plugins:changed',
+  EXTENSION_PLUGINS_COMMIT: 'extension-plugins:commit',
+  EXTENSION_PLUGINS_DISCARD: 'extension-plugins:discard',
+  EXTENSION_PLUGINS_SET_ENABLED: 'extension-plugins:set-enabled',
+  EXTENSION_PLUGINS_APPROVE_PENDING: 'extension-plugins:approve-pending',
+  EXTENSION_PLUGINS_REJECT_PENDING: 'extension-plugins:reject-pending',
+  EXTENSION_PLUGINS_UNINSTALL: 'extension-plugins:uninstall',
+  /** 桌面专用：弹系统对话框选目录或 zip，远端不可调 */
+  EXTENSION_PLUGINS_PICK_AND_STAGE: 'extension-plugins:pick-and-stage',
+  /** 运行期：界面发起的插件调用（命令、挂件、侧栏页面、补全），算用户手势 */
+  EXTENSION_PLUGINS_CALL: 'extension-plugins:call',
+  /** 运行期：按插件 id + 相对路径取渲染资源，渲染层不传磁盘路径 */
+  EXTENSION_PLUGINS_ASSET: 'extension-plugins:asset',
+  /** Main → 发起窗口：插件读写草稿的请求；只发给发起手势的那个窗口 */
+  EXTENSION_PLUGINS_DRAFT_REQUEST: 'extension-plugins:draft-request',
+  /** 渲染进程对草稿请求的回包，Main 校验回包窗口与发起窗口一致 */
+  EXTENSION_PLUGINS_DRAFT_RESPONSE: 'extension-plugins:draft-response',
+  /** 插件配置项：读（密钥不回显）与写；只在本机界面或服务端 CLI 上做 */
+  EXTENSION_PLUGINS_CONFIG_GET: 'extension-plugins:config-get',
+  EXTENSION_PLUGINS_CONFIG_SET: 'extension-plugins:config-set',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

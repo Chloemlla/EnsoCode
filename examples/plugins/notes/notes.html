@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1f2328;
+        --muted: #6e7781;
+        --line: #d0d7de;
+        --accent: #0969da;
+      }
+      :root[data-theme='dark'] {
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --line: #30363d;
+        --accent: #4493f8;
+      }
+      body {
+        margin: 0;
+        padding: 10px;
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: var(--fg);
+        background: transparent;
+      }
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 64px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        resize: vertical;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+        margin: 6px 0 12px;
+      }
+      button {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 3px 10px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        border-top: 1px solid var(--line);
+        padding: 8px 0;
+      }
+      .text {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .meta span {
+        flex: 1;
+      }
+      .error {
+        color: #cf222e;
+        font-size: 12px;
+      }
+      .empty {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="input" placeholder="写点什么… ⌘/Ctrl+Enter 保存"></textarea>
+    <div class="row"><button id="add" type="button" class="primary">保存</button></div>
+    <div id="error" class="error"></div>
+    <ul id="list"></ul>
+    <script>
+      const input = document.getElementById('input');
+      const list = document.getElementById('list');
+      const errorBox = document.getElementById('error');
+
+      const run = async (method, args) => {
+        errorBox.textContent = '';
+        try {
+          return await window.enso.call(method, args);
+        } catch (error) {
+          errorBox.textContent = error.message;
+          return null;
+        }
+      };
+
+      function render(notes) {
+        list.replaceChildren();
+        if (!notes || notes.length === 0) {
+          const empty = document.createElement('li');
+          empty.className = 'empty';
+          empty.textContent = '还没有便签';
+          list.append(empty);
+          return;
+        }
+        for (const note of notes) {
+          const item = document.createElement('li');
+          const text = document.createElement('div');
+          text.className = 'text';
+          text.textContent = note.text;
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          const time = document.createElement('span');
+          time.textContent = new Date(note.at).toLocaleString();
+          const insert = document.createElement('button');
+          insert.textContent = '插入输入框';
+          insert.onclick = () => run('insert', { id: note.id });
+          const remove = document.createElement('button');
+          remove.textContent = '删除';
+          remove.onclick = async () => render(await run('remove', { id: note.id }));
+          meta.append(time, insert, remove);
+          item.append(text, meta);
+          list.append(item);
+        }
+      }
+
+      async function add() {
+        const text = input.value.trim();
+        if (!text) return;
+        const notes = await run('add', { text });
+        if (notes) {
+          input.value = '';
+          render(notes);
+        }
+      }
+
+      document.getElementById('add').onclick = add;
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          add();
+        }
+      });
+      run('list').then(render);
+    </script>
+  </body>
+</html>

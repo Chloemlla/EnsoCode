@@ -614,8 +614,8 @@ export const zhTranslations: Record<string, string> = {
   'Open sessions keep the previous setting; it applies once you start a new session.':
     '已打开的会话保持原设置，新建会话后生效。',
   'Settings without this tag take effect immediately.': '没有此标签的设置修改后立即生效。',
-  'Turning a tool on applies to new sessions. Turning off Memory or Computer also blocks it in open sessions.':
-    '开启工具只对新会话生效；关闭记忆或电脑操控会同时在已打开的会话中拦截。',
+  'Isolated sandbox switches between script and tool-search mode, so open sessions keep the mode they started with.':
+    '隔离沙箱决定会话用脚本模式还是工具检索模式，已打开的会话保持启动时的模式。',
   'The / menu updates right away, but open sessions keep the skills they loaded. Start a new session to load the change.':
     '输入框的 / 菜单会立即更新，但已打开的会话仍使用原来加载的技能，新建会话后才会加载改动。',
   'The file panel and terminal use the change right away. Agents in open sessions keep the previous connection settings.':
@@ -765,6 +765,14 @@ export const zhTranslations: Record<string, string> = {
   'Remove chat reference': '移除会话引用',
   'Mention suggestions': '提及建议',
   'Command suggestions': '命令建议',
+  'Plugin suggestions': '插件建议',
+  'Plugin is not enabled': '插件未启用',
+  Configure: '配置',
+  'Set (leave blank to keep)': '已设置（留空保持不变）',
+  'Not set': '未设置',
+  'Clear value': '清除',
+  'Saved. New calls use it right away.': '已保存，新的调用立即生效。',
+  'Host MCP tools it may call': '可调用的宿主 MCP 工具',
   'Type @ to choose a file or Agent': '输入 @ 选择文件或 Agent',
   Recipient: '接收者',
   'Remove Agent recipient': '移除 Agent 接收者',
@@ -897,6 +905,7 @@ export const zhTranslations: Record<string, string> = {
   Command: '命令',
   'Arguments (one per line)': '参数（每行一条）',
   'Environment variables (KEY=VALUE, one per line)': '环境变量（KEY=VALUE，每行一条）',
+  'Headers (Name: value, one per line)': '请求头（Name: value，每行一条）',
   URL: 'URL',
   'Connection timeout (seconds)': '连接超时（秒）',
   'Tool call timeout (seconds)': '工具调用超时（秒）',
@@ -1680,9 +1689,18 @@ export const zhTranslations: Record<string, string> = {
     '电脑操控需要屏幕录制才能截窗，需要辅助功能才能读无障碍树或点击。请把这两项授权给 EnsoCode，然后重启应用。',
   'Grant Computer permissions': '授权电脑操控权限',
   'Show permission guide': '打开权限引导',
-  'The agent can screenshot windows and control the mouse and keyboard. Grant Screen Recording and Accessibility to EnsoCode, then restart. Only new sessions pick up the tool.':
-    'Agent 可以截取窗口并控制键鼠。请把屏幕录制和辅助功能授权给 EnsoCode，然后重启。只有新会话会拿到这个工具。',
-  'Computer is ready. Start a new session to use it.': '电脑操控已就绪。开一个新会话即可使用。',
+  'Apps the AI may control': 'AI 可操作的应用',
+  'Show the app being operated': '显示正在操作的应用',
+  'While the AI works in an app in the background, a small floating window shows that app live. Close it any time.':
+    'AI 在后台操作某个应用时，用一个小浮窗实时显示这个应用的画面，可随时关掉。',
+  'The first time the AI clicks or types in an app, EnsoCode asks you. Apps you always allow are listed here; it can then read everything in their windows.':
+    'AI 第一次在某个应用里点击或输入时，EnsoCode 会先询问你。你选择「始终允许」的应用会列在这里，AI 之后可以读取这些应用窗口里的全部内容。',
+  'No apps are always allowed yet.': '还没有始终允许的应用。',
+  Revoke: '撤销',
+  'The agent can screenshot windows and control the mouse and keyboard. Grant Screen Recording and Accessibility to EnsoCode, then restart.':
+    'Agent 可以截取窗口并控制键鼠。请把屏幕录制和辅助功能授权给 EnsoCode，然后重启。',
+  'Computer is ready. Open sessions can use it from their next step.':
+    '电脑操控已就绪。已打开的会话从下一步起即可使用。',
   'Capture: granted': '截屏:已授权',
   'Capture: denied': '截屏:未授权',
   'Input/AX: granted': '键鼠/AX:已授权',

@@ -90,6 +90,45 @@ export function withCodemodeTimeout(code: string): string {
   return `${OPTIONS_PREFIX} ${JSON.stringify({ ...options, timeout_ms: timeout })}${rest}`;
 }
 
+const INPUT_HEADER = /^\/\/ @input:\s*(\S+)\s*<<\s*(['"]?)([A-Za-z_][\w-]*)\2\s*$/;
+const INPUT_NAME = /^[A-Za-z_$][\w$]*$/;
+
+export const CODEMODE_INPUTS_DOC =
+  "\n\nLong verbatim text (file contents, patches, prose) can be passed without escaping in heredoc blocks: a line `// @input: name <<'EOF'`, the raw lines, then a line `EOF`. " +
+  'The script reads it as `inputs.name` (a string). Do not declare your own `inputs`.';
+
+/**
+ * 展开 `// @input: name <<'EOF'` 原文块：块内文本原样进 `inputs`，块所在行替换为空行，
+ * 声明前置到首个代码行同一行，脚本行号不变。无块原样返回。
+ */
+export function withCodemodeInputs(code: string): { code: string } | { error: string } {
+  if (!code.includes('// @input:')) return { code };
+  const lines = code.split('\n');
+  const inputs: Record<string, string> = {};
+  for (let i = 0; i < lines.length; i++) {
+    const header = INPUT_HEADER.exec(lines[i].replace(/\r$/, '').trimStart());
+    if (!header) continue;
+    const [, name, , delimiter] = header;
+    if (!INPUT_NAME.test(name)) return { error: `Invalid @input name "${name}".` };
+    if (Object.hasOwn(inputs, name)) return { error: `Duplicate @input name "${name}".` };
+    const end = lines.findIndex((line, j) => j > i && line.replace(/\r$/, '') === delimiter);
+    if (end === -1) {
+      return { error: `@input "${name}" is missing its closing line "${delimiter}".` };
+    }
+    inputs[name] = lines
+      .slice(i + 1, end)
+      .map((line) => line.replace(/\r$/, ''))
+      .join('\n');
+    for (let j = i; j <= end; j++) lines[j] = '';
+    i = end;
+  }
+  if (Object.keys(inputs).length === 0) return { code };
+  const first = lines[0]?.trimStart().startsWith(OPTIONS_PREFIX) ? 1 : 0;
+  lines[first] =
+    `const inputs = Object.freeze(${JSON.stringify(inputs)});${lines[first] ? ` ${lines[first]}` : ''}`;
+  return { code: lines.join('\n') };
+}
+
 export const isDeferredMcp = (server: McpServerSpawnConfig): boolean =>
   server.loadMode === 'deferred';
 
@@ -204,7 +243,8 @@ export class CodemodeHost {
     const { codemode, deferredServers } = this.options;
     // pi 默认注册为未激活；Enso 按开关直接在注册时激活
     const activating = Object.create(pi) as ExtensionAPI;
-    activating.registerTool = (tool) => pi.registerTool({ ...tool, defaultActive: true });
+    activating.registerTool = (tool) =>
+      pi.registerTool({ ...withInputsDoc(tool), defaultActive: true });
     if (codemode) createCodemodeExtension({ models: false })(activating);
     else createToolSearchExtension()(activating);
 
@@ -231,7 +271,11 @@ export class CodemodeHost {
             reason: 'codemode expects JavaScript, not an apply_patch document. Use apply_patch.',
           };
         }
-        if (code) input.code = withCodemodeTimeout(code);
+        if (code) {
+          const expanded = withCodemodeInputs(code);
+          if ('error' in expanded) return { block: true, reason: expanded.error };
+          input.code = withCodemodeTimeout(expanded.code);
+        }
       }
       if (event.toolName === CODEMODE_TOOL_NAME || event.toolName === TOOL_SEARCH_TOOL_NAME) {
         await this.ensureDeferredTools(pi);
@@ -309,9 +353,15 @@ export function codemodeToolSnapshot(): ToolDefinition {
   let captured: ToolDefinition | undefined;
   createCodemodeExtension({ models: false })({
     registerTool: (tool: ToolDefinition) => {
-      captured = tool;
+      captured = withInputsDoc(tool);
     },
   } as unknown as ExtensionAPI);
   if (!captured) throw new Error('codemode extension did not register its tool');
   return captured;
+}
+
+function withInputsDoc<T extends { name: string; description: string }>(tool: T): T {
+  return tool.name === CODEMODE_TOOL_NAME
+    ? { ...tool, description: `${tool.description}${CODEMODE_INPUTS_DOC}` }
+    : tool;
 }

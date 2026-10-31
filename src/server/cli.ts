@@ -17,6 +17,7 @@ import {
   writeServerConfig,
 } from './config';
 import type { ControlCommand } from './control';
+import { runPluginCommand } from './pluginCli';
 import { serviceUnit } from './service';
 import { type Prompt, runConfigWizard, type SetupSystem } from './setup/wizard';
 import { DEFAULT_WEB_PORT, parseWebConfig } from './web/config';
@@ -30,6 +31,7 @@ export const USAGE = `EnsoCode Server — 无界面宿主，手机 / 浏览器�
   pair                       生成配对二维码与链接，等待设备配对
   devices                    列出已配对设备
   revoke <pairId>            撤销设备
+  plugin <action>            管理 Enso 插件（list / install / enable / disable / approve / reject / uninstall / config）
   status                     运行状态、版本与更新
   update                     检查并安装新版本后重启（npm 全局安装时）
   service install [web 参数]  注册 systemd 服务（开机自启、崩溃拉起）；web 参数写入配置文件
@@ -346,6 +348,23 @@ export async function runCommand(
       await call(ctx.socketPath, { cmd: 'revoke', id: arg });
       console.log(`已撤销 ${arg}`);
       return true;
+    case 'plugin': {
+      const prompt = process.stdin.isTTY ? terminalPrompt() : null;
+      await runPluginCommand(arg ? [arg, ...rest] : [], {
+        call: (command) =>
+          request(ctx.socketPath, command).catch(() =>
+            fail(
+              'enso-server 没在运行：先 `enso-server start`，或 `enso-server service install` 后台常驻'
+            )
+          ),
+        confirm: async (question) => /^y(es)?$/i.test(((await prompt?.ask(question)) ?? '').trim()),
+        ask: async (question) => (await prompt?.ask(question)) ?? '',
+        log: (line) => console.log(line),
+        cwd: process.cwd(),
+        interactive: prompt !== null,
+      }).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+      return true;
+    }
     case 'status':
       await status(ctx.socketPath);
       return true;

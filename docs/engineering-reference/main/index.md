@@ -67,3 +67,4 @@ debounce 中的会话元数据会丢，表现得很像“持久化 bug”。
 - [windows.md](windows.md) —— 多窗口、无边框标题栏、macOS 红绿灯
 - [settings-persistence.md](settings-persistence.md) —— settings.json 缓存、防抖、原子写、多窗口广播
 - [native-modules.md](native-modules.md) —— better-sqlite3 / level 与 pnpm 构建脚本
+- [agent-harness.md](agent-harness.md) —— 外部 Agent Harness（Droid 1.0）设计对照与可借鉴项

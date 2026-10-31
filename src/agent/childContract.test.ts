@@ -36,6 +36,15 @@ describe('child contract system prompt', () => {
     );
     expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/Do NOT write report\/summary\/findings\/analysis/);
   });
+
+  it('合同约束范围、重读、卡住汇报与自足的最终回复', () => {
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/authoritative/);
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/fresh before editing/);
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/only the assigned work, then stop/);
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/concrete gap/);
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/self-sufficient/);
+    expect(SUBAGENT_CONTRACT_PROMPT).toMatch(/absolute paths/);
+  });
 });
 
 describe('tailSystemPromptSection', () => {
