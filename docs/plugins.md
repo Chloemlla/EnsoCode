@@ -7,7 +7,8 @@
 ## 安装与管理
 
 - 桌面：设置 → 插件 → Enso plugins → 安装目录。
-- 服务端：`enso-server plugin install <目录或 zip>`，确认后 `enso-server plugin enable <id>`。
+- 桌面也可以粘贴链接安装：http(s) 的 zip，或 GitHub 仓库（`https://github.com/owner/repo`；仓库里的子目录用 `.../tree/分支/子目录`）。本机下载 zip 后复制进数据目录，不保留原地址。私有仓库不支持。
+- 服务端：`enso-server plugin install <目录、zip 或 http(s) 链接>`，确认后 `enso-server plugin enable <id>`。
 - 新装的插件默认停用，需要手动启用。
 - 同 id 再装一次按更新处理。权限没有变大就直接换新版；权限变大则旧版继续运行，需要 `enso-server plugin approve <id>`（或设置页同意）才切到新版，`reject` 则留在旧版。
 - 10 分钟内非预期崩溃 3 次，插件会被自动停用，状态变成 `crashed`，重新启用即可。
@@ -38,6 +39,16 @@
     "triggers": [{ "symbol": "#", "name": "snippets" }],
     "skills": ["skills/bar-chart"],
     "mcpServers": [],
+    "presets": [
+      {
+        "id": "review",
+        "name": "Review",
+        "skills": ["skills/bar-chart"],
+        "mcpServers": [],
+        "instruction": "prompts/instruction.md",
+        "systemPrompt": "prompts/role.md"
+      }
+    ],
     "methods": [{ "name": "enhance", "timeoutMs": 120000 }],
     "configuration": [{ "key": "token", "title": "Token", "secret": true }]
   }
@@ -87,6 +98,7 @@
 - `triggers`：`{ symbol, name }`。`symbol` 只能是 `#`，`@` 和 `/` 归 Enso 自己用。
 - `skills`：skill 目录的相对路径，随插件下发给新会话。
 - `mcpServers`：`{ name, command, args, env }`。服务名会加 `plugin-<id>-` 前缀。`command`、`args`、`env` 里的 `${ENSO_PLUGIN_ROOT}` 会展开成插件安装目录，`env` 只能写字面量。
+- `presets`：`{ id, name, skills, mcpServers, instruction?, systemPrompt?, systemPromptTail?, boostPrompt?, refusalRetry?, refusalRetryPrompt? }`，最多 20 个。`skills` 和 `mcpServers` 只能引用本插件已经声明的 skill 目录和 MCP 服务名。指令和角色、真尾、boost、推脱补发都是插件目录里的 Markdown 文件。启用后出现在预设列表里，只读，不能在设置里改。会话 id 是 `plugin:<插件 id>:<预设 id>`。
 - `methods`：`{ name, timeoutMs }`，给 `renderer.handle` 注册的方法声明更长的超时，1000 到 120000 毫秒的整数。没声明的方法 2 秒超时。
 - `configuration`：`{ key, title, description?, secret? }`，最多 20 项。`key` 匹配 `^[A-Za-z][A-Za-z0-9_]{0,31}$`，`title` 最长 60 字符。用户在设置页或命令行里填写，插件用 `enso.config.get()` 读取。
 
@@ -231,9 +243,11 @@ export function onLoad(enso) {
 
 ## skill 与 MCP
 
-`skills` 列出的目录会在新建会话时并入 skill 搜索路径，排在内置 skill 和 Claude 插件之后。Bot 会话不并入。
+`skills` 列出的目录会在新建会话时并入 skill 搜索路径，排在内置 skill 和 Claude 插件之后。Bot 会话不并入。被某个 `presets` 点名的 skill 或 MCP 不再进入每个会话，只在选中那个预设时并入；没被任何预设点名的仍随插件启用进入每个新会话。
 
 `mcpServers` 在会话启动时拉起，生命周期和审批沿用 Enso 现有的 MCP 实现。
+
+选中插件预设时，用它的指令文件代替当前启用的全局指令；没写 `instruction` 就不注入指令。角色描述、真尾、boost 和推脱补发按文件内容下发，缺的字段沿用默认。用户自己启用的 skill 和 MCP 仍然保留。插件停用或预设被删掉之后，已经选中的会话在启动时会失败，需要改回别的预设。
 
 ## 当前未接通
 

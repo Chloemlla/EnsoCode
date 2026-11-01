@@ -1654,6 +1654,7 @@ export const zhTranslations: Record<string, string> = {
     '此项目带有 pi 扩展代码，会以你的权限运行，已阻止加载。只有信任这个仓库时才加载。',
   'Trust and load': '信任并加载',
   Plugins: '插件',
+  'Install from URL': '从链接安装',
   Commands: '命令',
   '{{count}} enabled': '已启用 {{count}} 个',
   'No supported components': '没有可用组件',
@@ -1985,6 +1986,8 @@ export const zhTranslations: Record<string, string> = {
     '这是 pi 开头的角色段落。自定义预设只替换这段，工具、使用准则和项目上下文均保持不变。',
   Global: '全局',
   'Set as default': '设为默认',
+  'Plugin preset unavailable': '插件预设不可用',
+  'Bundled by {{plugin}}': '由插件 {{plugin}} 提供',
   Default: '默认',
   None: '不注入',
   'Injection bundles of skills, MCP servers and instruction files, chosen per conversation':
