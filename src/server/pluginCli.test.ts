@@ -17,6 +17,11 @@ const preview: ExtensionPluginInstallPreview = {
   netDomains: ['api.example.com'],
   mcpServers: [],
   mcpTools: [],
+  env: ['GITHUB_TOKEN'],
+  interop: ['enso.example.github'],
+  resident: true,
+  events: [{ event: 'session_start', mode: 'observe', failClosed: false }],
+  schedules: [{ id: 'sweep', intervalSeconds: 3600 }],
   tools: [{ name: 'greet', description: 'greet someone' }],
   hasRenderer: false,
   warnings: ['w1'],
@@ -26,8 +31,18 @@ const preview: ExtensionPluginInstallPreview = {
 function deps(answer = true) {
   const out: string[] = [];
   const call = vi.fn(async (command: Record<string, unknown>) => {
-    if (command.action === 'stage') return { ok: true, preview };
-    if (command.action === 'list') return { ok: true, plugins: [] };
+    if (command.action === 'stage' || command.action === 'restage') return { ok: true, preview };
+    if (command.action === 'list')
+      return { ok: true, plugins: [], notice: { discarded: ['old.one'], unreadable: true } };
+    if (command.action === 'check')
+      return {
+        ok: true,
+        checked: 2,
+        available: 1,
+        failed: 0,
+        plugins: [{ id: 'demo.hello', name: 'Hello', version: '1.0.0', availableVersion: '1.2.0' }],
+      };
+    if (command.action === 'logs') return { ok: true, text: 'line-a\nline-b\n' };
     if (command.action === 'config-get')
       return {
         ok: true,
@@ -60,10 +75,71 @@ function deps(answer = true) {
 }
 
 describe('enso-server plugin', () => {
+  it('check：列出有新版本的插件和更新命令', async () => {
+    const { call, out, deps: d } = deps();
+    await runPluginCommand(['check'], d);
+    expect(call).toHaveBeenLastCalledWith({ cmd: 'plugin', action: 'check' });
+    const text = out.join('\n');
+    expect(text).toContain('demo.hello 1.0.0 → 1.2.0');
+    expect(text).toContain('enso-server plugin reload demo.hello');
+  });
+
+  it('列表里带上可更新版本', () => {
+    const summary = {
+      id: 'demo.hello',
+      name: 'Hello',
+      version: '1.0.0',
+      state: 'enabled',
+      availableVersion: '1.2.0',
+    } as ExtensionPluginSummary;
+    expect(formatPluginList([summary])).toContain('有新版本 1.2.0');
+  });
+
+  it('reload：从记录的来源重新暂存，确认后提交', async () => {
+    const { call, deps: d } = deps(true);
+    await runPluginCommand(['reload', 'demo.hello'], d);
+    expect(call).toHaveBeenNthCalledWith(1, { cmd: 'plugin', action: 'restage', id: 'demo.hello' });
+    expect(call).toHaveBeenNthCalledWith(2, { cmd: 'plugin', action: 'commit', token: 't1' });
+  });
+
+  it('logs：打印插件日志末尾', async () => {
+    const { call, out, deps: d } = deps();
+    await runPluginCommand(['logs', 'demo.hello'], d);
+    expect(call).toHaveBeenLastCalledWith({ cmd: 'plugin', action: 'logs', id: 'demo.hello' });
+    expect(out.join('\n')).toContain('line-b');
+  });
+
+  it('列表里带上最近错误', () => {
+    const summary = {
+      id: 'demo.hello',
+      name: 'Hello',
+      version: '1.0.0',
+      state: 'crashed',
+      lastError: { at: 1, message: 'Error: kaput\n    at x' },
+    } as ExtensionPluginSummary;
+    expect(formatPluginList([summary])).toContain('Error: kaput');
+    expect(formatPluginList([summary])).not.toContain('at x');
+  });
+
   it('安装预览列出权限、网络域名、工具与警告', () => {
     const text = formatInstallPreview(preview);
     for (const part of ['demo.hello', '1.0.0', 'agent.tool', 'api.example.com', 'greet', 'w1'])
       expect(text).toContain(part);
+    expect(text).toContain('GITHUB_TOKEN');
+    expect(text).toContain('常驻：是');
+    expect(text).toContain('session_start');
+    expect(text).toContain('sweep');
+  });
+
+  it('list 提示登记表问题，notice-dismiss 确认后不再提示', async () => {
+    const { out, call, deps: d } = deps();
+    await runPluginCommand(['list'], d);
+    const text = out.join('\n');
+    expect(text).toContain('old.one');
+    expect(text).toContain('registry.json.unreadable');
+    expect(text).toContain('notice-dismiss');
+    await runPluginCommand(['notice-dismiss'], d);
+    expect(call).toHaveBeenLastCalledWith({ cmd: 'plugin', action: 'notice-dismiss' });
   });
 
   it('列表为空时给出提示', () => {
@@ -122,6 +198,8 @@ describe('enso-server plugin', () => {
     await runPluginCommand(['disable', 'demo.hello'], d);
     expect(call).toHaveBeenLastCalledWith({ cmd: 'plugin', action: 'disable', id: 'demo.hello' });
     await expect(runPluginCommand(['enable'], d)).rejects.toThrow('用法');
+    await runPluginCommand(['inject-anywhere', 'a.b'], d);
+    expect(call).toHaveBeenLastCalledWith({ cmd: 'plugin', action: 'inject-anywhere', id: 'a.b' });
     await expect(runPluginCommand(['bogus'], d)).rejects.toThrow('用法');
   });
 

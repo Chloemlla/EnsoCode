@@ -64,10 +64,34 @@ describe('parseControlCommand', () => {
     expect(parse({ cmd: 'plugin', action: 'enable' })).toEqual({
       error: 'plugin enable requires id',
     });
+    for (const action of ['inject-anywhere', 'inject-current'])
+      expect(parse({ cmd: 'plugin', action, id: 'a.b' })).toEqual({
+        cmd: 'plugin',
+        action,
+        id: 'a.b',
+      });
+    expect(parse({ cmd: 'plugin', action: 'notice-dismiss' })).toEqual({
+      cmd: 'plugin',
+      action: 'notice-dismiss',
+    });
     expect(parse({ cmd: 'plugin', action: 'explode' })).toEqual({ error: 'unknown plugin action' });
   });
 
   it('插件配置命令：config-get 要 id，config-set 的值只能是字符串或 null', () => {
+    expect(parseControlCommand(JSON.stringify({ cmd: 'plugin', action: 'check' }))).toEqual({
+      cmd: 'plugin',
+      action: 'check',
+    });
+    expect(
+      parseControlCommand(JSON.stringify({ cmd: 'plugin', action: 'restage', id: 'a.b' }))
+    ).toEqual({ cmd: 'plugin', action: 'restage', id: 'a.b' });
+    expect(
+      parseControlCommand(JSON.stringify({ cmd: 'plugin', action: 'logs', id: 'a.b' }))
+    ).toEqual({
+      cmd: 'plugin',
+      action: 'logs',
+      id: 'a.b',
+    });
     const parse = (v: unknown) => parseControlCommand(JSON.stringify(v));
     expect(parse({ cmd: 'plugin', action: 'config-get', id: 'a.b' })).toEqual({
       cmd: 'plugin',

@@ -199,7 +199,14 @@ describe('executeMemoryOp', () => {
         if (kind === 'query') return Float32Array.from([0.9, 0, 0.44]);
         const t = text.toLowerCase();
         if (t.includes('kafka')) return Float32Array.from([0, 0, 1]);
-        if (t.includes('redis')) return Float32Array.from([1, t.includes('cluster') ? 0.1 : 0, 0]);
+        // replica 略偏，使两路通道都把 primary 排第一，避免 RRF 并列。
+        // kafka 只以约 0.003 的 MMR 值压过 replica；调 MMR_LAMBDA、RRF_K 或衰减参数后若此用例翻转，先量余量
+        if (t.includes('redis'))
+          return Float32Array.from([
+            1,
+            t.includes('cluster') ? 0.1 : t.includes('replica') ? 0.01 : 0,
+            0,
+          ]);
         return Float32Array.from([0, 1, 0]);
       },
     };

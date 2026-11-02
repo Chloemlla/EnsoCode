@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { SHELL_LIMITS } from '@shared/shellLimits';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type BackgroundTaskManager, withBackground } from '../backgroundTasks';
 import { ForegroundDetachedError } from '../foregroundCommand';
@@ -925,6 +926,7 @@ if (process.argv[2] === 'gain') process.stdout.write(JSON.stringify({ summary: {
       | { command: string; finalize?: () => Promise<unknown>; details?: unknown }
       | undefined;
     const manager = {
+      limits: SHELL_LIMITS,
       start(_sessionId: string, command: string, _cwd: string, options?: typeof launch) {
         launch = { command, ...options };
         return 'task-1';
@@ -976,6 +978,7 @@ if (process.argv[2] === 'gain') process.stdout.write(JSON.stringify({ summary: {
       | { command: string; finalize?: () => Promise<unknown>; details?: unknown }
       | undefined;
     const manager = {
+      limits: SHELL_LIMITS,
       start(_sessionId: string, command: string, _cwd: string, options?: typeof launch) {
         launch = { command, ...options };
         return 'task-1';

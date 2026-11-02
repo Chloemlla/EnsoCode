@@ -1,4 +1,7 @@
 import { parseApprovalReviewRecord } from '@shared/approvalReviewRecord';
+import { pluginArtifactsFromToolDetails } from '@shared/extensionPlugins/artifacts';
+import { PLUGIN_MESSAGE_TYPE, parsePluginMessageSource } from '@shared/extensionPlugins/protocol';
+import { parsePluginToolName } from '@shared/extensionPlugins/toolName';
 import { parseMaskReport } from '@shared/privacyMask/report';
 import { parseRtkToolStats } from '@shared/rtk';
 import {
@@ -6,6 +9,7 @@ import {
   type ProjectedCodemodeCall,
   type ProjectedMessage,
   type ProjectedPart,
+  parseShellFailure,
   type TodoItem,
 } from '@shared/types/agent';
 import {
@@ -170,6 +174,10 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
     const privacyMask = parseMaskReport(value.privacyMask);
     if (privacyMask) projected.privacyMask = privacyMask;
   }
+  if (value.role === 'custom' && value.customType === PLUGIN_MESSAGE_TYPE) {
+    const source = parsePluginMessageSource(value.details);
+    if (source) projected.pluginSource = source;
+  }
   if (value.role === 'compactionSummary') {
     // pi 的 compaction 消息用 summary 字段而不是 content
     if (typeof value.summary === 'string') {
@@ -198,6 +206,22 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
     isBackgroundTaskId(value.details.backgroundTaskId)
   ) {
     projected.backgroundTaskId = value.details.backgroundTaskId;
+  }
+  if (
+    value.role === 'toolResult' &&
+    (value.toolName === 'bash' || value.toolName === 'powershell') &&
+    isRecord(value.details)
+  ) {
+    const shellFailure = parseShellFailure(value.details.shellFailure);
+    if (shellFailure) projected.shellFailure = shellFailure;
+  }
+  if (
+    value.role === 'toolResult' &&
+    typeof value.toolName === 'string' &&
+    parsePluginToolName(value.toolName)
+  ) {
+    const artifacts = pluginArtifactsFromToolDetails(value.details);
+    if (artifacts.length > 0) projected.pluginArtifacts = artifacts;
   }
   if (value.role === 'toolResult' && isRecord(value.details)) {
     const approvalReview = parseApprovalReviewRecord(value.details.approvalReview);

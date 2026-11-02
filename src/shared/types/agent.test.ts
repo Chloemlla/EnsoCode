@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { resolveShellLimits } from '../shellLimits';
 import {
   parseAgentCommand,
   parseAgentControlToolRequest,
@@ -747,6 +748,22 @@ describe('parent/child commands', () => {
     expect(parseAgentCommand({ type: 'set-max-active-coworkers' })).toBeNull();
   });
 
+  it('set-shell-limits 只接受 resolveShellLimits 规范化后的完整值', () => {
+    const limits = resolveShellLimits({ taskWaitMaxMs: 5000 });
+    expect(parseAgentCommand({ type: 'set-shell-limits', limits })).toEqual({
+      type: 'set-shell-limits',
+      limits,
+    });
+    expect(
+      parseAgentCommand({ type: 'set-shell-limits', limits: { ...limits, taskWaitMaxMs: -1 } })
+    ).toBeNull();
+    expect(
+      parseAgentCommand({ type: 'set-shell-limits', limits: { taskWaitMaxMs: 5000 } })
+    ).toBeNull();
+    expect(parseAgentCommand({ type: 'set-shell-limits', limits: null })).toBeNull();
+    expect(parseAgentCommand({ type: 'set-shell-limits', limits, extra: 1 })).toBeNull();
+  });
+
   it('set-auto-retry-limit 接受 -1（无限）到 100 的整数', () => {
     expect(parseAgentCommand({ type: 'set-auto-retry-limit', limit: -1 })).toEqual({
       type: 'set-auto-retry-limit',
@@ -1076,6 +1093,17 @@ describe('parent/child commands', () => {
     ).toBeNull();
     const moved = { ...event, message: { ...event.message, backgroundTaskId: 'task-1-abc' } };
     expect(parseAgentWorkerEvent(moved)).toEqual(moved);
+    const failed = {
+      ...event,
+      message: { ...event.message, shellFailure: { kind: 'auth_required', retryable: false } },
+    };
+    expect(parseAgentWorkerEvent(failed)).toEqual(failed);
+    expect(
+      parseAgentWorkerEvent({
+        ...event,
+        message: { ...event.message, shellFailure: { kind: 'nope', retryable: false } },
+      })
+    ).toBeNull();
     const reviewed = {
       ...event,
       message: {
@@ -2058,6 +2086,15 @@ describe('generation lifecycle/events', () => {
     expect(parseAgentCommand({ ...base, mode: undefined })).toBeNull();
   });
 
+  it('set-approval-mode 的无人值守开关：布尔可选，非布尔与未知键整体拒绝', () => {
+    const base = { type: 'set-approval-mode', identity: parent, mode: 'supervised' };
+    expect(parseAgentCommand({ ...base, autoReject: true })).toEqual({ ...base, autoReject: true });
+    expect(parseAgentCommand(base)).toEqual(base);
+    expect(parseAgentCommand({ ...base, autoReject: 'yes' })).toBeNull();
+    expect(parseAgentCommand({ ...base, autoReject: 1 })).toBeNull();
+    expect(parseAgentCommand({ ...base, bogus: true })).toBeNull();
+  });
+
   it('pin-sessions 只接受字符串数组（脏项整体拒绝）', () => {
     expect(parseAgentCommand({ type: 'pin-sessions', sessionIds: [] })).toEqual({
       type: 'pin-sessions',
@@ -2693,6 +2730,30 @@ describe('受保护动作底线协议', () => {
     expect(
       parseAgentWorkerEvent({ ...event, request: { ...event.request, protected: 'nuke' } })
     ).toBeNull();
+  });
+
+  it('approval-request 的 guard 只接受非空 ruleId / reason；spawn-parent 的 dcgPath 须为非空字符串', () => {
+    const event = {
+      type: 'approval-request',
+      identity: parent,
+      seq: 1,
+      request: {
+        requestId: 'r1',
+        tool: 'bash',
+        kind: 'command',
+        summary: 'git reset --hard',
+        protected: 'destructive',
+        guard: { ruleId: 'core.git:reset-hard', reason: 'destroys changes' },
+      },
+    };
+    expect(parseAgentWorkerEvent(event)).toEqual(event);
+    for (const guard of [{ ruleId: '', reason: 'x' }, { ruleId: 'r' }, 'x']) {
+      expect(parseAgentWorkerEvent({ ...event, request: { ...event.request, guard } })).toBeNull();
+    }
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
+    expect(parseAgentCommand({ ...base, dcgPath: '/data/dcg/dcg' })).not.toBeNull();
+    expect(parseAgentCommand({ ...base, dcgPath: '' })).toBeNull();
+    expect(parseAgentCommand({ ...base, dcgPath: 1 })).toBeNull();
   });
 
   it('spawn-parent 携真尾 / boost / 拒答正文：非空字符串通过,脏值拒绝', () => {

@@ -42,6 +42,7 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   rtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   computerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
+  computerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   memoryEmbeddingModel: excluded('Memory embedding model choice is a desktop preference.'),
   memoryEmbeddingAutoDownload: excluded('Memory model download policy is a device preference.'),
   memoryModelIdleMinutes: excluded('Memory model idle unloading policy is a device preference.'),
@@ -54,6 +55,7 @@ export const SETTINGS_DATA_COVERAGE = {
   protectedActionsInCode: excluded(
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
+  dcgEnabled: excluded('dcg command guard depends on a device-local binary.'),
   botModeEnabled: excluded('Experimental Bot mode toggle; device-local, not an Enso capability.'),
   scratchSessionsEnabled: excluded(
     'Experimental temporary chats toggle; device-local, not an Enso capability.'
@@ -103,6 +105,7 @@ export const SETTINGS_DATA_COVERAGE = {
   maxActiveCoworkers: excluded('Desktop coworker capacity preference; not an Enso capability.'),
   autoRetryLimit: excluded('Desktop transient-error retry preference; not an Enso capability.'),
   privacyMasking: excluded('Device-local privacy masking rules; must not be agent-editable.'),
+  shell: excluded('Device-local command time limits and rollback switch; edited in settings.json.'),
   sshTimeoutSeconds: excluded('Device SSH network preference; not an Enso capability.'),
   generationStallTimeoutMin: excluded('Renderer stall-abort preference; not an Enso capability.'),
   autoArchiveIdleDays: excluded('Renderer sidebar archive preference; not an Enso capability.'),
@@ -186,9 +189,11 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setRtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   setComputerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
+  setComputerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   setProtectedActionsInCode: excluded(
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
+  setDcgEnabled: excluded('dcg command guard depends on a device-local binary.'),
   setMemoryEmbeddingModel: excluded('Memory embedding model choice is a desktop preference.'),
   setMemoryEmbeddingAutoDownload: excluded('Memory model download policy is a device preference.'),
   setMemoryModelIdleMinutes: excluded('Memory model idle unloading policy is a device preference.'),
@@ -785,6 +790,9 @@ export const IPC_PRODUCT_COVERAGE = {
   MEMORY_CHAT_MODEL_CANCEL: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHAT_MODEL_DELETE: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHAT_MODEL_PROGRESS: excluded('Memory desktop UI; not an Enso capability.'),
+  DCG_STATUS: excluded('dcg install settings UI; not an Enso capability.'),
+  DCG_INSTALL: excluded('dcg install settings UI; not an Enso capability.'),
+  DCG_UNINSTALL: excluded('dcg install settings UI; not an Enso capability.'),
   SPEECH_STATUS: excluded('Voice input settings UI; not an Enso capability.'),
   SPEECH_DOWNLOAD: excluded('Voice input settings UI; not an Enso capability.'),
   SPEECH_CANCEL: excluded('Voice input settings UI; not an Enso capability.'),
@@ -880,21 +888,41 @@ export const IPC_PRODUCT_COVERAGE = {
   COMPUTER_ALLOWED_APPS: surfaces('coding-tools.computer'),
   COMPUTER_REVOKE_APP: surfaces('coding-tools.computer'),
   EXTENSION_PLUGINS_LIST: excluded('Enso 插件管理页：列出已安装插件。'),
+  EXTENSION_PLUGINS_REGISTRY_NOTICE: excluded(
+    'Enso 插件管理页：登记表丢弃或读取失败的待确认提示。'
+  ),
+  EXTENSION_PLUGINS_DISMISS_REGISTRY_NOTICE: excluded('Enso 插件管理页：确认登记表提示。'),
   EXTENSION_PLUGINS_CHANGED: excluded('Enso 插件登记变更的跨窗口通知。'),
   EXTENSION_PLUGINS_COMMIT: excluded('Enso 插件安装确认：用户同意权限后落盘。'),
   EXTENSION_PLUGINS_DISCARD: excluded('Enso 插件安装取消：丢弃暂存。'),
   EXTENSION_PLUGINS_SET_ENABLED: excluded('Enso 插件启用 / 停用开关。'),
+  EXTENSION_PLUGINS_SET_CROSS_SESSION_INJECT: excluded('Enso 插件跨会话注入消息的授权开关。'),
   EXTENSION_PLUGINS_APPROVE_PENDING: excluded('Enso 插件更新扩大授权后的重新同意。'),
   EXTENSION_PLUGINS_REJECT_PENDING: excluded('Enso 插件更新扩大授权后的拒绝，保留旧版本。'),
   EXTENSION_PLUGINS_UNINSTALL: excluded('Enso 插件卸载。'),
   EXTENSION_PLUGINS_PICK_AND_STAGE: excluded('桌面专用：弹系统对话框选择插件目录或 zip。'),
   EXTENSION_PLUGINS_STAGE_URL: excluded('Enso 插件从 http(s) zip 链接暂存，渲染层只传链接。'),
+  EXTENSION_PLUGINS_CHECK_UPDATES: excluded('Enso 插件检查更新，只拉 GitHub 清单比较版本。'),
+  EXTENSION_PLUGINS_MARKET_LIST: excluded('Enso 插件市场列表：签名索引与本机安装状态。'),
+  EXTENSION_PLUGINS_MARKET_STAGE: excluded('Enso 插件从市场暂存，渲染层只传 id 与版本。'),
+  EXTENSION_PLUGINS_MARKET_SET_MIRROR: excluded('Enso 插件市场国内镜像开关。'),
+  EXTENSION_PLUGINS_RESTAGE: excluded('Enso 插件从记录的安装来源重新暂存，渲染层只传 id。'),
   EXTENSION_PLUGINS_CALL: excluded('Enso 插件运行期调用：命令、挂件、侧栏页面与补全。'),
   EXTENSION_PLUGINS_ASSET: excluded('Enso 插件渲染资源读取：只收插件 id 与相对路径。'),
   EXTENSION_PLUGINS_DRAFT_REQUEST: excluded('Enso 插件草稿请求：Main 推给发起手势的窗口。'),
   EXTENSION_PLUGINS_DRAFT_RESPONSE: excluded('Enso 插件草稿请求的回包。'),
   EXTENSION_PLUGINS_CONFIG_GET: excluded('Enso 插件配置项读取：密钥只报告是否已设置。'),
   EXTENSION_PLUGINS_CONFIG_SET: excluded('Enso 插件配置项写入，Main 私有文件保存。'),
+  EXTENSION_PLUGINS_LOGS: excluded('Enso 插件进程日志末尾，只给本机界面。'),
+  EXTENSION_PLUGINS_ARTIFACTS_LIST: excluded('Enso 插件产出文件列表，渲染层只传插件 id。'),
+  EXTENSION_PLUGINS_ARTIFACT_READ: excluded('Enso 插件产出预览，只收产出 id，路径由 Main 推导。'),
+  EXTENSION_PLUGINS_ARTIFACT_DELETE: excluded('Enso 插件产出删除，只收产出 id。'),
+  EXTENSION_PLUGINS_ARTIFACT_SAVE: excluded(
+    '桌面专用：把产出另存到用户选择的位置，渲染层只传产出 id。'
+  ),
+  EXTENSION_PLUGINS_VIEW_STATE_GET: excluded('Enso 插件侧栏页面状态读取，替代 localStorage。'),
+  EXTENSION_PLUGINS_VIEW_STATE_SET: excluded('Enso 插件侧栏页面状态写入，按插件 id 存在 Main。'),
+  EXTENSION_PLUGINS_PICK_PATH: excluded('桌面专用：插件配置项选择文件或目录。'),
 } satisfies Record<keyof typeof IPC_CHANNELS, CoverageDisposition>;
 
 export const AUTHORITATIVE_COVERAGE_SOURCES = {

@@ -1,26 +1,58 @@
+import type { PluginArtifactInfo } from '@shared/extensionPlugins/protocol';
 import type {
   ExtensionPluginConfigField,
   ExtensionPluginInstallPreview,
   ExtensionPluginSummary,
+  RegistryNotice,
 } from '@shared/extensionPlugins/types';
 import type { InstalledPluginInfo, PluginComponentSummary, PluginEntry } from '@shared/types';
-import { ChevronRight, Puzzle, RefreshCw, Settings2, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Files,
+  FileText,
+  Puzzle,
+  RefreshCw,
+  RotateCw,
+  Settings2,
+  Trash2,
+} from 'lucide-react';
 import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogPanel,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
+import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { PluginArtifactList } from '@/plugins/artifactViews';
+import { coerceConfigValue } from '@/plugins/configValue';
+import { pluginPermissionLabel } from '@/plugins/pluginMeta';
 import { useSettingsStore } from '@/stores/settings';
 import { NewSessionBadge } from './NewSessionBadge';
+import { PluginMarket } from './PluginMarket';
+import { RegistryNoticeBanner } from './RegistryNoticeBanner';
 
 /** 插件配置表单：密钥不回显，留空保持不变 */
-function ExtensionPluginConfigForm({ pluginId }: { pluginId: string }) {
+function ExtensionPluginConfigForm({ pluginId, plain }: { pluginId: string; plain?: boolean }) {
   const { t } = useI18n();
   const [fields, setFields] = React.useState<ExtensionPluginConfigField[]>([]);
-  const [draft, setDraft] = React.useState<Record<string, string | null>>({});
+  const [draft, setDraft] = React.useState<Record<string, string | boolean | null>>({});
   const [message, setMessage] = React.useState<{ error: boolean; text: string } | null>(null);
 
   const load = React.useCallback(async () => {
@@ -35,12 +67,17 @@ function ExtensionPluginConfigForm({ pluginId }: { pluginId: string }) {
   }, [load]);
 
   const save = async () => {
-    const patch = Object.fromEntries(
-      Object.entries(draft).filter(([key, value]) => {
-        const field = fields.find((f) => f.key === key);
-        return value === null || !(field?.secret && value === '');
-      })
-    );
+    const patch: Record<string, string | number | boolean | null> = {};
+    for (const [key, value] of Object.entries(draft)) {
+      const field = fields.find((item) => item.key === key);
+      if (!field || (field.secret && value === '')) continue;
+      const coerced = coerceConfigValue(field, value);
+      if (!coerced.ok) {
+        setMessage({ error: true, text: `${field.title}：${coerced.error}` });
+        return;
+      }
+      patch[key] = coerced.value;
+    }
     const result = await window.electronAPI.extensionPlugins.configSet(pluginId, patch);
     setMessage(
       result.ok
@@ -50,8 +87,24 @@ function ExtensionPluginConfigForm({ pluginId }: { pluginId: string }) {
     if (result.ok) await load();
   };
 
+  const textOf = (field: ExtensionPluginConfigField) => {
+    const drafted = draft[field.key];
+    if (typeof drafted === 'string') return drafted;
+    if (drafted === null) return '';
+    if (field.secret) return '';
+    return field.value ?? (field.default !== undefined ? String(field.default) : '');
+  };
+
+  const checkedOf = (field: ExtensionPluginConfigField) => {
+    const drafted = draft[field.key];
+    if (typeof drafted === 'boolean') return drafted;
+    const raw =
+      field.value ?? (typeof field.default === 'boolean' ? String(field.default) : 'false');
+    return raw === 'true';
+  };
+
   return (
-    <div className="space-y-2 rounded-md border border-border p-3">
+    <div className={cn('space-y-2', plain ? '' : 'rounded-md border border-border p-3')}>
       {fields.map((field) => (
         <div key={field.key} className="space-y-1">
           <p className="text-sm">
@@ -61,28 +114,77 @@ function ExtensionPluginConfigForm({ pluginId }: { pluginId: string }) {
           {field.description && (
             <p className="text-muted-foreground text-xs">{field.description}</p>
           )}
-          <div className="flex items-center gap-2">
-            <Input
-              type={field.secret ? 'password' : 'text'}
-              autoComplete="off"
-              value={draft[field.key] ?? (field.secret ? '' : (field.value ?? ''))}
-              placeholder={
-                field.secret && field.set ? t('Set (leave blank to keep)') : t('Not set')
-              }
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, [field.key]: event.target.value }))
-              }
+          {field.secret ||
+          field.type === 'string' ||
+          field.type === 'number' ||
+          field.type === 'path' ? (
+            <div className="flex items-center gap-2">
+              <Input
+                type={field.secret ? 'password' : field.type === 'number' ? 'number' : 'text'}
+                autoComplete="off"
+                inputMode={field.type === 'number' ? 'decimal' : undefined}
+                min={field.type === 'number' ? field.min : undefined}
+                max={field.type === 'number' ? field.max : undefined}
+                value={textOf(field)}
+                placeholder={
+                  field.secret && field.set ? t('Set (leave blank to keep)') : t('Not set')
+                }
+                onChange={(event) =>
+                  setDraft((prev) => ({ ...prev, [field.key]: event.target.value }))
+                }
+              />
+              {field.type === 'path' && !field.secret && !window.electronAPI.remote && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    void window.electronAPI.extensionPlugins
+                      .pickPath(field.pathKind === 'directory' ? 'directory' : 'file')
+                      .then((result) => {
+                        if (result.ok && 'path' in result)
+                          setDraft((prev) => ({ ...prev, [field.key]: result.path }));
+                      });
+                  }}
+                >
+                  {field.pathKind === 'directory' ? '选择文件夹' : '选择文件'}
+                </Button>
+              )}
+              {field.set && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setDraft((prev) => ({ ...prev, [field.key]: null }))}
+                >
+                  {t('Clear value')}
+                </Button>
+              )}
+            </div>
+          ) : field.type === 'boolean' ? (
+            <Switch
+              checked={checkedOf(field)}
+              onCheckedChange={(checked) => setDraft((prev) => ({ ...prev, [field.key]: checked }))}
             />
-            {field.set && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setDraft((prev) => ({ ...prev, [field.key]: null }))}
-              >
-                {t('Clear value')}
-              </Button>
-            )}
-          </div>
+          ) : (
+            <Select
+              items={Object.fromEntries((field.options ?? []).map((option) => [option, option]))}
+              value={textOf(field)}
+              onValueChange={(value) => {
+                if (typeof value === 'string')
+                  setDraft((prev) => ({ ...prev, [field.key]: value }));
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="请选择" />
+              </SelectTrigger>
+              <SelectPopup>
+                {(field.options ?? []).map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {option}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          )}
         </div>
       ))}
       {message && (
@@ -98,15 +200,181 @@ function ExtensionPluginConfigForm({ pluginId }: { pluginId: string }) {
 }
 
 /** Enso 自己的插件：安装时展示权限并征得同意，更新扩大授权要重新同意 */
+function ExtensionPluginLogs({ pluginId, plain }: { pluginId: string; plain?: boolean }) {
+  const { t } = useI18n();
+  const [text, setText] = React.useState<string | null>(null);
+  const load = React.useCallback(async () => {
+    const result = await window.electronAPI.extensionPlugins.logs(pluginId);
+    setText(result.ok ? result.text : result.error);
+  }, [pluginId]);
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+  return (
+    <div className={cn('space-y-2', plain ? '' : 'rounded-md border border-border p-3')}>
+      <div className="flex items-center justify-between">
+        <p className="text-sm">{t('Plugin logs')}</p>
+        <Button size="icon" variant="ghost" aria-label={t('Refresh')} onClick={() => void load()}>
+          <RefreshCw className="size-4" />
+        </Button>
+      </div>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-muted-foreground text-xs">
+        {text === null ? '' : text || t('No logs yet')}
+      </pre>
+    </div>
+  );
+}
+
+function PermissionLines({ permissions }: { permissions: readonly string[] }) {
+  if (permissions.length === 0) return <p className="text-muted-foreground text-xs">无特殊权限</p>;
+  return (
+    <ul className="space-y-0.5">
+      {permissions.map((permission) => (
+        <li key={permission} className="text-xs">
+          <span className="font-mono text-muted-foreground">{permission}</span>
+          <span className="ml-2">{pluginPermissionLabel(permission)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function scheduleLine(item: {
+  id: string;
+  intervalSeconds: number;
+  lastRunAt?: number;
+  lastError?: string;
+}) {
+  const every =
+    item.intervalSeconds >= 60 && item.intervalSeconds % 60 === 0
+      ? `每 ${item.intervalSeconds / 60} 分钟`
+      : `每 ${item.intervalSeconds} 秒`;
+  const last = item.lastRunAt ? ` · 最近 ${new Date(item.lastRunAt).toLocaleString()}` : '';
+  return `${item.id} · ${every}${last}${item.lastError ? ` · ${item.lastError}` : ''}`;
+}
+
+/** 折叠状态下的一行摘要：不展开也能看出这个插件要了多少能力 */
+function capabilitySummary(plugin: ExtensionPluginSummary): string {
+  return [
+    plugin.permissions.length > 0 ? `${plugin.permissions.length} 项权限` : '',
+    (plugin.events?.length ?? 0) > 0 ? `${plugin.events?.length} 个事件` : '',
+    (plugin.schedules?.length ?? 0) > 0 ? `${plugin.schedules?.length} 个定时任务` : '',
+    plugin.crossSessionInject !== undefined ? '跨会话投递开关' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function PluginCapabilityBlock({
+  permissions,
+  env,
+  interop,
+  resident,
+  running,
+  events,
+  schedules,
+}: {
+  permissions: readonly string[];
+  env?: readonly string[];
+  interop?: readonly string[];
+  resident?: boolean;
+  running?: boolean;
+  events?: readonly { event: string; mode: string; failClosed?: boolean }[];
+  schedules?: readonly {
+    id: string;
+    intervalSeconds: number;
+    lastRunAt?: number;
+    lastError?: string;
+  }[];
+}) {
+  return (
+    <div className="space-y-1">
+      <PermissionLines permissions={permissions} />
+      {resident && (
+        <p className="text-xs">
+          常驻进程
+          {running === undefined ? '' : running ? '：运行中' : '：未运行'}
+        </p>
+      )}
+      {(env?.length ?? 0) > 0 && (
+        <p className="text-xs">
+          环境变量：<span className="font-mono">{env?.join(', ')}</span>
+        </p>
+      )}
+      {(interop?.length ?? 0) > 0 && (
+        <p className="text-xs">
+          可调用插件：<span className="font-mono">{interop?.join(', ')}</span>
+        </p>
+      )}
+      {events?.map((event) => (
+        <p key={`${event.event}:${event.mode}`} className="text-xs">
+          事件 {event.event} · {event.mode === 'intercept' ? '拦截' : '观察'}
+          {event.failClosed ? ' · 失败即拒绝' : ''}
+        </p>
+      ))}
+      {schedules?.map((item) => (
+        <p key={item.id} className="text-xs">
+          定时任务 {scheduleLine(item)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function ExtensionPluginArtifacts({ pluginId, plain }: { pluginId: string; plain?: boolean }) {
+  const [items, setItems] = React.useState<PluginArtifactInfo[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const load = React.useCallback(async () => {
+    const result = await window.electronAPI.extensionPlugins.artifactsList(pluginId);
+    if (result.ok) {
+      setItems(result.artifacts);
+      setError(null);
+    } else setError(result.error);
+  }, [pluginId]);
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+  return (
+    <div className={cn('space-y-2', plain ? '' : 'rounded-md border border-border p-3')}>
+      <div className="flex items-center justify-between">
+        <p className="text-sm">产出文件</p>
+        <Button size="icon" variant="ghost" aria-label="刷新" onClick={() => void load()}>
+          <RefreshCw className="size-4" />
+        </Button>
+      </div>
+      {error && <p className="text-destructive text-xs">{error}</p>}
+      <PluginArtifactList
+        artifacts={items ?? []}
+        onDelete={(id) => {
+          void window.electronAPI.extensionPlugins.artifactDelete(id).then((result) => {
+            if (result.ok) void load();
+            else setError(result.error ?? '删除失败');
+          });
+        }}
+      />
+    </div>
+  );
+}
+
+/** Enso 自己的插件：安装时展示权限并征得同意，更新扩大授权要重新同意 */
 function ExtensionPluginsSection() {
   const { t } = useI18n();
   const [plugins, setPlugins] = React.useState<ExtensionPluginSummary[]>([]);
   const [preview, setPreview] = React.useState<ExtensionPluginInstallPreview | null>(null);
-  const [configuring, setConfiguring] = React.useState<string | null>(null);
+  const [panel, setPanel] = React.useState<{
+    kind: 'config' | 'logs' | 'artifacts';
+    pluginId: string;
+    pluginName: string;
+  } | null>(null);
+  const [expanded, setExpanded] = React.useState<readonly string[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [url, setUrl] = React.useState('');
   const [downloading, setDownloading] = React.useState(false);
+  const [checking, setChecking] = React.useState(false);
+  const [checkResult, setCheckResult] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<RegistryNotice | null>(null);
+  const [marketOpen, setMarketOpen] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -118,6 +386,10 @@ function ExtensionPluginsSection() {
 
   React.useEffect(() => {
     void refresh();
+    void window.electronAPI.extensionPlugins
+      .registryNotice()
+      .then(setNotice)
+      .catch(() => setNotice(null));
     return window.electronAPI.extensionPlugins.onChanged(() => void refresh());
   }, [refresh]);
 
@@ -144,12 +416,51 @@ function ExtensionPluginsSection() {
     else setPreview(result.preview);
   };
 
+  const restage = async (id: string, fromMarket = false) => {
+    setError(null);
+    if (preview) void window.electronAPI.extensionPlugins.discard(preview.token);
+    setPreview(null);
+    setDownloading(true);
+    const api = window.electronAPI.extensionPlugins;
+    const result = await (fromMarket ? api.marketStage(id) : api.restage(id)).finally(() => {
+      setDownloading(false);
+    });
+    if (!result.ok) setError(result.error);
+    else setPreview(result.preview);
+  };
+
+  const checkUpdates = async () => {
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const result = await window.electronAPI.extensionPlugins.checkUpdates();
+      setCheckResult(
+        result.checked === 0
+          ? t('No plugins installed from GitHub to check')
+          : result.available > 0
+            ? t('{{count}} update(s) available', { count: result.available })
+            : t('All plugins are up to date')
+      );
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const commit = async () => {
     if (!preview) return;
     setBusy(true);
     const result = await window.electronAPI.extensionPlugins.commit(preview.token);
     setBusy(false);
-    if (!result.ok) setError(result.error ?? t('Install failed'));
+    if (!result.ok) {
+      setError(result.error ?? t('Install failed'));
+    } else {
+      setUrl('');
+      addToast({
+        type: 'success',
+        title: t('{{name}} installed', { name: preview.name }),
+        description: t('Turn it on in the list below to use it.'),
+      });
+    }
     setPreview(null);
   };
 
@@ -173,6 +484,21 @@ function ExtensionPluginsSection() {
           </p>
         </div>
         <div className="flex gap-2">
+          {plugins.some(
+            (plugin) => plugin.source?.kind === 'url' || plugin.source?.kind === 'market'
+          ) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={checking}
+              onClick={() => void checkUpdates()}
+            >
+              {checking ? <Spinner /> : t('Check for updates')}
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={() => setMarketOpen(true)}>
+            {t('Marketplace')}
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -210,6 +536,36 @@ function ExtensionPluginsSection() {
         </Button>
       </div>
       {error && <p className="text-destructive text-sm">{error}</p>}
+      <Dialog open={marketOpen} onOpenChange={setMarketOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{t('Marketplace')}</DialogTitle>
+          </DialogHeader>
+          <DialogPanel>
+            <PluginMarket
+              disabled={busy || downloading}
+              installedKey={plugins.map((p) => `${p.id}@${p.version}`).join(',')}
+              onInstall={(id) => {
+                setMarketOpen(false);
+                void restage(id, true);
+              }}
+            />
+          </DialogPanel>
+        </DialogContent>
+      </Dialog>
+      {checkResult && <p className="text-muted-foreground text-sm">{checkResult}</p>}
+      {notice && (
+        <RegistryNoticeBanner
+          notice={notice}
+          remote={Boolean(window.electronAPI.remote)}
+          onDismiss={() =>
+            void window.electronAPI.extensionPlugins
+              .dismissRegistryNotice()
+              .then(() => setNotice(null))
+              .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+          }
+        />
+      )}
       {preview && (
         <div className="space-y-2 rounded-md border border-border p-3">
           <p className="font-medium text-sm">
@@ -220,11 +576,14 @@ function ExtensionPluginsSection() {
               </span>
             )}
           </p>
-          <p className="text-muted-foreground text-xs">
-            {preview.permissions.length > 0
-              ? preview.permissions.join(' · ')
-              : t('No special permissions')}
-          </p>
+          <PluginCapabilityBlock
+            permissions={preview.permissions}
+            env={preview.env}
+            interop={preview.interop}
+            resident={preview.resident}
+            events={preview.events}
+            schedules={preview.schedules}
+          />
           {preview.mcpServers.map((server) => (
             <p key={server.name} className="font-mono text-xs">
               {server.command} {server.args.join(' ')}
@@ -263,7 +622,35 @@ function ExtensionPluginsSection() {
                     {t('Stopped after crashes')}
                   </Badge>
                 )}
+                {plugin.resident && (
+                  <Badge variant={plugin.running ? 'secondary' : 'outline'} className="ml-2">
+                    {plugin.running ? '常驻运行中' : '常驻未运行'}
+                  </Badge>
+                )}
               </p>
+              {plugin.availableVersion && (
+                <p className="text-xs">
+                  {t('Version {{version}} is available', { version: plugin.availableVersion })}
+                  <button
+                    type="button"
+                    className="ml-2 underline"
+                    disabled={busy || downloading}
+                    onClick={() => void restage(plugin.id)}
+                  >
+                    {t('Update')}
+                  </button>
+                </p>
+              )}
+              {plugin.updateCheckError && (
+                <p className="text-muted-foreground text-xs">
+                  {t('Update check failed: {{reason}}', { reason: plugin.updateCheckError })}
+                </p>
+              )}
+              {plugin.lastError && (
+                <p className="line-clamp-2 break-all font-mono text-destructive text-xs">
+                  {plugin.lastError.message}
+                </p>
+              )}
               {plugin.pendingVersion && (
                 <p className="text-muted-foreground text-xs">
                   {t('{{version}} asks for more and is waiting for approval', {
@@ -291,13 +678,53 @@ function ExtensionPluginsSection() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {plugin.source && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  disabled={busy || downloading}
+                  aria-label={t('Reinstall from source')}
+                  title={
+                    plugin.source.kind === 'url'
+                      ? `${t('Reinstall from source')}: ${plugin.source.url}`
+                      : t('Reinstall from source')
+                  }
+                  onClick={() => void restage(plugin.id)}
+                >
+                  <RotateCw className="size-4" />
+                </Button>
+              )}
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="产出文件"
+                title="产出文件"
+                onClick={() =>
+                  setPanel({ kind: 'artifacts', pluginId: plugin.id, pluginName: plugin.name })
+                }
+              >
+                <Files className="size-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label={t('Plugin logs')}
+                title={t('Plugin logs')}
+                onClick={() =>
+                  setPanel({ kind: 'logs', pluginId: plugin.id, pluginName: plugin.name })
+                }
+              >
+                <FileText className="size-4" />
+              </Button>
               {plugin.configurable && (
                 <Button
                   size="icon"
                   variant="ghost"
                   aria-label={t('Configure')}
                   title={t('Configure')}
-                  onClick={() => setConfiguring((id) => (id === plugin.id ? null : plugin.id))}
+                  onClick={() =>
+                    setPanel({ kind: 'config', pluginId: plugin.id, pluginName: plugin.name })
+                  }
                 >
                   <Settings2 className="size-4" />
                 </Button>
@@ -317,9 +744,99 @@ function ExtensionPluginsSection() {
               </Button>
             </div>
           </div>
-          {configuring === plugin.id && <ExtensionPluginConfigForm pluginId={plugin.id} />}
+          <button
+            type="button"
+            aria-expanded={expanded.includes(plugin.id)}
+            className={cn(
+              'flex items-center gap-1 self-start text-xs',
+              'text-muted-foreground hover:text-foreground'
+            )}
+            onClick={() =>
+              setExpanded((prev) =>
+                prev.includes(plugin.id)
+                  ? prev.filter((id) => id !== plugin.id)
+                  : [...prev, plugin.id]
+              )
+            }
+          >
+            {expanded.includes(plugin.id) ? (
+              <ChevronDown className="size-3" />
+            ) : (
+              <ChevronRight className="size-3" />
+            )}
+            {expanded.includes(plugin.id) ? '收起详情' : '详情'}
+            {!expanded.includes(plugin.id) && capabilitySummary(plugin) && (
+              <span className="ml-1 opacity-70">{capabilitySummary(plugin)}</span>
+            )}
+          </button>
+          {expanded.includes(plugin.id) && (
+            <div className="space-y-2">
+              {plugin.interceptBreakers?.map((breaker) => (
+                <p key={breaker.event} className="text-amber-600 text-xs dark:text-amber-400">
+                  {breaker.event} 检查连续失败，临时放行到{' '}
+                  {new Date(breaker.until).toLocaleTimeString()}
+                </p>
+              ))}
+              <PluginCapabilityBlock
+                permissions={plugin.permissions}
+                resident={plugin.resident}
+                running={plugin.running}
+                events={plugin.events}
+                schedules={plugin.schedules}
+              />
+              {plugin.crossSessionInject !== undefined && (
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span>
+                    <span className="block">允许向任意运行中的会话发送消息</span>
+                    <span className="block text-muted-foreground">
+                      关闭时只能发到发起调用的会话；开启后定时任务、常驻进程也能向其他项目和窗口的会话发消息并触发执行
+                    </span>
+                  </span>
+                  <Switch
+                    aria-label="允许向任意运行中的会话发送消息"
+                    checked={plugin.crossSessionInject}
+                    onCheckedChange={(allowed) =>
+                      void window.electronAPI.extensionPlugins.setCrossSessionInject(
+                        plugin.id,
+                        allowed
+                      )
+                    }
+                  />
+                </div>
+              )}
+              {plugin.pendingPermissions && plugin.pendingPermissions.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-muted-foreground text-xs">待同意的权限</p>
+                  <PermissionLines permissions={plugin.pendingPermissions} />
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ))}
+      <Dialog open={panel !== null} onOpenChange={(open) => !open && setPanel(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {panel?.kind === 'config'
+                ? t('Configure')
+                : panel?.kind === 'logs'
+                  ? t('Plugin logs')
+                  : '产出文件'}
+              {panel ? ` · ${panel.pluginName}` : ''}
+            </DialogTitle>
+          </DialogHeader>
+          <DialogPanel className="space-y-4">
+            {panel?.kind === 'config' && (
+              <ExtensionPluginConfigForm pluginId={panel.pluginId} plain />
+            )}
+            {panel?.kind === 'logs' && <ExtensionPluginLogs pluginId={panel.pluginId} plain />}
+            {panel?.kind === 'artifacts' && (
+              <ExtensionPluginArtifacts pluginId={panel.pluginId} plain />
+            )}
+          </DialogPanel>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

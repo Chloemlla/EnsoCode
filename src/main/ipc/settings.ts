@@ -73,6 +73,7 @@ export const SETTINGS_STATE_FIELDS = [
   'exploreFoldEnabled',
   'rtkEnabled',
   'computerPreview',
+  'computerAllowAllApps',
   'editMode',
   'hashlineEditEnabled',
   'compactStrategy',
@@ -97,6 +98,7 @@ export const SETTINGS_STATE_FIELDS = [
   'maxActiveCoworkers',
   'autoRetryLimit',
   'privacyMasking',
+  'shell',
   'sshTimeoutSeconds',
   'generationStallTimeoutMin',
   'autoArchiveIdleDays',
@@ -159,6 +161,7 @@ export const SETTINGS_STATE_FIELDS = [
   'botRouteClassifier',
   'botAssistantModel',
   'protectedActionsInCode',
+  'dcgEnabled',
   'voiceInputDevice',
   'voiceModel',
   'voiceCorrectionEnabled',
@@ -182,9 +185,11 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'approvalAutoManage',
   'approvalAllowThreshold',
   'privacyMasking',
+  'shell',
   'virtualModels',
   'windowsLocalShell',
   'computerPreview',
+  'computerAllowAllApps',
   'terminalShell',
   'worktreeRoot',
   'fileOpenRules',
@@ -212,6 +217,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'botRouteClassifier',
   'botAssistantModel',
   'protectedActionsInCode',
+  'dcgEnabled',
   'voiceInputDevice',
   'voiceModel',
   'voiceCorrectionEnabled',
@@ -479,6 +485,7 @@ function scheduleWrite(
           pushMaxActiveCoworkers,
           pushAutoRetryLimit,
           pushPrivacyMasking,
+          pushShellLimits,
           pushDisabledWorkflowPresets,
           pushBuiltinTools,
           pushModelDirectory,
@@ -489,6 +496,7 @@ function scheduleWrite(
           pushMaxActiveCoworkers();
           pushAutoRetryLimit();
           pushPrivacyMasking();
+          pushShellLimits();
           pushDisabledWorkflowPresets();
           pushBuiltinTools();
           pushModelDirectory();
@@ -607,6 +615,7 @@ export function commitSettingsTransaction(
         pushMaxActiveCoworkers,
         pushAutoRetryLimit,
         pushPrivacyMasking,
+        pushShellLimits,
         pushDisabledWorkflowPresets,
         pushBuiltinTools,
         pushModelDirectory,
@@ -617,6 +626,7 @@ export function commitSettingsTransaction(
         pushMaxActiveCoworkers();
         pushAutoRetryLimit();
         pushPrivacyMasking();
+        pushShellLimits();
         pushDisabledWorkflowPresets();
         pushBuiltinTools();
         pushModelDirectory();

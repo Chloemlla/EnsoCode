@@ -29,8 +29,24 @@ import {
 } from '../capabilities/types';
 import { type CompactStrategy, parseCompactStrategy } from '../compactStrategy';
 import type { DefaultModelRef } from '../defaultModel';
+import { parsePluginArtifactInfo } from '../extensionPlugins/artifacts';
+import type {
+  InterceptPayload,
+  PluginEventName,
+  PluginInterceptEvent,
+} from '../extensionPlugins/events';
+import { isChildInterceptEvent, isInterceptEvent, PLUGIN_EVENTS } from '../extensionPlugins/events';
+import {
+  PLUGIN_INJECT_MAX_CHARS,
+  PLUGIN_PROGRESS_MAX_CHARS,
+  type PluginAgentSource,
+  type PluginArtifactInfo,
+  type PluginMessageSource,
+  parsePluginAgentSource,
+  parsePluginMessageSource,
+} from '../extensionPlugins/protocol';
 import { parsePluginToolName } from '../extensionPlugins/toolName';
-import type { PluginToolDescriptor } from '../extensionPlugins/types';
+import type { PluginEventPlan, PluginToolDescriptor } from '../extensionPlugins/types';
 import { parseMaxActiveCoworkers } from '../maxActiveCoworkers';
 import {
   isCodexAccountKey,
@@ -55,6 +71,7 @@ import { type PrivacyMaskSettings, parsePrivacyMaskSettings } from '../privacyMa
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
 import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsage';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
+import { resolveShellLimits, type ShellLimits } from '../shellLimits';
 import { parseSmartCompactMode, type SmartCompactMode } from '../smartCompactMode';
 import { parseSshTimeoutSeconds } from '../sshTimeout';
 import {
@@ -209,6 +226,7 @@ export const PROTECTED_ACTION_CATEGORIES = [
   'payment',
   'deploy',
   'secret',
+  'destructive',
 ] as const;
 export type ProtectedActionCategory = (typeof PROTECTED_ACTION_CATEGORIES)[number];
 
@@ -261,6 +279,8 @@ export interface ApprovalRequestInfo {
   expiresAt?: number;
   /** 托管判定无效（超时 / 出错 / 缺字段）退回人工的原因 */
   reviewFallback?: ApprovalReviewFallback;
+  /** dcg 命令守卫命中的规则与原因 */
+  guard?: { ruleId: string; reason: string };
 }
 
 /** agent 向用户的提问（ask_user 工具,阻塞等答复） */
@@ -285,6 +305,54 @@ export interface BackgroundTaskInfo {
   tail: string;
   startedAt: number;
   exitCode?: number;
+}
+
+export { SHELL_QUIET_MS } from '../shellLimits';
+
+/** 命令结果的结构化失败分类（工具结果 details.shellFailure；渲染层徽章与模型提示同源） */
+export const SHELL_FAILURE_KINDS = [
+  'exit_nonzero',
+  'deadline',
+  'stopped_by_user',
+  'tty_required',
+  'auth_required',
+  'not_found',
+  'not_executable',
+  'binary_output',
+  'output_truncated',
+] as const;
+
+export type ShellFailureKind = (typeof SHELL_FAILURE_KINDS)[number];
+
+export interface ShellFailure {
+  kind: ShellFailureKind;
+  /** false：原样重跑不会有不同结果（需要终端 / 认证 / 用户已停止） */
+  retryable: boolean;
+  exitCode?: number;
+}
+
+/** bash / powershell 工具结果 details 中由本应用写入的可选字段 */
+export interface ShellDetails {
+  backgroundTaskId?: string;
+  shellFailure?: ShellFailure;
+}
+
+export function parseShellFailure(value: unknown): ShellFailure | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!(SHELL_FAILURE_KINDS as readonly unknown[]).includes(record.kind)) return null;
+  if (typeof record.retryable !== 'boolean') return null;
+  if (
+    record.exitCode !== undefined &&
+    !(typeof record.exitCode === 'number' && Number.isInteger(record.exitCode))
+  ) {
+    return null;
+  }
+  return {
+    kind: record.kind as ShellFailureKind,
+    retryable: record.retryable,
+    ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode as number }),
+  };
 }
 
 /** 下发 worker 的 subagent 类型配置（model 由 main 补全 apiKey） */
@@ -466,9 +534,9 @@ export interface AgentControlWaitRequest {
   timeoutMs?: number;
 }
 
-/** 子代理阻塞等待：不写时限按默认，写了也不超过上限（与 task_output 阻塞上限一致） */
-export const AGENT_WAIT_DEFAULT_MS = 5 * 60 * 1000;
-export const AGENT_WAIT_MAX_MS = 10 * 60 * 1000;
+/** 子代理阻塞等待：不写时限按默认，写了也不超过上限。完成会自动通知，等待只用于下一步离不开结果时 */
+export const AGENT_WAIT_DEFAULT_MS = 30 * 1000;
+export const AGENT_WAIT_MAX_MS = 5 * 60 * 1000;
 
 export interface AgentControlListRequest {
   context: AgentControlContext;
@@ -1146,8 +1214,12 @@ export type AgentCommand =
       pluginHooks?: PluginHookSpawn[];
       /** 已启用 Enso 插件的 agent 工具；执行经 plugin-tool-invoke 回到 Main */
       pluginTools?: PluginToolDescriptor[];
+      /** 已启用插件的事件订阅；Bot 会话不下发 */
+      pluginEvents?: PluginEventPlan;
       instruction?: { path: string; content: string };
       approvalMode?: ApprovalMode;
+      /** 无人值守：需要人工确认的动作直接拒绝，不等真人 */
+      autoRejectApprovals?: boolean;
       /** 助手代审模型；仅 approvalMode=assistant 时有意义 */
       approvalReviewer?: SpawnModelConfig;
       /** 代审改用分类器（System One）；与 approvalReviewer 互斥 */
@@ -1163,6 +1235,8 @@ export type AgentCommand =
       windowsLocalShell?: WindowsLocalShell;
       /** 内置 RTK；未设置时默认启用。 */
       rtkEnabled?: boolean;
+      /** dcg 命令守卫二进制；Main 仅在启用且已安装时下发 */
+      dcgPath?: string;
       /** ssh 项目：工具执行切到远端。Main 从项目权威派生，不信任 renderer。 */
       remote?: AgentRemoteConfig;
       /** 旁路会话：首条 prompt 前缀注入，消费一次 */
@@ -1266,7 +1340,13 @@ export type AgentCommand =
     }
   /** Main 记录的子代理 Run 结束且模型尚未知情：投给父会话（空闲唤醒、忙时搭车） */
   | { type: 'agent-notify'; identity: SessionIdentity; text: string; urgent: boolean }
-  | { type: 'set-approval-mode'; identity: SessionIdentity; mode: ApprovalMode }
+  | {
+      type: 'set-approval-mode';
+      identity: SessionIdentity;
+      mode: ApprovalMode;
+      /** 省略表示不改动无人值守开关 */
+      autoReject?: boolean;
+    }
   | { type: 'set-plan-mode'; identity: SessionIdentity; active: boolean }
   | {
       type: 'plan-respond';
@@ -1297,6 +1377,8 @@ export type AgentCommand =
   | { type: 'set-web-search-config'; chain: WebSearchChainEntry[]; configured?: boolean }
   /** 隐私脱敏配置：worker 全局生效，不重启会话 */
   | { type: 'set-privacy-masking'; settings: PrivacyMaskSettings }
+  /** 全局 settings.shell 经 resolveShellLimits 规范化后的命令时限；worker 级后台任务管理器共用 */
+  | { type: 'set-shell-limits'; limits: ShellLimits }
   /** 统一模型目录 + 自定义 provider 全量注册信息。载荷在 worker 内再收窄。 */
   | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
@@ -1343,6 +1425,29 @@ export type AgentCommand =
       ok: boolean;
       result?: unknown;
       error?: string;
+    }
+  | {
+      type: 'plugin-intercept-result';
+      identity: SessionIdentity;
+      requestId: string;
+      ok: boolean;
+      result?: unknown;
+      error?: string;
+    }
+  | {
+      type: 'plugin-tool-progress';
+      identity: SessionIdentity;
+      requestId: string;
+      text: string;
+    }
+  | {
+      type: 'plugin-inject';
+      identity: SessionIdentity;
+      pluginId: string;
+      pluginName: string;
+      text: string;
+      deliverAs: 'steer' | 'followUp' | 'nextTurn';
+      triggerTurn: boolean;
     }
   | {
       type: 'rewind';
@@ -1500,6 +1605,12 @@ export interface ProjectedMessage {
   rtk?: RtkToolStats;
   /** 前台命令被移交为后台任务时的任务 id */
   backgroundTaskId?: string;
+  /** bash / powershell 结果的结构化失败分类 */
+  shellFailure?: ShellFailure;
+  /** 插件工具写出的产出文件 */
+  pluginArtifacts?: PluginArtifactInfo[];
+  /** 插件注入的消息（role=custom）的来源 */
+  pluginSource?: PluginMessageSource;
   role: string;
   content: ProjectedPart[];
   /** toolResult 消息附带 */
@@ -1606,6 +1717,8 @@ export interface AgentSpawnRequest {
   disabledTools?: string[];
   presetId?: string;
   approvalMode?: ApprovalMode;
+  /** 无人值守：新会话一起带上该开关，避免恢复后悄悄变回「等人确认」 */
+  autoRejectApprovals?: boolean;
   planMode?: boolean;
 }
 
@@ -1689,7 +1802,9 @@ export type RendererAgentEvent =
               | 'computer-invoke'
               | 'computer-cancel'
               | 'plugin-tool-invoke'
-              | 'plugin-tool-cancel';
+              | 'plugin-tool-cancel'
+              | 'plugin-event'
+              | 'plugin-intercept';
           }
         >
       | { type: 'session-reloaded' }
@@ -1700,6 +1815,13 @@ export type RendererAgentEvent =
 export function workspaceBranchChangedNote(branch: string): string {
   return `<workspace-branch-changed>\nThe current workspace is now on Git branch ${JSON.stringify(branch)}. The directory is unchanged, but file contents may differ. Re-read relevant files before relying on earlier observations or edits. This is background information only, not a task or goal.\n</workspace-branch-changed>`;
 }
+
+/** worker 等待 Main 回复的插件事件；载荷类型按事件绑定 */
+export type PluginInterceptRequest =
+  | { event: 'before_compact'; payload: { reason: string } }
+  | {
+      [E in PluginInterceptEvent]: { event: E; payload: InterceptPayload[E] };
+    }[PluginInterceptEvent];
 
 export type WorkspaceLockEvent =
   | { type: 'workspace-lock-result'; requestId: string; ok: boolean; error?: string }
@@ -1937,8 +2059,27 @@ export type AgentWorkerEvent =
       requestId: string;
       toolName: string;
       args: unknown;
+      /** 子会话发起时的来源；主会话不带 */
+      agent?: PluginAgentSource;
     }
   | { type: 'plugin-tool-cancel'; identity: SessionIdentity; seq: number; requestId: string }
+  | {
+      type: 'plugin-event';
+      identity: SessionIdentity;
+      seq: number;
+      event: PluginEventName;
+      data: unknown;
+      /** 子会话事件的来源；子会话只通知，before_compact 也走这里且不等待 */
+      agent?: PluginAgentSource;
+    }
+  | ({
+      type: 'plugin-intercept';
+      identity: SessionIdentity;
+      seq: number;
+      requestId: string;
+      /** 子会话的拦截来源；只允许 tool_call，Main 按子会话预算处理 */
+      agent?: PluginAgentSource;
+    } & PluginInterceptRequest)
   | { type: 'task-started'; identity: SessionIdentity; seq: number; task: BackgroundTaskInfo }
   | {
       /** 标题总结完成：无 identity/seq（不属于任何 worker 会话），渲染层按 conversationId 写回 */
@@ -2049,11 +2190,16 @@ function isPluginToolList(value: unknown): value is PluginToolDescriptor[] {
   for (const tool of value) {
     if (
       !isRecord(tool) ||
-      !hasExactKeys(tool, ['name', 'description', 'parameters', 'pluginId']) ||
+      !hasOnlyKeys(tool, ['name', 'description', 'parameters', 'pluginId', 'timeoutMs']) ||
+      tool.name === undefined ||
+      tool.description === undefined ||
+      tool.parameters === undefined ||
+      tool.pluginId === undefined ||
       typeof tool.name !== 'string' ||
       typeof tool.description !== 'string' ||
       tool.description.length > 1024 ||
       !isRecord(tool.parameters) ||
+      (tool.timeoutMs !== undefined && !isPluginToolTimeout(tool.timeoutMs)) ||
       parsePluginToolName(tool.name)?.pluginId !== tool.pluginId ||
       names.has(tool.name)
     )
@@ -2062,6 +2208,107 @@ function isPluginToolList(value: unknown): value is PluginToolDescriptor[] {
   }
   return true;
 }
+
+const isPluginToolTimeout = (value: unknown): boolean =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 1000 && value <= 600_000;
+
+const isBoundedText = (value: unknown, max: number): value is string =>
+  typeof value === 'string' && value.length <= max;
+
+function isPluginEventPlan(value: unknown): value is PluginEventPlan {
+  if (!isRecord(value) || !hasExactKeys(value, ['observe', 'intercept', 'inject'])) return false;
+  if (typeof value.inject !== 'boolean' || !Array.isArray(value.observe)) return false;
+  if (value.observe.length > PLUGIN_EVENTS.length) return false;
+  if (
+    !value.observe.every(
+      (event) => typeof event === 'string' && (PLUGIN_EVENTS as readonly string[]).includes(event)
+    )
+  )
+    return false;
+  if (new Set(value.observe).size !== value.observe.length) return false;
+  if (!Array.isArray(value.intercept) || value.intercept.length > 3) return false;
+  const events = new Set<string>();
+  for (const item of value.intercept) {
+    if (!isRecord(item) || !hasOnlyKeys(item, ['event', 'tools']) || typeof item.event !== 'string')
+      return false;
+    if (!isInterceptEvent(item.event) || events.has(item.event)) return false;
+    events.add(item.event);
+    if (item.tools === undefined) continue;
+    if (
+      !Array.isArray(item.tools) ||
+      item.tools.length > 64 ||
+      !item.tools.every(
+        (name) => typeof name === 'string' && name.length > 0 && name.length <= 256
+      ) ||
+      new Set(item.tools).size !== item.tools.length
+    )
+      return false;
+  }
+  return true;
+}
+
+/** 插件上行事件：固定字段之外只允许属于本子会话的 agent 来源 */
+const hasPluginAgentKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
+  if (value.agent === undefined) return hasExactKeys(value, keys);
+  const identity = value.identity as { sessionId?: unknown } | undefined;
+  return (
+    hasExactKeys(value, [...keys, 'agent']) &&
+    typeof identity?.sessionId === 'string' &&
+    parsePluginAgentSource(value.agent, identity.sessionId) !== null
+  );
+};
+
+const isPluginObserveData = (event: string, data: unknown): boolean => {
+  if (!isRecord(data)) return false;
+  if (isInterceptEvent(event)) return isPluginInterceptPayload(event, data);
+  if (event === 'agent_start' || event === 'agent_end') return hasExactKeys(data, []);
+  return (
+    (event === 'session_start' || event === 'session_end' || event === 'after_compact') &&
+    hasExactKeys(data, ['reason']) &&
+    isNonEmptyString(data.reason) &&
+    data.reason.length <= 64
+  );
+};
+
+const isPluginInterceptPayload = (event: string, payload: unknown): boolean => {
+  if (!isRecord(payload)) return false;
+  if (event === 'before_compact') {
+    return (
+      hasExactKeys(payload, ['reason']) &&
+      isNonEmptyString(payload.reason) &&
+      payload.reason.length <= 64
+    );
+  }
+  if (event === 'tool_call') {
+    return (
+      hasExactKeys(payload, ['toolCallId', 'toolName', 'input']) &&
+      isNonEmptyString(payload.toolCallId) &&
+      payload.toolCallId.length <= 512 &&
+      isNonEmptyString(payload.toolName) &&
+      payload.toolName.length <= 256 &&
+      isRecord(payload.input)
+    );
+  }
+  if (event === 'tool_result') {
+    return (
+      hasExactKeys(payload, ['toolCallId', 'toolName', 'input', 'content', 'isError']) &&
+      isNonEmptyString(payload.toolCallId) &&
+      payload.toolCallId.length <= 512 &&
+      isNonEmptyString(payload.toolName) &&
+      payload.toolName.length <= 256 &&
+      isRecord(payload.input) &&
+      typeof payload.content === 'string' &&
+      typeof payload.isError === 'boolean'
+    );
+  }
+  return (
+    event === 'input' &&
+    hasExactKeys(payload, ['text', 'source']) &&
+    typeof payload.text === 'string' &&
+    isNonEmptyString(payload.source) &&
+    payload.source.length <= 32
+  );
+};
 
 const isMcpScopeChallenge = (value: unknown): value is McpScopeChallenge =>
   isRecord(value) &&
@@ -2184,6 +2431,16 @@ function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
     return false;
   }
   if (value.backgroundTaskId !== undefined && !isBackgroundTaskId(value.backgroundTaskId)) {
+    return false;
+  }
+  if (value.shellFailure !== undefined && !parseShellFailure(value.shellFailure)) return false;
+  if (value.pluginSource !== undefined && !parsePluginMessageSource(value.pluginSource))
+    return false;
+  if (
+    value.pluginArtifacts !== undefined &&
+    (!Array.isArray(value.pluginArtifacts) ||
+      !value.pluginArtifacts.every((item) => parsePluginArtifactInfo(item) !== null))
+  ) {
     return false;
   }
   const fileChanges =
@@ -3122,9 +3379,11 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'mcpServers',
           'pluginCommands',
           'pluginTools',
+          'pluginEvents',
           'pluginHooks',
           'instruction',
           'approvalMode',
+          'autoRejectApprovals',
           'approvalReviewer',
           'approvalReviewerClassifier',
           'approvalReviewerManaged',
@@ -3134,6 +3393,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'disabledTools',
           'windowsLocalShell',
           'rtkEnabled',
+          'dcgPath',
           'remote',
           'rolePrompt',
           'systemPrompt',
@@ -3164,8 +3424,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.pluginCommands !== undefined &&
           parsePluginCommands(value.pluginCommands) === null) ||
         (value.pluginTools !== undefined && !isPluginToolList(value.pluginTools)) ||
+        (value.pluginEvents !== undefined && !isPluginEventPlan(value.pluginEvents)) ||
         (value.pluginHooks !== undefined && parsePluginHooks(value.pluginHooks) === null) ||
         (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
+        (value.dcgPath !== undefined && !isNonEmptyString(value.dcgPath)) ||
         (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
         (value.windowsLocalShell !== undefined &&
           !(WINDOWS_LOCAL_SHELLS as readonly string[]).includes(
@@ -3424,9 +3686,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-approval-mode':
-      return hasExactKeys(value, ['type', 'identity', 'mode']) &&
+      return hasOnlyKeys(value, ['type', 'identity', 'mode', 'autoReject']) &&
         parseAnySessionIdentity(value.identity) &&
-        APPROVAL_MODES.includes(value.mode as ApprovalMode)
+        APPROVAL_MODES.includes(value.mode as ApprovalMode) &&
+        (value.autoReject === undefined || typeof value.autoReject === 'boolean')
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-plan-mode':
@@ -3466,6 +3729,12 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         : null;
     case 'set-auto-retry-limit':
       return hasExactKeys(value, ['type', 'limit']) && parseAutoRetryLimit(value.limit) !== null
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'set-shell-limits':
+      return hasExactKeys(value, ['type', 'limits']) &&
+        isRecord(value.limits) &&
+        JSON.stringify(resolveShellLimits(value.limits)) === JSON.stringify(value.limits)
         ? (value as unknown as AgentCommand)
         : null;
     case 'set-privacy-masking':
@@ -3535,6 +3804,50 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         : isNonEmptyString(value.error) && value.result === undefined;
       return shapeOk ? (value as unknown as AgentCommand) : null;
     }
+    case 'plugin-intercept-result': {
+      if (
+        !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
+        !parseSessionIdentity(value.identity) ||
+        !isNonEmptyString(value.requestId) ||
+        typeof value.ok !== 'boolean'
+      ) {
+        return null;
+      }
+      const shapeOk = value.ok
+        ? value.error === undefined
+        : isNonEmptyString(value.error) && value.result === undefined;
+      return shapeOk ? (value as unknown as AgentCommand) : null;
+    }
+    case 'plugin-tool-progress':
+      return hasExactKeys(value, ['type', 'identity', 'requestId', 'text']) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.requestId) &&
+        isBoundedText(value.text, PLUGIN_PROGRESS_MAX_CHARS)
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'plugin-inject':
+      return hasExactKeys(value, [
+        'type',
+        'identity',
+        'pluginId',
+        'pluginName',
+        'text',
+        'deliverAs',
+        'triggerTurn',
+      ]) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.pluginId) &&
+        value.pluginId.length <= 128 &&
+        isNonEmptyString(value.pluginName) &&
+        value.pluginName.length <= 256 &&
+        isNonEmptyString(value.text) &&
+        isBoundedText(value.text, PLUGIN_INJECT_MAX_CHARS) &&
+        (value.deliverAs === 'steer' ||
+          value.deliverAs === 'followUp' ||
+          value.deliverAs === 'nextTurn') &&
+        typeof value.triggerTurn === 'boolean'
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'workflow-stop':
       return hasExactKeys(value, ['type', 'identity', 'runId']) &&
         parseAnySessionIdentity(value.identity) &&
@@ -3946,7 +4259,14 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'plugin-tool-invoke':
-      return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'toolName', 'args']) &&
+      return hasPluginAgentKeys(value, [
+        'type',
+        'identity',
+        'seq',
+        'requestId',
+        'toolName',
+        'args',
+      ]) &&
         isNonEmptyString(value.requestId) &&
         typeof value.toolName === 'string' &&
         parsePluginToolName(value.toolName) !== null
@@ -3955,6 +4275,35 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     case 'plugin-tool-cancel':
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
         isNonEmptyString(value.requestId)
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    case 'plugin-event':
+      return hasPluginAgentKeys(value, ['type', 'identity', 'seq', 'event', 'data']) &&
+        parseSessionIdentity(value.identity) &&
+        typeof value.event === 'string' &&
+        (PLUGIN_EVENTS as readonly string[]).includes(value.event) &&
+        // 主会话的 before_compact 要等插件，走 plugin-intercept；只有子会话的只通知
+        (value.event === 'before_compact'
+          ? value.agent !== undefined && isPluginInterceptPayload(value.event, value.data)
+          : isPluginObserveData(value.event, value.data))
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    case 'plugin-intercept':
+      return hasPluginAgentKeys(value, [
+        'type',
+        'identity',
+        'seq',
+        'requestId',
+        'event',
+        'payload',
+      ]) &&
+        parseSessionIdentity(value.identity) &&
+        isNonEmptyString(value.requestId) &&
+        (value.event === 'before_compact' ||
+          (typeof value.event === 'string' && isInterceptEvent(value.event))) &&
+        typeof value.event === 'string' &&
+        (value.agent === undefined || isChildInterceptEvent(value.event)) &&
+        isPluginInterceptPayload(value.event, value.payload)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'workspace-branch-context-consumed':
@@ -4060,7 +4409,12 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           (PROTECTED_ACTION_CATEGORIES as readonly unknown[]).includes(value.request.protected)) &&
         isOptionalTimestamp(value.request.expiresAt) &&
         (value.request.reviewFallback === undefined ||
-          APPROVAL_REVIEW_FALLBACKS.includes(value.request.reviewFallback as never))
+          APPROVAL_REVIEW_FALLBACKS.includes(value.request.reviewFallback as never)) &&
+        (value.request.guard === undefined ||
+          (isRecord(value.request.guard) &&
+            hasOnlyKeys(value.request.guard, ['ruleId', 'reason']) &&
+            isNonEmptyString(value.request.guard.ruleId) &&
+            isNonEmptyString(value.request.guard.reason)))
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'approval-resolved':

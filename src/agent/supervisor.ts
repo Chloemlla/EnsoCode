@@ -30,7 +30,8 @@ import {
 } from '@shared/builtinAgents';
 import { WORKSPACE_WRITE_TOOL_ID } from '@shared/childProfileTools';
 import { type CompactStrategy, resolveCompactStrategy } from '@shared/compactStrategy';
-import type { PluginToolDescriptor } from '@shared/extensionPlugins/types';
+import type { PluginAgentSource } from '@shared/extensionPlugins/protocol';
+import type { PluginEventPlan, PluginToolDescriptor } from '@shared/extensionPlugins/types';
 import { HUMAN_REQUEST_TIMEOUT_MS } from '@shared/humanRequestTimeout';
 import { DEFAULT_MAX_ACTIVE_COWORKERS } from '@shared/maxActiveCoworkers';
 import { positiveContextWindow } from '@shared/modelCatalog';
@@ -171,6 +172,7 @@ import {
   previewModelDirectoryPush,
   registerCustomProviderModels,
 } from './customProviderRegistry';
+import { createDcgGuard } from './dcg';
 import { createNormalizedEditTool } from './editTool';
 import type { EnsoCompactOptions } from './ensoCompact/types';
 import { ENSO_SYSTEM_PROMPT } from './ensoPrompt';
@@ -199,6 +201,11 @@ import {
 } from './oauthAccountPool';
 import { PendingNotificationStore } from './pendingNotifications';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
+import {
+  childPluginEventPlan,
+  createPluginEventsExtension,
+  PluginEventInvoker,
+} from './pluginEvents';
 import {
   configurePrivacyMasking,
   installPrivacyMasking,
@@ -276,6 +283,12 @@ import { createPluginTools, PluginToolInvoker } from './tools/pluginTools';
 import { createRoutineProposeTool } from './tools/routinePropose';
 import { confirmOutsideImage, createSendImageTool } from './tools/sendImage';
 import { createWebTools } from './tools/web';
+import {
+  consumeUnattendedNote,
+  UNATTENDED_OFF_NOTE,
+  UNATTENDED_ON_NOTE,
+  UNATTENDED_PROMPT,
+} from './unattended';
 import { createVirtualChooser, resolveClassifierModel } from './virtualClassifier';
 import { registerVirtualModel } from './virtualModels';
 import { createWorkflowTool, WORKFLOW_STOPPED_BY_USER } from './workflow';
@@ -296,6 +309,15 @@ interface ChildSessionResult {
   safeJournal?: EnsoSafeJournal;
   runawayGuard?: RunawayGuard;
   requestBudget?: RequestBudget;
+  pluginTools?: PluginToolInvoker;
+  pluginEvents?: PluginEventInvoker;
+}
+
+/** 子会话在插件侧的身份；没有就不挂插件能力 */
+interface ChildPluginSource {
+  identity: SessionIdentity;
+  kind: PluginAgentSource['kind'];
+  name: string;
 }
 
 /** 会话工厂：父 runtime/resource/tool 配置的唯一 child 创建入口。 */
@@ -318,6 +340,7 @@ interface SessionFactory {
     askManager?: AskManager;
     resumeFile?: string;
     extraTools?: unknown[];
+    pluginSource?: ChildPluginSource;
   }): Promise<ChildSessionResult>;
 }
 
@@ -351,8 +374,11 @@ interface ManagedSession {
   adaptiveDowngraded: Set<string>;
   computer?: ComputerInvoker;
   pluginTools?: PluginToolInvoker;
+  pluginEvents?: PluginEventInvoker;
   /** 最近一次 auto_retry_start 携带的原始错误（取消重试时的终态错误文案） */
   lastRetryError?: string;
+  /** 无人值守开关翻转后待告知模型的一条提示（只追加，不重开会话） */
+  unattendedNote?: string;
   /** 已见终态 agent_end、待 agent_settled 收口；failTurn 等提前收口时清掉，settled 不再重复收 */
   settlePending?: boolean;
   /** 当前用户轮已做过一次空回复自动续跑 */
@@ -455,6 +481,7 @@ const PENDING_COUNTERS: Record<PendingCounterKey, true> = {
   agentControl: true,
   computer: true,
   pluginTools: true,
+  pluginEvents: true,
 };
 
 export function hasPendingCalls(managed: ManagedSession): boolean {
@@ -518,6 +545,7 @@ function createSessionResourceLoader(options: {
     role: Parameters<typeof createClaudeHooksExtension>[0]['role'];
     resumed?: boolean;
   };
+  pluginEvents?: { invoker: PluginEventInvoker };
   exploreFold?: ReturnType<typeof createExploreFoldState>;
   /** codemode / tool_search 与按需 MCP；排在最前，mcp_servers 段先于 persona 强制提示词写入 */
   codemode?: InlineExtension;
@@ -535,6 +563,8 @@ function createSessionResourceLoader(options: {
   systemPromptBoost?: string;
   /** 仅子会话：追加子代理行为合同到系统提示词（进 system prompt 才不会随压缩丢失） */
   childContract?: boolean;
+  /** 无人值守：把「没人在线」写进系统提示词（同样为了不随压缩丢失） */
+  autoRejectApprovals?: boolean;
 }): DefaultResourceLoader {
   const harness = options.loadHarnessAssets && !options.remoteAgentsFiles;
   const skillPaths = harness
@@ -628,10 +658,14 @@ function createSessionResourceLoader(options: {
             }),
           ]
         : []),
+      ...(options.pluginEvents ? [createPluginEventsExtension(options.pluginEvents.invoker)] : []),
       options.silentTurnRecovery,
       appendSystemPromptExtension('workspace-policy', WORKSPACE_POLICY_PROMPT),
       ...(options.childContract
         ? [appendSystemPromptExtension('subagent-contract', SUBAGENT_CONTRACT_PROMPT)]
+        : []),
+      ...(options.autoRejectApprovals
+        ? [appendSystemPromptExtension('unattended', UNATTENDED_PROMPT)]
         : []),
       ...(options.systemPromptAppend
         ? [tailSystemPromptSection('preset_tail', options.systemPromptAppend)]
@@ -672,6 +706,18 @@ async function emitSessionShutdown(session: AgentSession): Promise<void> {
     const runner = session.extensionRunner;
     if (runner.hasHandlers('session_shutdown')) {
       await runner.emit({ type: 'session_shutdown', reason: 'quit' });
+    }
+  } catch {}
+}
+
+async function emitPluginSessionStart(
+  session: AgentSession,
+  reason: 'startup' | 'resume'
+): Promise<void> {
+  try {
+    const runner = session.extensionRunner;
+    if (runner.hasHandlers('session_start')) {
+      await runner.emit({ type: 'session_start', reason });
     }
   } catch {}
 }
@@ -972,6 +1018,21 @@ export class SessionSupervisor {
     });
   }
 
+  /** 子会话（coworker / child）创建时拷贝父档位，父会话切档后同步下去：
+   *  否则子会话里已挂起的卡片仍会等人，与「切档即时生效」矛盾 */
+  private applyApprovalModeToChildren(parentId: string, mode: ApprovalMode): void {
+    const autoReject = this.sessions.get(parentId)?.gate.autoReject ?? false;
+    for (const [id, child] of this.sessions) {
+      if (id === parentId || child.parentId !== parentId) continue;
+      const flipped = child.gate.autoReject !== autoReject;
+      child.gate.mode = mode;
+      child.gate.autoReject = autoReject;
+      child.asks.autoReject = autoReject;
+      if (flipped) child.unattendedNote = autoReject ? UNATTENDED_ON_NOTE : UNATTENDED_OFF_NOTE;
+      child.gate.reconsider();
+    }
+  }
+
   private deliverNotification(sessionId: string, text: string): void {
     const managed = this.sessions.get(sessionId);
     if (!managed) return;
@@ -1135,6 +1196,7 @@ export class SessionSupervisor {
     // 先收掉整棵子会话（coworker/child 都以 `${parentId}::` 为键前缀）
     for (const [id, child] of [...this.sessions]) {
       if (!id.startsWith(`${parentId}::`)) continue;
+      this.closeChildPlugins(child, 'parent_ended');
       child.gate.cancelAll();
       child.asks.cancelAll();
       cancelContinuousMemory(child.session.sessionManager);
@@ -1164,6 +1226,7 @@ export class SessionSupervisor {
     managed.agentControl?.close('Session released');
     managed.computer?.cancelAll('Session released');
     managed.pluginTools?.cancelAll('Session released');
+    managed.pluginEvents?.cancelAll();
     try {
       await managed.session.abort();
     } catch {}
@@ -1369,6 +1432,10 @@ export class SessionSupervisor {
       configurePrivacyMasking(this.options.agentDir, command.settings);
       return;
     }
+    if (command.type === 'set-shell-limits') {
+      this.bgTasks.setLimits(command.limits);
+      return;
+    }
     if (command.type === 'set-disabled-workflow-presets') {
       this.disabledWorkflowPresets = command.ids;
       return;
@@ -1452,7 +1519,10 @@ export class SessionSupervisor {
             command.type === 'memory-result' ||
             command.type === 'delegation-result' ||
             command.type === 'computer-result' ||
-            command.type === 'plugin-tool-result'
+            command.type === 'plugin-tool-result' ||
+            command.type === 'plugin-tool-progress' ||
+            command.type === 'plugin-intercept-result' ||
+            command.type === 'plugin-inject'
           ? command.identity
           : command.type === 'dismiss-child' ||
               command.type === 'dismiss-coworker' ||
@@ -1468,6 +1538,17 @@ export class SessionSupervisor {
     if (command.type === 'abort') {
       void this.execute(command).catch((error) => {
         console.error('[abort] failed:', toErrorMessage(error));
+      });
+      return;
+    }
+    if (
+      command.type === 'plugin-tool-result' ||
+      command.type === 'plugin-tool-progress' ||
+      command.type === 'plugin-intercept-result' ||
+      command.type === 'plugin-inject'
+    ) {
+      void this.execute(command).catch((error) => {
+        console.error(`[${command.type}] failed:`, toErrorMessage(error));
       });
       return;
     }
@@ -1497,6 +1578,15 @@ export class SessionSupervisor {
             seq: 0,
             reason: message,
           });
+          return;
+        }
+        if (
+          command.type === 'dismiss-child' ||
+          command.type === 'dismiss-coworker' ||
+          command.type === 'resume-coworker'
+        ) {
+          // 清理/恢复类命令按 parent 归因只为排队，失败不影响父会话本身，不能把它标成 failed（之后所有委派都会被拒）
+          console.error(`[${command.type}] failed:`, message);
           return;
         }
         const managed = this.sessions.get(identity.sessionId);
@@ -1571,7 +1661,10 @@ export class SessionSupervisor {
           command.botRoutines,
           command.botWriteLock,
           command.botDelegationTask,
-          command.pluginTools
+          command.pluginTools,
+          command.pluginEvents,
+          command.dcgPath,
+          command.autoRejectApprovals ?? false
         );
         return;
       case 'spawn-child':
@@ -1584,9 +1677,10 @@ export class SessionSupervisor {
         return;
       case 'dismiss-child': {
         this.must(command.parent);
-        const child = this.must(command.child);
+        // 清理幂等：子会话从未建成（spawn 被拒）或已换代时无事可做，不能抛错连累父会话
+        const child = this.sessions.get(command.child.sessionId);
         if (
-          !child.childIdentity ||
+          !child?.childIdentity ||
           !isSameChildSessionIdentity(command.child, child.childIdentity)
         ) {
           return;
@@ -1777,9 +1871,22 @@ export class SessionSupervisor {
         this.notifier.notify(managed.identity.sessionId, command.text, { urgent: command.urgent });
         return;
       }
-      case 'set-approval-mode':
-        this.must(command.identity).gate.mode = command.mode;
+      case 'set-approval-mode': {
+        const managed = this.must(command.identity);
+        managed.gate.mode = command.mode;
+        if (command.autoReject !== undefined) {
+          if (managed.gate.autoReject !== command.autoReject) {
+            // 系统提示词改不了，用一次性提示告知模型「人没了 / 人回来了」
+            managed.unattendedNote = command.autoReject ? UNATTENDED_ON_NOTE : UNATTENDED_OFF_NOTE;
+          }
+          managed.gate.autoReject = command.autoReject;
+          managed.asks.autoReject = command.autoReject;
+        }
+        // 切档即时生效：已挂起的请求按新档位重判，不留在原地等超时
+        managed.gate.reconsider();
+        this.applyApprovalModeToChildren(managed.identity.sessionId, command.mode);
         return;
+      }
       case 'set-plan-mode':
         this.must(command.identity).plan?.setActive(command.active);
         return;
@@ -1846,6 +1953,33 @@ export class SessionSupervisor {
         this.must(command.identity).pluginTools?.resolve(command);
         return;
       }
+      case 'plugin-tool-progress': {
+        const managed = this.sessions.get(command.identity.sessionId);
+        if (!managed || !isSameGeneration(managed.identity, command.identity)) return;
+        managed.pluginTools?.progress(command.requestId, command.text);
+        return;
+      }
+      case 'plugin-intercept-result': {
+        const managed = this.sessions.get(command.identity.sessionId);
+        if (!managed || !isSameGeneration(managed.identity, command.identity)) return;
+        managed.pluginEvents?.resolve(command);
+        return;
+      }
+      case 'plugin-inject': {
+        const managed = this.sessions.get(command.identity.sessionId);
+        if (!managed || !isSameGeneration(managed.identity, command.identity)) return;
+        const delivered = managed.pluginEvents?.deliver({
+          pluginId: command.pluginId,
+          pluginName: command.pluginName,
+          text: command.text,
+          deliverAs: command.deliverAs,
+          triggerTurn: command.triggerTurn,
+        });
+        if (!delivered?.ok) {
+          console.warn('[plugin-inject]', delivered?.error ?? '会话未接受注入');
+        }
+        return;
+      }
       case 'append-session-custom-entry': {
         const managed = this.must(command.identity);
         managed.session.sessionManager.appendCustomEntry('enso-agent-session', command.entry);
@@ -1866,7 +2000,8 @@ export class SessionSupervisor {
         return;
       case 'task-stop':
         this.must(command.identity);
-        this.bgTasks.stop(command.taskId);
+        // 卡片上的停止按钮：用户主动停的，完成通知要告诉模型别重启
+        this.bgTasks.stop(command.taskId, true);
         return;
       case 'tool-background':
         this.must(command.identity);
@@ -2031,6 +2166,7 @@ export class SessionSupervisor {
         managed.requestBudget?.disarm();
         managed.computer?.cancelAll('Computer action aborted');
         managed.pluginTools?.cancelAll('Plugin tool aborted');
+        managed.pluginEvents?.cancelAll();
         // 立即收口投影：不 await session.abort()（内部 waitForIdle 会一直等到工具/流
         // 真正结束，工具不响应 signal 时永远等不到，UI 就卡在 running 上）。
         // 中断信号发出即视为本轮终止，后续 agent_end 回流由 status 守卫幂等吸收。
@@ -2104,7 +2240,10 @@ export class SessionSupervisor {
     botRoutines = false,
     botWriteLock?: { label: string; ancestors: string[] },
     botDelegationTask = false,
-    pluginToolDescriptors: readonly PluginToolDescriptor[] = []
+    pluginToolDescriptors: readonly PluginToolDescriptor[] = [],
+    pluginEvents?: PluginEventPlan,
+    dcgPath?: string,
+    autoRejectApprovals = false
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -2173,6 +2312,21 @@ export class SessionSupervisor {
       codemode: toolEnabled('isolated_sandbox'),
       deferredServers: deferredMcp,
     });
+    // 非 Bot 会话即使启动时没有任何插件也挂上注入入口：插件可能在会话之后才启用
+    const pluginEventPlan = botMode
+      ? undefined
+      : (pluginEvents ?? { observe: [], intercept: [], inject: false });
+    const pluginEventInvoker = pluginEventPlan
+      ? new PluginEventInvoker(pluginEventPlan, (event) => {
+          const managed = this.sessions.get(sessionId);
+          if (!managed || !isSameGeneration(managed.identity, identity)) return;
+          this.options.emit({
+            ...event,
+            identity: managed.identity,
+            seq: ++managed.seq,
+          });
+        })
+      : undefined;
     const resourceLoader = createSessionResourceLoader({
       branchContext: this.branchContextExtension(() => managedRef),
       oauthPoolRecovery: this.oauthPoolRecovery(),
@@ -2192,11 +2346,13 @@ export class SessionSupervisor {
       trustedProjectCode,
       pluginCommands,
       pluginHooks: { hooks: pluginHooks, role: { kind: 'parent' }, resumed: Boolean(resumeFile) },
+      ...(pluginEventInvoker ? { pluginEvents: { invoker: pluginEventInvoker } } : {}),
       exploreFold,
       codemode: codemodeHost.extension,
       persona: systemPrompt,
       systemPromptAppend,
       systemPromptBoost,
+      autoRejectApprovals,
       ...(compactStrategy !== 'standard'
         ? {
             compactStrategy,
@@ -2240,7 +2396,9 @@ export class SessionSupervisor {
       {
         review: (info, signal) => this.reviewApproval(info, signal),
         protectedFloor: botMode || protectedActions,
+        autoReject: autoRejectApprovals,
         ...(botMode ? { exemptFull: true, humanTimeoutMs: HUMAN_REQUEST_TIMEOUT_MS } : {}),
+        ...(dcgPath ? { commandGuard: createDcgGuard(dcgPath) } : {}),
       }
     );
     const checkpoints = new CheckpointManager(
@@ -2268,6 +2426,14 @@ export class SessionSupervisor {
       return taken;
     };
     const reminders = new SystemReminderRegistry();
+    // 无人值守开关翻转的提示优先走工具结果（无人值守时可能很久没有用户消息，等不到下一条就白说了）
+    reminders.register('unattended', () => {
+      const managed = managedRef ?? this.sessions.get(sessionId);
+      const note = managed?.unattendedNote;
+      if (!note || !managed) return [];
+      managed.unattendedNote = undefined;
+      return [note];
+    });
     reminders.register('background-task', () => {
       const pending = takePendingReminders();
       return pending.map((text) => `<background-task-update>\n${text}\n</background-task-update>`);
@@ -2462,8 +2628,22 @@ export class SessionSupervisor {
         askManager,
         resumeFile: childResume,
         extraTools = [],
+        pluginSource,
       }) => {
         const isLockedEnso = resolved?.tools === 'enso-locked';
+        // 插件能力下沉：锁定档不挂任何插件能力；只读档不挂插件工具（可能有副作用，
+        // Plan 模式靠只读子代理保证不写）；事件只拦 tool_call（独立预算），其余只通知
+        const childPlugins =
+          pluginSource && !isLockedEnso
+            ? this.childPluginBridge(
+                pluginSource,
+                resolved?.displayName ?? agentType?.name,
+                resolved?.tools === 'readonly' || agentType?.tools === 'readonly'
+                  ? []
+                  : pluginToolDescriptors,
+                childPluginEventPlan(pluginEventPlan)
+              )
+            : undefined;
         const selectedMcp = resolved?.mcpServers ?? agentType?.mcpServers ?? [];
         // 冷连接最长 3s：与模型解析、资源加载并行，不串在首字节前的关键路径最前面
         const mcpPending =
@@ -2537,9 +2717,11 @@ export class SessionSupervisor {
                 },
                 resumed: Boolean(childResume),
               },
+              ...(childPlugins?.events ? { pluginEvents: { invoker: childPlugins.events } } : {}),
               ...(childExploreFold ? { exploreFold: childExploreFold } : {}),
               codemode: childCodemode.extension,
               childContract: true,
+              autoRejectApprovals: childGate.autoReject,
               systemPromptAppend,
               systemPromptBoost,
             });
@@ -2582,6 +2764,12 @@ export class SessionSupervisor {
                 }
               )
             : undefined;
+        // 子会话自己的门：审批条落在子会话 tab，allowSession 不跨会话（同 MCP）
+        const childPluginTools = childPlugins?.tools
+          ? createPluginTools([...childPlugins.descriptors], childPlugins.tools).map((tool) =>
+              withApproval(childGate, 'mcp', tool)
+            )
+          : [];
         const childTools = isLockedEnso
           ? [createEnsoCapabilitiesTool(), createEnsoAppTool(ensoApp!), createAskTool(askManager!)]
           : [
@@ -2596,6 +2784,7 @@ export class SessionSupervisor {
                     childIdentity?.sessionId
                   )),
               ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
+              ...childPluginTools,
               ...(extraTools as Def[]),
               ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
             ];
@@ -2683,14 +2872,18 @@ export class SessionSupervisor {
           ...(safeJournal ? { safeJournal } : {}),
           modelRef: settingsModelRef(selectedModel),
           toolIds: [...subTools.map((tool) => tool.name), ...childExtraTools],
-          // Decorators clone tools; exclude MCP by identity before decoration.
+          // Decorators clone tools; exclude MCP and plugin tools by identity before decoration.
           proofToolIds: [
-            ...rawSubTools.filter((tool) => !typeMcpTools.includes(tool)).map((tool) => tool.name),
+            ...rawSubTools
+              .filter((tool) => !typeMcpTools.includes(tool) && !childPluginTools.includes(tool))
+              .map((tool) => tool.name),
             ...childExtraTools,
           ],
           ...(ensoApp ? { ensoApp } : {}),
           ...(isLockedEnso ? {} : { runawayGuard: childRunaway }),
           requestBudget,
+          ...(childPlugins?.tools ? { pluginTools: childPlugins.tools } : {}),
+          ...(childPlugins?.events ? { pluginEvents: childPlugins.events } : {}),
         };
       },
     };
@@ -2734,6 +2927,7 @@ export class SessionSupervisor {
       trackWait: (toolCallId) => this.bgTasks.trackBlockingWait(sessionId, toolCallId),
     });
     const askManager = this.createAskManager(identity, gate.humanTimeoutMs);
+    askManager.autoReject = gate.autoReject;
     // 可热切的内置工具始终注册；激活与否由 applyBuiltinTools 按当前设置决定
     const builtinGroups = new Map<string, string[]>();
     const builtin = (id: string, tools: Def[]): Def[] => {
@@ -3035,7 +3229,11 @@ export class SessionSupervisor {
     if (managed.plan && planMode !== undefined) plan.setActive(planMode);
     managedRef.computer = computer;
     managedRef.pluginTools = pluginTools;
+    managedRef.pluginEvents = pluginEventInvoker;
     managedRef.delegation = delegation;
+    if (pluginEventInvoker) {
+      await emitPluginSessionStart(session, resumeFile ? 'resume' : 'startup');
+    }
     this.options.emit({
       type: 'parent-ready',
       identity,
@@ -3156,6 +3354,8 @@ export class SessionSupervisor {
     if (parentId) {
       const parent = this.sessions.get(parentId);
       if (parent?.refusalRetryPrompt) managed.refusalRetryPrompt = parent.refusalRetryPrompt;
+      // 子门在 await 建会话之前就按父档位铸好了：其间父会话若切过档，以注册时刻为准补同步
+      if (parent) managed.gate.mode = parent.gate.mode;
     }
     this.flushPendingMcpTools(managed);
     this.bindAutoRetryLimit(session);
@@ -3255,6 +3455,107 @@ export class SessionSupervisor {
     return managed;
   }
 
+  /**
+   * 子会话的插件桥：工具与事件都以子会话自己的普通身份上报（Main 按 rootSessionId 归到主会话），
+   * 并带 agent 来源。只在子会话仍是当前代时上报；解雇前先 cancelAll，取消才发得出去。
+   */
+  private childPluginBridge(
+    source: ChildPluginSource,
+    agentType: string | undefined,
+    descriptors: readonly PluginToolDescriptor[],
+    plan: PluginEventPlan | undefined
+  ): {
+    descriptors: readonly PluginToolDescriptor[];
+    tools?: PluginToolInvoker;
+    events?: PluginEventInvoker;
+  } {
+    const identity: SessionIdentity = {
+      sessionId: source.identity.sessionId,
+      generation: source.identity.generation,
+    };
+    const agent: PluginAgentSource = {
+      kind: source.kind,
+      sessionId: identity.sessionId,
+      name: source.name,
+      ...(agentType ? { agentType } : {}),
+    };
+    const current = () => {
+      const managed = this.sessions.get(identity.sessionId);
+      return managed && isSameGeneration(managed.identity, identity) ? managed : undefined;
+    };
+    const tools =
+      descriptors.length > 0
+        ? new PluginToolInvoker(
+            identity,
+            (request) => {
+              const managed = current();
+              if (!managed) throw new Error('Session is not ready for plugin tools.');
+              this.options.emit({
+                type: 'plugin-tool-invoke',
+                identity,
+                seq: ++managed.seq,
+                requestId: request.requestId,
+                toolName: request.toolName,
+                args: request.args,
+                agent,
+              });
+            },
+            {
+              emitCancel: (requestId) => {
+                const managed = current();
+                if (!managed) return;
+                this.options.emit({
+                  type: 'plugin-tool-cancel',
+                  identity,
+                  seq: ++managed.seq,
+                  requestId,
+                });
+              },
+            }
+          )
+        : undefined;
+    const events = plan
+      ? new PluginEventInvoker(
+          plan,
+          (event) => {
+            // 子会话只拦 tool_call；其余拦截不上报，抛错让等待立即放行
+            if (event.type === 'plugin-intercept' && event.event !== 'tool_call')
+              throw new Error('Child sessions only intercept tool_call.');
+            const managed = current();
+            if (!managed) throw new Error('Child session is closed.');
+            this.options.emit({ ...event, identity, seq: ++managed.seq, agent });
+          },
+          { childSession: true }
+        )
+      : undefined;
+    return { descriptors, ...(tools ? { tools } : {}), ...(events ? { events } : {}) };
+  }
+
+  /** 子会话登记后挂上插件能力并通知 session_start */
+  private attachChildPlugins(
+    managed: ManagedSession,
+    result: Pick<ChildSessionResult, 'pluginTools' | 'pluginEvents'>,
+    resumed: boolean
+  ): void {
+    if (result.pluginTools) managed.pluginTools = result.pluginTools;
+    if (!result.pluginEvents) return;
+    managed.pluginEvents = result.pluginEvents;
+    if (result.pluginEvents.plan.observe.includes('session_start')) {
+      result.pluginEvents.notify('session_start', { reason: resumed ? 'resume' : 'startup' });
+    }
+  }
+
+  /**
+   * 子会话收尾：仍在会话表里时先发 session_end，再取消挂起的插件调用（通知 Main 一并取消）。
+   * 挂起的 tool_call 检查由子会话 invoker 按拦下结束：不等本地兜底，也不让没检查完的工具在关闭后执行。
+   */
+  private closeChildPlugins(managed: ManagedSession, reason: string): void {
+    const events = managed.pluginEvents;
+    if (events?.plan.observe.includes('session_end')) events.notify('session_end', { reason });
+    managed.pluginTools?.cancelAll('Child session closed');
+    events?.cancelAll();
+  }
+
   private async spawnTypedChild(
     identity: ChildSessionIdentity,
     cwd: string,
@@ -3349,6 +3650,7 @@ export class SessionSupervisor {
               ),
               this.createPeerMessageTool(identity.parent.sessionId, identity.instanceName),
             ],
+            pluginSource: { identity, kind: 'subagent', name: identity.instanceName },
           }),
     });
     const metadata: ChildConversationMetadata = {
@@ -3391,6 +3693,7 @@ export class SessionSupervisor {
       ...(result.runawayGuard ? { runawayGuard: result.runawayGuard } : {}),
       ...(result.requestBudget ? { requestBudget: result.requestBudget } : {}),
     });
+    this.attachChildPlugins(managedRef, result, Boolean(resumeFile));
     if (!resumeFile) managedRef.pendingRole = config.systemPrompt;
     this.options.emit({
       type: 'child-ready',
@@ -3465,7 +3768,7 @@ export class SessionSupervisor {
       parent.gate.floorOptions
     );
     const askManager = this.createAskManager(identity, gate.humanTimeoutMs);
-    const { session, modelId, toolIds, runawayGuard, requestBudget } =
+    const { session, modelId, toolIds, runawayGuard, requestBudget, pluginTools, pluginEvents } =
       await factory.createChildSession({
         agentType,
         modelOverride,
@@ -3481,6 +3784,7 @@ export class SessionSupervisor {
           ),
           this.createPeerMessageTool(parentId, name),
         ],
+        pluginSource: { identity, kind: 'coworker', name },
       });
     const info: CoworkerInfo = {
       id: coworkerId,
@@ -3507,6 +3811,7 @@ export class SessionSupervisor {
       ...(runawayGuard ? { runawayGuard } : {}),
       ...(requestBudget ? { requestBudget } : {}),
     });
+    this.attachChildPlugins(managed, { pluginTools, pluginEvents }, Boolean(resumeFile));
     // 角色提示在首条消息前缀注入(无论来自主 agent send 还是用户 tab);resume 时 jsonl 已有
     if (!resumeFile && agentType?.systemPrompt) {
       managed.pendingRole = agentType.systemPrompt;
@@ -3520,6 +3825,7 @@ export class SessionSupervisor {
     const parent = this.mustCurrent(parentId);
     const managed = this.sessions.get(coworkerId);
     if (managed) {
+      this.closeChildPlugins(managed, 'dismissed');
       managed.gate.cancelAll();
       managed.asks.cancelAll();
       cancelContinuousMemory(managed.session.sessionManager);
@@ -3927,7 +4233,12 @@ export class SessionSupervisor {
         if (!managed.toolStartAt.has(event.toolCallId)) {
           const startedAt = Date.now();
           managed.toolStartAt.set(event.toolCallId, startedAt);
-          const timeoutMs = foregroundCommandTimeoutMs(event.toolName, event.args);
+          // deadlineAt = 让位时刻（与显式 timeout 取小）：倒计时与卡死检测都以前台真实返回点为准
+          const timeoutMs = foregroundCommandTimeoutMs(
+            event.toolName,
+            event.args,
+            this.bgTasks.limits
+          );
           this.options.emit({
             type: 'tool-output',
             identity: managed.identity,
@@ -4833,6 +5144,7 @@ export class SessionSupervisor {
       managed.currentTurnId = undefined;
       managed.computer?.cancelAll('Enso worker shutdown');
       managed.pluginTools?.cancelAll('Enso worker shutdown');
+      managed.pluginEvents?.cancelAll();
       // pi 的 bash 是 detached 进程组，只在中断信号上 killProcessTree；SDK 未导出退出清理，
       // 这里同步触发中断（不等 waitForIdle），否则 worker 退出后命令成孤儿进程
       void managed.session.abort().catch(() => {});
@@ -5339,8 +5651,12 @@ function planFreeEditorText(text: string): string {
   return message ? (message.kind === 'feedback' ? message.feedback : '') : rest;
 }
 
-/** Plan 状态变化后的一次性提示，随下一条进入模型的用户消息前置 */
-function withPendingPlanNote(managed: { plan?: PlanController }, text: string): string {
+/** Plan / 无人值守状态变化后的一次性提示，随下一条进入模型的用户消息前置 */
+function withPendingPlanNote(
+  managed: { plan?: PlanController; unattendedNote?: string },
+  text: string
+): string {
+  text = consumeUnattendedNote(managed, text);
   const note = managed.plan?.takeNote();
   return note ? withPlanNote(note, text) : text;
 }

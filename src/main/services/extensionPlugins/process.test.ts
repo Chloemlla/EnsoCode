@@ -103,6 +103,35 @@ describe('PluginProcess', () => {
     await expect(result).resolves.toEqual({ content: 'ok' });
   });
 
+  it('插件日志交给 onLog，级别不合法按 info', async () => {
+    const onLog = vi.fn();
+    const s = setup({ onLog });
+    await readyProcess(s);
+    s.child().reply({ t: 'log', level: 'error', message: 'boom' });
+    s.child().reply({ t: 'log', level: 'nope', message: 'x' });
+    s.child().reply({ t: 'log', level: 'info', message: 42 });
+    expect(onLog.mock.calls).toEqual([
+      ['error', 'boom'],
+      ['info', 'x'],
+    ]);
+  });
+
+  it('未知宿主接口直接拒绝，不交给 Main', async () => {
+    const handleHostCall = vi.fn(async () => 'host-value');
+    const s = setup({ handleHostCall });
+    await readyProcess(s);
+    s.child().reply({ t: 'call', id: 'h2', api: 'session.messages', args: {} });
+    await flush();
+    expect(handleHostCall).not.toHaveBeenCalled();
+    expect(s.child().inbox).toContainEqual(
+      expect.objectContaining({
+        id: 'h2',
+        ok: false,
+        error: expect.objectContaining({ code: 'UNKNOWN_API' }),
+      })
+    );
+  });
+
   it('超时：发送 cancel 并以 TIMEOUT 失败，晚到结果被丢弃', async () => {
     const s = setup();
     await readyProcess(s);
@@ -160,10 +189,34 @@ describe('PluginProcess', () => {
     const s = setup();
     await readyProcess(s);
     await vi.advanceTimersByTimeAsync(1100);
+    expect(s.child().inbox).toContainEqual({ t: 'shutdown' });
+    expect(s.children[0]?.killed).toBe(false);
+    await vi.advanceTimersByTimeAsync(3000);
     expect(s.children[0]?.killed).toBe(true);
     expect(s.onExit).toHaveBeenCalledWith({ unexpected: false });
     await readyProcess(s);
     expect(s.children).toHaveLength(2);
+  });
+
+  it('常驻进程不因空闲退出', async () => {
+    const s = setup({ resident: true });
+    await readyProcess(s);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(s.children[0]?.killed).toBe(false);
+    expect(s.onExit).not.toHaveBeenCalled();
+  });
+
+  it('stop 先发 shutdown，进程自己退出就不再 kill', async () => {
+    const s = setup();
+    await readyProcess(s);
+    const stopped = s.proc.whenStopped();
+    expect(s.child().inbox).toContainEqual({ t: 'shutdown' });
+    expect(s.child().killed).toBe(false);
+    s.child().emit('exit', 0);
+    await flush();
+    await stopped;
+    expect(s.child().killed).toBe(false);
+    expect(s.onExit).toHaveBeenCalledWith({ unexpected: false });
   });
 
   it('ready 超时视为加载失败', async () => {

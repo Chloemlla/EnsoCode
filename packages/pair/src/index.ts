@@ -66,6 +66,7 @@ export {
   toPairProjectEntry,
 } from './projectEntry';
 export {
+  APPROVAL_MODES,
   type ApprovalDecision,
   type ApprovalMode,
   type AttachedImage,
@@ -131,6 +132,7 @@ export {
   type RemoteToHost,
   splitRemoteFrame,
 } from './remote';
+export { createFrameReplay, type FrameReplay, isReplayHello } from './replay';
 export {
   createCachedHostLookup,
   isConnectStuck,

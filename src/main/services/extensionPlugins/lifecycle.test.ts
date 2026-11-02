@@ -8,7 +8,12 @@ const grant = (permissions: string[] = ['agent.tool']): PluginGrant => ({
   fsWrite: [],
   netDomains: [],
   mcp: [],
+  mcpTools: [],
   renderer: false,
+  env: [],
+  interop: [],
+  intercepts: [],
+  resident: false,
 });
 
 const record = (patch: Partial<PluginRecord> = {}): PluginRecord => ({
@@ -18,6 +23,7 @@ const record = (patch: Partial<PluginRecord> = {}): PluginRecord => ({
   state: 'disabled',
   grant: grant(),
   installedAt: 1,
+  crossSessionInject: false,
   ...patch,
 });
 

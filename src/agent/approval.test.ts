@@ -15,7 +15,10 @@ type ReviewFn = (
   signal: AbortSignal | undefined
 ) => Promise<{ decision: 'auto_allow' | 'ask_user' | 'block'; rationale?: string }>;
 
-const makeGate = (mode: GateMode = 'supervised', options?: { review?: ReviewFn }) => {
+const makeGate = (
+  mode: GateMode = 'supervised',
+  options?: { review?: ReviewFn; protectedFloor?: boolean }
+) => {
   const requests: string[] = [];
   const resolved: string[] = [];
   const gate = new ApprovalGate(
@@ -731,5 +734,279 @@ describe('ApprovalGate 托管判定（#152）', () => {
       gate.respond(infos[1].requestId, 'allow');
       expect(await pending).toBe('allow');
     }
+  });
+});
+
+describe('切档即时生效：reconsider 重判挂起请求', () => {
+  it('切档只放行「新档本来就不需要审批」的挂起项：auto-edits 放过文件、留下命令', async () => {
+    const { gate, resolved } = makeGate('supervised');
+    const edit = gate.ask('edit', 'file-edit', 'src/a.ts', undefined);
+    const command = gate.ask('bash', 'command', 'make', undefined);
+    gate.mode = 'auto-edits';
+    gate.reconsider();
+    expect(await edit).toBe('allow');
+    expect(gate.snapshot()).toHaveLength(1);
+    // 命令仍挂起：给一个决策收尾，避免测试留下未决 promise
+    const remaining = gate.snapshot()[0];
+    gate.respond(remaining.requestId, 'deny');
+    expect(await command).toBe('deny');
+    expect(resolved).toHaveLength(2);
+  });
+
+  it('受保护动作不随 full 放行：切到 full 仍继续等真人', async () => {
+    const { gate, resolved } = makeGate('supervised');
+    const pending = gate.ask(
+      'bash',
+      'command',
+      'rm -rf /repo/src',
+      undefined,
+      'call-protected',
+      undefined,
+      'delete'
+    );
+    gate.mode = 'full';
+    gate.reconsider();
+    expect(gate.snapshot()).toHaveLength(1);
+    gate.respond(gate.snapshot()[0].requestId, 'allow');
+    expect(await pending).toBe('allow');
+    expect(resolved).toHaveLength(1);
+  });
+});
+
+describe('代审期间切档：旧档结论不再算数', () => {
+  it('assistant 代审中切到 supervised，auto_allow 结论被丢弃并转人工', async () => {
+    const infos: ApprovalRequestInfo[] = [];
+    let release!: (value: { decision: 'auto_allow' }) => void;
+    const gate = new ApprovalGate(
+      'assistant',
+      (info) => infos.push(info),
+      () => {},
+      {
+        review: () =>
+          new Promise<{ decision: 'auto_allow' }>((resolve) => {
+            release = resolve;
+          }),
+      }
+    );
+    const pending = gate.ask('bash', 'command', 'ls', undefined, 'call-review');
+    await vi.waitFor(() => expect(infos[0]?.phase).toBe('reviewing'));
+
+    gate.mode = 'supervised';
+    gate.reconsider();
+    release({ decision: 'auto_allow' });
+
+    await vi.waitFor(() => expect(infos).toHaveLength(2));
+    expect(infos[1]?.phase).toBeUndefined();
+    gate.respond(infos[1].requestId, 'allow');
+    expect(await pending).toBe('allow');
+  });
+});
+
+describe('dcg 命令守卫', () => {
+  const hit = { ruleId: 'core.git:reset-hard', reason: 'destroys uncommitted changes' };
+  const setup = (
+    mode: GateMode,
+    options: { exemptFull?: boolean; protectedFloor?: boolean } = {},
+    verdict: typeof hit | null = hit
+  ) => {
+    const infos: ApprovalRequestInfo[] = [];
+    const commandGuard = vi.fn().mockResolvedValue(verdict);
+    const gate = new ApprovalGate(
+      mode,
+      (info) => infos.push(info),
+      () => undefined,
+      { ...options, commandGuard }
+    );
+    const execute = vi.fn().mockResolvedValue({ content: [], details: {} });
+    const wrap = (name: string, kind: 'command' | 'file-edit' = 'command') =>
+      withApproval(gate, kind, {
+        name,
+        label: name,
+        description: '',
+        parameters: {} as never,
+        execute,
+      });
+    const run = (name: string, params: unknown, kind?: 'command' | 'file-edit') =>
+      wrap(name, kind).execute('c1', params as never, undefined, undefined, undefined as never);
+    return { gate, infos, commandGuard, execute, run };
+  };
+
+  it('full 档命中也强制真人确认，卡片带 destructive 类别与原因；拒绝则不执行', async () => {
+    const { gate, infos, commandGuard, execute, run } = setup('full');
+    const pending = run('powershell', { command: 'Remove-Item -Recurse x' });
+    await vi.waitFor(() => expect(infos).toHaveLength(1));
+    expect(commandGuard).toHaveBeenCalledWith('powershell', 'Remove-Item -Recurse x', undefined);
+    expect(infos[0]).toMatchObject({ protected: 'destructive', guard: hit });
+    gate.respond(infos[0].requestId, 'allowSession');
+    await pending;
+    expect(execute).toHaveBeenCalledOnce();
+    const again = run('powershell', { command: 'Remove-Item -Recurse y' });
+    await vi.waitFor(() => expect(infos).toHaveLength(2));
+    gate.respond(infos[1].requestId, 'deny');
+    await expect(again).rejects.toThrow(/denied/);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('未命中按原档位放行；非命令工具不调用守卫', async () => {
+    const { infos, commandGuard, execute, run } = setup('full', {}, null);
+    await run('bash', { command: 'ls' });
+    expect(infos).toHaveLength(0);
+    expect(execute).toHaveBeenCalledOnce();
+    const edits = setup('full');
+    await edits.run('edit', { path: '/repo/a.ts' }, 'file-edit');
+    expect(edits.commandGuard).not.toHaveBeenCalled();
+    expect(commandGuard).toHaveBeenCalledOnce();
+  });
+
+  it('底线已判出类别时保留原类别并附带原因', async () => {
+    const { gate, infos, run } = setup('supervised', { protectedFloor: true });
+    const pending = run('bash', { command: 'rm -rf build' });
+    await vi.waitFor(() => expect(infos).toHaveLength(1));
+    expect(infos[0]).toMatchObject({ protected: 'delete', guard: hit });
+    gate.respond(infos[0].requestId, 'allow');
+    await pending;
+  });
+
+  it('bot 完全放行豁免守卫；子会话经 floorOptions 继承守卫', async () => {
+    const bot = setup('full', { protectedFloor: true, exemptFull: true });
+    await bot.run('bash', { command: 'git reset --hard' });
+    expect(bot.infos).toHaveLength(0);
+    expect(bot.commandGuard).not.toHaveBeenCalled();
+
+    const parent = setup('supervised');
+    const childInfos: ApprovalRequestInfo[] = [];
+    const child = new ApprovalGate(
+      'full',
+      (info) => childInfos.push(info),
+      () => undefined,
+      parent.gate.floorOptions
+    );
+    const pending = withApproval(child, 'command', {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: {} as never,
+      execute: vi.fn(),
+    }).execute(
+      'c2',
+      { command: 'git reset --hard' } as never,
+      undefined,
+      undefined,
+      undefined as never
+    );
+    await vi.waitFor(() => expect(childInfos).toHaveLength(1));
+    child.respond(childInfos[0].requestId, 'deny');
+    await expect(pending).rejects.toThrow(/denied/);
+  });
+});
+
+describe('无人值守：需要审批的动作直接拒绝，不建 pending（对齐 factory）', () => {
+  const tool = (execute: () => Promise<never>) => ({
+    name: 'bash',
+    label: 'Bash',
+    description: '',
+    parameters: {} as never,
+    execute,
+  });
+
+  it('开关打开时 ask 不发请求、不建 pending，按「没人能批准」拒绝', async () => {
+    const { gate, requests } = makeGate('supervised');
+    gate.autoReject = true;
+    await expect(gate.ask('bash', 'command', 'npm run build', undefined)).resolves.toBe(
+      'no-approver'
+    );
+    expect(requests).toHaveLength(0);
+    expect(gate.snapshot()).toHaveLength(0);
+  });
+
+  it('拒绝文案点名动作、说没人能批准、要求别重试并给替代做法', async () => {
+    const { gate } = makeGate('supervised');
+    gate.autoReject = true;
+    const execute = vi.fn();
+    const wrapped = withApproval(gate, 'command', tool(execute as never));
+    const error = await wrapped
+      .execute('call-1', { command: 'git push' }, undefined, undefined, {} as never)
+      .catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/Bash/);
+    expect((error as Error).message).toMatch(/no user available to approve/i);
+    expect((error as Error).message).toMatch(/Do not retry/i);
+    expect((error as Error).message).toMatch(/needs no approval/i);
+    // 「继续干活」在主位，「停下」只留给不可逆决定
+    expect((error as Error).message).toMatch(/most reasonable assumption and continue/i);
+    expect((error as Error).message).toMatch(/unavoidable and irreversible/i);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('full 档命中受保护底线时也是拒绝而不是等人', async () => {
+    const { gate, requests } = makeGate('full', { protectedFloor: true });
+    gate.autoReject = true;
+    expect(gate.needsApproval('command', 'bash')).toBe(false);
+    await expect(
+      gate.ask('bash', 'command', 'rm -rf /repo/src', undefined, 'c1', undefined, 'delete')
+    ).resolves.toBe('no-approver');
+    expect(requests).toHaveLength(0);
+    const message = await withApproval(gate, 'command', tool(vi.fn() as never))
+      .execute('c2', { command: 'rm -rf /repo/src' }, undefined, undefined, {} as never)
+      .catch((e: Error) => e);
+    expect((message as Error).message).toMatch(/no user available to approve/i);
+  });
+
+  it('auto-edits：改文件照跑，命令被拒（开关只改「要确认时怎么办」）', async () => {
+    const { gate } = makeGate('auto-edits');
+    gate.autoReject = true;
+    const execute = vi.fn().mockResolvedValue({ content: [] });
+    const edit = withApproval(gate, 'file-edit', {
+      name: 'edit',
+      label: 'Edit',
+      description: '',
+      parameters: {} as never,
+      execute,
+    });
+    await edit.execute('c1', { path: '/repo/a.ts' }, undefined, undefined, {} as never);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const command = withApproval(gate, 'command', tool(vi.fn() as never));
+    await expect(
+      command.execute('c2', { command: 'make' }, undefined, undefined, {} as never)
+    ).rejects.toThrow(/no user available to approve/i);
+  });
+
+  it('assistant 档代审：auto_allow 照放，代审要问人时改为拒绝', async () => {
+    const asked = makeGate('assistant', {
+      review: async () => ({ decision: 'ask_user' as const }),
+    });
+    asked.gate.autoReject = true;
+    await expect(asked.gate.ask('bash', 'command', 'ls', undefined)).resolves.toBe('no-approver');
+    // 代审阶段会发一张「代审中」卡片，但不发需要人点的请求
+    expect(asked.gate.snapshot()).toHaveLength(0);
+
+    const allowed = makeGate('assistant', {
+      review: async () => ({ decision: 'auto_allow' as const }),
+    });
+    allowed.gate.autoReject = true;
+    await expect(allowed.gate.ask('bash', 'command', 'ls', undefined)).resolves.toBe('allow');
+  });
+
+  it('assistant 档没配代审模型：无人值守下不退回等人，直接拒绝', async () => {
+    const { gate, requests } = makeGate('assistant');
+    gate.autoReject = true;
+    await expect(gate.ask('bash', 'command', 'ls', undefined)).resolves.toBe('no-approver');
+    expect(requests).toHaveLength(0);
+    expect(gate.snapshot()).toHaveLength(0);
+  });
+
+  it('关掉开关后回到等人；打开时挂起的卡片立即按拒绝收尾', async () => {
+    const { gate, requests } = makeGate('supervised');
+    const pending = gate.ask('bash', 'command', 'npm test', undefined);
+    expect(requests).toHaveLength(1);
+    gate.autoReject = true;
+    gate.reconsider();
+    await expect(pending).resolves.toBe('no-approver');
+
+    gate.autoReject = false;
+    const again = gate.ask('bash', 'command', 'npm test', undefined);
+    expect(requests).toHaveLength(2);
+    gate.respond(gate.snapshot()[0].requestId, 'allow');
+    await expect(again).resolves.toBe('allow');
   });
 });

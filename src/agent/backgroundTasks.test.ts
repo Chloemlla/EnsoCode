@@ -1,24 +1,25 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { resolveShellLimits, SHELL_LIMITS, type ShellLimits } from '@shared/shellLimits';
 import type { BackgroundTaskInfo } from '@shared/types/agent';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   attachBackgroundCommandHooks,
   BackgroundTaskManager,
   createTaskTools,
-  DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC,
   foregroundCommandTimeoutMs,
   resolveBackgroundLaunch,
+  shellBackgroundEscape,
+  shellReadHint,
   type TaskEvents,
   withBackground,
-  withForegroundBashTimeout,
 } from './backgroundTasks';
 import { ForegroundDetachedError } from './foregroundCommand';
 import { createSessionCommandTool } from './sessionShell';
 
-const makeManager = () => {
+const makeManager = (limits?: Partial<ShellLimits>) => {
   const notified: string[] = [];
   const ended: string[] = [];
   const started: BackgroundTaskInfo[] = [];
@@ -28,7 +29,10 @@ const makeManager = () => {
     onEnded: (_s, taskId) => ended.push(taskId),
     onCompletionNotify: (_s, text) => notified.push(text),
   };
-  const manager = new BackgroundTaskManager(events, mkdtempSync(path.join(tmpdir(), 'enso-bg-')));
+  const manager = new BackgroundTaskManager(events, mkdtempSync(path.join(tmpdir(), 'enso-bg-')), {
+    ...SHELL_LIMITS,
+    ...limits,
+  });
   return { manager, notified, ended, started };
 };
 
@@ -46,44 +50,26 @@ const until = (pred: () => boolean, ms = 5000) =>
     }, 50);
   });
 
-describe('withForegroundBashTimeout', () => {
-  it('前台未指定 timeout 时填默认秒数', () => {
-    expect(DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC).toBe(120);
-    expect(withForegroundBashTimeout({ command: 'sleep 1' })).toEqual({
-      command: 'sleep 1',
-      timeout: DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC,
-    });
-  });
-
-  it('模型显式 timeout 保留', () => {
-    expect(withForegroundBashTimeout({ command: 'sleep 1', timeout: 30 })).toEqual({
-      command: 'sleep 1',
-      timeout: 30,
-    });
-  });
-
-  it('background 不注入 timeout', () => {
-    expect(withForegroundBashTimeout({ command: 'sleep 999', background: true })).toEqual({
-      command: 'sleep 999',
-      background: true,
-    });
-  });
-});
-
 describe('foregroundCommandTimeoutMs', () => {
-  it('前台 bash / powershell 按实际生效的超时换算毫秒', () => {
-    expect(foregroundCommandTimeoutMs('bash', { command: 'sleep 400' })).toBe(
-      DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC * 1000
-    );
+  it('截止 = min(让位时刻, 显式 timeout)：按命令分类取让位时刻', () => {
+    expect(foregroundCommandTimeoutMs('bash', { command: 'sleep 400' })).toBe(45_000);
+    expect(foregroundCommandTimeoutMs('bash', { command: 'pnpm test' })).toBe(180_000);
+    expect(foregroundCommandTimeoutMs('bash', { command: 'pnpm dev' })).toBe(10_000);
+    // 模型给 600s：前台 45s 就让位，渲染层倒计时与卡死检测都应以 45s 为准
+    expect(foregroundCommandTimeoutMs('bash', { command: 'sleep 999', timeout: 600 })).toBe(45_000);
+    expect(foregroundCommandTimeoutMs('bash', { command: 'pnpm test', timeout: 30 })).toBe(30_000);
+  });
+
+  it('powershell 走同一规则', () => {
     expect(foregroundCommandTimeoutMs('powershell', { command: 'x', timeout: 30 })).toBe(30_000);
+    expect(foregroundCommandTimeoutMs('powershell', { command: 'dotnet test' })).toBe(180_000);
+    expect(foregroundCommandTimeoutMs('powershell', { command: 'Get-Date' })).toBe(45_000);
   });
 
   it('background、非命令工具与脏参数没有截止时间', () => {
     expect(foregroundCommandTimeoutMs('bash', { command: 'x', background: true })).toBeUndefined();
     expect(foregroundCommandTimeoutMs('read', { path: 'a' })).toBeUndefined();
-    expect(foregroundCommandTimeoutMs('bash', null)).toBe(
-      DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC * 1000
-    );
+    expect(foregroundCommandTimeoutMs('bash', null)).toBe(45_000);
   });
 });
 
@@ -99,6 +85,30 @@ describe('withBackground promptSnippet 跟随工具名', () => {
     } as unknown as ToolDefinition;
     const wrapped = withBackground(base, manager, 's1', '/tmp');
     expect(wrapped.promptSnippet).toMatch(/^powershell:/);
+  });
+
+  it('提示词：snippet 讲让位语义，rules 只追加两条且保留原工具的', () => {
+    const manager = makeManager().manager;
+    const base = {
+      name: 'bash',
+      label: 'bash',
+      description: 'Execute a bash command.',
+      promptGuidelines: ['You can inspect PI_* environment variables.'],
+      parameters: { type: 'object', properties: {} },
+      execute: async () => ({ content: [], details: undefined }),
+    } as unknown as ToolDefinition;
+    const wrapped = withBackground(base, manager, 's1', '/tmp');
+    expect(wrapped.promptSnippet).toMatch(/tracked jobs/);
+    expect(wrapped.promptSnippet).toMatch(/background=true/);
+    expect(wrapped.promptGuidelines).toHaveLength(3);
+    expect(wrapped.promptGuidelines?.[0]).toContain('PI_*');
+    expect(wrapped.promptGuidelines?.[1]).toMatch(/nohup/);
+    expect(wrapped.promptGuidelines?.[2]).toMatch(/do not rerun/i);
+    expect(wrapped.description).toMatch(/fresh shell/i);
+    const props = (wrapped.parameters as { properties: Record<string, { description: string }> })
+      .properties;
+    expect(props.timeout.description).toMatch(/kill/i);
+    expect(props.background.description).toMatch(/notified/);
   });
 });
 
@@ -234,7 +244,7 @@ describe('withBackground 命令变换(远程会话用)', () => {
     expect(startCalls[0].cwd).toBe(process.cwd());
   });
 
-  it('前台 execute 注入默认 timeout', async () => {
+  it('前台 execute 不再注入默认 timeout，参数原样下传', async () => {
     const { manager } = makeManager();
     const seen: unknown[] = [];
     const base = {
@@ -249,10 +259,7 @@ describe('withBackground 命令变换(远程会话用)', () => {
     } as unknown as ToolDefinition;
     const wrapped = withBackground(base, manager, 's1', '/tmp');
     await wrapped.execute('t1', { command: 'echo hi' }, undefined, undefined, undefined as never);
-    expect(seen[0]).toEqual({
-      command: 'echo hi',
-      timeout: DEFAULT_FOREGROUND_BASH_TIMEOUT_SEC,
-    });
+    expect(seen[0]).toEqual({ command: 'echo hi' });
   });
 });
 
@@ -320,19 +327,102 @@ describe('BackgroundTaskManager', () => {
     expect(result?.status).toBe('done');
   });
 
-  it('完成通知只内联输出尾部，超长时标注省略并指向 task_output', async () => {
+  it('完成通知超长时保留头 20% 尾 80%，标注省略并指向 task_output', async () => {
     const { manager, notified, ended } = makeManager();
     const taskId = manager.start(
       's1',
-      `node -e "process.stdout.write('HEAD' + '-MARK' + 'x'.repeat(20000) + 'TAIL' + '-MARK')"`,
+      `node -e "process.stdout.write('HEAD' + '-MARK' + 'x'.repeat(20000) + 'MID' + '-MARK' + 'y'.repeat(20000) + 'TAIL' + '-MARK')"`,
       '/tmp'
     );
     await until(() => ended.length === 1);
     expect(notified[0]).toContain('TAIL-MARK');
-    expect(notified[0]).not.toContain('HEAD-MARK');
-    expect(notified[0]).toMatch(/earlier characters omitted/);
+    expect(notified[0]).toContain('HEAD-MARK');
+    expect(notified[0]).not.toContain('MID-MARK');
+    expect(notified[0]).toMatch(/characters omitted/);
     expect(notified[0]).toContain(`task_output("${taskId}")`);
     expect(notified[0].length).toBeLessThan(6000);
+  });
+
+  it('失败的后台任务：完成通知带结构化分类与下一步', async () => {
+    const { manager, notified, ended } = makeManager();
+    manager.start(
+      's1',
+      'echo "sudo: no tty present and no askpass program specified" >&2; exit 1',
+      '/tmp'
+    );
+    await until(() => ended.length === 1);
+    expect(notified[0]).toContain('[tty_required]');
+    expect(notified[0]).toMatch(/non-interactive/);
+  });
+
+  it('日志超过上限停写并标记截断，不杀进程', async () => {
+    const { manager, notified, ended } = makeManager({ logMaxBytes: 64 });
+    const taskId = manager.start(
+      's1',
+      `node -e "process.stdout.write('a'.repeat(50)); setTimeout(() => process.stdout.write('b'.repeat(200)), 50)"`,
+      '/tmp'
+    );
+    await until(() => ended.includes(taskId));
+    const result = await manager.read(taskId);
+    expect(result?.status).toBe('done');
+    expect(result?.output).toContain('b'.repeat(200));
+    await new Promise((r) => setTimeout(r, 50));
+    const log = readFileSync(result?.logPath as string, 'utf8');
+    expect(log).toContain('a'.repeat(50));
+    expect(log).not.toContain('b'.repeat(200));
+    expect(log).toMatch(/log truncated/);
+    expect(notified[0]).toContain('[output_truncated]');
+  });
+
+  it('task_output 单次阻塞等待按上限截断', async () => {
+    const { manager } = makeManager({ taskWaitMaxMs: 100 });
+    const taskId = manager.start('s1', 'sleep 5', '/tmp');
+    const t0 = Date.now();
+    expect((await manager.read(taskId, 60_000))?.status).toBe('running');
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    manager.stopAll();
+    const tool = createTaskTools(manager).find((item) => item.name === 'task_output');
+    expect(tool?.description).toContain('0.1 seconds');
+  });
+
+  it('settings.shell 下发 taskWaitMaxMs=5000 后：task_output 阻塞上限变成 5s（已建好的工具也按新值）', async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager } = makeManager();
+      const before = createTaskTools(manager, 's1').find((item) => item.name === 'task_output');
+      manager.setLimits(resolveShellLimits({ taskWaitMaxMs: 5000 }));
+      expect(manager.limits.taskWaitMaxMs).toBe(5000);
+      const after = createTaskTools(manager, 's1').find((item) => item.name === 'task_output');
+      expect(after?.description).toContain('5 seconds');
+      const taskId = manager.adopt(
+        's1',
+        { output: () => '', pipe: () => {}, done: new Promise(() => {}), kill: () => {} },
+        { command: 'sleep 999', startedAt: Date.now() }
+      );
+      let settled = false;
+      const reading = before
+        ?.execute('r1', { taskId, timeout_ms: 600_000 }, undefined, undefined, undefined as never)
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expect(JSON.stringify((await reading)?.content)).toContain('[running]');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settings.shell 坏值回落默认，不抛错', () => {
+    const { manager } = makeManager();
+    expect(() =>
+      manager.setLimits(resolveShellLimits({ taskWaitMaxMs: 'fast', maxTasks: -3 }))
+    ).not.toThrow();
+    expect(manager.limits.taskWaitMaxMs).toBe(SHELL_LIMITS.taskWaitMaxMs);
+    expect(manager.limits.maxTasks).toBe(SHELL_LIMITS.maxTasks);
   });
 
   it('完成通知：无输出时明确说明，ANSI 控制序列被剥离', async () => {
@@ -367,8 +457,8 @@ describe('BackgroundTaskManager', () => {
     const first = manager.start('s1', 'true', '/tmp');
     expect(levels.at(-1)).toEqual({ sessionId: 's1', ids: [first], statuses: ['running'] });
     await until(() => levels.at(-1)?.statuses[0] === 'done');
-    for (let i = 0; i < 9; i++) manager.start('s2', 'sleep 5', '/tmp');
-    // 第 11 个触发配额清理：s1 的已完成任务被移除，s1 必须收到空快照
+    for (let i = 0; i < SHELL_LIMITS.maxTasks - 1; i++) manager.start('s2', 'sleep 5', '/tmp');
+    // 超出配额的那一个触发清理：s1 的已完成任务被移除，s1 必须收到空快照
     manager.start('s2', 'sleep 5', '/tmp');
     expect(levels.filter((level) => level.sessionId === 's1').at(-1)).toEqual({
       sessionId: 's1',
@@ -400,6 +490,35 @@ describe('BackgroundTaskManager', () => {
     await until(() => ended.includes(byUser));
     expect(notified).toHaveLength(1);
     expect(notified[0]).toContain('do not restart');
+  });
+
+  it('kill 后进程仍不收口（Windows 孙进程占着 stdio）：两次宽限后强制结束，不占配额不锁工作区（#185）', async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, ended, notified } = makeManager();
+      const kill = vi.fn();
+      const taskId = manager.adopt(
+        'root',
+        {
+          output: () => '',
+          pipe: () => {},
+          done: new Promise<number | null>(() => {}),
+          kill,
+        },
+        { command: 'python -m http.server', startedAt: Date.now() }
+      );
+      expect(manager.stop(taskId, true)).toBe(true);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(kill).toHaveBeenCalledTimes(2);
+      expect(manager.snapshot('root')[0]?.status).toBe('running');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(manager.snapshot('root')[0]?.status).toBe('failed');
+      expect(ended).toEqual([taskId]);
+      expect(manager.hasRunningInWorkspace(['root'])).toBe(false);
+      expect(notified[0]).toContain('do not restart');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('task_output 阻塞时插话提前返回，任务继续跑，结束后照常通知', async () => {
@@ -593,5 +712,304 @@ describe('前台命令转后台', () => {
     await until(() => ended.includes(taskId));
     expect(finalized).toBe(1);
     expect((await manager.read(taskId))?.details).toEqual({ stage: 'final' });
+  });
+});
+
+describe('前台让位 / 截止 / 失败回执（真实进程）', () => {
+  const shell = (manager: BackgroundTaskManager) =>
+    withBackground(
+      createSessionCommandTool({ cwd: process.cwd() }) as unknown as ToolDefinition,
+      manager,
+      's1',
+      process.cwd()
+    );
+  const textOf = (result: { content: Array<{ type: string; text?: string }> }) =>
+    result.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+
+  it('到让位时刻：工具回执（任务 id / 日志 / Next:，无 timeout 字样），进程继续跑完并通知', async () => {
+    const { manager, notified, ended } = makeManager({ yieldDefaultMs: 300 });
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo before-yield; sleep 0.8; echo after-yield' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    const text = textOf(result);
+    const taskId = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+    expect(taskId).toMatch(/^task-/);
+    expect(text).toContain(taskId);
+    expect(text).toContain('before-yield');
+    expect(text).toMatch(/Log: .+\.log/);
+    expect(text).toContain('Next:');
+    expect(text).not.toMatch(/time ?out|timed out/i);
+    await until(() => ended.includes(taskId));
+    expect((await manager.read(taskId))?.output).toContain('after-yield');
+    expect(notified[0]).toContain(`Background task ${taskId} finished (exit 0`);
+  });
+
+  it('显式 timeout 早于让位：到点杀进程，结果带 deadline 分类与下一步', async () => {
+    const { manager, started } = makeManager();
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo go; sleep 5', timeout: 0.3 },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Command timed out after 0.3 seconds');
+    expect(textOf(result)).toContain('[deadline]');
+    expect(result.details).toMatchObject({ shellFailure: { kind: 'deadline', retryable: true } });
+    expect(started).toHaveLength(0);
+  });
+
+  it('显式 timeout 晚于让位：先让位，后台到截止时间杀掉并在通知里说明', async () => {
+    const { manager, notified, ended } = makeManager({ yieldDefaultMs: 200 });
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'sleep 5', timeout: 0.6 },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    const taskId = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+    expect(taskId).toMatch(/^task-/);
+    await until(() => ended.includes(taskId), 8_000);
+    expect(notified[0]).toMatch(/timeout you set/);
+    expect(notified[0]).toContain('[deadline]');
+  });
+
+  it('非零退出：结果带 exit_nonzero 分类与退出码', async () => {
+    const { manager } = makeManager();
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo broken >&2; exit 3' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[exit_nonzero]');
+    expect(result.details).toMatchObject({
+      shellFailure: { kind: 'exit_nonzero', retryable: true, exitCode: 3 },
+    });
+  });
+
+  it('需要终端的失败：tty_required，不可重试', async () => {
+    const { manager } = makeManager();
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo "sudo: no tty present and no askpass program specified" >&2; exit 1' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(result.details).toMatchObject({
+      shellFailure: { kind: 'tty_required', retryable: false, exitCode: 1 },
+    });
+    expect(textOf(result)).toMatch(/Do not retry it unchanged/);
+  });
+
+  it('成功的命令不加失败分类', async () => {
+    const { manager } = makeManager();
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo fine' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(result.isError).not.toBe(true);
+    expect(JSON.stringify(result.details ?? {})).not.toContain('shellFailure');
+  });
+
+  it('让位时配额已满：停止命令并说明原因，不挂住调用', async () => {
+    const { manager } = makeManager({ yieldDefaultMs: 200, maxTasks: 1 });
+    manager.start('s1', 'sleep 5', '/tmp');
+    const result = await shell(manager).execute(
+      't1',
+      { command: 'echo go; sleep 5' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('go');
+    expect(textOf(result)).toMatch(/Too many background tasks/);
+    manager.stopAll();
+  });
+});
+
+describe('shellBackgroundEscape', () => {
+  it('拦下用 shell 逃逸代替 background 参数的写法', () => {
+    for (const command of [
+      'npm run dev &',
+      'a & b',
+      'nohup node server.js > /tmp/out.log 2>&1',
+      'setsid ./run.sh',
+      'sleep 5 & disown',
+    ]) {
+      expect(shellBackgroundEscape(command), command).not.toBeNull();
+    }
+  });
+
+  it('不误报普通重定向、&& 链与引号内的 &', () => {
+    for (const command of [
+      'npm test 2>&1 | tail -20',
+      'pnpm build && pnpm test',
+      'echo "a & b"',
+      "echo 'x && y'",
+      'cat file > out.txt',
+    ]) {
+      expect(shellBackgroundEscape(command), command).toBeNull();
+    }
+  });
+
+  it('heredoc 正文里的 & 不算逃逸，但链式 nohup 仍要拦', () => {
+    const heredoc = ["cat > run.sh <<'EOF'", 'npm start &', 'EOF'].join('\n');
+    expect(shellBackgroundEscape(heredoc)).toBeNull();
+    expect(shellBackgroundEscape('cd app && nohup npm start > /tmp/a.log 2>&1')).toBe(
+      'nohup/setsid'
+    );
+  });
+});
+
+describe('shellReadHint', () => {
+  it('用 shell 读文件/搜内容时给出专用工具提示', () => {
+    expect(shellReadHint('cat src/a.ts')).toMatch(/read/);
+    expect(shellReadHint('sed -n 1,20p src/a.ts')).toMatch(/read/);
+    expect(shellReadHint('rg -n "foo" src')).toMatch(/grep/);
+    expect(shellReadHint('find . -name "*.ts"')).toMatch(/find/);
+  });
+
+  it('普通命令与写文件不改写结果', () => {
+    expect(shellReadHint('pnpm test')).toBe('');
+    expect(shellReadHint('sed -i "" s/a/b/ src/a.ts')).toBe('');
+    expect(shellReadHint('git status')).toBe('');
+  });
+});
+
+describe('withBackground 前台预算与回执', () => {
+  const makeTool = () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const base = {
+      name: 'bash',
+      label: 'bash',
+      description: 'Run a shell command.',
+      parameters: { type: 'object', properties: {} },
+      execute: async (_id: string, params: unknown) => {
+        seen.push(params as Record<string, unknown>);
+        return { content: [{ type: 'text' as const, text: 'ok' }], details: undefined };
+      },
+    } as unknown as ToolDefinition;
+    return { base, seen };
+  };
+
+  it('显式 timeout 原样下传（只作截止），不按让位改写', async () => {
+    const { manager } = makeManager();
+    const { base, seen } = makeTool();
+    const wrapped = withBackground(base, manager, 's1', '/tmp');
+    await wrapped.execute(
+      't1',
+      { command: 'npm run build', timeout: 300 },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    expect(seen[0]).toEqual({ command: 'npm run build', timeout: 300 });
+  });
+
+  it('后台启动回执说明：没有独立工作就结束本轮，完成会唤醒', async () => {
+    const { manager } = makeManager();
+    const { base } = makeTool();
+    const wrapped = withBackground(base, manager, 's1', process.cwd());
+    const result = await wrapped.execute(
+      't1',
+      { command: 'sleep 0.2', background: true },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+    expect(text).toMatch(/end your turn/i);
+    expect(text).toMatch(/wake you|notified/i);
+  });
+
+  it('用 & / nohup 逃逸时拒绝执行并指回 background 参数', async () => {
+    const { manager } = makeManager();
+    const { base } = makeTool();
+    const wrapped = withBackground(base, manager, 's1', '/tmp');
+    await expect(
+      wrapped.execute('t1', { command: 'npm run dev &' }, undefined, undefined, undefined as never)
+    ).rejects.toThrow(/background: true/);
+    await expect(
+      wrapped.execute(
+        't2',
+        { command: 'nohup node app.js > /tmp/a.log 2>&1' },
+        undefined,
+        undefined,
+        undefined as never
+      )
+    ).rejects.toThrow(/background: true/);
+  });
+
+  it('shell 读文件的结果里附带专用工具提示', async () => {
+    const { manager } = makeManager();
+    const { base } = makeTool();
+    const wrapped = withBackground(base, manager, 's1', '/tmp');
+    const result = await wrapped.execute(
+      't1',
+      { command: 'cat src/a.ts' },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+    expect(text).toMatch(/read/);
+  });
+
+  it.skipIf(process.platform === 'win32')('本地后台命令跑在非交互硬化 env 里', async () => {
+    const { manager, ended } = makeManager();
+    const { base } = makeTool();
+    const wrapped = withBackground(base, manager, 's1', process.cwd());
+    await wrapped.execute(
+      't1',
+      { command: 'printf "%s|%s" "$GIT_TERMINAL_PROMPT" "$PAGER"', background: true },
+      undefined,
+      undefined,
+      undefined as never
+    );
+    const taskId = manager.knownIds()[0];
+    await until(() => ended.includes(taskId));
+    expect((await manager.read(taskId))?.output).toBe('0|cat');
+  });
+});
+
+describe('后台截止时间', () => {
+  it('转后台的显式 timeout 到点杀进程，并在通知里说明是超时', async () => {
+    const { manager, notified, ended } = makeManager();
+    let killed = 0;
+    let resolveDone: (code: number | null) => void = () => {};
+    const proc = {
+      output: () => '',
+      pipe: () => {},
+      done: new Promise<number | null>((resolve) => {
+        resolveDone = resolve;
+      }),
+      kill: () => {
+        killed += 1;
+        resolveDone(null);
+      },
+    };
+    const taskId = manager.adopt('s1', proc, {
+      command: 'npm run build',
+      startedAt: Date.now(),
+      deadlineSec: 0.15,
+    });
+    await until(() => killed > 0, 3000);
+    expect(killed).toBeGreaterThan(0);
+    await until(() => ended.includes(taskId), 3000);
+    expect(notified.join('\n')).toMatch(/timeout/i);
   });
 });

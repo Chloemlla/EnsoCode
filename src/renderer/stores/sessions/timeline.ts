@@ -1,4 +1,5 @@
 import type { ApprovalReviewRecord } from '@shared/approvalReviewRecord';
+import type { PluginArtifactInfo } from '@shared/extensionPlugins/protocol';
 import { IMAGE_EXTENSIONS, mediaExtension } from '@shared/localImage';
 import { type MaskReport, mergeMaskReports } from '@shared/privacyMask/report';
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
@@ -9,6 +10,7 @@ import type {
   ApprovalRequestInfo,
   ProjectedCodemodeCall,
   ProjectedMessage,
+  ShellFailure,
   TodoItem,
   TurnPerf,
 } from '@shared/types/agent';
@@ -100,6 +102,8 @@ export type TimelineItem =
       waiting?: 'subagent' | 'task';
       /** 前台命令被移交为后台任务时的任务 id；其它缺省 */
       backgroundTaskId?: string;
+      /** bash / powershell 结果的结构化失败分类；其它缺省 */
+      shellFailure?: ShellFailure;
       /** submit_plan 提交的计划；其它工具缺省 */
       plan?: { title: string; text: string } | null;
       /** 联系主 agent / 队员、子代理 send 发出的正文，或子代理 spawn 交代的任务；其它工具缺省 */
@@ -112,6 +116,8 @@ export type TimelineItem =
       subagentOp?: SubagentOp;
       /** wait / list 行：agentId → spawn 时起的名字，展开后逐个标注；其它缺省 */
       subagentTitles?: Record<string, string>;
+      /** 插件工具写出的产出文件；其它缺省 */
+      pluginArtifacts?: PluginArtifactInfo[];
     }
   | {
       kind: 'tool-group';
@@ -155,7 +161,9 @@ export type TimelineItem =
   /** 不进入 LLM context 的 parent/child SessionManager custom entry。 */
   | { kind: 'session-custom'; key: string; entry: AgentSessionCustomEntry }
   /** 带字分隔线（委派子会话的「第 N 次执行」） */
-  | { kind: 'divider'; key: string; text: string };
+  | { kind: 'divider'; key: string; text: string }
+  /** 插件经 session.inject 写入的消息；必须标明来源 */
+  | { kind: 'plugin-message'; key: string; text: string; pluginId: string; pluginName: string };
 
 export function formatApplyPatchOutcome(outcome: ProjectedApplyPatchOutcome): string {
   const list = (label: string, paths: string[]): string =>
@@ -854,6 +862,8 @@ function buildMessageTimeline(
       rtk?: RtkToolStats;
       approvalReview?: ApprovalReviewRecord;
       backgroundTaskId?: string;
+      shellFailure?: ShellFailure;
+      pluginArtifacts?: PluginArtifactInfo[];
     }
   >();
   for (const message of messages) {
@@ -871,6 +881,8 @@ function buildMessageTimeline(
         rtk: message.rtk,
         approvalReview: message.approvalReview,
         backgroundTaskId: message.backgroundTaskId,
+        shellFailure: message.shellFailure,
+        pluginArtifacts: message.pluginArtifacts,
       });
     }
   }
@@ -959,6 +971,17 @@ function buildMessageTimeline(
         };
         items.push(userItem);
         currentTurnUserItem = userItem;
+      }
+      return;
+    }
+    if (message.role === 'custom') {
+      if (message.pluginSource) {
+        items.push({
+          kind: 'plugin-message',
+          key: `${absIndex}`,
+          text: partText(message),
+          ...message.pluginSource,
+        });
       }
       return;
     }
@@ -1206,6 +1229,7 @@ function buildMessageTimeline(
             ...(liveCommand || waiting ? { callId: part.id } : {}),
             ...(waiting ? { waiting } : {}),
             ...(result?.backgroundTaskId ? { backgroundTaskId: result.backgroundTaskId } : {}),
+            ...(result?.shellFailure ? { shellFailure: result.shellFailure } : {}),
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
               : {}),
@@ -1214,6 +1238,7 @@ function buildMessageTimeline(
             ...(asked ? { ask: asked.ask } : {}),
             ...(subagent?.op ? { subagentOp: subagent.op } : {}),
             ...(subagent?.titles ? { subagentTitles: subagent.titles } : {}),
+            ...(result?.pluginArtifacts ? { pluginArtifacts: result.pluginArtifacts } : {}),
             ...(result || !toolStartedAt ? {} : { startedAt: toolStartedAt[part.id] ?? null }),
           });
           return;
@@ -1535,6 +1560,7 @@ function isTurnSwallowable(item: TimelineItem): boolean {
     case 'compaction-progress':
     case 'error':
     case 'divider':
+    case 'plugin-message':
       return false;
     default:
       return true;

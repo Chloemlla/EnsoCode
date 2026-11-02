@@ -75,6 +75,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   exploreFoldEnabled: { mode: 'portable' },
   rtkEnabled: { mode: 'portable' },
   computerPreview: { mode: 'excluded', reason: 'macOS-only desktop display preference' },
+  computerAllowAllApps: { mode: 'excluded', reason: 'device-local computer control trust' },
   editMode: { mode: 'portable' },
   hashlineEditEnabled: { mode: 'excluded', reason: 'legacy read-only edit mode migration' },
   compactStrategy: { mode: 'portable' },
@@ -103,6 +104,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   botRouteClassifier: { mode: 'excluded', reason: 'bot members and chats live on this device' },
   botAssistantModel: { mode: 'excluded', reason: 'bot members and chats live on this device' },
   protectedActionsInCode: { mode: 'excluded', reason: 'device-local safety preference' },
+  dcgEnabled: { mode: 'excluded', reason: 'dcg binary is installed on this device' },
   voiceInputDevice: { mode: 'excluded', reason: 'microphones belong to this device' },
   voiceModel: { mode: 'excluded', reason: 'speech model lives on this device' },
   voiceCorrectionEnabled: { mode: 'excluded', reason: 'voice input is configured per device' },
@@ -129,6 +131,10 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   privacyMasking: {
     mode: 'excluded',
     reason: 'custom words and allow list may themselves be sensitive',
+  },
+  shell: {
+    mode: 'excluded',
+    reason: 'device-local command time limits and rollback switch',
   },
   generationStallTimeoutMin: { mode: 'portable' },
   autoArchiveIdleDays: { mode: 'portable' },

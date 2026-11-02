@@ -974,6 +974,27 @@ describe('buildTimeline', () => {
     );
     expect(moved[1]).toMatchObject({ kind: 'tool', state: 'ok', backgroundTaskId: 'task-1-abc' });
     expect(moved[1]).not.toHaveProperty('callId');
+
+    const failed = buildTimeline(
+      [
+        user('跑'),
+        call('t2', 'bash'),
+        {
+          role: 'toolResult',
+          toolCallId: 't2',
+          toolName: 'bash',
+          isError: true,
+          content: [{ type: 'text', text: 'sudo: a terminal is required' }],
+          shellFailure: { kind: 'tty_required', retryable: false, exitCode: 1 },
+        },
+      ],
+      false
+    );
+    expect(failed[1]).toMatchObject({
+      kind: 'tool',
+      state: 'error',
+      shellFailure: { kind: 'tty_required', retryable: false, exitCode: 1 },
+    });
   });
 
   it('运行中的阻塞等待带调用 id 与等待类型，供「不等了」', () => {
@@ -2436,6 +2457,29 @@ describe('mcp 代理调用行', () => {
 });
 
 describe('compaction 摘要行', () => {
+  it('插件注入的消息渲染为带来源的行，其它 custom 消息不显示', () => {
+    const timeline = buildTimeline(
+      [
+        user('hi'),
+        {
+          role: 'custom',
+          content: [{ type: 'text', text: '提醒：构建完成' }],
+          timestamp: 9,
+          pluginSource: { pluginId: 'enso.example.notes', pluginName: 'Notes' },
+        },
+        { role: 'custom', content: [{ type: 'text', text: 'hidden' }] },
+      ],
+      false
+    );
+    expect(timeline.map((item) => item.kind)).toEqual(['user', 'plugin-message']);
+    expect(timeline[1]).toMatchObject({
+      kind: 'plugin-message',
+      text: '提醒：构建完成',
+      pluginId: 'enso.example.notes',
+      pluginName: 'Notes',
+    });
+  });
+
   it('compactionSummary 消息渲染为 compaction 行，带摘要与压缩前 token 数', () => {
     const timeline = buildTimeline(
       [

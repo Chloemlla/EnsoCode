@@ -39,6 +39,7 @@ import {
   MessagesSquare,
   PackageMinus,
   Pencil,
+  Puzzle,
   RefreshCw,
   Search,
   SkipForward,
@@ -98,6 +99,7 @@ import {
 } from '@/stores/sessions/timeline';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentRunsStore } from '@/stores/subagentRuns';
+import { PluginArtifactsCard } from '../../plugins/artifactViews';
 import { PluginMessageActions, PluginToolCardSlot } from '../../plugins/slots';
 import { ApprovalReviewBar } from './ApprovalReviewBar';
 import { AskUserResult } from './AskUserResult';
@@ -115,6 +117,7 @@ import { fileMentionBasename, splitInlineMentions, splitMentionRefs } from './me
 import { PrivacyMaskBadge } from './PrivacyMaskBadge';
 import { ReadFileView } from './ReadFileView';
 import { RtkToolStatsBar } from './RtkToolStatsBar';
+import { ShellFailureBadge, ShellRunStatus } from './ShellStatus';
 import { SlashChip, slashChipClass, splitSlashCommand } from './SlashChip';
 import { StepNode, type StepNodeState } from './StepNode';
 import { SubagentResult } from './SubagentResult';
@@ -208,7 +211,9 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.ask?.autoSelected === b.ask?.autoSelected &&
         a.subagentOp === b.subagentOp &&
         JSON.stringify(a.subagentTitles) === JSON.stringify(b.subagentTitles) &&
-        a.waiting === b.waiting
+        a.waiting === b.waiting &&
+        a.pluginArtifacts === b.pluginArtifacts &&
+        a.shellFailure === b.shellFailure
       );
     case 'tool-group':
       return (
@@ -245,6 +250,8 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
       return b.kind === 'session-custom' && a.entry === b.entry;
     case 'divider':
       return b.kind === 'divider' && a.text === b.text;
+    case 'plugin-message':
+      return b.kind === 'plugin-message' && a.text === b.text && a.pluginId === b.pluginId;
   }
 }
 
@@ -425,9 +432,10 @@ function InlineMentionText({
   activeNth?: number;
 }) {
   const segments = splitInlineMentions(text);
+  const mentions = segments.filter((segment) => segment.type !== 'text').length;
   const counter = { n: 0 };
   return (
-    <span className="whitespace-pre-wrap">
+    <span className="flex flex-col items-start gap-1.5">
       {segments.map((segment, index) =>
         segment.type === 'file' ? (
           // biome-ignore lint/suspicious/noArrayIndexKey: 同一文件可重复提及，分段随文本快照整体替换
@@ -455,12 +463,13 @@ function InlineMentionText({
             title={`${segment.path}${segment.text ? ` · ${segment.text}` : ''}`}
           />
         ) : (
-          // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
-          <span key={index}>
-            {searchQuery.trim()
-              ? renderHighlighted(segment.text, searchQuery, activeNth, counter)
-              : segment.text}
-          </span>
+          <Markdown
+            // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
+            key={index}
+            text={segment.text}
+            searchQuery={searchQuery}
+            activeNth={activeNth - (mentions > 0 ? counter.n : 0)}
+          />
         )
       )}
     </span>
@@ -790,6 +799,7 @@ export const TimelineRow = memo(function TimelineRow({
         <>
           <PluginToolCardSlot name={item.name} output={item.output} state={item.state} />
           <ToolRow item={item} />
+          {item.pluginArtifacts ? <PluginArtifactsCard artifacts={item.pluginArtifacts} /> : null}
         </>
       );
     case 'tool-group':
@@ -811,6 +821,8 @@ export const TimelineRow = memo(function TimelineRow({
       return <CompactionProgressRow state={item.state} />;
     case 'session-custom':
       return <SessionCustomRow entry={item.entry} />;
+    case 'plugin-message':
+      return <PluginMessageRow item={item} />;
     case 'divider':
       return (
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
@@ -852,6 +864,24 @@ function OauthAccountRow({
     <div className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2 text-xs">
       <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
       <p className="min-w-0 break-words text-muted-foreground">{text}</p>
+    </div>
+  );
+}
+
+/** 插件注入的消息：标明来源，样式与用户消息、模型回复都不同 */
+function PluginMessageRow({ item }: { item: Extract<TimelineItem, { kind: 'plugin-message' }> }) {
+  const { t } = useI18n();
+  return (
+    <div
+      data-plugin-message={item.pluginId}
+      className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-xs"
+    >
+      <p className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+        <Puzzle className="h-3.5 w-3.5 shrink-0" />
+        <span>{t('From plugin {{name}}', { name: item.pluginName })}</span>
+        <span className="font-mono opacity-70">{item.pluginId}</span>
+      </p>
+      <p className="whitespace-pre-wrap break-words text-foreground">{item.text}</p>
     </div>
   );
 }
@@ -1291,6 +1321,12 @@ function TextRow({
   const { t } = useI18n();
   const host = useChatHost();
   const perfStr = item.perf ? formatPerf(item.perf, t, item.turnDurationMs !== undefined) : '';
+  const localSessionId = useSessionsStore((state) => displayedConversation(state)?.id ?? null);
+  const pluginActionProps = {
+    text: item.text,
+    messageIndex: Number(item.key.split('-')[0]),
+    sessionId: host ? host.sessionId : localSessionId,
+  };
   return (
     <div className="group text-sm">
       <Markdown
@@ -1302,8 +1338,9 @@ function TextRow({
       {item.turnEnd && !item.streaming && host?.turnFooter?.(Number(item.key.split('-')[0]))}
       {!item.streaming && (
         <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+          <PluginMessageActions position="left" {...pluginActionProps} />
           <CopyButton text={item.text} />
-          <PluginMessageActions position="right" text={item.text} />
+          <PluginMessageActions position="right" {...pluginActionProps} />
           {item.turnEnd && <ForkButton messageIndex={Number(item.key.split('-')[0])} />}
           {item.timestamp && <span>{formatClock(item.timestamp)}</span>}
           {item.turnDurationMs !== undefined && (
@@ -1931,12 +1968,24 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
               {t('Moved to background')}
             </span>
           )}
+          {item.shellFailure && item.state !== 'running' && (
+            <ShellFailureBadge failure={item.shellFailure} />
+          )}
           {item.state === 'reviewing' ? (
             <span className="t-shimmer shrink-0 text-[11px]" data-text={t('Assistant reviewing…')}>
               {t('Assistant reviewing…')}
             </span>
           ) : item.state === 'running' && item.startedAt !== null ? (
-            <RunningElapsed itemKey={item.key} since={item.startedAt ?? undefined} />
+            <>
+              {item.callId && (item.name === 'bash' || item.name === 'powershell') && (
+                <ShellRunStatusLive
+                  callId={item.callId}
+                  startedAt={item.startedAt}
+                  output={item.output ?? ''}
+                />
+              )}
+              <RunningElapsed itemKey={item.key} since={item.startedAt ?? undefined} />
+            </>
           ) : (
             (item.agentMeta || item.durationMs !== null) && (
               <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70 tabular-nums">
@@ -2036,8 +2085,12 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
             <ToolContentScroller follow={item.state === 'running'}>
               {isSandboxTool(item.name) ? (
                 <SandboxOutput source={item.source} output={item.output} view={sandbox} />
-              ) : item.name === 'bash' ? (
-                <TerminalOutput command={item.summary} output={item.output ?? ''} />
+              ) : item.name === 'bash' || item.name === 'powershell' ? (
+                <TerminalOutput
+                  command={item.summary}
+                  output={item.output ?? ''}
+                  failure={item.shellFailure}
+                />
               ) : item.name === 'read' && hasImage && item.imagePath ? (
                 <ReadImagePreview
                   key={item.imagePath}
@@ -2311,6 +2364,23 @@ function RunningElapsed({ itemKey, since }: { itemKey: string; since?: number })
       {formatDuration(Date.now() - origin)}
     </span>
   );
+}
+
+/** 运行中命令的让位倒计时与静默徽章；远程节点视图没有本机 deadline，只显示静默 */
+function ShellRunStatusLive({
+  callId,
+  startedAt,
+  output,
+}: {
+  callId: string;
+  startedAt: number | null | undefined;
+  output: string;
+}) {
+  const host = useChatHost();
+  const deadlineAt = useSessionsStore((state) =>
+    host ? undefined : displayedConversation(state)?.toolDeadlineAt?.[callId]
+  );
+  return <ShellRunStatus startedAt={startedAt} deadlineAt={deadlineAt} output={output} />;
 }
 
 function toolIcon(name: string): LucideIcon {

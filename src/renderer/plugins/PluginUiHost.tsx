@@ -1,6 +1,9 @@
 import { useEffect } from 'react';
+import { addToast } from '@/components/ui/toast';
 import { useSessionsStore } from '@/stores/sessions';
 import { displayedConversationId } from '@/stores/sessions/chatChrome';
+import { newInterceptBreakers } from './breakers';
+import { mergePluginCommands, setPluginCommands } from './commands';
 import { handleDraftRequest } from './draftBridge';
 import { createRendererDeps, loadPluginRenderer } from './loader';
 import { setPluginTriggers } from './triggers';
@@ -13,31 +16,45 @@ export function PluginUiHost() {
     const deps = createRendererDeps(() => displayedConversationId(useSessionsStore.getState()));
     let generation = 0;
     let handles: { dispose(): void }[] = [];
+    const breakers = new Set<string>();
     const reload = () => {
       const mine = ++generation;
       for (const handle of handles) handle.dispose();
       handles = [];
       void window.electronAPI.extensionPlugins.list().then(async (list) => {
         if (mine !== generation) return;
+        for (const { pluginName, event } of newInterceptBreakers(list, breakers)) {
+          addToast({
+            type: 'warning',
+            title: `插件 ${pluginName} 的检查连续失败，已临时放行`,
+            description: `${event} 事件 30 秒内不再经过该插件；详情见设置里的插件日志`,
+          });
+        }
+        const enabled = list.filter((plugin) => plugin.state === 'enabled');
+        setPluginCommands(
+          enabled.flatMap((plugin) =>
+            mergePluginCommands(plugin.commands, plugin.dynamicCommands).map((command) => ({
+              pluginId: plugin.id,
+              pluginName: plugin.name,
+              ...command,
+            }))
+          )
+        );
         setPluginViews(
-          list
-            .filter((plugin) => plugin.state === 'enabled')
-            .flatMap((plugin) =>
-              plugin.views.map((view) => ({
-                pluginId: plugin.id,
-                pluginName: plugin.name,
-                ...view,
-              }))
-            )
+          enabled.flatMap((plugin) =>
+            plugin.views.map((view) => ({
+              pluginId: plugin.id,
+              pluginName: plugin.name,
+              ...view,
+            }))
+          )
         );
         setPluginTriggers(
-          list
-            .filter((plugin) => plugin.state === 'enabled')
-            .flatMap((plugin) =>
-              plugin.triggers
-                .filter((trigger) => trigger.symbol === '#')
-                .map((trigger) => ({ pluginId: plugin.id, name: trigger.name }))
-            )
+          enabled.flatMap((plugin) =>
+            plugin.triggers
+              .filter((trigger) => trigger.symbol === '#')
+              .map((trigger) => ({ pluginId: plugin.id, name: trigger.name }))
+          )
         );
         for (const plugin of list) {
           if (plugin.state !== 'enabled' || !plugin.renderer) continue;
@@ -68,6 +85,7 @@ export function PluginUiHost() {
       generation += 1;
       unsubscribe();
       unsubscribeDraft();
+      setPluginCommands([]);
       setPluginTriggers([]);
       setPluginViews([]);
       for (const handle of handles) handle.dispose();

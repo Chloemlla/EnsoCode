@@ -66,6 +66,7 @@ import {
   promptChildSession,
   promptSession,
   readSettingsState,
+  registerPluginSessionBridge,
   releaseParentSession,
   reloadSession,
   requestSnapshot,
@@ -82,6 +83,8 @@ import {
   sendComputerResultToSession,
   sendDelegationResultToSession,
   sendMemoryResultToSession,
+  sendPluginInterceptResultToSession,
+  sendPluginToolProgressToSession,
   sendPluginToolResultToSession,
   setAgentEventListener,
   setPinnedSessions,
@@ -335,6 +338,17 @@ export function pluginProjectRoot(sessionId: string): string | null {
   return authoritativeSpawnCwd(sessionId);
 }
 
+/** 拉起声明了动态工具的插件；失败不阻塞会话启动 */
+function preparePluginsForSpawn(): Promise<void> {
+  try {
+    return getExtensionPlugins()
+      .prepareForSpawn()
+      .catch(() => undefined);
+  } catch {
+    return Promise.resolve();
+  }
+}
+
 function removeConversationFiles(conversation: {
   conversationId: string;
   projectId: string;
@@ -415,10 +429,13 @@ function spawnBoundSession(
   );
 }
 
-function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
-  const request = asRecord(value);
-  if (!request) return null;
-  const allowed = new Set([
+/**
+ * 渲染层 → Main 的 spawn 请求白名单。键集必须与 AgentSpawnRequest 完全一致：漏登记一个字段
+ * 的后果是「类型里有、校验里没有」→ 整条请求被拒成 invalid spawn request（手机新会话踩过：
+ * autoRejectApprovals 已进类型与 worker 校验，唯独漏在这张表里）。
+ */
+function spawnRequestKeys(): readonly (keyof AgentSpawnRequest)[] {
+  const keys = [
     'sessionId',
     'providerId',
     'modelId',
@@ -430,8 +447,23 @@ function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
     'disabledTools',
     'presetId',
     'approvalMode',
+    'autoRejectApprovals',
     'planMode',
-  ]);
+  ] as const;
+  // 少登记字段时这里编译失败，而不是等到真机上整条请求被拒
+  const missing: Exclude<keyof AgentSpawnRequest, (typeof keys)[number]> extends never
+    ? []
+    : [Exclude<keyof AgentSpawnRequest, (typeof keys)[number]>] = [];
+  void missing;
+  return keys;
+}
+
+const SPAWN_REQUEST_KEYS = new Set<string>(spawnRequestKeys());
+
+function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
+  const request = asRecord(value);
+  if (!request) return null;
+  const allowed = SPAWN_REQUEST_KEYS;
   if (
     Object.keys(request).some((key) => !allowed.has(key)) ||
     !isNonEmptyString(request.sessionId) ||
@@ -450,6 +482,8 @@ function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
     (request.presetId !== undefined && typeof request.presetId !== 'string') ||
     (request.approvalMode !== undefined &&
       !APPROVAL_MODES.includes(request.approvalMode as ApprovalMode)) ||
+    (request.autoRejectApprovals !== undefined &&
+      typeof request.autoRejectApprovals !== 'boolean') ||
     (request.planMode !== undefined && typeof request.planMode !== 'boolean')
   ) {
     return null;
@@ -949,6 +983,11 @@ async function runAgentControl(
 }
 
 export function registerAgentHandlers(): void {
+  registerPluginSessionBridge((sessionId) => {
+    const identity = agentSessionIndex.currentIdentity(sessionId);
+    if (!identity || 'parent' in identity || !agentSessionIndex.isReady(identity)) return undefined;
+    return identity;
+  });
   wirePairAgentBridge();
   wirePairSessionHost();
   configureMemoryDistill({ complete: distillCompletion });
@@ -1093,7 +1132,7 @@ export function registerAgentHandlers(): void {
         const source = sourceBindings?.resolveParentSource(input.context.owner.ownerId);
         if (!source) return { ok: false, error: 'Agent parent workspace is unavailable.' };
         return validateAgentRun({
-          cwd: source.parentProjectPath,
+          cwd: authoritativeSpawnCwd(source.parentConversationId) ?? source.parentProjectPath,
           ...(input.text !== undefined ? { text: input.text } : {}),
           ...(input.schema !== undefined ? { schema: input.schema } : {}),
           ...(input.gate ? { gate: input.gate } : {}),
@@ -1407,18 +1446,84 @@ export function registerAgentHandlers(): void {
       pendingPluginTools.get(workerEvent.requestId)?.abort();
       return;
     }
+    if (workerEvent.type === 'plugin-event') {
+      // 子会话事件按所属主会话推项目根，来源经 agent 带给插件
+      const sessionId = rootSessionId(workerEvent.identity);
+      void getExtensionPlugins()
+        .dispatchEvent({
+          sessionId,
+          projectRoot: pluginProjectRoot(sessionId),
+          event: workerEvent.event,
+          data: workerEvent.data,
+          ...(workerEvent.agent ? { agent: workerEvent.agent } : {}),
+        })
+        .catch((error: unknown) => {
+          console.warn('[plugins] event failed:', error instanceof Error ? error.message : error);
+        });
+      return;
+    }
+    if (workerEvent.type === 'plugin-intercept') {
+      const { identity, requestId, event, payload } = workerEvent;
+      const sessionId = rootSessionId(identity);
+      const agent = sessionId !== identity.sessionId ? workerEvent.agent : undefined;
+      // 子会话只拦 tool_call（带来源、走子会话自己的预算）；其余的 worker 不会发，发了也直接放行
+      if (sessionId !== identity.sessionId && (!agent || event !== 'tool_call')) {
+        sendPluginInterceptResultToSession(identity, requestId, {
+          ok: true,
+          ...(event === 'before_compact' ? {} : { result: {} }),
+        });
+        return;
+      }
+      const projectRoot = pluginProjectRoot(sessionId);
+      const service = getExtensionPlugins();
+      const task =
+        event === 'before_compact'
+          ? service.dispatchEvent({
+              sessionId,
+              projectRoot,
+              event,
+              data: payload,
+            })
+          : service.intercept({
+              sessionId,
+              projectRoot,
+              event,
+              payload,
+              ...(agent ? { agent } : {}),
+            });
+      void Promise.resolve(task).then(
+        (result) =>
+          sendPluginInterceptResultToSession(identity, requestId, {
+            ok: true,
+            ...(event === 'before_compact' ? {} : { result: result ?? {} }),
+          }),
+        (error: unknown) =>
+          sendPluginInterceptResultToSession(identity, requestId, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+      );
+      return;
+    }
     if (workerEvent.type === 'plugin-tool-invoke') {
       const { identity, requestId, toolName, args } = workerEvent;
       const controller = new AbortController();
       pendingPluginTools.set(requestId, controller);
+      // 子会话的调用归属主会话（项目根、注入缺省目标），来源经 agent 带给插件
+      const sessionId = rootSessionId(identity);
       void getExtensionPlugins()
         .callTool({
           toolName,
           args,
-          sessionId: identity.sessionId,
-          projectRoot: pluginProjectRoot(identity.sessionId),
+          sessionId,
+          projectRoot: pluginProjectRoot(sessionId),
+          ...(workerEvent.agent ? { agent: workerEvent.agent } : {}),
           signal: controller.signal,
-        })
+          onProgress: (text: string) => {
+            if (typeof text !== 'string' || text.length > 16 * 1024) return;
+            sendPluginToolProgressToSession(identity, requestId, text);
+          },
+        } as Parameters<ReturnType<typeof getExtensionPlugins>['callTool']>[0])
         .then(
           (result) => sendPluginToolResultToSession(identity, requestId, { ok: true, result }),
           (error: unknown) =>
@@ -1729,8 +1834,10 @@ export function registerAgentHandlers(): void {
     };
     agentSessionIndex.prepareParent(identity);
     let credentialKeys: ReadonlySet<string>;
+    const pluginsReady = preparePluginsForSpawn();
     try {
       credentialKeys = await readStoredOauthCredentialKeys();
+      await pluginsReady;
     } catch {
       return { ok: false, error: 'model credentials unavailable' };
     }
@@ -1979,17 +2086,27 @@ export function registerAgentHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.AGENT_SET_APPROVAL_MODE,
-    async (_event, sessionId: unknown, mode: unknown): Promise<AgentActionResult> => {
+    async (
+      _event,
+      sessionId: unknown,
+      mode: unknown,
+      autoReject: unknown
+    ): Promise<AgentActionResult> => {
       const rejected = botControlError(sessionId);
       if (rejected) return rejected;
       const identity = exactIdentity(sessionId);
-      if (!identity || !APPROVAL_MODES.includes(mode as ApprovalMode)) {
+      if (
+        !identity ||
+        !APPROVAL_MODES.includes(mode as ApprovalMode) ||
+        (autoReject !== undefined && typeof autoReject !== 'boolean')
+      ) {
         return { ok: false, error: 'invalid approval mode or stale generation' };
       }
       return setSessionApprovalMode(
         identity,
         mode as ApprovalMode,
-        await readStoredOauthCredentialKeys()
+        await readStoredOauthCredentialKeys(),
+        autoReject === undefined ? undefined : autoReject
       );
     }
   );

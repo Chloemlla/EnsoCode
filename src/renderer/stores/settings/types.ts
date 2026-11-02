@@ -8,6 +8,7 @@ import type { ContextMenuOpen, FileOpenRule } from '@shared/fileOpening';
 import type { Locale } from '@shared/i18n';
 import type { PrivacyMaskSettings } from '@shared/privacyMask/settings';
 import type { ProxyMode } from '@shared/proxy';
+import type { ShellLimits } from '@shared/shellLimits';
 import type { StatusLineSegmentId } from '@shared/statusLine';
 import type { TerminalShell } from '@shared/terminalShell';
 import type {
@@ -132,9 +133,14 @@ export interface SettingsState {
   rtkEnabled: boolean;
   /** 后台操作电脑时显示被操作窗口的画中画（macOS） */
   computerPreview: boolean;
+  /** computer 操作任何 app 都不再询问（macOS），缺省关 */
+  computerAllowAllApps: boolean;
 
   /** Code 会话也启用受保护动作底线（Bot 会话恒开）；缺省关，新建或冷恢复会话生效。 */
   protectedActionsInCode: boolean;
+
+  /** dcg 命令守卫：命中危险命令强制真人确认；需先安装二进制，新建或冷恢复会话生效。 */
+  dcgEnabled: boolean;
 
   /** 文件编辑工具模式；缺省 apply_patch，新建或冷恢复会话生效。 */
   editMode: EditMode;
@@ -221,6 +227,8 @@ export interface SettingsState {
   autoRetryLimit: number;
   /** 发往模型前的隐私脱敏；缺省关闭，不参与配置同步 */
   privacyMasking: PrivacyMaskSettings;
+  /** 命令时限覆盖（让位 / task_output 上限 / 配额等）；只在 settings.json 手改，Main 与 worker 用 resolveShellLimits 解析，坏值回落默认 */
+  shell: Partial<ShellLimits>;
   /** SSH 远端单次命令超时（秒）；缺省 30，范围 5–300 */
   sshTimeoutSeconds: number;
   /** 无 token/工具结果超过此时长则中止；0 = 永不；单位分钟 */
@@ -359,7 +367,9 @@ export interface SettingsState {
   setExploreFoldEnabled: (value: boolean) => void;
   setRtkEnabled: (value: boolean) => void;
   setComputerPreview: (value: boolean) => void;
+  setComputerAllowAllApps: (value: boolean) => void;
   setProtectedActionsInCode: (value: boolean) => void;
+  setDcgEnabled: (value: boolean) => void;
   setMemoryEmbeddingModel: (value: string) => void;
   setMemoryEmbeddingAutoDownload: (value: boolean) => void;
   setMemoryModelIdleMinutes: (value: number) => void;

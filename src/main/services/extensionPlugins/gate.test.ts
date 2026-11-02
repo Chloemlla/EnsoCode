@@ -12,10 +12,13 @@ const manifest = (patch: Partial<ExtensionPluginManifest> = {}): ExtensionPlugin
   version: '1',
   description: '',
   main: 'main.js',
-  permissions: ['fs.read', 'fs.write', 'net.fetch', 'composer.draft', 'ui.notify', 'session.read'],
+  permissions: ['fs.read', 'fs.write', 'net.fetch', 'composer.draft', 'ui.notify'],
   fs: { read: ['docs'], write: ['out'] },
   net: { domains: ['api.example.com'] },
   mcp: { tools: [] },
+  resident: false,
+  env: [],
+  interop: { call: [] },
   contributes: {
     agentTools: [],
     commands: [],
@@ -26,6 +29,11 @@ const manifest = (patch: Partial<ExtensionPluginManifest> = {}): ExtensionPlugin
     methods: [],
     configuration: [],
     presets: [],
+    agentTypes: [],
+    events: [],
+    schedules: [],
+    exports: [],
+    dynamic: { tools: 0, commands: 0 },
   },
   ...patch,
 });
@@ -52,7 +60,6 @@ beforeEach(() => {
     ),
     notify: vi.fn(() => true),
     composer: vi.fn(async () => ({ ok: true })),
-    sessionMessages: vi.fn(async () => []),
     config: vi.fn(() => ({ baseUrl: 'https://bce.example.com' })),
     mcpTools: vi.fn(async () => [
       { server: 'bce', name: 'enhance_prompt', description: '改写' },
@@ -314,5 +321,93 @@ describe('PluginHostGate', () => {
       gate.invocations.cancel(inv);
       expect(seen?.aborted).toBe(true);
     });
+  });
+
+  it('剪贴板和外链需要权限、手势，外链只接受 http/https/mailto', async () => {
+    const clipboard = vi.fn();
+    const openExternal = vi.fn(async () => undefined);
+    deps.clipboard = clipboard;
+    deps.openExternal = openExternal;
+    deps.manifest = () => manifest({ permissions: ['ui.clipboard', 'ui.openExternal'] });
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'ui.clipboard', { text: 'hi' }, agentCall())
+    ).rejects.toMatchObject({
+      code: 'GESTURE_REQUIRED',
+    });
+    await expect(gate.handle('a.b', 'ui.clipboard', { text: 'hi' }, uiCall())).resolves.toBeNull();
+    expect(clipboard).toHaveBeenCalledWith('hi');
+    await expect(
+      gate.handle('a.b', 'ui.openExternal', { url: 'file:///etc/passwd' }, uiCall())
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGS',
+    });
+    await expect(
+      gate.handle('a.b', 'ui.openExternal', { url: 'https://example.com/a' }, uiCall())
+    ).resolves.toBeNull();
+    expect(openExternal).toHaveBeenCalledWith('https://example.com/a');
+    await expect(
+      gate.handle('a.b', 'ui.openExternal', { url: 'mailto:a@b.c' }, uiCall())
+    ).resolves.toBeNull();
+  });
+
+  it('远端窗口发起的调用不能动宿主桌面的剪贴板和外链', async () => {
+    deps.clipboard = vi.fn();
+    deps.openExternal = vi.fn(async () => undefined);
+    deps.manifest = () => manifest({ permissions: ['ui.clipboard', 'ui.openExternal'] });
+    gate = new PluginHostGate(deps);
+    const remote = () =>
+      gate.invocations.create({
+        pluginId: 'a.b',
+        sessionId: 's1',
+        projectRoot: root,
+        gesture: true,
+        remote: true,
+      });
+    await expect(
+      gate.handle('a.b', 'ui.clipboard', { text: 'hi' }, remote())
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    await expect(
+      gate.handle('a.b', 'ui.openExternal', { url: 'https://example.com' }, remote())
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    expect(deps.clipboard).not.toHaveBeenCalled();
+    expect(deps.openExternal).not.toHaveBeenCalled();
+  });
+
+  it('注入参数不合法或目标未授权时不消耗频率配额', async () => {
+    const inject = vi.fn(() => ({ ok: true as const }));
+    deps.inject = inject;
+    deps.manifest = () => manifest({ permissions: ['agent.inject'] });
+    gate = new PluginHostGate(deps);
+    for (let i = 0; i < 6; i++) {
+      await expect(
+        gate.handle('a.b', 'session.inject', { text: 'x'.repeat(40_000) }, agentCall())
+      ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+      await expect(
+        gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 'other' }, agentCall())
+      ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    }
+    for (let i = 0; i < 5; i++)
+      await expect(
+        gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall())
+      ).resolves.toBeNull();
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall())
+    ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    expect(inject).toHaveBeenCalledTimes(5);
+  });
+
+  it('net.fetch 随调用取消中止', async () => {
+    let seen: AbortSignal | undefined;
+    deps.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return new Response('ok');
+    });
+    gate = new PluginHostGate(deps);
+    const inv = agentCall();
+    await gate.handle('a.b', 'net.fetch', { url: 'https://api.example.com/x', init: {} }, inv);
+    expect(seen?.aborted).toBe(false);
+    gate.invocations.cancel(inv);
+    expect(seen?.aborted).toBe(true);
   });
 });

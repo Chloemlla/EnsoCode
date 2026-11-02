@@ -92,6 +92,9 @@ export const IPC_CHANNELS = {
   MEMORY_CHAT_MODEL_CANCEL: 'memory:chat-model-cancel',
   MEMORY_CHAT_MODEL_DELETE: 'memory:chat-model-delete',
   MEMORY_CHAT_MODEL_PROGRESS: 'memory:chat-model-progress',
+  DCG_STATUS: 'dcg:status',
+  DCG_INSTALL: 'dcg:install',
+  DCG_UNINSTALL: 'dcg:uninstall',
   SPEECH_STATUS: 'speech:status',
   SPEECH_DOWNLOAD: 'speech:download',
   SPEECH_CANCEL: 'speech:cancel',
@@ -504,10 +507,13 @@ export const IPC_CHANNELS = {
   BOT_TEMPLATES_CHANGED: 'bots:templates-changed',
   /** Enso 插件：管理操作只能在本机界面或服务端 CLI 上做 */
   EXTENSION_PLUGINS_LIST: 'extension-plugins:list',
+  EXTENSION_PLUGINS_REGISTRY_NOTICE: 'extension-plugins:registry-notice',
+  EXTENSION_PLUGINS_DISMISS_REGISTRY_NOTICE: 'extension-plugins:dismiss-registry-notice',
   EXTENSION_PLUGINS_CHANGED: 'extension-plugins:changed',
   EXTENSION_PLUGINS_COMMIT: 'extension-plugins:commit',
   EXTENSION_PLUGINS_DISCARD: 'extension-plugins:discard',
   EXTENSION_PLUGINS_SET_ENABLED: 'extension-plugins:set-enabled',
+  EXTENSION_PLUGINS_SET_CROSS_SESSION_INJECT: 'extension-plugins:set-cross-session-inject',
   EXTENSION_PLUGINS_APPROVE_PENDING: 'extension-plugins:approve-pending',
   EXTENSION_PLUGINS_REJECT_PENDING: 'extension-plugins:reject-pending',
   EXTENSION_PLUGINS_UNINSTALL: 'extension-plugins:uninstall',
@@ -515,6 +521,16 @@ export const IPC_CHANNELS = {
   EXTENSION_PLUGINS_PICK_AND_STAGE: 'extension-plugins:pick-and-stage',
   /** 从 http(s) zip 链接暂存；渲染层只传链接，远端不可调 */
   EXTENSION_PLUGINS_STAGE_URL: 'extension-plugins:stage-url',
+  /** 从已记录的安装来源重新暂存（更新 / 开发时重新加载），渲染层只传插件 id */
+  EXTENSION_PLUGINS_RESTAGE: 'extension-plugins:restage',
+  /** 立即检查 GitHub 来源的插件更新；结果随列表下发 */
+  EXTENSION_PLUGINS_CHECK_UPDATES: 'extension-plugins:check-updates',
+  /** 插件市场列表（签名索引 + 本机安装状态）；入参 refresh 布尔 */
+  EXTENSION_PLUGINS_MARKET_LIST: 'extension-plugins:market-list',
+  /** 从插件市场暂存；渲染层只传插件 id 与可选版本 */
+  EXTENSION_PLUGINS_MARKET_STAGE: 'extension-plugins:market-stage',
+  /** 插件市场「国内镜像」开关 */
+  EXTENSION_PLUGINS_MARKET_SET_MIRROR: 'extension-plugins:market-set-mirror',
   /** 运行期：界面发起的插件调用（命令、挂件、侧栏页面、补全），算用户手势 */
   EXTENSION_PLUGINS_CALL: 'extension-plugins:call',
   /** 运行期：按插件 id + 相对路径取渲染资源，渲染层不传磁盘路径 */
@@ -526,6 +542,21 @@ export const IPC_CHANNELS = {
   /** 插件配置项：读（密钥不回显）与写；只在本机界面或服务端 CLI 上做 */
   EXTENSION_PLUGINS_CONFIG_GET: 'extension-plugins:config-get',
   EXTENSION_PLUGINS_CONFIG_SET: 'extension-plugins:config-set',
+  /** 插件进程日志末尾；只在本机界面或服务端 CLI 上看 */
+  EXTENSION_PLUGINS_LOGS: 'extension-plugins:logs',
+  /** 产出文件列表；可选插件 id，渲染层不传磁盘路径 */
+  EXTENSION_PLUGINS_ARTIFACTS_LIST: 'extension-plugins:artifacts-list',
+  /** 按产出 id 读取内容（≤ 8MB），路径由 Main 推导 */
+  EXTENSION_PLUGINS_ARTIFACT_READ: 'extension-plugins:artifact-read',
+  /** 按产出 id 删除 */
+  EXTENSION_PLUGINS_ARTIFACT_DELETE: 'extension-plugins:artifact-delete',
+  /** 桌面专用：另存对话框，渲染层只传产出 id */
+  EXTENSION_PLUGINS_ARTIFACT_SAVE: 'extension-plugins:artifact-save',
+  /** 侧栏页面状态，替代 localStorage */
+  EXTENSION_PLUGINS_VIEW_STATE_GET: 'extension-plugins:view-state-get',
+  EXTENSION_PLUGINS_VIEW_STATE_SET: 'extension-plugins:view-state-set',
+  /** 桌面专用：配置项选择文件或目录，只把路径字符串交回界面 */
+  EXTENSION_PLUGINS_PICK_PATH: 'extension-plugins:pick-path',
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

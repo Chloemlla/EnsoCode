@@ -67,6 +67,91 @@ describe('projectMessage', () => {
     }
   });
 
+  it('命令结果投影结构化失败分类，非命令工具与脏值不投影', () => {
+    const shellFailure = { kind: 'tty_required', retryable: false, exitCode: 1 };
+    for (const toolName of ['bash', 'powershell']) {
+      expect(
+        projectMessage({ role: 'toolResult', toolName, content: [], details: { shellFailure } })
+      ).toEqual({ role: 'toolResult', toolName, content: [], shellFailure });
+    }
+    for (const [toolName, value] of [
+      ['read', shellFailure],
+      ['bash', { kind: 'boom', retryable: true }],
+      ['bash', { kind: 'deadline' }],
+    ] as const) {
+      expect(
+        projectMessage({
+          role: 'toolResult',
+          toolName,
+          content: [],
+          details: { shellFailure: value },
+        })
+      ).not.toHaveProperty('shellFailure');
+    }
+  });
+
+  it('插件注入的消息带来源投影，其它 custom 消息与脏来源不带', () => {
+    expect(
+      projectMessage({
+        role: 'custom',
+        customType: 'enso-plugin-message',
+        content: '来自插件',
+        display: true,
+        details: { pluginId: 'enso.example.notes', pluginName: 'Notes' },
+        timestamp: 5,
+      })
+    ).toEqual({
+      role: 'custom',
+      content: [{ type: 'text', text: '来自插件' }],
+      timestamp: 5,
+      pluginSource: { pluginId: 'enso.example.notes', pluginName: 'Notes' },
+    });
+    expect(
+      projectMessage({
+        role: 'custom',
+        customType: 'claude-hook-context',
+        content: 'x',
+        details: { pluginId: 'enso.example.notes', pluginName: 'Notes' },
+      })
+    ).not.toHaveProperty('pluginSource');
+    expect(
+      projectMessage({
+        role: 'custom',
+        customType: 'enso-plugin-message',
+        content: 'x',
+        details: { pluginId: 'Bad Id', pluginName: 'N' },
+      })
+    ).not.toHaveProperty('pluginSource');
+  });
+
+  it('插件工具结果投影产出文件，非插件工具与脏条目不投影', () => {
+    const artifact = {
+      id: 'a1b2',
+      pluginId: 'enso.example.notes',
+      name: '报告.txt',
+      mime: 'text/plain',
+      size: 12,
+      createdAt: 1,
+    };
+    const details = { details: { x: 1 }, artifacts: [artifact, { id: 'bad' }] };
+    expect(
+      projectMessage({
+        role: 'toolResult',
+        toolName: 'plugin_enso-example-notes__save',
+        content: [],
+        details,
+      })
+    ).toEqual({
+      role: 'toolResult',
+      toolName: 'plugin_enso-example-notes__save',
+      content: [],
+      pluginArtifacts: [artifact],
+    });
+    expect(
+      projectMessage({ role: 'toolResult', toolName: 'bash', content: [], details })
+    ).not.toHaveProperty('pluginArtifacts');
+  });
+
   it('assistant 消息只保留白名单字段，provider 原始数据不出 worker', () => {
     const projected = projectMessage({
       role: 'assistant',

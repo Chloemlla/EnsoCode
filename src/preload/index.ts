@@ -206,6 +206,7 @@ import type {
   BrowserDesignModeEvent,
   BrowserTabState,
 } from '@shared/types/browser';
+import type { DcgActionResult, DcgStatus } from '@shared/types/dcg';
 import type { SessionChangeSnapshots } from '@shared/types/fileChanges';
 import type {
   AgentComposerPrefillEvent,
@@ -456,6 +457,12 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.MEMORY_CHAT_MODEL_PROGRESS, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.MEMORY_CHAT_MODEL_PROGRESS, handler);
     },
+  },
+
+  dcg: {
+    status: (): Promise<DcgStatus> => ipcRenderer.invoke(IPC_CHANNELS.DCG_STATUS),
+    install: (): Promise<DcgActionResult> => ipcRenderer.invoke(IPC_CHANNELS.DCG_INSTALL),
+    uninstall: (): Promise<DcgActionResult> => ipcRenderer.invoke(IPC_CHANNELS.DCG_UNINSTALL),
   },
 
   speech: {
@@ -903,8 +910,12 @@ const electronAPI = {
       decision: ApprovalDecision
     ): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_APPROVAL_RESPOND, sessionId, requestId, decision),
-    setApprovalMode: (sessionId: string, mode: ApprovalMode): Promise<AgentActionResult> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_APPROVAL_MODE, sessionId, mode),
+    setApprovalMode: (
+      sessionId: string,
+      mode: ApprovalMode,
+      autoReject?: boolean
+    ): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_APPROVAL_MODE, sessionId, mode, autoReject),
     setPlanMode: (sessionId: string, active: boolean): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SET_PLAN_MODE, sessionId, active),
     respondPlan: (
@@ -1609,6 +1620,10 @@ const electronAPI = {
   extensionPlugins: {
     list: (): Promise<ExtensionPluginSummary[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_LIST),
+    registryNotice: (): Promise<RegistryNotice | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_REGISTRY_NOTICE),
+    dismissRegistryNotice: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_DISMISS_REGISTRY_NOTICE),
     onChanged: (callback: () => void): (() => void) => {
       const listener = () => callback();
       ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_CHANGED, listener);
@@ -1626,12 +1641,34 @@ const electronAPI = {
     ): Promise<
       { ok: true; preview: ExtensionPluginInstallPreview } | { ok: false; error: string }
     > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_STAGE_URL, url),
+    restage: (
+      id: string
+    ): Promise<
+      { ok: true; preview: ExtensionPluginInstallPreview } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_RESTAGE, id),
+    checkUpdates: (): Promise<{ checked: number; available: number; failed: number }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CHECK_UPDATES),
+    marketList: (refresh = false): Promise<ExtensionPluginMarketList> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_MARKET_LIST, refresh),
+    marketStage: (
+      id: string,
+      version?: string
+    ): Promise<
+      { ok: true; preview: ExtensionPluginInstallPreview } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_MARKET_STAGE, id, version),
+    setMarketChinaMirror: (on: boolean): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_MARKET_SET_MIRROR, on),
     commit: (token: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_COMMIT, token),
     discard: (token: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_DISCARD, token),
     setEnabled: (id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_SET_ENABLED, id, enabled),
+    setCrossSessionInject: (
+      id: string,
+      allowed: boolean
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_SET_CROSS_SESSION_INJECT, id, allowed),
     approvePending: (id: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_APPROVE_PENDING, id),
     rejectPending: (id: string): Promise<{ ok: boolean; error?: string }> =>
@@ -1642,12 +1679,43 @@ const electronAPI = {
       id: string
     ): Promise<{ ok: true; fields: ExtensionPluginConfigField[] } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CONFIG_GET, id),
+    logs: (id: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_LOGS, id),
     /** 省略的键不变，null 清除 */
     configSet: (
       id: string,
-      patch: Record<string, string | null>
+      patch: Record<string, string | number | boolean | null>
     ): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_CONFIG_SET, id, patch),
+    artifactsList: (
+      pluginId?: string
+    ): Promise<{ ok: true; artifacts: PluginArtifactInfo[] } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_ARTIFACTS_LIST, pluginId),
+    artifactRead: (
+      id: string
+    ): Promise<
+      { ok: true; info: PluginArtifactInfo; base64: string } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_ARTIFACT_READ, id),
+    artifactDelete: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_ARTIFACT_DELETE, id),
+    artifactSave: (
+      id: string
+    ): Promise<{ ok: true; cancelled?: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_ARTIFACT_SAVE, id),
+    viewStateGet: (
+      pluginId: string
+    ): Promise<{ ok: true; state: Record<string, string> } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_VIEW_STATE_GET, pluginId),
+    viewStateSet: (
+      pluginId: string,
+      patch: Record<string, string | null>
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_VIEW_STATE_SET, pluginId, patch),
+    pickPath: (
+      kind: 'file' | 'directory'
+    ): Promise<
+      { ok: true; path: string } | { ok: true; cancelled: true } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_PICK_PATH, kind),
     call: (request: {
       pluginId: string;
       method: 'command.run' | 'trigger.candidates' | 'trigger.pick' | 'renderer.call';
@@ -1690,8 +1758,11 @@ export type ElectronAPI = typeof electronAPI;
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 
 import type { ComputerAllowedApp, ComputerCapabilities } from '@shared/computer/types';
+import type { PluginArtifactInfo } from '@shared/extensionPlugins/protocol';
 import type {
   ExtensionPluginConfigField,
   ExtensionPluginInstallPreview,
+  ExtensionPluginMarketList,
   ExtensionPluginSummary,
+  RegistryNotice,
 } from '@shared/extensionPlugins/types';

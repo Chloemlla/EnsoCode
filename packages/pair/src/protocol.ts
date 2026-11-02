@@ -12,7 +12,9 @@ export interface AttachedImage {
   mimeType: string;
 }
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type ApprovalMode = 'supervised' | 'auto-edits' | 'full' | 'assistant';
+/** pair 协议审批档：与桌面 APPROVAL_MODES 同集合，两边漂移由测试守住 */
+export const APPROVAL_MODES = ['supervised', 'auto-edits', 'full', 'assistant'] as const;
+export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type ApprovalDecision = 'allow' | 'allowSession' | 'deny';
 
 // ── 中继明文控制帧（中继可见，不加密）──────────────────────────────────
@@ -64,6 +66,8 @@ export type PairSessionSync = {
 
 // ── 上行：手机 → Electron（加密 payload，白名单）─────────────────────────
 export type PhoneToHost =
+  /** 防重放握手回声：收到对端质询后回一帧，对端据此锁定收发前缀与计数窗口 */
+  | { type: 'replay-hello' }
   | { type: 'prompt'; sessionId: string; text: string; images?: AttachedImage[] }
   | { type: 'steer'; sessionId: string; text: string; images?: AttachedImage[] }
   | { type: 'abort'; sessionId: string }
@@ -84,6 +88,8 @@ export type PhoneToHost =
       modelId: string;
       presetId?: string;
       approvalMode?: ApprovalMode;
+      /** 无人值守：需要人工确认的动作直接拒绝，不等真人 */
+      autoRejectApprovals?: boolean;
       reasoningEnabled?: boolean;
       thinkingLevel?: ThinkingLevel;
     }
@@ -524,6 +530,8 @@ export interface TerminalPalette {
 
 /** 下行信封：pair 自有的目录类帧 + 透传的现有 RendererAgentEvent（此处不重定义，按 unknown 透传） */
 export type HostToPhone =
+  /** 防重放握手回声：收到对端质询后回一帧，对端据此锁定收发前缀与计数窗口 */
+  | { type: 'replay-hello' }
   | {
       type: 'catalog';
       entries: CatalogEntry[];

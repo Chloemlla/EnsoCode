@@ -70,7 +70,12 @@ async function handlePlugin(command: PluginControlCommand): Promise<unknown> {
   const plugins = getExtensionPlugins();
   switch (command.action) {
     case 'list':
-      return { ok: true, plugins: plugins.list() };
+      return { ok: true, plugins: plugins.list(), notice: plugins.registryNotice() };
+    case 'notice-dismiss':
+      plugins.dismissRegistryNotice();
+      return { ok: true };
+    case 'check':
+      return { ok: true, ...(await plugins.checkUpdates()), plugins: plugins.list() };
     case 'stage':
       return plugins.stage(
         'url' in command
@@ -94,8 +99,15 @@ async function handlePlugin(command: PluginControlCommand): Promise<unknown> {
       return plugins.rejectPending(command.id);
     case 'uninstall':
       return plugins.uninstall(command.id);
+    case 'inject-anywhere':
+    case 'inject-current':
+      return plugins.setCrossSessionInject(command.id, command.action === 'inject-anywhere');
     case 'config-get':
       return plugins.configView(command.id);
+    case 'restage':
+      return plugins.restage(command.id);
+    case 'logs':
+      return { ok: true, text: plugins.logs(command.id) };
     case 'config-set':
       return plugins.setConfig(command.id, command.values);
   }
@@ -174,6 +186,7 @@ async function serve(web: WebConfig | null): Promise<void> {
   startPairHost();
   startPairGuest();
   listenControl(updater, web);
+  getExtensionPlugins().startBackground();
 
   app.on('before-quit', () => {
     void relay?.close();
@@ -185,6 +198,13 @@ async function serve(web: WebConfig | null): Promise<void> {
   attachAppQuitDrain(app, [
     { begin: disposeAllTerminals, shouldWait: hasPendingPtys, wait: waitPtyQuitIdle },
     { shouldWait: agentWorkerAlive, wait: () => stopAgentWorkerForQuit(3_000) },
+    {
+      begin: () => {
+        void getExtensionPlugins().dispose();
+      },
+      shouldWait: () => getExtensionPlugins().hasRunningPlugins(),
+      wait: () => getExtensionPlugins().dispose(),
+    },
   ]);
   let quitting = false;
   const quit = () => {
