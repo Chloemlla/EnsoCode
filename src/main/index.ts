@@ -11,6 +11,8 @@ import { confirmRevealExternal } from './desktop/revealExternalConfirm';
 import { registerIpcHandlers } from './ipc';
 import { registerDesktopIpcHandlers } from './ipc/desktop';
 import { consumeTrayReenterAfterUpdate, readSettings } from './ipc/settings';
+import { openPluginInstallFromProtocol } from './ipc/window';
+import { createPluginInstallInbox } from './protocol/pluginInstall';
 import { agentWorkerAlive, startAgentWorker, stopAgentWorkerForQuit } from './services/agentHost';
 import { installAppMenu } from './services/appMenu';
 import { attachAppQuitDrain } from './services/appQuitDrain';
@@ -35,6 +37,7 @@ import {
   syncMemoryEmbeddingFromSettings,
   syncMemoryKgFromSettings,
 } from './services/memoryHost';
+import { registerNodeSettingsProtocolHandler } from './services/nodeRemote';
 import {
   maybeNotify,
   maybeNotifyBot,
@@ -89,11 +92,28 @@ if (app.isPackaged && process.platform !== 'win32') {
 }
 
 const gotTheLock = app.requestSingleInstanceLock();
+const pluginInstallInbox = createPluginInstallInbox(process.platform);
+
+function registerEnsoProtocol(): void {
+  if (process.defaultApp && process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('enso', process.execPath, [path.resolve(process.argv[1])]);
+    return;
+  }
+  app.setAsDefaultProtocolClient('enso');
+}
+
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  registerEnsoProtocol();
+  pluginInstallInbox.noteArgv(process.argv);
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    pluginInstallInbox.noteLink(url);
+  });
+  app.on('second-instance', (_event, argv) => {
     restoreFromSecondInstance();
+    pluginInstallInbox.noteArgv(argv);
   });
   app.on('child-process-gone', (_event, details) => {
     console.error(
@@ -158,12 +178,14 @@ if (!gotTheLock) {
     });
     registerIpcHandlers();
     registerDesktopIpcHandlers();
+    pluginInstallInbox.start((url) => openPluginInstallFromProtocol(url));
     setTrayToggleHandler(() => {
       if (isServerMode()) leaveServerMode();
       else void enterServerMode();
     });
     // 协议处理器要赶在窗口加载内容之前注册（local-image:// 资源依赖它）。
     registerLocalImageProtocolHandler();
+    registerNodeSettingsProtocolHandler();
     const persisted = readSettings()?.['enso-settings'] as
       | { state?: { proxyMode?: unknown; customProxyUrl?: unknown; autoUpdate?: boolean } }
       | undefined;

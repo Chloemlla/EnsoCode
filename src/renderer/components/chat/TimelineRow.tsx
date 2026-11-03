@@ -4,6 +4,7 @@ import { stripBotNotesUpdate } from '@shared/bots/notes';
 import { isBtwIsolationPrompt } from '@shared/btw';
 import { toLocalImageUrl } from '@shared/localImage';
 import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
+import { type UnattendedNoteKind, splitUnattendedPrefix } from '@shared/unattendedNote';
 import type { MaskReport } from '@shared/privacyMask/report';
 import type {
   AgentRunProgress,
@@ -24,6 +25,7 @@ import {
   ClipboardCheck,
   ClipboardList,
   Copy,
+  EyeOff,
   FilePlus,
   FileText,
   FolderOpen,
@@ -39,7 +41,6 @@ import {
   MessagesSquare,
   PackageMinus,
   Pencil,
-  Puzzle,
   RefreshCw,
   Search,
   SkipForward,
@@ -47,6 +48,7 @@ import {
   Target,
   TerminalSquare,
   Undo2,
+  UserRound,
   Workflow,
   Wrench,
 } from 'lucide-react';
@@ -100,6 +102,7 @@ import {
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentRunsStore } from '@/stores/subagentRuns';
 import { PluginArtifactsCard } from '../../plugins/artifactViews';
+import { PluginIcon } from '../../plugins/PluginIcon';
 import { PluginMessageActions, PluginToolCardSlot } from '../../plugins/slots';
 import { ApprovalReviewBar } from './ApprovalReviewBar';
 import { AskUserResult } from './AskUserResult';
@@ -300,6 +303,60 @@ function PlanNoteBanner({ note }: { note: PlanNoteKind }) {
   );
 }
 
+/** 无人值守开关提示：worker 前置在用户消息之前，渲染成系统事件行 */
+function UnattendedNoteBanner({ note }: { note: UnattendedNoteKind }) {
+  const { t } = useI18n();
+  const on = note === 'on';
+  return (
+    <div className="flex w-full items-start gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
+      {on ? (
+        <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      ) : (
+        <UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      )}
+      <span className="min-w-0">
+        {on
+          ? t('Unattended mode on: no one is watching, so it decides and keeps going')
+          : t('Unattended mode off: a person is available again')}
+      </span>
+    </div>
+  );
+}
+
+/** 合成注入块（后台任务 / 子代理完成通知等）：多行时默认只露首行，点击展开全文 */
+function SyntheticNotice({ tag, body }: { tag: string; body: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const trimmed = body.trim();
+  const nl = trimmed.indexOf('\n');
+  const collapsible = nl > 0;
+  const Icon = tag.startsWith('coworker-') || tag === 'agent-notification' ? Bot : TerminalSquare;
+  return (
+    <div className="w-full rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
+      <button
+        type="button"
+        disabled={!collapsible}
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-start gap-2 text-left enabled:hover:text-foreground"
+      >
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span className={cn('min-w-0 flex-1', collapsible ? 'truncate' : 'whitespace-pre-wrap')}>
+          {collapsible ? trimmed.slice(0, nl) : trimmed}
+        </span>
+        {collapsible && (
+          <ChevronRight
+            className={cn('mt-0.5 h-3 w-3 shrink-0 transition-transform', expanded && 'rotate-90')}
+          />
+        )}
+      </button>
+      {collapsible && expanded && (
+        <pre className="mt-1.5 max-h-80 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
+          {trimmed.slice(nl + 1)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 /** 主 agent 发给 coworker 的消息包裹 */
 const MAIN_AGENT_BLOCK =
   /^<message-from-main-agent>\n?([\s\S]*?)\n?<\/message-from-main-agent>\s*$/;
@@ -432,10 +489,9 @@ function InlineMentionText({
   activeNth?: number;
 }) {
   const segments = splitInlineMentions(text);
-  const mentions = segments.filter((segment) => segment.type !== 'text').length;
   const counter = { n: 0 };
   return (
-    <span className="flex flex-col items-start gap-1.5">
+    <span className="whitespace-pre-wrap">
       {segments.map((segment, index) =>
         segment.type === 'file' ? (
           // biome-ignore lint/suspicious/noArrayIndexKey: 同一文件可重复提及，分段随文本快照整体替换
@@ -463,13 +519,12 @@ function InlineMentionText({
             title={`${segment.path}${segment.text ? ` · ${segment.text}` : ''}`}
           />
         ) : (
-          <Markdown
-            // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
-            key={index}
-            text={segment.text}
-            searchQuery={searchQuery}
-            activeNth={activeNth - (mentions > 0 ? counter.n : 0)}
-          />
+          // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
+          <span key={index}>
+            {searchQuery.trim()
+              ? renderHighlighted(segment.text, searchQuery, activeNth, counter)
+              : segment.text}
+          </span>
         )
       )}
     </span>
@@ -558,6 +613,16 @@ function UserText({
       </div>
     );
   }
+  const unattended = splitUnattendedPrefix(text);
+  if (unattended.note) {
+    const remainder = unattended.rest.trim();
+    return (
+      <div className="flex w-full flex-col items-end gap-1.5">
+        <UnattendedNoteBanner note={unattended.note} />
+        {remainder && <UserText text={remainder} searchQuery={searchQuery} activeNth={activeNth} />}
+      </div>
+    );
+  }
   const planMessage = parsePlanMessage(text);
   if (planMessage?.kind === 'approved') {
     return (
@@ -630,18 +695,7 @@ function UserText({
     );
   }
   const block = SYNTHETIC_BLOCK.exec(text);
-  if (block) {
-    return (
-      <div className="flex w-full items-start gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
-        {block[1].startsWith('coworker-') || block[1] === 'agent-notification' ? (
-          <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        ) : (
-          <TerminalSquare className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        )}
-        <span className="whitespace-pre-wrap">{block[2]}</span>
-      </div>
-    );
-  }
+  if (block) return <SyntheticNotice tag={block[1]} body={block[2]} />;
   const role = ROLE_PREFIX.exec(text);
   const rest = role ? text.slice(role[0].length) : text;
   const fromMain = MAIN_AGENT_BLOCK.exec(rest);
@@ -877,7 +931,7 @@ function PluginMessageRow({ item }: { item: Extract<TimelineItem, { kind: 'plugi
       className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-xs"
     >
       <p className="mb-1 flex items-center gap-1.5 text-muted-foreground">
-        <Puzzle className="h-3.5 w-3.5 shrink-0" />
+        <PluginIcon pluginId={item.pluginId} className="h-3.5 w-3.5 shrink-0" />
         <span>{t('From plugin {{name}}', { name: item.pluginName })}</span>
         <span className="font-mono opacity-70">{item.pluginId}</span>
       </p>
@@ -1457,7 +1511,11 @@ function TaskNoteRow({ item }: { item: Extract<TimelineItem, { kind: 'task-note'
   const [log, setLog] = useState<string | null | undefined>(undefined);
   const match = /^Background task (\S+) finished \((.+?), ran (.+?)\)/.exec(item.summary);
   const text = match ? `${match[1]} · ${match[2]} · ${match[3]}` : item.summary;
-  const logPath = /read (\/.+?\.log) for the complete log/.exec(item.detail)?.[1] ?? null;
+  const logPath =
+    /(?:read (\/.+?\.log) for the complete log|Full log: (\/\S+?\.log))/
+      .exec(item.detail)
+      ?.slice(1)
+      .find(Boolean) ?? null;
 
   useEffect(() => {
     if (!expanded || !logPath || log !== undefined) return;

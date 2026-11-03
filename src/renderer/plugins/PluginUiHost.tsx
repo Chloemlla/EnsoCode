@@ -4,10 +4,23 @@ import { useSessionsStore } from '@/stores/sessions';
 import { displayedConversationId } from '@/stores/sessions/chatChrome';
 import { newInterceptBreakers } from './breakers';
 import { mergePluginCommands, setPluginCommands } from './commands';
-import { handleDraftRequest } from './draftBridge';
+import { handleDraftRequest, prefillDraft } from './draftBridge';
 import { createRendererDeps, loadPluginRenderer } from './loader';
+import { setPluginIcons } from './PluginIcon';
+import { handleSessionRequest, type SessionRequest } from './sessionBridge';
 import { setPluginTriggers } from './triggers';
 import { setPluginViews } from './viewBridge';
+
+const sessionDeps = {
+  conversation: (id: string) => useSessionsStore.getState().conversations[id] ?? null,
+  focus: (rootId: string, target: string) => {
+    const sessions = useSessionsStore.getState();
+    sessions.selectConversation(rootId);
+    if (target !== rootId) sessions.selectTab(rootId, target);
+  },
+  create: (projectId: string) => useSessionsStore.getState().newConversation(projectId),
+  prefill: prefillDraft,
+};
 
 /** 挂一次：启用插件的渲染模块在宿主页面加载，登记挂点；停用或变更时收回 */
 export function PluginUiHost() {
@@ -31,6 +44,7 @@ export function PluginUiHost() {
           });
         }
         const enabled = list.filter((plugin) => plugin.state === 'enabled');
+        setPluginIcons(Object.fromEntries(list.flatMap((p) => (p.icon ? [[p.id, p.icon]] : []))));
         setPluginCommands(
           enabled.flatMap((plugin) =>
             mergePluginCommands(plugin.commands, plugin.dynamicCommands).map((command) => ({
@@ -76,6 +90,21 @@ export function PluginUiHost() {
     reload();
     const unsubscribe = window.electronAPI.extensionPlugins.onChanged(reload);
     const unsubscribeDraft = window.electronAPI.extensionPlugins.onDraftRequest((request) => {
+      if (request.op === 'focusSession' || request.op === 'createSession') {
+        void handleSessionRequest(request as SessionRequest, sessionDeps)
+          .catch((error: unknown) => ({
+            ok: false as const,
+            code: 'SESSION_FAILED',
+            error: error instanceof Error ? error.message : String(error),
+          }))
+          .then((result) =>
+            window.electronAPI.extensionPlugins.respondDraft({
+              requestId: request.requestId,
+              ...result,
+            })
+          );
+        return;
+      }
       void window.electronAPI.extensionPlugins.respondDraft({
         requestId: request.requestId,
         ...handleDraftRequest(request),

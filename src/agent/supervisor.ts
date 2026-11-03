@@ -92,6 +92,7 @@ import { type EditMode, resolveEditMode } from '@shared/types/editMode';
 import type { ModelEntry } from '@shared/types/llm';
 import { providerIdOfAccountKey } from '@shared/types/oauthProviders';
 import type { PluginCommandSpawn, PluginHookSpawn } from '@shared/types/plugins';
+import { splitUnattendedPrefix } from '@shared/unattendedNote';
 import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
@@ -149,6 +150,7 @@ import {
   type OccupancyBranchEntry,
   type OccupancySkill,
 } from './contextOccupancy';
+import { buildContextParts } from './contextParts';
 import {
   type ContextUsageTracker,
   contextBreakdownMessages,
@@ -203,6 +205,7 @@ import { PendingNotificationStore } from './pendingNotifications';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
 import {
   childPluginEventPlan,
+  contextUsagePayload,
   createPluginEventsExtension,
   PluginEventInvoker,
 } from './pluginEvents';
@@ -1834,6 +1837,17 @@ export class SessionSupervisor {
         await managed.session.setModel(next);
         ensureAssistantUsage(managed.session.messages as unknown[]);
         managed.modelId = command.model.modelId;
+        const usage = managed.session.getContextUsage();
+        const compaction = managed.session.settingsManager.getCompactionSettings(
+          managed.session.model
+        );
+        if (
+          managed.status !== 'running' &&
+          managed.compaction !== 'running' &&
+          shouldCompactAfterModelSwitch(usage, compaction)
+        ) {
+          void this.runCompaction(managed);
+        }
         // 必须回报：Main 的 agentSessionIndex 只认 parent-ready 与本事件，
         // 不回报就会让后续派发的 selection 校验永远对不上（issue #30）。
         this.options.emit({
@@ -1972,6 +1986,7 @@ export class SessionSupervisor {
           pluginId: command.pluginId,
           pluginName: command.pluginName,
           text: command.text,
+          ...(command.images?.length ? { images: command.images } : {}),
           deliverAs: command.deliverAs,
           triggerTurn: command.triggerTurn,
         });
@@ -5087,6 +5102,27 @@ export class SessionSupervisor {
       // 渲染层冷会话不留正文、手机只持尾窗：按 worker 的完整记录算好随占用下发
       usageTotals: toUsageTotals(computeStats(managed.messages)),
     });
+    if (occupancy && managed.pluginEvents?.plan.observe.includes('context_usage')) {
+      const payload = contextUsagePayload(occupancy, managed.messages);
+      try {
+        const inputs = this.occupancyInputs(managed);
+        Object.assign(
+          payload,
+          buildContextParts({
+            buckets: payload.buckets,
+            agentsFiles: inputs.agentsFiles,
+            skills: inputs.skills,
+            tools: inputs.tools,
+            reminders: inputs.pendingTaskReminders ?? [],
+            messages: inputs.contextMessages,
+            estimate: (message) => this.estimateSessionMessage(message),
+          })
+        );
+      } catch {
+        // 拆分失败只少了条目，分类合计照发
+      }
+      managed.pluginEvents.notify('context_usage', payload);
+    }
   }
 
   private snapshotSessions(): SessionSnapshot[] {
@@ -5646,7 +5682,7 @@ export function runGateCommand(cwd: string, gate: string, executor?: SshExecutor
 
 /** 回退回填输入框：去掉 Plan 提示前缀；批准消息不回填，修改意见只回填意见原文 */
 function planFreeEditorText(text: string): string {
-  const rest = splitPlanPrefix(text).rest;
+  const rest = splitPlanPrefix(splitUnattendedPrefix(text).rest).rest;
   const message = parsePlanMessage(rest);
   return message ? (message.kind === 'feedback' ? message.feedback : '') : rest;
 }
@@ -5874,6 +5910,15 @@ function modelFamilyOf(modelId: string): string {
   if (id.includes('gemini')) return 'gemini';
   const vendor = id.split(/[-/_]/)[0];
   return vendor || id;
+}
+
+/** 换模型后已有上下文吃掉了新窗口的压缩预留：立即压缩，免得下一轮直接超窗 */
+export function shouldCompactAfterModelSwitch(
+  usage: { tokens: number | null; contextWindow: number } | undefined,
+  settings: { enabled: boolean; reserveTokens: number }
+): boolean {
+  if (!settings.enabled || !usage || usage.tokens === null) return false;
+  return usage.tokens > usage.contextWindow - settings.reserveTokens;
 }
 
 /**

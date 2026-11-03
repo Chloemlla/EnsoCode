@@ -1,6 +1,7 @@
 import type { SettingsDeepLink } from '@shared/settingsDeepLink';
 import {
   BarChart3,
+  Blocks,
   Bot,
   BotMessageSquare,
   Brain,
@@ -45,7 +46,7 @@ import { McpSettings } from './McpSettings';
 import { MemoryKnowledge } from './MemoryKnowledge';
 import { MemoryLibrary } from './MemoryLibrary';
 import { MemorySettings } from './MemorySettings';
-import { PluginsSettings } from './PluginsSettings';
+import { ClaudePluginsSettings, EnsoPluginsSettings } from './PluginsSettings';
 import { PresetsSettings } from './PresetsSettings';
 import { PrivacySettings } from './PrivacySettings';
 import { ProvidersSettings } from './ProvidersSettings';
@@ -73,6 +74,7 @@ export function SettingsContent() {
   const { t } = useI18n();
   const [activeCategory, setActiveCategory] = React.useState<SettingsCategory>('general');
   const [flashRowId, setFlashRowId] = React.useState<string | null>(null);
+  const [pluginInstallUrl, setPluginInstallUrl] = React.useState<string | null>(null);
   // 提炼写入记忆后让记忆库重新拉数据（两个组件各自持有列表）
   const [memoryRevision, setMemoryRevision] = React.useState(0);
   // 窄屏下分类列表与内容逐级进入
@@ -94,6 +96,7 @@ export function SettingsContent() {
     setActiveCategory(link.category);
     setMobileList(false);
     setFlashRowId(link.rowId);
+    if (link.pluginInstallUrl) setPluginInstallUrl(link.pluginInstallUrl);
   }, []);
 
   React.useEffect(() => {
@@ -129,7 +132,8 @@ export function SettingsContent() {
     { id: 'memory', icon: Brain, label: t('Memory') },
     { id: 'privacy', icon: Shield, label: t('Privacy') },
     { id: 'skills', icon: Sparkles, label: t('Skills') },
-    { id: 'plugins', icon: Puzzle, label: t('Plugins') },
+    { id: 'plugins', icon: Puzzle, label: t('Enso plugins') },
+    { id: 'claudePlugins', icon: Blocks, label: t('Claude Code plugins') },
     { id: 'mcp', icon: Plug, label: t('MCP Servers') },
     { id: 'instructions', icon: FileText, label: t('Instruction Files') },
     { id: 'phone', icon: Smartphone, label: t('Devices') },
@@ -206,7 +210,13 @@ export function SettingsContent() {
           {activeCategory === 'appearance' && <AppearanceSettings />}
           {activeCategory === 'providers' && <ProvidersSettings />}
           {activeCategory === 'skills' && <SkillsSettings />}
-          {activeCategory === 'plugins' && <PluginsSettings />}
+          {activeCategory === 'plugins' && (
+            <EnsoPluginsSettings
+              requestedInstallUrl={pluginInstallUrl}
+              onRequestedInstallUrlConsumed={() => setPluginInstallUrl(null)}
+            />
+          )}
+          {activeCategory === 'claudePlugins' && <ClaudePluginsSettings />}
           {activeCategory === 'mcp' && <McpSettings />}
           {activeCategory === 'instructions' && <InstructionsSettings />}
           {activeCategory === 'presets' && <PresetsSettings />}

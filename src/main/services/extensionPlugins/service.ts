@@ -47,6 +47,7 @@ import {
   type PluginArtifactInfo,
   type PluginCallMethod,
   type PluginHostCapabilities,
+  type PluginInjectImage,
   type PluginToolResult,
 } from '@shared/extensionPlugins/protocol';
 import { parsePluginToolName, pluginToolName } from '@shared/extensionPlugins/toolName';
@@ -81,7 +82,7 @@ import {
   stagePlugin,
 } from './install';
 import { applyPluginAction, type PluginAction, type PluginRecord } from './lifecycle';
-import type { PluginMarket } from './market';
+import { marketIconUrl, type PluginMarket } from './market';
 import { type PluginLogLevel, PluginProcess, pluginError } from './process';
 import {
   preserveUnreadableRegistry,
@@ -142,10 +143,12 @@ export interface PluginSessionBridge {
       pluginId: string;
       pluginName: string;
       text: string;
+      images: PluginInjectImage[];
       deliverAs: 'steer' | 'followUp' | 'nextTurn';
       triggerTurn: boolean;
     }
   ): { ok: true } | { ok: false; error: string };
+  abort(sessionId: string): { ok: true } | { ok: false; error: string };
 }
 
 export interface PluginToolOutcome {
@@ -253,6 +256,10 @@ export class ExtensionPluginService {
       progress: (invocationId, text) => this.progressTaps.get(invocationId)?.(text),
       writeArtifact: (pluginId, input) => this.artifacts.write(pluginId, input),
       inject: (pluginId, input) => this.inject(pluginId, input),
+      abort: (pluginId, sessionId) => {
+        const bridge = this.enabledManifest(pluginId) ? this.options.sessionBridge?.() : null;
+        return bridge ? bridge.abort(sessionId) : { ok: false, error: '当前环境不能中止会话' };
+      },
       crossSessionInject: (pluginId) =>
         this.records.find((r) => r.id === pluginId)?.crossSessionInject === true,
       callPlugin: (callerId, targetId, name, args, depth, caller) =>
@@ -289,6 +296,7 @@ export class ExtensionPluginService {
           name: manifest.name,
           version: record.version,
           description: manifest.description,
+          ...(manifest.icon ? { icon: manifest.icon } : {}),
           state: record.state,
           permissions: manifest.permissions,
           tools: manifest.contributes.agentTools.map(({ name, description }) => ({
@@ -433,6 +441,7 @@ export class ExtensionPluginService {
       chinaMirror,
       plugins: r.index.plugins.map((p) => {
         const installed = this.records.find((rec) => rec.id === p.id)?.version;
+        const icon = marketIconUrl(p.icon);
         return {
           id: p.id,
           name: p.name,
@@ -440,6 +449,7 @@ export class ExtensionPluginService {
           tier: p.tier,
           tags: p.tags,
           ...(p.homepage ? { homepage: p.homepage } : {}),
+          ...(icon ? { icon } : {}),
           latest: p.latest,
           permissions: p.versions.find((v) => v.version === p.latest)?.permissions ?? [],
           ...(installed ? { installedVersion: installed } : {}),
@@ -1296,7 +1306,9 @@ export class ExtensionPluginService {
   /** 渲染资源（ui.js / 侧栏页面）在安装目录内的真实路径；未启用或越界返回 null */
   assetPath(pluginId: string, rel: string): string | null {
     const record = this.records.find((r) => r.id === pluginId);
-    if (record?.state !== 'enabled' || !isPluginRelativePath(rel) || rel === '.') return null;
+    if (!record || !isPluginRelativePath(rel) || rel === '.') return null;
+    // 停用的插件只放出清单 icon，供设置页显示
+    if (record.state !== 'enabled' && this.load(record.id, record.dir)?.icon !== rel) return null;
     const base = pluginPackagePath(this.options.root, record.id, record.dir);
     try {
       const real = realpathSync(resolve(base, rel));
@@ -1616,6 +1628,7 @@ export class ExtensionPluginService {
     input: {
       sessionId: string;
       text: string;
+      images: PluginInjectImage[];
       deliverAs: 'steer' | 'followUp' | 'nextTurn';
       triggerTurn: boolean;
     }
@@ -1627,6 +1640,7 @@ export class ExtensionPluginService {
       pluginId,
       pluginName: manifest.name,
       text: input.text,
+      images: input.images,
       deliverAs: input.deliverAs,
       triggerTurn: input.triggerTurn,
     });

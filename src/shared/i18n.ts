@@ -1676,6 +1676,11 @@ export const zhTranslations: Record<string, string> = {
   'Trust and load': '信任并加载',
   Plugins: '插件',
   'Enso plugins': 'Enso 插件',
+  'Claude Code plugins': 'Claude Code 插件',
+  'No Enso plugins installed': '还没有安装 Enso 插件',
+  'Browse the marketplace or install from a GitHub URL, folder or zip.':
+    '可以从插件市场浏览，或通过 GitHub 地址、文件夹、zip 安装。',
+  'Or install from': '或从本地安装',
   'Installing a plugin lets it run code on this machine. Review what it asks for before confirming.':
     '安装插件会让它在这台电脑上运行代码。确认前请先查看它申请的权限。',
   'Install from folder': '从文件夹安装',
@@ -1931,6 +1936,9 @@ export const zhTranslations: Record<string, string> = {
   'Plan mode on: read-only research, then a plan for your approval':
     '已进入 Plan 模式：只读调研，产出计划交你审批',
   'Plan mode off': '已退出 Plan 模式',
+  'Unattended mode on: no one is watching, so it decides and keeps going':
+    '已开启无人值守：没人在看，它会自己决定并继续',
+  'Unattended mode off: a person is available again': '已关闭无人值守：可以再问你了',
   'Context compacted: the approved plan was attached again': '上下文已压缩，已重新附上执行中的计划',
   'Plan approved, executing': '已批准计划，开始执行',
   'Plan feedback': '计划修改意见',
@@ -2263,6 +2271,7 @@ export const zhTranslations: Record<string, string> = {
   'The remote desktop has no projects yet': '对方桌面还没有项目',
   'Select a conversation on the left, or create one': '从左侧选择会话，或新建一个',
   'New remote conversation': '新建远程会话',
+  'Node settings': '节点设置',
   'The conversation runs on the remote computer with its projects, models and keys.':
     '会话在对方电脑上运行，用的是对方的项目、模型与密钥。',
   'On the other computer open Settings → Devices, generate a pairing code and copy the link. Paste it here.':

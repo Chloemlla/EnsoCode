@@ -2,6 +2,7 @@ import type { PluginEventPlan } from '@shared/extensionPlugins/types';
 import { describe, expect, it, vi } from 'vitest';
 import {
   childPluginEventPlan,
+  contextUsagePayload,
   createPluginEventsExtension,
   PluginEventInvoker,
   type PluginSessionEmit,
@@ -56,6 +57,40 @@ describe('插件事件扩展', () => {
     expect([...handlers.keys()].sort()).toEqual(
       ['session_before_compact', 'session_start', 'tool_call'].sort()
     );
+  });
+
+  it('agent_end 带本轮最后一条助手回复的正文；没有文字时为空串', () => {
+    const { emit, handlers } = harness(plan({ observe: ['agent_end'] }));
+    handlers.get('agent_end')?.({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'q' }] },
+        { role: 'assistant', content: [{ type: 'text', text: '旧' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'x' },
+            { type: 'text', text: '答' },
+            { type: 'toolCall', id: 't', name: 'bash', arguments: {} },
+            { type: 'text', text: '案' },
+          ],
+        },
+        { role: 'toolResult', content: [{ type: 'text', text: 'ok' }] },
+      ],
+    } as never);
+    handlers.get('agent_end')?.({ messages: [] } as never);
+    expect(emit.mock.calls.map((call) => call[0])).toEqual([
+      { type: 'plugin-event', event: 'agent_end', data: { text: '答\n案' } },
+      { type: 'plugin-event', event: 'agent_end', data: { text: '' } },
+    ]);
+  });
+
+  it('agent_end 正文超长时截断', () => {
+    const { emit, handlers } = harness(plan({ observe: ['agent_end'] }));
+    handlers.get('agent_end')?.({
+      messages: [{ role: 'assistant', content: [{ type: 'text', text: 'a'.repeat(70_000) }] }],
+    } as never);
+    const event = emit.mock.calls[0]?.[0] as { data: { text: string } } | undefined;
+    expect(event?.data.text.length).toBe(64 * 1024);
   });
 
   it('观察型订阅 tool_call / tool_result / input 也会通知，且不等回复', async () => {
@@ -261,6 +296,24 @@ describe('插件事件扩展', () => {
       { deliverAs: 'steer', triggerTurn: true }
     );
   });
+
+  it('带图片的注入以文字加图片块发送', () => {
+    const { invoker, sendMessage } = harness(plan({ inject: true }));
+    invoker.deliver({
+      pluginId: 'example.demo',
+      pluginName: 'Demo',
+      text: 'hi',
+      images: [{ data: 'AAAA', mimeType: 'image/png' }],
+      deliverAs: 'followUp',
+      triggerTurn: true,
+    });
+    expect(sendMessage.mock.calls[0]?.[0]).toMatchObject({
+      content: [
+        { type: 'text', text: 'hi' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+      ],
+    });
+  });
 });
 
 describe('子会话的插件事件', () => {
@@ -421,5 +474,59 @@ describe('子会话的插件事件', () => {
     } as never);
     parent.invoker.cancelAll();
     await expect(released).resolves.toBeUndefined();
+  });
+});
+
+describe('contextUsagePayload', () => {
+  const occupancy = {
+    buckets: {
+      system: 1,
+      instructions: 2,
+      skills: 3,
+      tools: 4,
+      conversation: 5,
+      compaction: 6,
+      projectMemory: 7,
+      reminders: 8,
+    },
+    used: 36,
+    estimated: false,
+    compactedMessageCount: 0,
+    compactionModelMismatch: false,
+    contextWindow: 100,
+    percent: 36,
+  };
+
+  it('带分桶与最近一次请求的用量，去掉已废弃的 projectMemory', () => {
+    const payload = contextUsagePayload(occupancy, [
+      { role: 'assistant', usage: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } },
+      { role: 'user' },
+      { role: 'assistant', usage: { input: 10, output: 2, cacheRead: 90, cacheWrite: 3 } },
+      { role: 'user' },
+    ]);
+    expect(payload).toEqual({
+      used: 36,
+      estimated: false,
+      contextWindow: 100,
+      percent: 36,
+      buckets: {
+        system: 1,
+        instructions: 2,
+        skills: 3,
+        tools: 4,
+        conversation: 5,
+        compaction: 6,
+        reminders: 8,
+      },
+      usage: { input: 10, output: 2, cacheRead: 90, cacheWrite: 3 },
+    });
+  });
+
+  it('还没有带用量的回复时不带 usage', () => {
+    const { contextWindow: _w, percent: _p, ...noWindow } = occupancy;
+    const payload = contextUsagePayload({ ...noWindow, estimated: true }, [{ role: 'user' }]);
+    expect(payload).not.toHaveProperty('usage');
+    expect(payload).not.toHaveProperty('contextWindow');
+    expect(payload.estimated).toBe(true);
   });
 });

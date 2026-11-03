@@ -31,6 +31,7 @@
   "name": "Notes",
   "version": "1.0.0",
   "description": "侧栏便签",
+  "icon": "icon.svg",
   "engines": { "enso": ">=0.2.0" },
   "main": "main.mjs",
   "renderer": "ui.js",
@@ -76,6 +77,7 @@
 | `name` | 非空，最长 60 字符 |
 | `version` | 非空，最长 40 字符 |
 | `description` | 可选 |
+| `icon` | 可选，插件目录内的图片相对路径（svg / png / jpg / webp），用于设置页、侧栏标签和插件消息；缺省显示拼图图标 |
 | `engines.enso` | 可选，只支持 `>=x.y.z`；宿主机版本不够则拒绝安装 |
 | `main` | 可选，插件目录内的相对路径。声明了工具、命令、补全来源、方法或配置项时必填 |
 | `renderer` | 可选，渲染模块的相对路径 |
@@ -106,11 +108,14 @@
 | `mcp.call` | 有 `mcp.tools` | 调用用户已配置的 MCP 服务里、清单列出的工具 |
 | `agent.observe` | 有通知型 `events` | 收到会话事件 |
 | `agent.intercept` | 有拦截型 `events` | 拦截并改写工具调用、工具结果和用户输入 |
-| `agent.inject` | 要向会话发消息 | `enso.session.inject`：向会话发送消息，并可触发该会话继续执行。默认只能发到发起调用的会话；用户单独允许后可发到任意运行中的会话 |
+| `agent.inject` | 要向会话发消息 | `enso.session.inject` / `enso.session.abort`：向会话发送消息（可带图片）、触发或中止该会话的执行。默认只能发到发起调用的会话；用户单独允许后可发到任意运行中的会话 |
 | `process.background` | `resident` 或有 `schedules` | 常驻进程、定时任务 |
 | `plugin.call` | 有 `interop.call` | 调用其他插件导出的方法 |
 | `ui.clipboard` | 要写剪贴板 | `enso.ui.clipboard.writeText` |
 | `ui.openExternal` | 要打开外部链接 | `enso.ui.openExternal` |
+| `session.read` | 要列出会话 | `enso.session.list` |
+| `session.focus` | 要切换到会话 | `enso.session.focus` |
+| `session.create` | 要新建会话 | `enso.session.create` |
 
 升级时如果权限、文件范围、域名、MCP 工具、透传变量、可调用的插件、拦截事件变多，或改成常驻，需要重新确认。
 
@@ -173,6 +178,10 @@ export async function activate(enso) {
 | `exports.handle(name, handler)` / `plugins.call(pluginId, name, args?)` | 见「插件间调用」 |
 | `artifacts.write(input)` | 见「产出文件」 |
 | `session.inject(input)` | 见「向会话发消息」 |
+| `session.abort(sessionId?)` | 见「向会话发消息」 |
+| `session.list()` | 需要 `session.read`。返回 `{ current, sessions }`：`current` 是发起调用的会话 id（子会话为其 id，可用 `split('::')[0]` 取主会话），`sessions` 是同项目的主会话，按最近活动从新到旧，最多 200 条，每项 `{ id, title, updatedAt, running?, archived? }`。不含 Bot 会话与已结束的会话；某个 id 不在列表里即可视为已删除 |
+| `session.focus(sessionId)` | 需要 `session.focus`。切换到同项目的会话（子会话切到所属主会话的对应标签）。只能在用户操作触发的调用里用（同草稿的 30 秒手势）；会话不在本项目返回 `NOT_FOUND` |
+| `session.create({ text? })` | 需要 `session.create`。在发起会话的项目里新建会话并切过去，返回 `{ sessionId }`。`text`（不超过 32KB）只填进新会话的输入框，由用户确认后发送。只能在用户操作触发的调用里用 |
 | `host.capabilities()` | 返回 `{ host: 'desktop' \| 'server', hostVersion, notify, mcp, clipboard, openExternal, composer }`，用来在桌面和服务端之间降级 |
 | `triggers.register(name, handlers)` | `handlers.candidates(query, ctx)` 与 `handlers.pick(item, ctx)` |
 | `renderer.handle(method, handler)` | 供渲染模块和侧栏页面调用，`handler(args, ctx)` |
@@ -205,14 +214,27 @@ export async function activate(enso) {
 | 事件 | 时机 | `data` | 可拦截 |
 | --- | --- | --- | --- |
 | `session_start` / `session_end` | 会话开始 / 结束 | `{ reason }` | 否 |
-| `agent_start` / `agent_end` | 一轮回复开始 / 结束 | `{}` | 否 |
+| `agent_start` / `agent_end` | 一轮回复开始 / 结束 | `agent_start`：`{}`；`agent_end`：`{ text }`，本轮最后一条助手回复的文字部分（不含思考与工具调用，最多 64K 字符，没有文字时为空串） | 否 |
 | `before_compact` | 上下文压缩前 | `{ reason }` | 否，但会等所有插件处理完（最多 10 秒）再压缩 |
 | `after_compact` | 压缩后 | `{ reason }` | 否 |
 | `tool_call` | 工具执行前 | `{ toolCallId, toolName, input }` | 返回 `{ block: true, reason? }` 拦下，或 `{ input }` 改写参数 |
 | `tool_result` | 工具执行后 | `{ toolCallId, toolName, input, content, isError }` | 返回 `{ content?, isError? }` 改写结果 |
 | `input` | 用户发送消息时 | `{ text, source }` | 返回 `{ action: 'transform', text }` 改写，或 `{ action: 'handled' }` 吞掉这条消息 |
+| `context_usage` | 上下文占用刷新时（回复开始、每条回复结束、压缩后、一轮收口） | `{ used, estimated, contextWindow?, percent?, buckets, usage?, parts?, turns? }` | 否 |
 
 `tools` 只对 `tool_call` / `tool_result` 有效，限定只对这些工具名触发。通知型的返回值被忽略，不阻塞会话。
+
+`context_usage` 与输入框旁的上下文占用同源：`buckets` 是 `system` / `instructions` / `skills` / `tools` / `conversation` / `compaction` / `reminders` 各自的 token 数（文件、工具结果都算在 `conversation` 里），`used` 是总占用，`estimated` 为 `true` 表示还没有模型实报用量可校准、全部是估算。`usage` 是最近一次带用量的回复的实报 `{ input, output, cacheRead, cacheWrite }`，可据此算缓存命中率；还没有回复时不带。同一轮里会发多次，按最后一次为准。
+
+`parts` 是更细的拆分，形状与 magpie 的 prompt parts 相同：按 `system` / `tools` / `skills` / `memory` / `files` / `results` / `chat` 顺序，每类 `{ kind, tokens, items }`，空的类不出现。`items` 每项 `{ name, tag, n?, tokens }`，每类最多 24 项：
+
+- `tools`：每个工具一项；同一 MCP server 的工具合成一项（`tag: 'mcp'`，`name` 为 `mcp__<server>`，`n` 为工具数）。
+- `skills`：每个 skill 一项。`memory`：每个指令文件一项（`tag: 'project'`，`name` 为路径），待办提醒一项（`tag: 'reminder'`）。
+- `files`：读文件工具读入的文件（`tag: 'read'`）、只读 shell 命令（`cat` / `head` / `sed -n` 等）读入的文件（`tag: 'shell'`）、图片（`tag: 'image'`）。
+- `results`：其余工具输出，按工具名合并（`tag: 'result'`，`n` 为次数）。
+- `chat`：按用户轮次，`name` 为轮次序号（`tag: 'turn'`），从旧到新；超出时最早的合成一项（`tag: 'turns'`）；压缩摘要排最前（`tag: 'compacted'`）。
+
+其余类超出 24 项时，最小的合成一项（`tag: 'more'`）。`memory` 合计 = `instructions + reminders`，`files + results + chat` 合计 = `conversation + compaction`，其余类与同名 `buckets` 相等。`turns` 是当前上下文里用户发言的轮数。
 
 多个插件拦截同一事件时按插件 id 顺序依次询问，后一个看到的是前一个改写后的数据；一旦有插件拦下或吞掉，后面的不再询问。每个插件限时 5 秒，一次拦截合计不超过 25 秒。处理函数抛错或超时时默认放行；设了 `failClosed: true` 的则拦下。合计时长用尽时，还没轮到的插件也按各自的 `failClosed` 处理。只有 Enso 自身出错（与任何插件无关）时才无条件放行。
 
@@ -233,14 +255,18 @@ Agent 用 `subagent` 工具派出的子代理和 coworker（下称子会话）�
 
 ### 向会话发消息
 
-`session.inject({ text, sessionId?, deliverAs?, triggerTurn? })` 把一条消息加进会话。需要 `agent.inject`。消息在会话里单独成行，标明「来自插件 <名称>」和插件 id，样式与用户消息、模型回复都不同。模型侧按用户角色收到原文，不带来源标记；需要模型知道来源时请在文本里自己写明。
+`session.inject({ text, images?, sessionId?, deliverAs?, triggerTurn? })` 把一条消息加进会话。需要 `agent.inject`。消息在会话里单独成行，标明「来自插件 <名称>」和插件 id，样式与用户消息、模型回复都不同。模型侧按用户角色收到原文，不带来源标记；需要模型知道来源时请在文本里自己写明。
 
 - `sessionId` 缺省取当前调用所属的会话，都没有则返回 `NO_SESSION`。会话必须正在运行，否则返回 `INJECT_FAILED`。
+- 常驻进程在宿主调用之外（如自己的轮询循环）也能用 `session.inject` / `session.abort`，但必须指明 `sessionId`，并且同样要用户打开下面的跨会话开关。
 - 发到发起调用以外的会话（包括定时任务、常驻进程里没有当前会话时指定的 `sessionId`）要用户在设置页该插件下打开「允许向任意运行中的会话发送消息」（命令行 `enso-server plugin inject-anywhere <id>`），否则返回 `PERMISSION_DENIED`。新装的插件默认关闭。关闭开关只影响之后的发送，已经投递、排队等下一轮的消息不会撤回。
 - 每个插件 10 秒内最多 5 条，超过返回 `RATE_LIMITED`。只有参数不合法和目标未授权被拒的不计入；目标会话没在运行（`INJECT_FAILED`）也计入。
 - `deliverAs`：`nextTurn`（缺省，并入下一轮）、`steer`（插入正在进行的回复）、`followUp`（当前回复结束后排队）。
 - `triggerTurn: true` 时会话空闲也会立即开始一轮。
 - 文本不超过 32K 字符。
+- `images` 是 `[{ data, mimeType }]`，`data` 为 base64，`mimeType` 只能是 `image/png`、`image/jpeg`、`image/webp`、`image/gif`；最多 4 张，每张 base64 不超过 7M 字符。图片随文字一起交给模型，不合法返回 `INVALID_ARGS`。
+
+`session.abort(sessionId?)` 中止会话正在进行的一轮，权限与目标会话规则同 `session.inject`（不计入频率限制）。会话没在运行返回 `ABORT_FAILED`。
 
 ### 产出文件
 
@@ -258,7 +284,7 @@ Agent 用 `subagent` 工具派出的子代理和 coworker（下称子会话）�
 
 ### 网络
 
-`net.fetch` 只接受 `http` 和 `https`，主机名必须在 `net.domains` 里，不允许 URL 内嵌用户名密码。`init` 支持 `method`、`headers`、`body`。返回 `{ status, headers, body }`，`body` 是字符串。响应不超过 5MB，最多跟随 5 次重定向，重定向到未授权的域名会被拒绝。
+`net.fetch` 只接受 `http` 和 `https`，主机名必须在 `net.domains` 里，不允许 URL 内嵌用户名密码。`init` 支持 `method`、`headers`、`body`、`responseType`。返回 `{ status, headers, body }`，`body` 是字符串；`responseType: 'base64'` 时为响应原始字节的 base64，用于下载图片等二进制内容。响应不超过 5MB，最多跟随 5 次重定向，重定向到未授权的域名会被拒绝。
 
 ### 文件
 

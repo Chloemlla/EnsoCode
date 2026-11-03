@@ -80,6 +80,49 @@ describe('插件工具协议', () => {
   });
 
   it('plugin-event / plugin-intercept 事件', () => {
+    const buckets = {
+      system: 1,
+      instructions: 2,
+      skills: 3,
+      tools: 4,
+      conversation: 5,
+      compaction: 0,
+      reminders: 0,
+    };
+    const usage = { input: 10, output: 2, cacheRead: 90, cacheWrite: 0 };
+    const contextUsage = (data: unknown) =>
+      parseAgentWorkerEvent({
+        type: 'plugin-event',
+        identity: parent,
+        seq: 1,
+        event: 'context_usage',
+        data,
+      });
+    expect(
+      contextUsage({ used: 15, estimated: false, contextWindow: 100, percent: 15, buckets, usage })
+    ).not.toBeNull();
+    expect(contextUsage({ used: 15, estimated: true, buckets })).not.toBeNull();
+    expect(contextUsage({ used: 15, estimated: true, buckets: { system: 1 } })).toBeNull();
+    expect(contextUsage({ used: -1, estimated: true, buckets })).toBeNull();
+    const parts = [
+      { kind: 'tools', tokens: 4, items: [{ name: 'mcp__gh', tag: 'mcp', n: 2, tokens: 4 }] },
+      { kind: 'chat', tokens: 5, items: [{ name: '1', tag: 'turn', tokens: 5 }] },
+    ];
+    expect(contextUsage({ used: 15, estimated: true, buckets, parts, turns: 1 })).not.toBeNull();
+    expect(
+      contextUsage({ used: 15, estimated: true, buckets, parts: [{ ...parts[0], kind: 'x' }] })
+    ).toBeNull();
+    expect(
+      contextUsage({
+        used: 15,
+        estimated: true,
+        buckets,
+        parts: [
+          { kind: 'chat', tokens: 1, items: Array(25).fill({ name: '1', tag: 'turn', tokens: 0 }) },
+        ],
+      })
+    ).toBeNull();
+    expect(contextUsage({ used: 15, estimated: true, buckets, usage: { input: 1 } })).toBeNull();
     expect(
       parseAgentWorkerEvent({
         type: 'plugin-event',
@@ -218,6 +261,20 @@ describe('插件工具协议', () => {
         triggerTurn: false,
       })
     ).toBeNull();
+    const withImages = (images: unknown) =>
+      parseAgentCommand({
+        type: 'plugin-inject',
+        identity: parent,
+        pluginId: 'example.demo',
+        pluginName: 'Demo',
+        text: 'hello',
+        images,
+        deliverAs: 'followUp',
+        triggerTurn: true,
+      });
+    expect(withImages([{ data: 'AAAA', mimeType: 'image/jpeg' }])).not.toBeNull();
+    expect(withImages([{ data: 'AAAA', mimeType: 'application/pdf' }])).toBeNull();
+    expect(withImages('AAAA')).toBeNull();
   });
 
   it('plugin-tool-result 成功与失败两种形状', () => {
@@ -260,6 +317,17 @@ describe('插件工具协议', () => {
     expect(snapshot({ pluginId: 'enso.example.notes', pluginName: 'Notes' })).not.toBeNull();
     expect(snapshot({ pluginId: 'enso.example.notes' })).toBeNull();
     expect(snapshot({ pluginId: '../x', pluginName: 'N' })).toBeNull();
+  });
+
+  it('agent_end 只接受字符串 text（≤64KB），agent_start 仍为空对象', () => {
+    const event = (name: string, data: unknown) =>
+      parseAgentWorkerEvent({ type: 'plugin-event', identity: parent, seq: 1, event: name, data });
+    expect(event('agent_end', { text: '答' })).not.toBeNull();
+    expect(event('agent_end', {})).not.toBeNull();
+    expect(event('agent_end', { text: 1 })).toBeNull();
+    expect(event('agent_end', { text: 'a'.repeat(64 * 1024 + 1) })).toBeNull();
+    expect(event('agent_end', { text: '', extra: 1 })).toBeNull();
+    expect(event('agent_start', { text: 'x' })).toBeNull();
   });
 
   describe('子会话来源 agent', () => {

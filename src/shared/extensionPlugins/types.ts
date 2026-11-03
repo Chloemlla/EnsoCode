@@ -6,6 +6,8 @@ export interface ExtensionPluginSummary {
   name: string;
   version: string;
   description: string;
+  /** 图片相对路径，渲染层经 asset 通道取 */
+  icon?: string;
   state: 'disabled' | 'enabled' | 'crashed';
   permissions: ExtensionPluginPermission[];
   tools: { name: string; description: string }[];
@@ -59,6 +61,8 @@ export interface ExtensionPluginMarketEntry {
   tier: 'official' | 'community';
   tags: string[];
   homepage?: string;
+  /** 已转成 Worker 代理地址 */
+  icon?: string;
   latest: string;
   permissions: string[];
   installedVersion?: string;

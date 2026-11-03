@@ -10,8 +10,67 @@ export const PLUGIN_EVENTS = [
   'tool_call',
   'tool_result',
   'input',
+  'context_usage',
 ] as const;
 export type PluginEventName = (typeof PLUGIN_EVENTS)[number];
+
+/** agent_end 携带的本轮最终回复正文上限（字符） */
+export const AGENT_END_TEXT_MAX = 64 * 1024;
+
+/** context_usage 的分桶：与宿主上下文占用一致，不含已废弃的 projectMemory */
+export const CONTEXT_USAGE_BUCKETS = [
+  'system',
+  'instructions',
+  'skills',
+  'tools',
+  'conversation',
+  'compaction',
+  'reminders',
+] as const;
+export type ContextUsageBucket = (typeof CONTEXT_USAGE_BUCKETS)[number];
+
+export interface ContextUsagePayload {
+  used: number;
+  /** 没有模型实报用量可锚定时为 true */
+  estimated: boolean;
+  contextWindow?: number;
+  percent?: number;
+  buckets: Record<ContextUsageBucket, number>;
+  /** 最近一次带用量的回复的实报 token */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** 与 magpie 同形的七类拆分，各类条目按大小排列（会话按轮次） */
+  parts?: ContextPart[];
+  /** 当前上下文里用户发言的轮数 */
+  turns?: number;
+}
+
+export const CONTEXT_PART_KINDS = [
+  'system',
+  'tools',
+  'skills',
+  'memory',
+  'files',
+  'results',
+  'chat',
+] as const;
+export type ContextPartKind = (typeof CONTEXT_PART_KINDS)[number];
+/** 每类最多的条目数 */
+export const CONTEXT_PART_ITEMS = 24;
+
+export interface ContextPartItem {
+  name: string;
+  /** mcp / project / reminder / skills / read / shell / image / result / turn / turns / compacted / more */
+  tag: string;
+  /** 合并了多少项：MCP server 的工具数、工具的结果次数、合并的轮次或条目 */
+  n?: number;
+  tokens: number;
+}
+
+export interface ContextPart {
+  kind: ContextPartKind;
+  tokens: number;
+  items: ContextPartItem[];
+}
 
 /** 可以拦截或改写的事件；其余只通知 */
 export const PLUGIN_INTERCEPT_EVENTS = ['tool_call', 'tool_result', 'input'] as const;
