@@ -16,7 +16,7 @@
 - 插件系统正式发布前登记格式可能变更且不做兼容：启动时读到旧格式或字段不全的登记记录会丢弃，并清理这些插件的包、数据、配置、产出、页面状态和日志。设置页和 `enso-server plugin list` 会列出被丢弃的插件 id，重新安装后自动消失；提示保存在磁盘上，重启不会丢，点「知道了」或 `enso-server plugin notice-dismiss` 清除。
 - 登记表本身读不出（不是 JSON 或结构不对，比如磁盘损坏、同步冲突、手改）时不删除任何插件文件：原文另存为数据目录下的 `extension-plugins/registry.json.unreadable`，插件列表暂时为空，设置页和 `plugin list` 会提示。每次写登记表前还会把上一份留成 `registry.json.bak`。磁盘上有包目录、登记表里却没有的插件只记日志，不自动删除。
 - 10 分钟内非预期崩溃 3 次，插件会被自动停用，状态变成 `crashed`，重新启用即可。停用原因会显示在设置页和 `enso-server plugin list` 里。
-- 日志：`main.mjs` 里的 `console.*` 输出、处理器抛出的异常和进程意外退出都会记下来，在设置页插件行的日志按钮或 `enso-server plugin logs <id>` 里看。单个日志文件超过 1MB 轮转一次，卸载时删除。
+- 日志：`main.mjs` 里的 `console.*` 输出、处理器抛出的异常和进程意外退出都会记下来，在设置页插件行的日志按钮或 `enso-server plugin logs <id>` 里看。单个日志文件超过 1MB 轮转一次，卸载时删除。每个插件每秒最多落盘 100 行，超出的直接丢弃，并额外记一条「已丢弃 N 行」。
 - 远程使用：手机 PWA 的完整模式跑的是同一套界面，插件的挂点、补全、命令和侧栏页面都能用；安装、启停、授权、配置、看日志和重新安装只能在本机界面或服务端 CLI 上做。手机精简模式不加载插件界面，插件工具仍由桌面端的 Agent 正常调用。
 - 有配置项的插件：设置页插件行的齿轮按钮，或 `enso-server plugin config <id>`（查看）/ `enso-server plugin config <id> key=value`（设置；`key=` 留空会在终端里提示输入，不进 shell 历史；`--unset key` 清除）。
 
@@ -139,7 +139,7 @@ Enso 安装插件时只复制目录，不会执行 `npm install`，也不会在�
 - `triggers`：`{ symbol, name }`。`symbol` 只能是 `#`，`@` 和 `/` 归 Enso 自己用。
 - `skills`：skill 目录的相对路径，随插件下发给新会话。
 - `mcpServers`：`{ name, command, args, env }`。服务名会加 `plugin-<id>-` 前缀。`command`、`args`、`env` 里的 `${ENSO_PLUGIN_ROOT}` 会展开成插件安装目录，`env` 只能写字面量。
-- `presets`：`{ id, name, skills, mcpServers, instruction?, systemPrompt?, systemPromptTail?, boostPrompt?, refusalRetry?, refusalRetryPrompt?, model?, thinkingLevel?, approvalMode?, disabledTools? }`，最多 20 个。`skills` 和 `mcpServers` 只能引用本插件已经声明的 skill 目录和 MCP 服务名。指令和角色、真尾、boost、推脱补发都是插件目录里的 Markdown 文件。启用后出现在预设列表里，只读，不能在设置里改。会话 id 是 `plugin:<插件 id>:<预设 id>`。`model` 是 `{ providerId, modelId }`，选中预设时输入框切到这个模型，模型不可用时会话启动失败；`thinkingLevel` 覆盖当前档位；`approvalMode` 只能是 `supervised` 或 `auto-edits`，和用户当前档位取更严的一个；`disabledTools` 并入禁用工具列表。
+- `presets`：`{ id, name, skills, mcpServers, agentTypes?, instruction?, systemPrompt?, systemPromptTail?, boostPrompt?, refusalRetry?, refusalRetryPrompt?, model?, thinkingLevel?, approvalMode?, disabledTools? }`，最多 20 个。`skills`、`mcpServers` 和 `agentTypes` 只能引用本插件已经声明的 skill 目录、MCP 服务名和子代理类型名。指令和角色、真尾、boost、推脱补发都是插件目录里的 Markdown 文件。启用后出现在预设列表里，只读，不能在设置里改；用户也可以在自建预设的「高级」里叠加它。会话 id 是 `plugin:<插件 id>:<预设 id>`。`model` 是 `{ providerId, modelId }`，选中预设时输入框切到这个模型，模型不可用时会话启动失败；`thinkingLevel` 覆盖当前档位；`approvalMode` 只能是 `supervised` 或 `auto-edits`，和用户当前档位取更严的一个；`disabledTools` 并入禁用工具列表。
 - `agentTypes`：`{ name, description, systemPrompt, tools?, skills? }`，最多 20 个，见下文「子代理类型」。
 - `methods`：`{ name, timeoutMs }`，给 `renderer.handle` 注册的方法声明更长的超时，1000 到 120000 毫秒的整数。没声明的方法 2 秒超时。
 - `configuration`：`{ key, title, description?, secret?, type?, default?, options?, min?, max?, pathKind? }`，最多 20 项。`key` 匹配 `^[A-Za-z][A-Za-z0-9_]{0,31}$`，`title` 最长 60 字符。`type` 是 `string`（缺省）、`number`（可带 `min` / `max`）、`boolean`、`enum`（必须带 `options`）或 `path`（可带 `pathKind: 'file' | 'directory'`）；只有 `string` 能设 `secret`。用户在设置页或命令行里填写，插件用 `enso.config.get()` 读取。
@@ -149,6 +149,53 @@ Enso 安装插件时只复制目录，不会执行 `npm install`，也不会在�
 - `dynamic`：`{ tools?, commands? }`，运行期最多能额外注册多少工具（0–50）和命令（0–20），缺省都是 0。
 
 同一类贡献里的 `id` 或 `name` 不能重复。
+
+## 类型
+
+[`types/enso-plugin.d.ts`](../types/enso-plugin.d.ts) 从宿主实现再导出 `main.mjs`、`ui.js`、侧栏页面和清单的类型。引用这份声明，不要复制，否则会和实现脱节。
+
+插件目录放 `jsconfig.json`，把 `enso-plugin` 指到仓库里的声明（路径按实际位置改）：
+
+```json
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ESNext",
+    "strict": true,
+    "lib": ["ESNext", "DOM"],
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "types": [],
+    "paths": {
+      "enso-plugin": ["../enso-code/types/enso-plugin.d.ts"]
+    }
+  },
+  "include": ["main.mjs", "ui.js"]
+}
+```
+
+```js
+/** @param {import('enso-plugin').EnsoMain} enso */
+export function activate(enso) {}
+
+/** @param {import('enso-plugin').EnsoUi} enso */
+export function onLoad(enso) {}
+```
+
+侧栏页面脚本里：
+
+```js
+/** @type {import('enso-plugin').EnsoView} */
+const enso = window.enso;
+```
+
+清单用 `import('enso-plugin').EnsoPluginManifest`（作者写的 JSON，版本约束是 `engines.enso`）。解析之后的形状是 `ExtensionPluginManifest`（`ensoRange`）。
+
+`enso-server plugin init <目录> [--id <id>]` 会生成带上述引用的最小插件。`enso-server plugin validate <目录>` 用同一套清单校验检查 `enso-plugin.json`，并确认 `main` / `renderer` 指向的文件存在；失败时错误打到 stderr，退出码为 1。
 
 ## `main.mjs`
 
@@ -205,7 +252,7 @@ export async function activate(enso) {
 
 ### 动态工具与命令
 
-清单 `dynamic` 给出上限后，插件可以在运行期用 `tools.register(name, handler, meta)` / `commands.register(id, handler, meta)` 注册清单里没有的工具和命令，名字规则与清单相同，`parameters` 必须是 `type` 为 `object` 的 JSON Schema，超出上限返回 `QUOTA`。返回的取消函数会把它们撤掉。动态工具对之后新开的会话生效：Enso 启动会话前会先拉起声明了动态工具的插件（最多等 5 秒）。插件进程退出后，动态注册全部清空。
+清单 `dynamic` 给出上限后，插件可以在运行期用 `tools.register(name, handler, meta)` / `commands.register(id, handler, meta)` 注册清单里没有的工具和命令，名字规则与清单相同，`parameters` 必须是 `type` 为 `object` 的 JSON Schema，超出上限返回 `QUOTA`。返回的取消函数会把它们撤掉。动态工具对之后新开的会话生效：Enso 启动会话前会先拉起声明了动态工具的插件（最多等 5 秒）；加载失败会被记住，重新启用、升级或从来源重新安装后才再试。插件进程退出后，动态注册全部清空；插件仍启用时再调用，会先拉起进程、等它重新注册后再查一次，仍然没有才当作不存在。
 
 ### 会话事件
 
@@ -215,14 +262,16 @@ export async function activate(enso) {
 | --- | --- | --- | --- |
 | `session_start` / `session_end` | 会话开始 / 结束 | `{ reason }` | 否 |
 | `agent_start` / `agent_end` | 一轮回复开始 / 结束 | `agent_start`：`{}`；`agent_end`：`{ text }`，本轮最后一条助手回复的文字部分（不含思考与工具调用，最多 64K 字符，没有文字时为空串） | 否 |
-| `before_compact` | 上下文压缩前 | `{ reason }` | 否，但会等所有插件处理完（最多 10 秒）再压缩 |
+| `before_compact` | 上下文压缩前 | `{ reason }` | 否。主会话只等已经在运行的插件（含常驻）处理完，最多 10 秒，然后照常压缩；没在运行的非常驻插件直接跳过，不会为此拉起进程。子会话里只通知、不等待 |
 | `after_compact` | 压缩后 | `{ reason }` | 否 |
 | `tool_call` | 工具执行前 | `{ toolCallId, toolName, input }` | 返回 `{ block: true, reason? }` 拦下，或 `{ input }` 改写参数 |
-| `tool_result` | 工具执行后 | `{ toolCallId, toolName, input, content, isError }` | 返回 `{ content?, isError? }` 改写结果 |
+| `tool_result` | 工具执行后 | `{ toolCallId, toolName, input, content, isError }`。通知里的 `content` 最多 64K 字符，超出截断；拦截看到的是完整文本 | 返回 `{ content?, isError? }` 改写结果 |
 | `input` | 用户发送消息时 | `{ text, source }` | 返回 `{ action: 'transform', text }` 改写，或 `{ action: 'handled' }` 吞掉这条消息 |
 | `context_usage` | 上下文占用刷新时（回复开始、每条回复结束、压缩后、一轮收口） | `{ used, estimated, contextWindow?, percent?, buckets, usage?, parts?, turns? }` | 否 |
 
-`tools` 只对 `tool_call` / `tool_result` 有效，限定只对这些工具名触发。通知型的返回值被忽略，不阻塞会话。
+`tools` 只对 `tool_call` / `tool_result` 有效，限定只对这些工具名触发。通知型的返回值被忽略，不阻塞会话。插件进程没在运行、且不是常驻时，通知直接丢掉，不会为此拉起进程。主会话的 `before_compact` 也一样：只等已经在运行的插件，不会为了等待去拉起非常驻插件。
+
+通知按「插件 + 事件 + 会话」分开投递；子代理或 coworker 再按子会话身份（种类、子会话 id、名字）分开，所以一个会话的 `session_end` 不会盖掉另一个会话或子代理的。`context_usage` 和 `tool_result` 这类高频通知，同一条队列上如果上一条还在处理，后来的只保留最新一条。`session_start` / `session_end`、`agent_start` / `agent_end`、`before_compact` / `after_compact`，以及通知型的 `tool_call`、`input`，不合并，按到达顺序排队，每条队列最多 32 条，满了丢掉最旧的。
 
 `context_usage` 与输入框旁的上下文占用同源：`buckets` 是 `system` / `instructions` / `skills` / `tools` / `conversation` / `compaction` / `reminders` 各自的 token 数（文件、工具结果都算在 `conversation` 里），`used` 是总占用，`estimated` 为 `true` 表示还没有模型实报用量可校准、全部是估算。`usage` 是最近一次带用量的回复的实报 `{ input, output, cacheRead, cacheWrite }`，可据此算缓存命中率；还没有回复时不带。同一轮里会发多次，按最后一次为准。
 
@@ -325,6 +374,12 @@ Agent 用 `subagent` 工具派出的子代理和 coworker（下称子会话）�
 
 渲染模块在主界面里运行，和 Enso 自己的界面同权，能操作页面上的一切。这和 `main.mjs` 不同，后者在独立进程里。所以渲染模块只适合你完全信任的插件。
 
+`ui.js` 不是按文件 URL 加载的：宿主把源码放进 blob，再用 `import()` 执行。blob 没有插件目录作为基址，`import './util.js'` 这类相对模块解析不到，也不会去读插件包里的其他文件。入口必须是单文件。用 esbuild 打包：
+
+```bash
+esbuild src/ui.tsx --bundle --format=esm --platform=browser --outfile=ui.js
+```
+
 导出 `onLoad(enso)`：
 
 ```js
@@ -355,7 +410,9 @@ export function onLoad(enso) {
 | `message.action` | `position: 'left' \| 'right'` | `{ position, text, messageIndex, sessionId }` | 可用。位于回复正文下方的操作条，`left` 在复制按钮之前，`right` 在复制按钮之后。`messageIndex` 是这条消息在会话里的下标，`sessionId` 是当前展示的会话 |
 | `tool.card` | `toolName` | `{ toolName, output, state }` | 可用。`output` 是工具结果文本，可能为 `null` |
 | `block` | `language` | `{ language, source }` | 可用 |
-| `composer.left` / `composer.right` | 无 | `{ position, sessionId, draft, busy }` | 可用。`draft` 是当前草稿的纯文本，`busy` 表示输入框被锁定；侧栏等独立输入框里 `sessionId` 为 `null` |
+| `composer.left` / `composer.right` | 无 | `{ position, sessionId, draft, busy, pluginPresetId }` | 可用。`draft` 是当前草稿的纯文本，`busy` 表示输入框被锁定。`pluginPresetId` 是当前会话生效的插件预设 id。直接选插件预设时是它本身。选自建预设且其 `pluginPresetId` 是合法插件预设 id 时是叠加的那个。否则为 `null`。侧栏等独立输入框里 `sessionId` 为 `null` |
+| `thinking.body` | 无 | `{ text, streaming, itemKey }` | 可用。接管展开后的思考正文；多个插件只渲染先注册的那个，组件抛错时回退显示原文 |
+| `message.leaf` | 无 | `{ source, final, messageIndex, sessionId, Markdown }` | 可用。只在回复正文的文字叶子后追加，原文仍由宿主整体渲染。叶子是段落、标题、表格单元格，以及不包含段落的紧凑列表项；代码块、公式、分隔线和 HTML 不追加。`source` 是该叶子的行内 Markdown（不含 `#`、列表标记、表格竖线和引用标记），`final` 表示这个叶子是否已经写完，`messageIndex` / `sessionId` 与 `message.action` 相同。`Markdown` 是宿主的 Markdown 组件，用来渲染译文，且不会再次触发本挂点。多个插件只渲染先注册的那个；组件返回 null 或抛错时不追加内容，原文不受影响 |
 
 其它 `slot` 注册时直接报错。
 
@@ -367,7 +424,8 @@ export function onLoad(enso) {
 
 页面里用 `window.enso`：
 
-- `enso.theme`：`'light'` 或 `'dark'`，打开页面时确定，不会随主题切换更新。`<html>` 上同时有 `data-theme`。
+- `enso.theme`：`'light'` 或 `'dark'`，当前主题。`<html>` 上的 `data-theme` 会随宿主主题一起变。
+- `enso.onTheme(listener)`：主题变化时调用 `listener(theme)`，返回取消订阅的函数。打开页面时不会立刻回调，当前值读 `enso.theme`。
 - `enso.call(method, args)`：调用本插件 `renderer.handle` 注册的方法，返回 Promise。
 - `enso.storage.get(key)` / `set(key, value)` / `remove(key)`：页面状态，关闭重开后仍在。值按字符串保存。页面里的 `localStorage` 是另一份包装，方法名是标准的 `getItem` / `setItem` / `removeItem` / `clear`，读写同一份数据。读取是同步的（打开页面时的快照加本页写入），写入异步保存。每个插件合计不超过 1MB，卸载时删除。
 
@@ -390,7 +448,7 @@ iframe 只有 `allow-scripts`，没有 `allow-modals`，`alert`、`confirm`、`p
 
 `mcpServers` 在会话启动时拉起，生命周期和审批沿用 Enso 现有的 MCP 实现。
 
-选中插件预设时，用它的指令文件代替当前启用的全局指令；没写 `instruction` 就不注入指令。角色描述、真尾、boost 和推脱补发按文件内容下发，缺的字段沿用默认。用户自己启用的 skill 和 MCP 仍然保留。插件停用或预设被删掉之后，已经选中的会话在启动时会失败，需要改回别的预设。
+选中插件预设时，用它的指令文件代替当前启用的全局指令；没写 `instruction` 就沿用当前启用的全局指令。角色描述、真尾、boost 和推脱补发按文件内容下发，缺的字段沿用默认。用户自己启用的 skill 和 MCP 仍然保留。插件停用或预设被删掉之后，已经选中的会话在启动时会失败，需要改回别的预设。
 
 ## 子代理类型
 
@@ -403,8 +461,9 @@ iframe 只有 `allow-scripts`，没有 `allow-modals`，`alert`、`confirm`、`p
 | `systemPrompt` | 必填，插件目录里的 Markdown 文件，作为子代理的系统提示。安装时必须存在；运行时读不出（缺失、为空或超过 256KB）的类型会被跳过并写进插件日志 |
 | `tools` | `all`（缺省）或 `readonly`，按声明原样生效，不从工具名推断 |
 | `skills` | 可选，只能引用本插件 `skills` 里已声明的目录，派生这个类型的子代理时附加。不受预设范围影响 |
+| `modelMode` | 可选，`follow`（缺省）或 `agent_pick`。`agent_pick` 时主 agent 派生可传 `model` / `thinking`；用户没配置可选子代理模型时退回跟随会话 |
 
-类型跟随会话模型（`follow`）。插件启用后立即出现在子代理类型列表里，停用或卸载后立即消失；Bot 会话不下发 Enso 插件的子代理类型。
+插件启用后立即出现在子代理类型列表里，停用或卸载后立即消失；Bot 会话不下发 Enso 插件的子代理类型。被某个 `presets` 的 `agentTypes` 点名的类型只在那个预设生效时（直接选中，或被自建预设叠加）下发给会话；设置页列表和 @ 派发仍列出全部类型。
 
 同名时的优先级（名字去首尾空白、忽略大小写比较）：用户自定义类型 > Claude 插件的子代理 > Enso 插件。Enso 插件之间按插件 id 排序，排在前面的先占名字。被挤掉的类型写进对应插件的日志（每个类型只记一次）。
 
@@ -437,6 +496,8 @@ iframe 只有 `allow-scripts`，没有 `allow-modals`，`alert`、`confirm`、`p
 | 系统通知 | 标题 200 字符，正文 1000 字符 |
 | 补全 | 50 条，label 64 字符，detail 120 字符，插入文本 32KB |
 | 调用频率 | 每插件每秒 10 次；连续失败 5 次熔断 30 秒 |
+| 事件通知 | 同一插件、同一事件、同一会话（子代理另计）同时最多 1 次在途；`context_usage` 与 `tool_result` 只保留最新一条，其余通知按顺序最多排 32 条；`tool_result` 通知正文 64K 字符 |
+| 插件日志 | 1MB 轮转；每插件每秒 100 行，超出记一条已丢弃行数 |
 | 进程 | 启动限时 10 秒；非常驻空闲 5 分钟退出；10 分钟内崩溃 3 次自动停用；退出前 `deactivate` 最多 3 秒 |
 
 ## 错误码

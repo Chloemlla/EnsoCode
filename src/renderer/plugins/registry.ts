@@ -3,7 +3,9 @@ export type PluginSlotName =
   | 'tool.card'
   | 'block'
   | 'composer.left'
-  | 'composer.right';
+  | 'composer.right'
+  | 'thinking.body'
+  | 'message.leaf';
 
 export type PluginSlotComponent = (props: Record<string, unknown>) => unknown;
 
@@ -14,7 +16,12 @@ export interface PluginSlotEntry {
   position?: 'left' | 'right';
   toolName?: string;
   language?: string;
+  /** 一次 loadPluginRenderer 的代号；分代清理时只移除同一代号 */
+  generation?: number;
+  uid: number;
 }
+
+export type PluginSlotRegistration = Omit<PluginSlotEntry, 'uid'> & { uid?: number };
 
 const SLOTS = new Set<PluginSlotName>([
   'message.action',
@@ -22,10 +29,14 @@ const SLOTS = new Set<PluginSlotName>([
   'block',
   'composer.left',
   'composer.right',
+  'thinking.body',
+  'message.leaf',
 ]);
 
 let entries: PluginSlotEntry[] = [];
 let version = 0;
+let nextUid = 1;
+let nextGeneration = 1;
 const listeners = new Set<() => void>();
 
 function bump(): void {
@@ -42,7 +53,11 @@ export function subscribePluginSlots(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function registerPluginSlot(entry: PluginSlotEntry): () => void {
+export function allocateSlotGeneration(): number {
+  return nextGeneration++;
+}
+
+export function registerPluginSlot(entry: PluginSlotRegistration): () => void {
   if (!SLOTS.has(entry.slot)) throw new Error(`未知挂点 ${entry.slot}`);
   if (entry.slot === 'message.action' && entry.position !== 'left' && entry.position !== 'right')
     throw new Error('message.action 需要 position');
@@ -51,6 +66,7 @@ export function registerPluginSlot(entry: PluginSlotEntry): () => void {
   if (typeof entry.component !== 'function') throw new Error('挂点需要组件函数');
   const stored: PluginSlotEntry = {
     ...entry,
+    uid: nextUid++,
     ...(entry.language ? { language: entry.language.toLowerCase() } : {}),
   };
   entries.push(stored);
@@ -64,8 +80,12 @@ export function registerPluginSlot(entry: PluginSlotEntry): () => void {
   };
 }
 
-export function clearPluginSlots(pluginId: string): void {
-  const next = entries.filter((item) => item.pluginId !== pluginId);
+export function clearPluginSlots(pluginId: string, generation?: number): void {
+  const next = entries.filter((item) => {
+    if (item.pluginId !== pluginId) return true;
+    if (generation === undefined) return false;
+    return item.generation !== generation;
+  });
   if (next.length !== entries.length) {
     entries = next;
     bump();
@@ -74,6 +94,8 @@ export function clearPluginSlots(pluginId: string): void {
 
 export function resetPluginSlots(): void {
   entries = [];
+  nextUid = 1;
+  nextGeneration = 1;
   bump();
 }
 
@@ -90,6 +112,16 @@ export function pluginToolCard(pluginId: string, toolName: string): PluginSlotEn
   return entries.find(
     (item) => item.slot === 'tool.card' && item.pluginId === pluginId && item.toolName === toolName
   );
+}
+
+/** 多个插件注册时用先注册的那个 */
+export function pluginThinkingBody(): PluginSlotEntry | undefined {
+  return entries.find((item) => item.slot === 'thinking.body');
+}
+
+/** 多个插件注册时用先注册的那个 */
+export function pluginMessageLeaf(): PluginSlotEntry | undefined {
+  return entries.find((item) => item.slot === 'message.leaf');
 }
 
 export function pluginBlock(pluginId: string, language: string): PluginSlotEntry | undefined {

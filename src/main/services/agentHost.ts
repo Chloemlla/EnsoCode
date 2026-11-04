@@ -32,6 +32,7 @@ import {
   type ModelCredentialContext,
   modelUsability,
 } from '@shared/defaultModel';
+import { presetOverlay } from '@shared/extensionPlugins/preset';
 import { PLUGIN_INJECT_MAX_CHARS } from '@shared/extensionPlugins/protocol';
 import { normalizeMaxActiveCoworkers } from '@shared/maxActiveCoworkers';
 import { mcpHeaders } from '@shared/mcpConfig';
@@ -937,43 +938,33 @@ export function spawnSession(
   const approvalReviewerSource = reviewer.ok ? reviewer.source : null;
   const bot = options?.bot;
   const extensionPlugins = bot ? null : getExtensionPlugins();
-  const pluginPreset = extensionPlugins?.presetForSpawn(request.presetId);
-  if (pluginPreset && !pluginPreset.ok) return { ok: false, error: pluginPreset.error };
+  const overlay = bot ? undefined : presetOverlay(request.presetId, resolvePreset);
+  const overlayResult = extensionPlugins?.presetForSpawn(overlay?.pluginPresetId);
+  if (overlayResult && !overlayResult.ok && overlay?.required) {
+    return { ok: false, error: overlayResult.error };
+  }
+  // 自建预设叠加的插件预设失效（插件停用/卸载）时退回只用自建预设
+  const pluginPreset = overlayResult?.ok ? overlayResult : undefined;
   const preset: Preset | undefined = bot
     ? { id: 'bot', name: 'bot', skillIds: bot.skillIds, mcpServerIds: bot.mcpServerIds }
-    : pluginPreset?.ok
-      ? undefined
-      : resolvePreset(request.presetId);
-  const promptKit = bot
+    : overlay?.preset;
+  const ownKit = bot
     ? { ok: true as const, systemPrompt: bot.systemPrompt }
-    : pluginPreset?.ok
-      ? {
-          ok: true as const,
-          ...(pluginPreset.systemPrompt ? { systemPrompt: pluginPreset.systemPrompt } : {}),
-          ...(pluginPreset.systemPromptAppend
-            ? { systemPromptAppend: pluginPreset.systemPromptAppend }
-            : {}),
-          ...(pluginPreset.systemPromptBoost
-            ? { systemPromptBoost: pluginPreset.systemPromptBoost }
-            : {}),
-          ...(pluginPreset.refusalRetryPrompt
-            ? { refusalRetryPrompt: pluginPreset.refusalRetryPrompt }
-            : {}),
-        }
-      : resolvePresetPromptKit(preset);
-  if (!promptKit.ok) {
+    : resolvePresetPromptKit(preset);
+  if (!ownKit.ok) {
     return { ok: false, error: '自定义系统提示词正文读取失败，请重新保存或恢复默认。' };
   }
+  const promptKit = mergePresetPromptKit(ownKit, pluginPreset);
   const instruction = bot
     ? bot.instruction
-    : pluginPreset?.ok
-      ? pluginPreset.instruction
-      : resolveGlobalInstruction(preset ? { instructionId: preset.instructionId } : undefined);
+    : pluginPresetInstruction(pluginPreset?.instruction, () =>
+        resolveGlobalInstruction(preset ? { instructionId: preset.instructionId } : undefined)
+      );
   const state = readSettingsState();
   // Claude 插件：按各自开关现读安装目录，不受预设影响
   const plugins = enabledPlugins(state);
   // Enso 插件：顺序在预设、Claude 插件之后；Bot 会话不合并
-  const activePluginPreset = pluginPreset?.ok ? request.presetId : undefined;
+  const activePluginPreset = pluginPreset ? overlay?.pluginPresetId : undefined;
   const skillPaths = [
     ...enabledSkillPaths(preset),
     ...(bot ? [] : plugins.skillPaths),
@@ -1001,7 +992,7 @@ export function spawnSession(
         subagentModels.length > 0,
         plugins,
         // Enso 插件的子代理类型与其 skill / MCP 同口径：Bot 会话不合并
-        bot ? [] : undefined
+        bot ? [] : extensionPlugins?.agentTypesForSpawn({ activePresetId: activePluginPreset })
       );
   // 当前平台不能操作桌面时禁用 computer，避免模型反复调用必失败的工具
   const extraDisabledTools = options?.extraDisabledTools ?? [];
@@ -1041,7 +1032,7 @@ export function spawnSession(
     thinkingLevel: request.thinkingLevel,
     approvalMode: request.approvalMode,
     disabledTools,
-    preset: pluginPreset?.ok ? readPluginPresetOverrides(pluginPreset) : undefined,
+    preset: pluginPreset ? readPluginPresetOverrides(pluginPreset) : undefined,
     resolveModel: (model) => {
       const next = resolveModelSelection(
         model.providerId,
@@ -1147,6 +1138,64 @@ export interface PluginPresetSpawnOverrides {
 }
 
 /** 插件预设覆盖：模型以预设为准，思考档覆盖，审批取更严，禁用工具并入 */
+/** 插件预设自带指令则替换全局指令，否则沿用全局指令 */
+export function pluginPresetInstruction<T>(
+  own: T | undefined,
+  global: () => T | undefined
+): T | undefined {
+  return own ?? global();
+}
+
+/** spawn 前斜杠菜单要预览的插件 skill 路径，与 spawn 同口径：Claude 插件在前，Enso 插件按生效的插件预设圈定 */
+export function pluginSkillPathsForMenu(
+  presetId: string | undefined,
+  deps: {
+    resolve: (id?: string) => Preset | undefined;
+    claude: readonly string[];
+    extension: {
+      presetForSpawn(id?: string): { ok: boolean } | undefined;
+      skillPathsForSpawn(activePresetId?: string): string[];
+    } | null;
+  }
+): string[] {
+  const { pluginPresetId } = presetOverlay(presetId, deps.resolve);
+  const active = deps.extension?.presetForSpawn(pluginPresetId)?.ok ? pluginPresetId : undefined;
+  return [...deps.claude, ...(deps.extension?.skillPathsForSpawn(active) ?? [])];
+}
+
+export function menuPluginSkillPaths(presetId: string | undefined): string[] {
+  return pluginSkillPathsForMenu(presetId, {
+    resolve: resolvePreset,
+    claude: enabledPlugins(readSettingsState()).skillPaths,
+    extension: getExtensionPlugins(),
+  });
+}
+
+interface PresetPromptKit {
+  systemPrompt?: string;
+  systemPromptAppend?: string;
+  systemPromptBoost?: string;
+  refusalRetryPrompt?: string;
+}
+
+/** 尾段自建在前、插件在后拼接；角色/加强/推脱补发以插件为准 */
+export function mergePresetPromptKit(
+  own: PresetPromptKit,
+  plugin?: PresetPromptKit
+): PresetPromptKit {
+  const pick = (key: keyof PresetPromptKit) => {
+    const value = plugin?.[key] || own[key];
+    return value ? { [key]: value } : {};
+  };
+  const tail = [own.systemPromptAppend, plugin?.systemPromptAppend].filter(Boolean).join('\n\n');
+  return {
+    ...pick('systemPrompt'),
+    ...(tail ? { systemPromptAppend: tail } : {}),
+    ...pick('systemPromptBoost'),
+    ...pick('refusalRetryPrompt'),
+  };
+}
+
 export function applyPluginPresetOverrides<T>(input: {
   model: T;
   thinkingLevel?: ThinkingLevel;
@@ -1443,7 +1492,7 @@ export function registerPluginSessionBridge(
       if (message.text.length > PLUGIN_INJECT_MAX_CHARS)
         return { ok: false, error: '注入文本过长' };
       const identity = lookup(sessionId);
-      if (!identity) return { ok: false, error: '会话不在运行' };
+      if (!identity) return { ok: false, error: '会话不在运行', notRunning: true };
       const { images, ...rest } = message;
       const sent = sendAgentCommand({
         type: 'plugin-inject',

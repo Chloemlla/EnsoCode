@@ -103,7 +103,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useSubagentRunsStore } from '@/stores/subagentRuns';
 import { PluginArtifactsCard } from '../../plugins/artifactViews';
 import { PluginIcon } from '../../plugins/PluginIcon';
-import { PluginMessageActions, PluginToolCardSlot } from '../../plugins/slots';
+import { PluginMessageActions, PluginThinkingBody, PluginToolCardSlot } from '../../plugins/slots';
 import { ApprovalReviewBar } from './ApprovalReviewBar';
 import { AskUserResult } from './AskUserResult';
 import { CodeBlock } from './CodeBlock';
@@ -1388,6 +1388,10 @@ function TextRow({
         streaming={item.streaming}
         searchQuery={searchQuery}
         activeNth={activeNth}
+        leaf={{
+          messageIndex: pluginActionProps.messageIndex,
+          sessionId: pluginActionProps.sessionId,
+        }}
       />
       {item.turnEnd && !item.streaming && host?.turnFooter?.(Number(item.key.split('-')[0]))}
       {!item.streaming && (
@@ -1494,11 +1498,7 @@ function ThinkingRow({
         {streaming && <RunningElapsed itemKey={itemKey} since={startedAt} />}
         <ChevronRight className={cn('h-3 w-3 transition-transform', expanded && 'rotate-90')} />
       </button>
-      {expanded && (
-        <p className="t-acc-reveal mt-1 ml-[10px] border-l-2 border-border py-0.5 pl-[19px] text-[13px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-          {text}
-        </p>
-      )}
+      {expanded && <PluginThinkingBody text={text} streaming={streaming} itemKey={itemKey} />}
     </div>
   );
 }

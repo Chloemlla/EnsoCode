@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { SettingsCategory } from './constants';
-import { isCategoryVisible, resolveActiveCategory, visibleCategories } from './settingsCategories';
+import {
+  groupCategories,
+  isCategoryVisible,
+  resolveActiveCategory,
+  SETTINGS_GROUPS,
+  searchCategories,
+  visibleCategories,
+} from './settingsCategories';
 
 const cats = [
   { id: 'general' as SettingsCategory },
@@ -60,6 +67,80 @@ describe('isCategoryVisible', () => {
   });
 });
 
+const EVERY_SETTINGS_CATEGORY = {
+  general: true,
+  shortcuts: true,
+  voice: true,
+  appearance: true,
+  providers: true,
+  skills: true,
+  plugins: true,
+  claudePlugins: true,
+  mcp: true,
+  instructions: true,
+  presets: true,
+  agents: true,
+  workflows: true,
+  tools: true,
+  memory: true,
+  privacy: true,
+  phone: true,
+  ssh: true,
+  usage: true,
+  resources: true,
+  experimental: true,
+  bots: true,
+  botTemplates: true,
+} satisfies Record<SettingsCategory, true>;
+
+describe('SETTINGS_GROUPS', () => {
+  it('covers every settings category exactly once', () => {
+    const listed = SETTINGS_GROUPS.flatMap((group) => group.categories);
+    const expected = Object.keys(EVERY_SETTINGS_CATEGORY);
+    expect(listed).toHaveLength(expected.length);
+    expect(new Set(listed).size).toBe(listed.length);
+    expect([...listed].sort()).toEqual([...expected].sort());
+  });
+});
+
+describe('groupCategories', () => {
+  it('orders groups and items by the table, not the input', () => {
+    const shuffled = [
+      { id: 'ssh' as const, label: 'ssh' },
+      { id: 'privacy' as const, label: 'privacy' },
+      { id: 'general' as const, label: 'general' },
+      { id: 'voice' as const, label: 'voice' },
+      { id: 'phone' as const, label: 'phone' },
+    ];
+    expect(groupCategories(shuffled)).toEqual([
+      {
+        id: 'app',
+        label: 'Application',
+        items: [
+          { id: 'general', label: 'general' },
+          { id: 'voice', label: 'voice' },
+          { id: 'privacy', label: 'privacy' },
+        ],
+      },
+      {
+        id: 'connections',
+        label: 'Connections',
+        items: [
+          { id: 'phone', label: 'phone' },
+          { id: 'ssh', label: 'ssh' },
+        ],
+      },
+    ]);
+  });
+
+  it('drops a group when none of its categories are passed', () => {
+    expect(groupCategories([{ id: 'general' }, { id: 'usage' }]).map((group) => group.id)).toEqual([
+      'app',
+      'system',
+    ]);
+  });
+});
+
 describe('Bot mode page', () => {
   const withBots = [
     ...cats,
@@ -81,5 +162,65 @@ describe('Bot mode page', () => {
     expect(resolveActiveCategory('bots', [], true)).toBe('bots');
     expect(resolveActiveCategory('botTemplates', [], false)).toBe('experimental');
     expect(resolveActiveCategory('botTemplates', [], true)).toBe('botTemplates');
+  });
+});
+
+describe('searchCategories', () => {
+  const items = [
+    { id: 'general' as const, label: 'General', mark: 1 },
+    { id: 'appearance' as const, label: 'Appearance', mark: 2 },
+  ];
+  const entries = [
+    { id: 'general.root', category: 'general', title: 'Onlyrootmarker' },
+    { id: 'general.language', category: 'general', title: 'Language' },
+    { id: 'appearance.theme', category: 'appearance', title: 'Theme mode' },
+  ];
+
+  it('returns every category with no hits when the query is empty', () => {
+    expect(searchCategories(items, entries, '   ')).toEqual([
+      { id: 'general', label: 'General', mark: 1, hits: [] },
+      { id: 'appearance', label: 'Appearance', mark: 2, hits: [] },
+    ]);
+  });
+
+  it('keeps a category whose translated name matches, without listing root rows', () => {
+    const translate = (text: string) => (text === 'Appearance' ? '外观' : text);
+    expect(searchCategories(items, entries, '外观', translate)).toEqual([
+      { id: 'appearance', label: 'Appearance', mark: 2, hits: [] },
+    ]);
+    expect(searchCategories(items, entries, 'Appear').map((item) => item.id)).toEqual([
+      'appearance',
+    ]);
+  });
+
+  it('keeps only the category of a matching row and lists that row', () => {
+    expect(searchCategories(items, entries, 'Language')).toEqual([
+      {
+        id: 'general',
+        label: 'General',
+        mark: 1,
+        hits: [{ id: 'general.language', category: 'general', title: 'Language' }],
+      },
+    ]);
+  });
+
+  it('omits catalog rows whose id ends in .root', () => {
+    const found = searchCategories(items, entries, 'general');
+    expect(found.map((item) => item.id)).toEqual(['general']);
+    expect(found[0]?.hits.map((hit) => hit.id)).toEqual(['general.language']);
+  });
+
+  it('returns no categories when nothing matches', () => {
+    expect(searchCategories(items, entries, 'zzzz-not-a-setting')).toEqual([]);
+  });
+
+  it('does not stop at the default settings search limit', () => {
+    const many = Array.from({ length: 25 }, (_, index) => ({
+      id: `general.row${index}`,
+      category: 'general',
+      title: `Zebra option ${index}`,
+    }));
+    const found = searchCategories([{ id: 'general' as const, label: 'General' }], many, 'Zebra');
+    expect(found[0]?.hits).toHaveLength(25);
   });
 });
