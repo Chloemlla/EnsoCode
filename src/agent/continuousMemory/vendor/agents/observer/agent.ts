@@ -1,7 +1,6 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
-import type { Static } from "typebox";
+import { Type, type Static } from "typebox";
 import { hashId } from "../../ids.js";
 import { logAgentStreamError } from "../stream-errors.js";
 import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
@@ -163,13 +162,15 @@ export async function runObserver(args: RunObserverArgs): Promise<Observation[] 
 	};
 
 	const now = nowTimestamp();
-	const userText = `Current local time: ${now}
-
-CURRENT REFLECTIONS:
+	// The timestamp changes every run, so it sits after the reflections and observations to keep them
+	// in a stable prefix the provider can serve from its prompt cache.
+	const userText = `CURRENT REFLECTIONS:
 ${joinOrEmpty(priorReflections)}
 
 CURRENT OBSERVATIONS:
 ${joinOrEmpty(priorObservations)}
+
+Current local time: ${now}
 
 Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
 
