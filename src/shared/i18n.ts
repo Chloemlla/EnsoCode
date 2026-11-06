@@ -270,6 +270,17 @@ export const zhTranslations: Record<string, string> = {
   System: '系统',
   Terminal: '终端',
   'Conversation display': '对话显示',
+  'Conversation typography': '会话排版',
+  'Headings, tables and inline code scale with the body text': '标题、表格与行内代码按正文比例缩放',
+  Body: '正文',
+  'Heading 1': '一级标题',
+  'Heading 2': '二级标题',
+  'Heading 3': '三级标题',
+  'Heading 4–6': '四到六级标题',
+  Table: '表格',
+  'Inline code': '行内代码',
+  'Code block': '代码块',
+  'Reset to defaults': '恢复默认',
   'Agent runtime': 'Agent 运行',
   'Sessions & worktrees': '会话与 Worktree',
   'Collaboration & planning': '协作与规划',
@@ -392,6 +403,10 @@ export const zhTranslations: Record<string, string> = {
   Reason: '原因',
   'Cookies and site storage of the built-in browser, separate from the app itself.':
     '内嵌浏览器的 Cookie 与站点存储，与应用本身隔离。',
+  'Open chat links in the built-in browser': '对话链接在内嵌浏览器打开',
+  'Clicking a web link in chat opens it in the side panel browser. {{key}}+Click opens it in the external browser.':
+    '点击对话里的网页链接会在侧栏内嵌浏览器打开；{{key}}+点击在外部浏览器打开。',
+  '{{key}}+Click to open in external browser': '{{key}}+点击在外部浏览器打开',
   Cleared: '已清除',
   'Clear cookies': '清除 Cookie',
   'Clear cache': '清除缓存',
@@ -540,6 +555,8 @@ export const zhTranslations: Record<string, string> = {
   // Background image
   'Background image': '背景图',
   'Show a custom image behind the interface': '在界面背后显示自定义背景图',
+  'The current theme has its own background. Turn this on to replace it with your image.':
+    '当前主题自带背景，开启后用你的图片替换',
   'Source type': '来源类型',
   'Single image': '单张图片',
   'Folder (random)': '文件夹（随机）',
@@ -552,10 +569,12 @@ export const zhTranslations: Record<string, string> = {
   'Refresh now': '立即刷新',
   'Background visibility': '背景可见度',
   'Composer opacity': '输入框不透明度',
+  'Border opacity': '边框不透明度',
   'Code block opacity': '代码块不透明度',
   Blur: '模糊',
   Brightness: '亮度',
   Saturation: '饱和度',
+  Overlay: '遮罩',
   'Size mode': '填充方式',
   Cover: '覆盖',
   Contain: '完整显示',
@@ -651,6 +670,8 @@ export const zhTranslations: Record<string, string> = {
   'Deselect all': '全不选',
   '{{enabled}}/{{total}} enabled': '已启用 {{enabled}}/{{total}}',
   'Fetch models': '拉取模型',
+  'Fetch all models': '拉取全部模型',
+  'Fetched {{count}} providers': '已拉取 {{count}} 个模型服务',
   'Test connection': '测试连接',
   Authorize: '授权',
   Authorizing: '授权中...',
@@ -1928,6 +1949,7 @@ export const zhTranslations: Record<string, string> = {
   'Stop subagent': '停止子代理',
   'Dismiss coworker': '解雇 coworker',
   'Hire coworker': '雇佣 coworker',
+  'Subagent history': '子代理记录',
   'Set a session goal (/goal <objective> · pause · resume · clear)':
     '设定会话目标(/goal <目标> · pause · resume · clear)',
   'Pause the current session goal': '暂停当前会话目标',
@@ -2784,6 +2806,22 @@ export const zhTranslations: Record<string, string> = {
   'Queued {{time}}': '排队 {{time}}',
   Continue: '继续',
   'Start over': '重新开始',
+  'Will retry automatically': '将自动重试',
+  'Retrying automatically at {{time}} (attempt {{n}})': '将于 {{time}} 自动重试（第 {{n}} 次）',
+  'Retrying automatically · attempt {{n}}': '自动重试中 · 第 {{n}} 次',
+  'Retry #{{n}} · {{source}}': '第 {{n}} 次重试 · {{source}}',
+  Automatic: '自动',
+  'By delegator': '委派人',
+  'Delegator note: {{note}}': '委派人补充：{{note}}',
+  'Retry now': '立即重试',
+  'Skip the wait and retry now. The scheduled automatic retry is canceled.':
+    '不再等待，立即重试；已排定的自动重试会取消。',
+  'Result posted to the group · View': '结果已发到群里 · 查看',
+  'Delegation result': '委派结果',
+  'Locate the delegation card': '定位到对应的委派卡片',
+  'The delegation card is posted after the delegator receives the result.':
+    '委派人收到结果后，委派卡片才会发到群里。',
+  'The delegation card is not in the loaded messages.': '委派卡片不在已加载的消息里。',
   '{{n}} steps': '{{n}} 步',
   'Could not locate this reply; showing the latest turn.': '未定位到这条回复，显示最近一轮。',
   'No tool calls in this turn.': '这一轮没有工具调用。',
@@ -2895,6 +2933,14 @@ export const zhTranslations: Record<string, string> = {
   'Falls back to the group owner on timeout, error or an unclear answer.':
     '超时、出错或回答不明确时由群主回复。',
   'Handed to the group owner on timeout.': '超时就交给群主处理。',
+  'Discussion mode': '讨论模式',
+  'Experimental feature': '实验性',
+  'Off: group chats work the same as the stable release. On: in smart-routing groups, discussion-style messages let the judge model pick who speaks next.':
+    '关闭时，群聊流程与正式版一致。打开后，智能选人的群里遇到讨论类消息，会由判断模型挑选下一位发言人。',
+  'First pick: the group owner replies on timeout, error or an unclear answer. During a discussion, picking the next speaker ends the discussion in these cases.':
+    '首轮选人遇到超时、出错或回答不明确时由群主回复；讨论中判断下一位遇到这些情况时，结束本轮讨论。',
+  'First pick: handed to the group owner on timeout. Next speaker in a discussion: the discussion ends on timeout.':
+    '首轮选人超时交给群主回复；讨论中判断下一位超时则结束本轮讨论。',
   'Uses the primary model on timeout.': '超时就用主模型。',
   Timeout: '超时',
   'Without @': '不 @ 时',
@@ -2957,6 +3003,8 @@ export const zhTranslations: Record<string, string> = {
   'Task from {{name}}': '来自 {{name}} 的委派任务',
   'Result from {{name}}': '{{name}} 的结果',
   'Delegation results': '委派结果',
+  'Continue delegated task': '继续委派任务',
+  'Acceptance check not passed': '验收未通过',
   'Routine did not run': '例行任务未能运行',
   'Routine not deleted': '例行任务未删除',
   'New routine': '新建例行任务',
@@ -3168,6 +3216,8 @@ export const zhTranslations: Record<string, string> = {
   Unnamed: '未命名',
   'Group settings and member personas only. Memory, sessions, timeline, tasks, routines, models, skills and MCP are not included.':
     '只含群配置和成员人设，不含记忆、会话、时间线、看板、例行任务、模型、技能和 MCP。',
+  'Interface is zoomed to {{percent}}% · {{shortcut}}': '界面已缩放至 {{percent}}% · {{shortcut}}',
+  'Restore 100%': '恢复 100%',
 };
 
 export function normalizeLocale(input?: string): Locale {

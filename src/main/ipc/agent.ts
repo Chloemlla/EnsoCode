@@ -3,8 +3,9 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { app, ipcMain, powerMonitor, type RendererContents } from '@platform';
 import { browserSessionKey } from '@shared/bots/browser';
-import type { ChildSessionIdentity, SessionIdentity } from '@shared/builtinAgents';
+import { type ChildSessionIdentity, isUuid, type SessionIdentity } from '@shared/builtinAgents';
 import { conversationCwd } from '@shared/conversationCwd';
+import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { resolveSshTarget } from '@shared/ssh';
 import {
   IPC_CHANNELS,
@@ -20,6 +21,7 @@ import type {
   AgentWorkerEvent,
   ApprovalMode,
   ChildHistoryResult,
+  ChildRunListResult,
   ConversationReloadResult,
   McpStatusPush,
   ParentHistoryTailResult,
@@ -39,7 +41,7 @@ import {
   parseUpdateConversationSelectionRequest,
   THINKING_LEVELS,
 } from '@shared/types/agent';
-import { parseTaskCheck } from '@shared/types/bot';
+import { DELEGATION_NOTE_MAX, parseTaskCheck } from '@shared/types/bot';
 import { effectiveSubagentAllowedModes } from '@shared/types/builtinTools';
 import {
   parseAgentDispatchRequest,
@@ -106,6 +108,7 @@ import { HumanRequestTimeouts } from '../services/bots/humanRequestTimeouts';
 import { pickBrowserFileRoot, setBrowserFileRootResolver } from '../services/browserFileRoot';
 import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
+import { listChildRuns, resolveChildRunFile } from '../services/childRunCatalog';
 import { reloadConversation } from '../services/conversationReload';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
 import { getExtensionPlugins, setPluginSessionDirectory } from '../services/extensionPlugins';
@@ -547,6 +550,44 @@ async function readChildHistory(conversationId: string): Promise<ChildHistoryRes
     return { ok: false, code: 'not-found', error: 'History file is missing.' };
   }
   return { ok: true, projection: await EnsoSafeJournal.restore(resolved) };
+}
+
+function agentSessionDir(): string {
+  return path.join(app.getPath('userData'), 'agent', 'sessions');
+}
+
+function listChildRunSummaries(parentId: string): ChildRunListResult {
+  const sessionDir = agentSessionDir();
+  const items = listChildRuns(sessionDir, parentId)
+    .map((run) => {
+      const located = resolveChildRunFile(sessionDir, parentId, run.childId);
+      return {
+        childId: run.childId,
+        name: run.name,
+        ...(run.agentType ? { agentType: run.agentType } : {}),
+        startedAt: run.startedAt,
+        live: agentSessionIndex.isAlive(run.childId),
+        available: Boolean(located && existsSync(located.path)),
+      };
+    })
+    .sort(
+      (left, right) => right.startedAt - left.startedAt || left.childId.localeCompare(right.childId)
+    );
+  return { ok: true, items };
+}
+
+async function readRegisteredChildRun(
+  parentId: string,
+  childId: string,
+  beforeIndex?: number
+): Promise<ParentHistoryTailResult> {
+  const located = resolveChildRunFile(agentSessionDir(), parentId, childId);
+  if (!located || !existsSync(located.path)) {
+    return { ok: false, code: 'not-found', error: 'No child run for this conversation.' };
+  }
+  if (located.format === 'pi') return readSessionHistoryFile(located.path, beforeIndex);
+  const timeline = projectSafeJournal((await EnsoSafeJournal.restore(located.path)).records);
+  return { ok: true, messages: timeline.messages, baseIndex: 0 };
 }
 
 /**
@@ -1465,6 +1506,18 @@ export function registerAgentHandlers(): void {
             ...(typeof input.id === 'string' ? { id: input.id } : {}),
             ...(typeof input.cancel === 'boolean' ? { cancel: input.cancel } : {}),
           });
+        } else if (
+          op === 'retry_delegation' &&
+          typeof input.id === 'string' &&
+          input.id.length > 0 &&
+          (input.note === undefined ||
+            (typeof input.note === 'string' && input.note.length <= DELEGATION_NOTE_MAX))
+        ) {
+          result = service.retryAsDelegator(
+            identity.sessionId,
+            input.id,
+            typeof input.note === 'string' ? input.note : undefined
+          );
         } else result = { ok: false, error: 'Invalid delegation arguments.' };
         void Promise.resolve(result).then(
           (value) =>
@@ -1753,6 +1806,27 @@ export function registerAgentHandlers(): void {
       return { ok: false, code: 'not-found', error: 'conversationId is required' };
     }
     return await readChildHistory(conversationId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_CHILD_RUNS_LIST, async (_event, request: unknown) => {
+    const parentConversationId = asRecord(request)?.parentConversationId;
+    if (!isUuid(parentConversationId)) {
+      return { ok: false, code: 'invalid', error: 'Invalid parentConversationId.' };
+    }
+    return listChildRunSummaries(parentConversationId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_CHILD_RUN_READ, async (_event, request: unknown) => {
+    const record = asRecord(request);
+    const parentConversationId = record?.parentConversationId;
+    const childId = record?.childId;
+    if (!isUuid(parentConversationId) || !isNonEmptyString(childId)) {
+      return { ok: false, code: 'not-found', error: 'Invalid child run request.' };
+    }
+    const rawBefore = record?.beforeIndex;
+    const beforeIndex =
+      typeof rawBefore === 'number' && Number.isFinite(rawBefore) ? rawBefore : undefined;
+    return readRegisteredChildRun(parentConversationId, childId, beforeIndex);
   });
 
   // 手动重新读取会话：来源由 Main 按会话索引决定（worker 内存活着 → 带 seq 的快照，否则 safe journal）。

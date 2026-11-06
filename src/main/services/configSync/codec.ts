@@ -6,6 +6,7 @@ import {
 } from 'node:crypto';
 import { parseAccentColor } from '@shared/accentColor';
 import { isReservedAgentTypeName } from '@shared/builtinAgents';
+import { isStoredChatTypography } from '@shared/chatTypography';
 import { parseCompactStrategy } from '@shared/compactStrategy';
 import { isPluginPresetId } from '@shared/extensionPlugins/preset';
 import { parseOauthAccountPool } from '@shared/oauthAccountPool';
@@ -106,6 +107,7 @@ const STATE_KEYS = [
   'collapseCompletedActivity',
   'pinUnfinishedTodos',
   'chatWide',
+  'chatTypography',
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
   'autoRetryLimit',
@@ -119,6 +121,8 @@ const STATE_KEYS = [
   'backgroundBlur',
   'backgroundBrightness',
   'backgroundSaturation',
+  'backgroundMask',
+  'borderOpacity',
   'backgroundComposerOpacity',
   'backgroundCodeOpacity',
   'backgroundSizeMode',
@@ -1019,6 +1023,9 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
     'autoArchiveMergedWorktrees',
   ])
     booleanField(state, key, 'state', false);
+  if (state.chatTypography !== undefined && !isStoredChatTypography(state.chatTypography)) {
+    throw new Error('Invalid state.chatTypography');
+  }
   numberField(state, 'maxActiveCoworkers', 'state', 1, 20, true);
   numberField(state, 'autoRetryLimit', 'state', -1, 100, true);
   numberField(state, 'generationStallTimeoutMin', 'state', 0, 120, true);
@@ -1031,6 +1038,8 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
     ['backgroundBlur', 0, 20],
     ['backgroundBrightness', 0, 2],
     ['backgroundSaturation', 0, 2],
+    ['backgroundMask', 0, 1],
+    ['borderOpacity', 0, 1],
     ['backgroundComposerOpacity', 0, 1],
     ['backgroundCodeOpacity', 0, 1],
   ] as const)

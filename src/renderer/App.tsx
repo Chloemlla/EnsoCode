@@ -27,6 +27,7 @@ import {
   ShellChromeContext,
   useWindowChromeKind,
 } from '@/components/app/WindowChrome';
+import { ZoomBanner } from '@/components/app/ZoomBanner';
 import { BotView } from '@/components/bots/BotView';
 import { ModeSwitch } from '@/components/bots/ModeSwitch';
 import { requestOpenChatFind } from '@/components/chat/ChatFindBar';
@@ -58,7 +59,7 @@ import { isMobileWidth, useIsMobile, useViewportWidth } from '@/hooks/useViewpor
 import { useWindowsWindowChrome } from '@/hooks/useWindowsWindowChrome';
 import { useI18n } from '@/i18n';
 import { effectiveKeybindings, eventToBinding, isEventInSidePanel } from '@/lib/keybindings';
-import { springStandard } from '@/lib/motion';
+import { easeOutLayout, springStandard } from '@/lib/motion';
 import {
   addSidePanelBtw,
   addSidePanelTerminal,
@@ -393,43 +394,12 @@ export default function App() {
     },
     [desktopShell]
   );
-  // Code/Bot 切换按对话卡片居中：侧栏、右侧面板开合与拖宽都会改变卡片宽度
-  const [mainEl, setMainEl] = useState<HTMLDivElement | null>(null);
-  const [mainBox, setMainBox] = useState<{ left: number; right: number } | null>(null);
-  useEffect(() => {
-    const el = mainEl;
-    if (!el) {
-      setMainBox(null);
-      return;
-    }
-    const update = () => {
-      const r = el.getBoundingClientRect();
-      setMainBox((prev) =>
-        prev && prev.left === r.left && prev.right === r.right
-          ? prev
-          : { left: r.left, right: r.right }
-      );
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener('resize', update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', update);
-    };
-  }, [mainEl]);
   const modeSwitch = botModeEnabled && !remoteNodeActive ? <ModeSwitch /> : null;
   // 桌面外壳：右侧面板顶到窗口顶部，tab 条与顶栏同一行；Windows 原生按钮由面板 tab 条右端让位，
   // Linux 自绘按钮在顶栏里会被面板盖住，保持独立卡片
   const titleRowPanel = desktopShell && (chromeKind === 'mac' || chromeKind === 'windows');
   const sideInTitleRow =
-    titleRowPanel &&
-    sideOpen &&
-    !sideFullscreen &&
-    !isMobile &&
-    !botModeActive &&
-    !remoteNodeActive;
+    titleRowPanel && sideOpen && !isMobile && !botModeActive && !remoteNodeActive;
   const sideToggle = remoteNodeActive ? null : (
     <button
       type="button"
@@ -487,7 +457,7 @@ export default function App() {
                 <div
                   className={cn(
                     chromeKind !== 'mac' && 'flex justify-center',
-                    chromeKind !== 'mac' && (desktopShell ? 'ml-[8px] w-[48px]' : 'w-12')
+                    chromeKind !== 'mac' && (desktopShell ? 'w-[48px]' : 'w-12')
                   )}
                 >
                   <button
@@ -526,12 +496,13 @@ export default function App() {
               )}
             </div>
           }
-          centered={modeSwitch ?? undefined}
-          centerOver={desktopShell ? mainBox : undefined}
+          // 顶栏态全屏：面板 tab 条铺满整行，居中开关会被压在 tab 下
+          centered={(sideInTitleRow && sideFullscreen ? null : modeSwitch) ?? undefined}
           className={cn(
             chromeKind !== 'mac' && !remoteNodeActive && 'pl-0',
             desktopShell && 'border-b-0',
-            desktopShell && (chromeKind === 'windows' ? 'bg-canvas' : 'bg-transparent'),
+            // 顶栏落在画布上：原生按钮底色随它透明，壁纸与侧栏一样透出来
+            desktopShell && 'bg-transparent',
             // 右侧面板开关与面板 tab 条右端（面板 8px 外边距 + 8px 内边距）对齐
             desktopShell && chromeKind === 'mac' && 'pr-4'
           )}
@@ -563,6 +534,7 @@ export default function App() {
         />
       )}
       {!desktopShell && <UpdateBanner />}
+      {!desktopShell && <ZoomBanner />}
       <div className="flex min-h-0 flex-1">
         {remoteNodeActive ? (
           // 远程节点态：整块换成对方的目录与会话；本机 Sidebar/ChatView/SidePanel 卸载
@@ -616,7 +588,6 @@ export default function App() {
                   collapsed={collapsed}
                   onToggleCollapse={() => setCollapsed((v) => !v)}
                   onOpenSearch={() => setSearchOpen(true)}
-                  card={desktopShell}
                 />
                 {!collapsed && <ResizeHandle edge={desktopShell} onResize={handleResize} />}
               </>
@@ -632,7 +603,6 @@ export default function App() {
               )}
             >
               <div
-                ref={setMainEl}
                 data-enso="main"
                 className={cn(
                   'flex min-h-0 min-w-0 flex-1 flex-col bg-background',
@@ -640,12 +610,22 @@ export default function App() {
                   // 与右侧面板合成一张卡：接缝处直角，分割靠 1px 手柄线
                   sideInTitleRow && 'rounded-r-none'
                 )}
+                // 全屏面板开壁纸时是半透明的，铺开后把被盖住的对话藏掉，否则会透上来
+                style={
+                  sideOpen && sideFullscreen
+                    ? {
+                        visibility: 'hidden',
+                        transition: `visibility 0s ${easeOutLayout.duration}s`,
+                      }
+                    : undefined
+                }
               >
                 <PluginUiHost />
                 <ShellChromeContext.Provider value={shellChrome}>
                   <ChatView />
                 </ShellChromeContext.Provider>
                 {desktopShell && <UpdateBanner />}
+                {desktopShell && <ZoomBanner />}
               </div>
               {sideOpen && !sideFullscreen && !isMobile && (
                 <ResizeHandle

@@ -1,4 +1,5 @@
 import { previewImageMime } from '@shared/markdownPreviewImage';
+import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import type { Element, ElementContent } from 'hast';
 import { FolderOpen } from 'lucide-react';
 import type { Root } from 'mdast';
@@ -25,7 +26,8 @@ import {
 } from '@/components/ui/context-menu';
 import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
-import { openSidePanelFile } from '@/lib/sidePanelDock';
+import { IS_MAC } from '@/lib/keybindings';
+import { openSidePanelBrowserUrl, openSidePanelFile } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { type PluginSlotEntry, parsePluginFence, pluginMessageLeaf } from '../../plugins/registry';
@@ -37,6 +39,7 @@ import { highlightNode } from './highlightQuery';
 import { MermaidRenderer } from './MermaidRenderer';
 import {
   classifyMarkdownLink,
+  parseWebUrl,
   splitFileLineRef,
   toExternalAbsolutePath,
   toWorkspaceRelativePath,
@@ -441,9 +444,33 @@ function MarkdownAnchor({
   );
   const local = classification.kind === 'local' && linkContext !== null;
   const codeText = local ? soleInlineCodeText(node) : null;
+  const builtinBrowser = useSettingsStore(
+    (state) =>
+      state.openLinksInBuiltinBrowser &&
+      isBuiltinToolEnabledForProject(
+        state.disabledBuiltinTools,
+        state.projects,
+        linkContext?.projectId,
+        'browser'
+      )
+  );
+  const webUrl =
+    builtinBrowser && linkContext && classification.kind === 'external' ? parseWebUrl(href) : null;
 
   const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (classification.kind === 'external') return;
+    if (classification.kind === 'external') {
+      // Cmd/Ctrl+点击或打不开内置浏览器时走默认 target=_blank → 系统浏览器
+      if (!webUrl || !linkContext || (IS_MAC ? event.metaKey : event.ctrlKey)) return;
+      const opening = openSidePanelBrowserUrl(linkContext.conversationId, webUrl.href);
+      if (!opening) return;
+      event.preventDefault();
+      void opening.then((result) => {
+        if (!result.ok) {
+          addToast({ type: 'error', title: t('Navigation failed'), description: result.error });
+        }
+      });
+      return;
+    }
     event.preventDefault();
     if (local) void openLocal(false);
   };
@@ -457,6 +484,11 @@ function MarkdownAnchor({
       )}
       role={local ? 'link' : undefined}
       tabIndex={local ? 0 : undefined}
+      title={
+        webUrl
+          ? t('{{key}}+Click to open in external browser', { key: IS_MAC ? 'Cmd' : 'Ctrl' })
+          : undefined
+      }
       {...(classification.kind === 'external' ? { target: '_blank', rel: 'noreferrer' } : {})}
       onClick={onClick}
       onKeyDown={(event) => {
@@ -491,7 +523,7 @@ function MarkdownAnchor({
 
   if (codeText !== null) {
     return (
-      <span className="inline-flex max-w-full items-center gap-0.5 rounded-[5px] border border-border/70 bg-muted/70 py-px pr-0.5 pl-1 align-baseline font-mono text-xs">
+      <span className="inline-flex max-w-full items-center gap-0.5 rounded-[5px] border border-border/70 bg-muted/70 py-px pr-0.5 pl-1 align-baseline font-mono text-(length:--chat-inline-code-size) [font-weight:var(--chat-inline-code-weight)]">
         {anchor}
         <button
           type="button"
@@ -536,8 +568,13 @@ export function markdownUrlTransform(value: string, key?: string, allowLocal = t
 }
 
 const P_CLASS = 'my-2 leading-[1.7] first:mt-0 last:mb-0';
-const H12_CLASS = 'mt-3 mb-1.5 text-base font-semibold';
-const H3_CLASS = 'mt-2 mb-1 text-sm font-semibold';
+const H1_CLASS =
+  'mt-4 mb-2 text-(length:--chat-h1-size) leading-tight [font-weight:var(--chat-h1-weight)]';
+const H2_CLASS =
+  'mt-4 mb-2 text-(length:--chat-h2-size) leading-tight [font-weight:var(--chat-h2-weight)]';
+const H3_CLASS =
+  'mt-3 mb-1.5 text-(length:--chat-h3-size) leading-tight [font-weight:var(--chat-h3-weight)]';
+const H4_CLASS = 'mt-3 mb-1 text-(length:--chat-h4-size) [font-weight:var(--chat-h4-weight)]';
 const TH_CLASS = 'whitespace-nowrap border-b border-border px-2 py-1 text-left font-medium';
 const TD_CLASS = 'whitespace-nowrap border-b border-border/50 px-2 py-1';
 
@@ -546,18 +583,21 @@ export const markdownComponents: Components = {
   p: ({ children }) => <Paragraph className={P_CLASS}>{children}</Paragraph>,
   a: MarkdownAnchor,
   ul: ({ children }) => (
-    <ul className="my-2 list-disc space-y-0.5 pl-5 text-[12px] leading-[1.5] marker:text-muted-foreground [&_p]:leading-[1.5]">
+    <ul className="my-2 list-disc space-y-0.5 pl-5 leading-[1.5] marker:text-muted-foreground [&_p]:leading-[1.5]">
       {children}
     </ul>
   ),
   ol: ({ children }) => (
-    <ol className="my-2 list-decimal space-y-0.5 pl-5 text-[12px] leading-[1.5] marker:text-muted-foreground [&_p]:leading-[1.5]">
+    <ol className="my-2 list-decimal space-y-0.5 pl-5 leading-[1.5] marker:text-muted-foreground [&_p]:leading-[1.5]">
       {children}
     </ol>
   ),
-  h1: ({ children }) => <h1 className={H12_CLASS}>{children}</h1>,
-  h2: ({ children }) => <h2 className={H12_CLASS}>{children}</h2>,
+  h1: ({ children }) => <h1 className={H1_CLASS}>{children}</h1>,
+  h2: ({ children }) => <h2 className={H2_CLASS}>{children}</h2>,
   h3: ({ children }) => <h3 className={H3_CLASS}>{children}</h3>,
+  h4: ({ children }) => <h4 className={H4_CLASS}>{children}</h4>,
+  h5: ({ children }) => <h5 className={H4_CLASS}>{children}</h5>,
+  h6: ({ children }) => <h6 className={H4_CLASS}>{children}</h6>,
   blockquote: ({ children, node }) => {
     const { t } = useI18n();
     const props = node?.properties as Record<string, unknown> | undefined;
@@ -604,7 +644,7 @@ export const markdownComponents: Components = {
           type="button"
           onClick={onClick}
           title={value}
-          className="inline-flex max-w-full items-center rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px align-baseline font-mono text-xs text-brand transition-colors hover:bg-muted"
+          className="inline-flex max-w-full items-center rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px align-baseline font-mono text-(length:--chat-inline-code-size) [font-weight:var(--chat-inline-code-weight)] text-brand transition-colors hover:bg-muted"
         >
           <span className="truncate">{value}</span>
         </button>
@@ -618,7 +658,7 @@ export const markdownComponents: Components = {
       );
     }
     return (
-      <code className="rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px font-mono text-xs">
+      <code className="rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px font-mono text-(length:--chat-inline-code-size) [font-weight:var(--chat-inline-code-weight)]">
         {children}
       </code>
     );
@@ -651,7 +691,7 @@ export const markdownComponents: Components = {
     const raw = start !== undefined && end !== undefined ? text.slice(start, end) : null;
     return (
       <div className="group/table relative my-2 min-w-0 max-w-full overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch]">
-        <table className="w-max min-w-full border-collapse text-[12px] leading-[1.5] [overflow-wrap:normal]">
+        <table className="w-max min-w-full border-collapse text-(length:--chat-table-size) [font-weight:var(--chat-table-weight)] leading-[1.5] [overflow-wrap:normal]">
           {children}
         </table>
         {raw && !streaming && (
@@ -830,12 +870,12 @@ function LeafCell({
   );
 }
 
-const LeafH1 = makeLeafHeading('h1', H12_CLASS);
-const LeafH2 = makeLeafHeading('h2', H12_CLASS);
+const LeafH1 = makeLeafHeading('h1', H1_CLASS);
+const LeafH2 = makeLeafHeading('h2', H2_CLASS);
 const LeafH3 = makeLeafHeading('h3', H3_CLASS);
-const LeafH4 = makeLeafHeading('h4');
-const LeafH5 = makeLeafHeading('h5');
-const LeafH6 = makeLeafHeading('h6');
+const LeafH4 = makeLeafHeading('h4', H4_CLASS);
+const LeafH5 = makeLeafHeading('h5', H4_CLASS);
+const LeafH6 = makeLeafHeading('h6', H4_CLASS);
 
 const leafMarkdownComponents: Components = {
   ...markdownComponents,
@@ -893,7 +933,7 @@ function MarkdownView({
   );
   return (
     <MarkdownCtx.Provider value={ctx}>
-      <div className={streaming ? 't-stream-live' : undefined}>
+      <div className={cn('[font-weight:var(--chat-body-weight)]', streaming && 't-stream-live')}>
         <ReactMarkdown
           remarkPlugins={REMARK_PLUGINS}
           components={leafSlot ? leafMarkdownComponents : markdownComponents}

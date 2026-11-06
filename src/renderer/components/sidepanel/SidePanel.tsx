@@ -847,6 +847,7 @@ export function SidePanel({
     previousConversationId: widthAnim.from ?? undefined,
   });
   const targetW = fullscreen ? workspaceW || width : open ? width : 0;
+  const inTitleRow = Boolean(titleRow) && !isMobile;
   if (activeId && !mountedIds.includes(activeId)) {
     setMountedIds((ids) => (ids.includes(activeId) ? ids : [...ids, activeId]));
   }
@@ -860,8 +861,14 @@ export function SidePanel({
         data-slot="side-panel"
         initial={false}
         animate={{ width: targetW }}
+        // 定位走内联：主题 CSS 常给 [data-enso="side-panel"] 写 position:relative 挂角标，会压过 absolute 类，全屏就铺不开
         style={
-          cover ? undefined : { maxWidth: `max(0px, calc(100% - ${CHAT_MIN_WIDTH + handleW}px))` }
+          cover
+            ? { position: 'absolute' }
+            : {
+                position: 'relative',
+                maxWidth: `max(0px, calc(100% - ${CHAT_MIN_WIDTH + handleW}px))`,
+              }
         }
         transition={sidePanelWidthTransition({ skip: skipWidthAnim, cover, targetW })}
         onAnimationComplete={() => {
@@ -871,26 +878,28 @@ export function SidePanel({
           'flex min-h-0 flex-col',
           // 顶栏态的描边/阴影画在盒外，放宽 4px 裁剪才能和对话卡片底边、右边一致；
           // 关着时不放宽：dockview 的 .dv-view.visible 会顶掉外层 invisible，内容会从余量里漏出一条
-          titleRow && !cover && open
-            ? 'overflow-clip [overflow-clip-margin:4px]'
-            : 'overflow-hidden',
+          inTitleRow && open ? 'overflow-clip [overflow-clip-margin:4px]' : 'overflow-hidden',
           // 平时透明让底层挖孔透出 guest；全屏盖在 ChatView 上、收起动画中必须实底
-          open && !cover ? 'bg-transparent' : titleRow && !cover ? '' : 'bg-background',
+          open && (inTitleRow || !cover) ? 'bg-transparent' : inTitleRow ? '' : 'bg-background',
           !cover
-            ? 'relative shrink-0'
-            : !card
-              ? 'absolute inset-y-0 right-0'
-              : 'absolute top-0 right-[8px] bottom-[8px]',
-          titleRow && !cover
-            ? 'no-drag -mt-[44px] rounded-br-[10px]'
+            ? 'shrink-0'
+            : inTitleRow
+              ? 'top-px right-[8px] bottom-[8px]'
+              : !card
+                ? 'inset-y-0 right-0'
+                : 'top-0 right-[8px] bottom-[8px]',
+          inTitleRow
+            ? cn('no-drag -mt-[44px]', cover ? 'rounded-b-[10px]' : 'rounded-br-[10px]')
             : card
               ? cn('rounded-[10px]', open && 'shadow-surface')
               : open && 'border-l'
         )}
         data-enso="side-panel"
-        data-title-row={(titleRow && !cover) || undefined}
+        data-title-row={inTitleRow || undefined}
       >
-        {open && !cover ? <SurfaceUnderHoles titleRow={titleRow} /> : null}
+        {open && (inTitleRow || !cover) ? (
+          <SurfaceUnderHoles titleRow={inTitleRow} full={cover} />
+        ) : null}
         {open && !cover && contentW !== undefined ? (
           // 过冲补条：只盖 [内容右边缘, aside 右边缘]，稳态宽度为 0，不会压到 Browser 挖孔
           <div
@@ -909,21 +918,15 @@ export function SidePanel({
             // invisible 而非 hidden：关着时 dockview 也按目标宽度排好，打开首帧即满遮罩
             !open && 'invisible'
           )}
-          style={
-            contentW === undefined
-              ? undefined
-              : {
-                  width: contentW,
-                  // 顶栏态：面板内容自带实底，挖出卡片右上圆角（y=44 处）与右下圆角
-                  clipPath: titleRow
-                    ? 'shape(from 0 0, hline to 100%, vline to 44px, hline to calc(100% - 10px), arc to 100% 54px of 10px cw, vline to calc(100% - 10px), arc to calc(100% - 10px) 100% of 10px cw, hline to 0, close)'
-                    : undefined,
-                }
-          }
+          style={{
+            width: contentW,
+            // 顶栏态：面板内容自带实底，挖出卡片面（y=44 起）的圆角；全屏时左侧没有接缝，四角都圆
+            clipPath: inTitleRow ? (cover ? TITLE_ROW_FULL_CLIP : TITLE_ROW_SEAM_CLIP) : undefined,
+          }}
         >
           {visibleIds.length > 0 ? (
             <div className="relative min-h-0 flex-1">
-              <TitleRowContext.Provider value={titleRow && !cover}>
+              <TitleRowContext.Provider value={inTitleRow}>
                 {visibleIds.map((id) => (
                   <MountedConversationDock key={id} conversationId={id} hidden={id !== activeId} />
                 ))}
@@ -944,7 +947,12 @@ export function SidePanel({
  * 展开态面板底色：BackgroundLayer 现在铺的是画布色，面板自己铺卡片底，
  * 同样按视口坐标挖掉 Browser guest 的矩形，guest 沉底时才能透出。
  */
-function SurfaceUnderHoles({ titleRow }: { titleRow: boolean }) {
+const TITLE_ROW_SEAM_CLIP =
+  'shape(from 0 0, hline to 100%, vline to 44px, hline to calc(100% - 10px), arc to 100% 54px of 10px cw, vline to calc(100% - 10px), arc to calc(100% - 10px) 100% of 10px cw, hline to 0, close)';
+const TITLE_ROW_FULL_CLIP =
+  'shape(from 0 0, hline to 100%, vline to 44px, hline to calc(100% - 10px), arc to 100% 54px of 10px cw, vline to calc(100% - 10px), arc to calc(100% - 10px) 100% of 10px cw, hline to 10px, arc to 0 calc(100% - 10px) of 10px cw, vline to 54px, arc to 10px 44px of 10px cw, hline to 0, close)';
+
+function SurfaceUnderHoles({ titleRow, full }: { titleRow: boolean; full: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const holes = useSidePanelStore((s) => s.browserHoles);
   useLayoutEffect(() => {
@@ -960,8 +968,11 @@ function SurfaceUnderHoles({ titleRow }: { titleRow: boolean }) {
       {titleRow && (
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-[44px] bottom-0 rounded-r-[10px] shadow-surface"
-          style={{ clipPath: 'inset(-24px -24px -24px 0)' }}
+          className={cn(
+            'pointer-events-none absolute inset-x-0 top-[44px] bottom-0 shadow-surface',
+            full ? 'rounded-[10px]' : 'rounded-r-[10px]'
+          )}
+          style={full ? undefined : { clipPath: 'inset(-24px -24px -24px 0)' }}
         />
       )}
       <div
@@ -969,7 +980,7 @@ function SurfaceUnderHoles({ titleRow }: { titleRow: boolean }) {
         aria-hidden
         className={cn(
           'pointer-events-none absolute inset-x-0 bottom-0 bg-background',
-          titleRow ? 'top-[44px] rounded-r-[10px]' : 'top-0'
+          titleRow ? cn('top-[44px]', full ? 'rounded-[10px]' : 'rounded-r-[10px]') : 'top-0'
         )}
       />
     </>

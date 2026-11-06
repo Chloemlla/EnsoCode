@@ -24,8 +24,8 @@
   --color-warning-foreground: var(--warning-foreground);
   --color-info: var(--info);
   --color-info-foreground: var(--info-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
+  --color-border: color-mix(in oklab, var(--border) calc(var(--ui-border-opacity, 1) * 100%), transparent);
+  --color-input: color-mix(in oklab, var(--input) calc(var(--ui-border-opacity, 1) * 100%), transparent);
   --color-ring: var(--ring);
 
   --radius-lg: var(--radius);
@@ -245,11 +245,10 @@
 html.bg-image-enabled {
   --color-background: oklch(from var(--background) l c h / var(--bg-panel-alpha, 0.15));
   --color-card: oklch(from var(--card) l c h / var(--bg-panel-alpha, 0.15));
-  --color-secondary: oklch(from var(--secondary) l c h / var(--bg-panel-alpha, 0.15));
-  --color-muted: oklch(from var(--muted) l c h / var(--bg-panel-alpha, 0.15));
-  --color-accent: oklch(from var(--accent) l c h / var(--bg-panel-alpha, 0.15));
-  --color-border: oklch(from var(--border) l c h / var(--bg-border-alpha, 0.4));
-  --color-input: oklch(from var(--input) l c h / var(--bg-border-alpha, 0.4));
+  /* 控件/hover 保持主题对比度，不随全局壁纸可见度消失。 */
+  --color-secondary: var(--secondary);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
   /* 弹出层保底不透明度，叠在内容上方时保住可读性 */
   --color-popover: oklch(from var(--popover) l c h / var(--bg-popover-alpha, 0.92));
 }
@@ -312,11 +311,6 @@ html.bg-image-enabled [data-slot='composer'] {
   background-color: oklch(from var(--background) l c h / var(--bg-composer-alpha, 0.6));
 }
 
-/* 开壁纸时侧栏卡片与对话卡片同档半透明；圆角由组件的 overflow 裁切 */
-html.bg-image-enabled [data-enso='sidebar'] {
-  background-color: oklch(from var(--canvas, var(--background)) l c h / var(--bg-panel-alpha, 0.15));
-}
-
 /*
  * 承载内容的卡片叠在已半透明的面板上会叠成近乎不透明，这些卡片不再额外叠一层面板色，
  * 只留边框、直接透出壁纸：欢迎页建议、工具详情、Bot 页的内容卡片与系统提示条。
@@ -330,6 +324,15 @@ html.bg-image-enabled [data-slot='bot-notice'] {
 /* 可点击的卡片行：只在静止态置透明，保留 hover 底色反馈 */
 html.bg-image-enabled [data-slot='bot-card-button']:not(:hover) {
   background-color: transparent;
+}
+/*
+ * 群聊 / 私聊时间线里的卡片（委派、产物、例程提议、查看过程）：与底部输入框同一档不透明度，
+ * 跟随设置项 --bg-composer-alpha。时间线列与输入框都直接叠在聊天主栏同一层 bg-background 上，
+ * 中间没有别的面板层，叠出的深度一致。私聊顶栏进行中委派条、侧栏、看板、收件箱、实时查看弹窗里的
+ * bot-card 与系统提示条仍走上面的透明规则。
+ */
+html.bg-image-enabled [data-slot='bot-timeline'] [data-slot='bot-card'] {
+  background-color: oklch(from var(--card) l c h / var(--bg-composer-alpha, 0.6));
 }
 
 @keyframes settings-row-flash {

@@ -57,6 +57,11 @@ describe('parseTeamSpec', () => {
     expect(team?.routing).toEqual({ mode: 'smart', maxHops: 6, maxTurnsPerBot: 2 });
   });
 
+  it('接受成员自选（turns）路由模式', () => {
+    const team = parseTeamSpec(spec({ routing: { mode: 'turns', maxHops: 6, maxTurnsPerBot: 2 } }));
+    expect(team?.routing.mode).toBe('turns');
+  });
+
   it('拒绝未知字段（顶层、成员、嵌套）', () => {
     expect(parseTeamSpec(spec({ projectId: 'x' }))).toBeNull();
     expect(
@@ -278,6 +283,17 @@ describe('buildTeamFile', () => {
       'now'
     );
     expect(file.team.routing).toEqual({ mode: 'smart', maxHops: 5, maxTurnsPerBot: 3 });
+    expect(parseTeamFile(JSON.stringify(file)).ok).toBe(true);
+  });
+
+  it('讨论安全上限是群内设置，不随团队导出（旧版本 exactKeys 校验仍能导入）', () => {
+    const file = buildTeamFile(
+      { ...chat, routing: { ...chat.routing, discussMaxTurns: 80 } },
+      [bot(1, 'Lin'), bot(2, 'Max')],
+      {},
+      'now'
+    );
+    expect(file.team.routing).not.toHaveProperty('discussMaxTurns');
     expect(parseTeamFile(JSON.stringify(file)).ok).toBe(true);
   });
 });

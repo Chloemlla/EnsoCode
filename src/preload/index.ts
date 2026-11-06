@@ -131,6 +131,7 @@ import type {
   AttachedImage,
   AuthorityMutationResult,
   ChildHistoryResult,
+  ChildRunListResult,
   ConversationAuthorityProjection,
   ConversationAuthorityRequest,
   ConversationReloadResult,
@@ -258,7 +259,8 @@ import type {
   WorkspaceSearchQueryRequest,
   WorkspaceSearchQueryResult,
 } from '@shared/workspaceSearchQuery';
-import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { zoomPercent } from '@shared/zoomBanner';
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron';
 
 const electronAPI = {
   env: {
@@ -874,6 +876,18 @@ const electronAPI = {
     /** 已结束 child 的只读历史；只传 conversationId，路径由 Main 推导 */
     readChildHistory: (conversationId: string): Promise<ChildHistoryResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_CHILD_HISTORY_READ, { conversationId }),
+    listChildRuns: (parentConversationId: string): Promise<ChildRunListResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_CHILD_RUNS_LIST, { parentConversationId }),
+    readChildRun: (
+      parentConversationId: string,
+      childId: string,
+      beforeIndex?: number
+    ): Promise<ParentHistoryTailResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_CHILD_RUN_READ, {
+        parentConversationId,
+        childId,
+        beforeIndex,
+      }),
     /** 手动「重新读取会话」：只传 conversationId，来源（worker 活快照 / safe journal）由 Main 决定，只读不 spawn */
     reloadConversation: (conversationId: string): Promise<ConversationReloadResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_CONVERSATION_RELOAD, { conversationId }),
@@ -1308,6 +1322,10 @@ const electronAPI = {
       const listener = (_: unknown, fullscreen: boolean) => callback(fullscreen);
       ipcRenderer.on(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, listener);
+    },
+    getZoomPercent: (): number => zoomPercent(webFrame.getZoomFactor()),
+    resetZoom: (): void => {
+      webFrame.setZoomFactor(1);
     },
   },
   btw: {

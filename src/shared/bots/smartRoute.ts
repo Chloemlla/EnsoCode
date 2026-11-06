@@ -6,6 +6,7 @@ import {
   botNameKey,
   type GroupEntry,
 } from '../types/bot';
+import { validChoiceProbabilities } from './choiceProbabilities';
 import type { HumanEntry } from './router';
 
 /** 智能选人：不 @ 的人类消息由便宜模型（judge）或 pi 分类器判定意图并从成员里选 1–3 位回复人（有序） */
@@ -15,6 +16,7 @@ export const SMART_ROUTE_INTENTS = ['build', 'answer', 'discuss'] as const;
 export type SmartRouteIntent = (typeof SMART_ROUTE_INTENTS)[number];
 
 export interface SmartRouteDecision {
+  /** 空名单交给群主兜底；build 且名单恰为一位时投递端才附 SMART_ROUTE_BUILD_NOTE */
   ids: BotId[];
   intent?: SmartRouteIntent;
   /** build 但没有能动手的成员：交给群主 */
@@ -23,6 +25,8 @@ export interface SmartRouteDecision {
   failure?: string;
   /** 选中了忙碌成员，但消息是独立新任务：排到其当前任务之后，不插话 */
   separate?: true;
+  /** 人类点名全员（「大家 / everyone」）规则直出；smart 群据此进入讨论模式 */
+  everyone?: true;
 }
 
 /** 发给忙碌成员的消息：continue 补充其当前任务（插话），new 独立新任务（排队） */
@@ -201,6 +205,24 @@ const ASCII_WORD = /[A-Za-z0-9_-]/;
 const SEGMENT_SPLIT = /[\n,，、;；]/;
 const INTENT_LINE = /^\s*intent\s*[:：]\s*(\w+)/i;
 const TASK_LINE = /^\s*task\s*[:：]\s*(\w+)/i;
+/**
+ * 明确点名群主：一整段（按 SEGMENT_SPLIT 切分、去首尾空白）就是 BOSS，大小写不敏感。
+ * 只额外容忍两类修饰：行首列表标记（- * • 或「数字.」「数字)」）与行尾一个 . 或 。；
+ * 其余写法（散文、括注、引号、加粗、其他标点）都不算，避免「I cannot identify the boss」被当成交给群主。
+ */
+const BOSS_SEGMENT = /^(?:(?:[-*•]|\d+[.)])\s*)?boss[.。]?$/i;
+
+const isBossSegment = (segment: string): boolean => BOSS_SEGMENT.test(segment.trim());
+
+/** INTENT / TASK 行之外的回复正文按换行/逗号/顿号/分号切成名单段 */
+const replySegments = (text: string): string[] =>
+  text
+    .split('\n')
+    .filter((line) => !INTENT_LINE.test(line) && !TASK_LINE.test(line))
+    .join('\n')
+    .normalize('NFC')
+    .toLowerCase()
+    .split(SEGMENT_SPLIT);
 
 /** judge 回复里的 INTENT 行；没有或不认识返回 undefined */
 export function parseSmartRouteIntent(text: string): SmartRouteIntent | undefined {
@@ -222,21 +244,18 @@ export function parseSmartRouteTask(text: string): SmartRouteTask | undefined {
   return undefined;
 }
 
-/** 按换行/逗号/顿号分段，每段取最先出现的成员名（大小写不敏感）或 BOSS；去重后取前 3 个 */
+/**
+ * 按换行/逗号/顿号/分号分段，每段取最先出现的成员名（大小写不敏感）；没有成员名且整段是 BOSS（见 BOSS_SEGMENT）
+ * 时取群主。成员名优先于 BOSS 保留词（成员就叫 Boss 时按成员处理）。去重后取前 3 个。
+ */
 export function parseSmartRouteReply(text: string, input: SmartRouteInput): BotId[] {
   if (typeof text !== 'string') return [];
-  const keys = [
-    ...input.candidates.map((c) => ({ key: botNameKey(c.name), id: c.id })),
-    ...(input.bossBotId ? [{ key: 'boss', id: input.bossBotId }] : []),
-  ]
+  const keys = input.candidates
+    .map((c) => ({ key: botNameKey(c.name), id: c.id }))
     .filter(({ key }) => key.length > 0)
     .sort((a, b) => b.key.length - a.key.length);
   const picked: BotId[] = [];
-  const names = text
-    .split('\n')
-    .filter((line) => !INTENT_LINE.test(line) && !TASK_LINE.test(line))
-    .join('\n');
-  for (const segment of names.normalize('NFC').toLowerCase().split(SEGMENT_SPLIT)) {
+  for (const segment of replySegments(text)) {
     let best: { at: number; id: BotId } | null = null;
     for (const { key, id } of keys) {
       for (let at = segment.indexOf(key); at !== -1; at = segment.indexOf(key, at + 1)) {
@@ -248,10 +267,28 @@ export function parseSmartRouteReply(text: string, input: SmartRouteInput): BotI
         break;
       }
     }
-    if (best && !picked.includes(best.id)) picked.push(best.id);
+    const id = best?.id ?? (input.bossBotId && isBossSegment(segment) ? input.bossBotId : null);
+    if (id && !picked.includes(id)) picked.push(id);
     if (picked.length >= SMART_ROUTE_MAX_PICKS) break;
   }
   return picked;
+}
+
+/**
+ * judge 名单首位是否是群主（解析规则同 parseSmartRouteReply）：回 BOSS 和回群主本人的名字都算明确点名群主。
+ * 群里没有群主、首位是其他成员（含本身就叫 Boss 的成员）时是 false。
+ */
+export function smartRouteReplyLeadsWithOwner(text: string, input: SmartRouteInput): boolean {
+  return !!input.bossBotId && parseSmartRouteReply(text, input)[0] === input.bossBotId;
+}
+
+/**
+ * judge 回复（INTENT 行之外）是否有一段明确是 BOSS（规则同 parseSmartRouteReply，见 BOSS_SEGMENT）；
+ * 与群里有没有群主无关，用来区分「交给群主」和「无法识别」
+ */
+export function smartRouteReplyNamesBoss(text: string): boolean {
+  if (typeof text !== 'string') return false;
+  return replySegments(text).some(isBossSegment);
 }
 
 export function smartRouteQuestion(input: SmartRouteInput): {
@@ -274,7 +311,21 @@ export function smartRouteQuestion(input: SmartRouteInput): {
   };
 }
 
-/** choice 概率达到阈值的候选按概率降序，最多 3 位；都不达标返回空（交给群主） */
+/**
+ * 成员题是一道单选 choice 题：键是每位候选的 id（群主也是普通候选，没有 BOSS 保留键）。
+ * 合法性规则同讨论判断，见 validChoiceProbabilities；不合法时选人与排序都为空，调用方据此报「判断结果无法识别」。
+ */
+export function smartRouteChoiceRecognized(
+  probabilities: unknown,
+  input: SmartRouteInput
+): boolean {
+  return validChoiceProbabilities(probabilities, candidateKeys(input)) !== null;
+}
+
+/**
+ * choice 概率达到阈值的候选按概率降序，最多 3 位；都不达标返回空（交给群主）。
+ * 合法的单选分布里至多两位能达到 0.4，上限 3 只是防御。
+ */
 export function pickSmartRouteChoice(probabilities: unknown, input: SmartRouteInput): BotId[] {
   return ranked(probabilities, input)
     .filter(({ p }) => p >= SMART_ROUTE_MIN_CONFIDENCE)
@@ -282,19 +333,18 @@ export function pickSmartRouteChoice(probabilities: unknown, input: SmartRouteIn
     .map(({ id }) => id);
 }
 
-/** 全部候选按 choice 概率降序（build 时从中找第一位能动手的） */
+/** 已返回概率的候选按 choice 概率降序（build 时从中找第一位能动手的） */
 export function rankSmartRouteChoice(probabilities: unknown, input: SmartRouteInput): BotId[] {
   return ranked(probabilities, input).map(({ id }) => id);
 }
 
+const candidateKeys = (input: SmartRouteInput): string[] => input.candidates.map((c) => c.id);
+
 function ranked(probabilities: unknown, input: SmartRouteInput): Array<{ id: BotId; p: number }> {
-  if (!probabilities || typeof probabilities !== 'object') return [];
-  const values = probabilities as Record<string, unknown>;
+  const values = validChoiceProbabilities(probabilities, candidateKeys(input));
+  if (!values) return [];
   return input.candidates
-    .flatMap((c) => {
-      const p = values[c.id];
-      return typeof p === 'number' && Number.isFinite(p) ? [{ id: c.id, p }] : [];
-    })
+    .flatMap((c) => (Object.hasOwn(values, c.id) ? [{ id: c.id, p: values[c.id]! }] : []))
     .sort((a, b) => b.p - a.p);
 }
 
@@ -312,14 +362,15 @@ export function smartRouteIntentQuestion(input: SmartRouteInput): {
   };
 }
 
-/** 意图概率最高者达到 0.5 才采信 */
+/** 意图概率最高者达到 0.5 才采信；概率表不合法（规则同 validChoiceProbabilities）返回 undefined，交给关键词兜底 */
 export function pickSmartRouteIntent(probabilities: unknown): SmartRouteIntent | undefined {
-  if (!probabilities || typeof probabilities !== 'object') return undefined;
-  const values = probabilities as Record<string, unknown>;
+  const values = validChoiceProbabilities(probabilities, SMART_ROUTE_INTENTS);
+  if (!values) return undefined;
   let best: { intent: SmartRouteIntent; p: number } | undefined;
   for (const intent of SMART_ROUTE_INTENTS) {
     const p = values[intent];
-    if (typeof p === 'number' && Number.isFinite(p) && (!best || p > best.p)) best = { intent, p };
+    if (p !== undefined && Object.hasOwn(values, intent) && (!best || p > best.p))
+      best = { intent, p };
   }
   return best && best.p >= SMART_ROUTE_INTENT_MIN_CONFIDENCE ? best.intent : undefined;
 }
@@ -395,15 +446,30 @@ export function guessSmartRouteIntent(message: string): SmartRouteIntent {
 /**
  * 落定名单：build 只留一位能动手的成员（先按 preferred 顺序，再按群成员顺序），
  * 没有能动手的成员时清空名单交给群主并标 noWriter；其余意图原样保留。
+ *
+ * ownerFirst（judge 名单首位是群主，回 BOSS 或群主名字都算，见 smartRouteReplyLeadsWithOwner）：明确点名群主
+ * 优先于「build 交给能动手的人」，以群主为准，由群主再委派或分派，后面跟的成员名一并不用。群主只读但有人能动手时清空名单交给群主
+ * （不填群主 id，投递端就不附 SMART_ROUTE_BUILD_NOTE，免得让只读群主「先动手完成」）；
+ * 群主能动手、或没有任何能动手的成员（noWriter）时与原规则一致。
  */
 export function decideSmartRoute(
   input: SmartRouteInput,
   intent: SmartRouteIntent | undefined,
   picked: readonly BotId[],
-  preferred: readonly BotId[] = picked
+  preferred: readonly BotId[] = picked,
+  options: { ownerFirst?: boolean } = {}
 ): SmartRouteDecision {
   if (intent !== 'build') return { ids: [...picked], ...(intent ? { intent } : {}) };
   const writers = input.candidates.filter((c) => c.canAct).map((c) => c.id);
+  const owner = input.bossBotId;
+  if (
+    options.ownerFirst &&
+    owner &&
+    picked[0] === owner &&
+    !writers.includes(owner) &&
+    writers.length > 0
+  )
+    return { ids: [], intent };
   const writer = [...preferred, ...picked, ...writers].find((id) => writers.includes(id));
   return writer ? { ids: [writer], intent } : { ids: [], intent, noWriter: true };
 }

@@ -290,15 +290,94 @@ describe('SessionSupervisor terminal turn handling', () => {
     await supervisor.shutdown();
   });
 
-  it('compaction/branch summary等非idle状态拒绝retry，不编辑上下文', async () => {
-    const { supervisor, parentSession } = await spawn();
+  it.each([true, false])(
+    'resume prompt（%s）：空闲时先把未完成的 assistant 移出上下文再 prompt；普通 prompt 不动',
+    async (resume) => {
+      const { supervisor, parentSession } = await spawn();
+      const order: string[] = [];
+      const unfinished = { role: 'assistant', content: [], stopReason: 'aborted' };
+      parentSession.messages.push(
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        unfinished
+      );
+      Object.assign(mocks.managers[0]!, {
+        buildSessionProjection: vi.fn(() => ({
+          entries: parentSession.messages.map((message, index) => ({
+            sourceEntry: { type: 'message', id: `m${index}`, message },
+            messages: [message],
+          })),
+        })),
+        appendContextEdit: vi.fn((targetId: string) => {
+          order.push(`edit:${targetId}`);
+          parentSession.messages.pop();
+        }),
+      });
+      Object.assign(parentSession, { refreshContext: vi.fn() });
+      parentSession.prompt.mockImplementation(async () => {
+        order.push('prompt');
+      });
+      supervisor.handleCommand({
+        type: 'prompt',
+        identity: parent,
+        text: '<delegation-retry id="d">continue</delegation-retry>',
+        deliveryId: 'd',
+        ...(resume ? { resume: true as const } : {}),
+      });
+      for (let i = 0; i < 10 && !order.includes('prompt'); i++) await settle();
+      expect(order).toEqual(resume ? ['edit:m1', 'prompt'] : ['prompt']);
+      await supervisor.shutdown();
+    }
+  );
+
+  it('compaction/branch summary等非idle状态拒绝retry，不编辑上下文，回执 busy', async () => {
+    const { events, supervisor, parentSession } = await spawn();
     const projection = vi.fn(() => ({ entries: [] }));
     Object.assign(mocks.managers[0]!, { buildSessionProjection: projection });
     parentSession.isIdle = false;
     supervisor.handleCommand({ type: 'retry', identity: parent });
-    await settle();
+    await waitFor(events, 'retry-skipped');
     expect(projection).not.toHaveBeenCalled();
     expect(parentSession.agent.continue).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'retry-skipped')).toEqual([
+      { type: 'retry-skipped', identity: parent, seq: expect.any(Number), reason: 'busy' },
+    ]);
+    await supervisor.shutdown();
+  });
+
+  it('最后一条仍是已完成的 assistant（没有可重试的）：回执 nothing-to-retry，不续跑', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    Object.assign(mocks.managers[0]!, { buildSessionProjection: vi.fn(() => ({ entries: [] })) });
+    parentSession.messages.push(
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' }
+    );
+    const run = vi.fn(async () => undefined);
+    Object.assign(parentSession, { _runAgentPrompt: run });
+    supervisor.handleCommand({ type: 'retry', identity: parent });
+    await waitFor(events, 'retry-skipped');
+    expect(run).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'retry-skipped')).toEqual([
+      {
+        type: 'retry-skipped',
+        identity: parent,
+        seq: expect.any(Number),
+        reason: 'nothing-to-retry',
+      },
+    ]);
+    expect(events.some((event) => event.type === 'status' && event.status === 'running')).toBe(
+      false
+    );
+    await supervisor.shutdown();
+  });
+
+  it('会话已不在 worker 时 retry 按 parent-rejected 回流，不静默丢弃', async () => {
+    const { events, supervisor } = await spawn();
+    const ghost = { sessionId: 'ghost', generation: '22222222-2222-4222-8222-222222222222' };
+    supervisor.handleCommand({ type: 'retry', identity: ghost });
+    await waitFor(events, 'parent-rejected');
+    expect(events.find((event) => event.type === 'parent-rejected')).toMatchObject({
+      identity: ghost,
+    });
     await supervisor.shutdown();
   });
 
@@ -338,6 +417,52 @@ describe('SessionSupervisor terminal turn handling', () => {
     });
     expect(events.some((event) => event.type === 'messages-truncated')).toBe(false);
 
+    await supervisor.shutdown();
+  });
+
+  it('回合内自动重试用尽后仍是瞬态错误：turn-failed 标 retryExhausted；未重试或非瞬态错误不标', async () => {
+    const { events, supervisor, parentSession } = await spawn();
+    const failTurn = async (retried: boolean, finalError: string) => {
+      parentSession.emit({ type: 'agent_start' });
+      if (retried) {
+        parentSession.messages.push({
+          role: 'assistant',
+          content: [],
+          stopReason: 'error',
+          errorMessage: 'Connection error.',
+        });
+        parentSession.emit({ type: 'agent_end', willRetry: true });
+        parentSession.emit({
+          type: 'auto_retry_start',
+          attempt: 1,
+          maxAttempts: 1,
+          delayMs: 10,
+          errorMessage: 'Connection error.',
+        });
+        await settle();
+      }
+      parentSession.messages.push({
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: finalError,
+      });
+      parentSession.emit({ type: 'agent_end', willRetry: false });
+      parentSession.emit({ type: 'agent_settled' });
+      await settle();
+      return events.filter((event) => event.type === 'turn-failed').at(-1);
+    };
+    expect(await failTurn(true, 'socket hang up')).toMatchObject({ retryExhausted: true });
+    expect(await failTurn(false, 'socket hang up')).not.toHaveProperty('retryExhausted');
+    expect(await failTurn(true, '401 invalid api key')).not.toHaveProperty('retryExhausted');
+    for (const error of [
+      '429 insufficient_quota',
+      '429 Monthly usage limit reached',
+      '503 billing quota exceeded',
+      'subscription_sharing_usage_limit_exceeded',
+    ])
+      expect(await failTurn(true, error)).not.toHaveProperty('retryExhausted');
+    expect(events.filter((event) => event.type === 'turn-failed')).toHaveLength(7);
     await supervisor.shutdown();
   });
 

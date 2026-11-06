@@ -2,6 +2,7 @@ import type {
   BotProfile,
   Delegation,
   DelegationAppend,
+  DelegationRetryBy,
   DelegationState,
   TaskCheck,
 } from '@shared/types/bot';
@@ -12,15 +13,49 @@ import { addToast } from '@/components/ui/toast';
 import { type TFunction, useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useBotsStore } from '@/stores/bots';
-import { delegationActions, formatElapsed, isActiveDelegation } from '@/stores/bots/delegations';
+import {
+  delegationActions,
+  formatElapsed,
+  isActiveDelegation,
+  isAutoRetrying,
+  isAwaitingAutoRetry,
+  retryAttempt,
+  retrySource,
+} from '@/stores/bots/delegations';
 import { BotAvatar } from './BotAvatar';
 import { PresenceChip, useDelegationPresence } from './PresenceMark';
 
 const timeOf = (at: number) =>
   new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+/** 自动重试的退避常是几十秒，精确到秒 */
+const secondsOf = (at: number) =>
+  new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-export function DelegationBadge({ state, interrupted }: { state: string; interrupted?: boolean }) {
+const EMPTY: readonly Delegation[] = [];
+
+const RETRY_SOURCE_LABELS: Record<DelegationRetryBy, string> = {
+  auto: 'Automatic',
+  delegator: 'By delegator',
+  human: 'Manual',
+};
+
+export function DelegationBadge({
+  state,
+  interrupted,
+  autoRetry,
+}: {
+  state: string;
+  interrupted?: boolean;
+  /** 失败但已排定自动重试：不是最终失败 */
+  autoRetry?: boolean;
+}) {
   const { t } = useI18n();
+  if (autoRetry && state === 'failed')
+    return (
+      <span className="rounded bg-warning/25 px-1.5 text-[11px] text-warning-foreground dark:bg-warning/15 dark:text-warning">
+        {t('Will retry automatically')}
+      </span>
+    );
   const tone =
     state === 'running' || state === 'queued'
       ? 'bg-info/15 text-info'
@@ -137,8 +172,36 @@ interface DelegationCardProps {
   /** 并入 record 这次执行的追加：标「已并入」，不单独显示状态与结果 */
   append?: DelegationAppend;
   taskSeq?: number;
+  /** 群聊时间线：铺满 CHAT_COL 内容盒，与底部输入框同宽；其他位置（看板、私聊顶栏）保留 max-w-lg */
+  fill?: boolean;
   bots: Map<string, BotProfile>;
   onOpenConversation: (conversationId: string, title: string) => void;
+}
+
+/** 重试链标记：自动重试进行中 / 第几次重试与来源；委派人重试附的说明放在悬停提示里 */
+function RetryChip({
+  record,
+  delegations,
+}: {
+  record: Delegation;
+  delegations: readonly Delegation[];
+}) {
+  const { t } = useI18n();
+  const source = retrySource(record);
+  if (!source) return null;
+  const n = retryAttempt(record, delegations);
+  return (
+    <span
+      className="rounded border px-1 py-px text-[10px]"
+      title={
+        record.retryNote ? t('Delegator note: {{note}}', { note: record.retryNote }) : undefined
+      }
+    >
+      {isAutoRetrying(record)
+        ? t('Retrying automatically · attempt {{n}}', { n })
+        : t('Retry #{{n}} · {{source}}', { n, source: t(RETRY_SOURCE_LABELS[source]) })}
+    </span>
+  );
 }
 
 /** 委派卡片：发起人 → 目标、任务、状态与耗时、结果摘要，按状态给取消 / 重试 / 查看过程 */
@@ -148,10 +211,12 @@ export function DelegationCard({
   retried,
   append,
   taskSeq,
+  fill,
   bots,
   onOpenConversation,
 }: DelegationCardProps) {
   const { t } = useI18n();
+  const delegations = useBotsStore((s) => s.delegations) ?? EMPTY;
   const state = record?.state ?? entry?.state ?? 'queued';
   const now = useNow(!append && isActiveDelegation(state));
   const from = bots.get(record?.parentBotId ?? entry?.from ?? '');
@@ -171,15 +236,22 @@ export function DelegationCard({
   const openTask = useBotsStore((s) => s.openTask);
   const collapsible = Boolean(entry?.taskId) && !append;
   const [open, setOpen] = useState(!collapsible);
-  const summary = append
-    ? undefined
-    : record
-      ? state === 'completed'
-        ? record.result
-        : state === 'blocked'
-          ? undefined
-          : failureText(record, t)
-      : entry?.summary;
+  const awaiting = record ? isAwaitingAutoRetry(record, delegations) : false;
+  // 结果全文已作为成员消息入群：卡片不再重复摘要，改给跳转
+  const posted =
+    !append && record?.chatId && record.resultSeq !== undefined
+      ? { chatId: record.chatId, seq: record.resultSeq }
+      : undefined;
+  const summary =
+    append || posted
+      ? undefined
+      : record
+        ? state === 'completed'
+          ? record.result
+          : state === 'blocked'
+            ? undefined
+            : failureText(record, t)
+        : entry?.summary;
   const title = t('{{from}} → {{to}} · Delegation', {
     from: from?.name ?? t('Deleted member'),
     to: to?.name ?? t('Deleted member'),
@@ -193,10 +265,14 @@ export function DelegationCard({
         />
       )}
       <BotAvatar bot={from} size="xs" />
-      <span className="text-foreground">{from?.name ?? t('Deleted member')}</span>
+      <span className="min-w-0 truncate text-foreground" title={from?.name}>
+        {from?.name ?? t('Deleted member')}
+      </span>
       <span>→</span>
       <BotAvatar bot={to} size="xs" presence={presence?.state} />
-      <span className="text-foreground">{to?.name ?? t('Deleted member')}</span>
+      <span className="min-w-0 truncate text-foreground" title={to?.name}>
+        {to?.name ?? t('Deleted member')}
+      </span>
       <span>· {t('Delegation')}</span>
       {append ? (
         <span className="rounded bg-info/15 px-1.5 text-[11px] text-info">
@@ -207,8 +283,13 @@ export function DelegationCard({
       ) : active ? (
         <PresenceChip info={presence} />
       ) : (
-        <DelegationBadge state={state} interrupted={record?.failure === 'interrupted'} />
+        <DelegationBadge
+          state={state}
+          interrupted={record?.failure === 'interrupted'}
+          autoRetry={awaiting}
+        />
       )}
+      {record && !append && <RetryChip record={record} delegations={delegations} />}
       {record && !append && (
         <span>{formatElapsed((record.finishedAt ?? now) - record.createdAt)}</span>
       )}
@@ -220,7 +301,10 @@ export function DelegationCard({
     'flex flex-wrap items-center gap-1.5 whitespace-nowrap text-muted-foreground text-xs';
   const task = append?.text ?? record?.task;
   return (
-    <div data-slot="bot-card" className="max-w-lg rounded-xl border bg-card px-3 py-2.5">
+    <div
+      data-slot="bot-card"
+      className={cn('rounded-xl border bg-card px-3 py-2.5', fill ? 'w-full min-w-0' : 'max-w-lg')}
+    >
       {collapsible ? (
         <button
           type="button"
@@ -235,12 +319,14 @@ export function DelegationCard({
         <div className={headerClass}>{header}</div>
       )}
       {!open && task && <div className="mt-1 truncate text-muted-foreground text-xs">{task}</div>}
-      {open && task && <div className="mt-1.5 line-clamp-3 text-sm">{task}</div>}
+      {open && task && (
+        <div className="mt-1.5 line-clamp-3 text-sm [overflow-wrap:anywhere]">{task}</div>
+      )}
       {open && (
         <>
           {record?.check && !append && <CheckBadge check={record.check} className="mt-1.5" />}
           {summary && (
-            <div className="mt-1.5 line-clamp-4 whitespace-pre-wrap text-muted-foreground text-xs">
+            <div className="mt-1.5 line-clamp-4 whitespace-pre-wrap text-muted-foreground text-xs [overflow-wrap:anywhere]">
               {summary}
             </div>
           )}
@@ -260,8 +346,25 @@ export function DelegationCard({
               </div>
             </div>
           )}
+          {awaiting && record?.autoRetryAt !== undefined && (
+            <div className="mt-1 text-warning-foreground text-xs dark:text-warning">
+              {t('Retrying automatically at {{time}} (attempt {{n}})', {
+                time: secondsOf(record.autoRetryAt),
+                n: retryAttempt(record, delegations) + 1,
+              })}
+            </div>
+          )}
+          {posted && (
+            <button
+              type="button"
+              onClick={() => useBotsStore.getState().focusSeq(posted.chatId, posted.seq)}
+              className="mt-1.5 text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline"
+            >
+              {t('Result posted to the group · View')}
+            </button>
+          )}
           {record && (
-            <div className="mt-2 flex justify-end gap-1.5">
+            <div className="mt-2 flex flex-wrap justify-end gap-1.5">
               <Button
                 size="xs"
                 variant="ghost"
@@ -286,8 +389,17 @@ export function DelegationCard({
                 </Button>
               )}
               {actions.retry && !retried && (
-                <Button size="xs" variant="outline" onClick={() => retryDelegation(record.id, t)}>
-                  {t('Retry')}
+                <Button
+                  size="xs"
+                  variant="outline"
+                  title={
+                    awaiting
+                      ? t('Skip the wait and retry now. The scheduled automatic retry is canceled.')
+                      : undefined
+                  }
+                  onClick={() => retryDelegation(record.id, t)}
+                >
+                  {awaiting ? t('Retry now') : t('Retry')}
                 </Button>
               )}
               {actions.resumeOrRestart && !retried && (

@@ -121,6 +121,95 @@ token 那一块写成两段，选择器是 `:where(:root)` 和 `:where(:root.dar
 | `settings-nav` | 设置导航。 |
 | `settings-content` | 设置内容。 |
 
+## 状态
+
+主窗口在 `<html>` 上写两个状态属性，值都是 `idle`、`running`、`waiting`、`error` 之一，含义和优先级与插件 `session_status` 事件相同，见 [插件](plugins.md) 的「会话状态」：
+
+- `data-enso-activity`：所有主会话里优先级最高的状态。
+- `data-enso-session`：当前打开的会话的状态。没有打开会话时是 `idle`。
+
+`waiting` 包括等待回答的提问、等待审批的工具调用和能力确认。未读不算状态。设置窗口不写这两个属性。
+
+思考块 `[data-enso="thinking"]` 在思考进行中带 `data-live`，结束后去掉。
+
+```css
+:root[data-enso-session="error"] [data-enso="composer"] { border-color: var(--destructive); }
+[data-enso="thinking"][data-live]::before { background-image: var(--my-busy); }
+```
+
+这些属性和锚点一样是稳定接口，不要再用内部类名（例如 `.animate-pulse`）推断状态。
+
+## 素材槽位
+
+主题 JSON 可以加 `assets`，把图片放进预设位置，不用写 CSS。每个槽位一张默认图，可选三种变体：
+
+```json
+"assets": {
+  "thinking": {
+    "src": "assets/busy.webp",
+    "still": "assets/busy-still.webp",
+    "dark": "assets/busy-dark.webp",
+    "states": { "running": "assets/run.webp", "waiting": "assets/ask.webp", "error": "assets/oops.webp" }
+  }
+}
+```
+
+- `still`：系统开了「减少动态效果」时用它。`thinking` 槽位的思考块不在进行中（没有 `data-live`）时也用它。
+- `dark`：深色模式用它。
+- `states`：键只能是 `running`、`waiting`、`error`，按下表的状态来源切换。状态图优先于 `dark` 和 `still`，所以状态图最好本身不动。
+
+| 槽位 | 位置 | 默认摆法 | 状态来源 |
+| --- | --- | --- | --- |
+| `canvas-pattern` | 主窗口画布底纹 | 铺满平铺，在内容下面 | `data-enso-activity` |
+| `sidebar-footer` | 侧栏背景底部 | 居中，离底 64px，宽 `min(150px, 80%)` | `data-enso-activity` |
+| `empty-main` | 没有会话时的主区背景 | 居中偏上 130px，宽 170px | `data-enso-activity` |
+| `welcome` | 新会话还没有用户消息时，时间线右下角 | 右 24px、下 12px，132×132 | `data-enso-session` |
+| `composer-peek` | 从输入区上沿探头，聚焦时弹起 | 右 72px，84×66，底边对齐 | `data-enso-session` |
+| `thinking` | 思考块左侧 | 34×34，思考块左缩进 36px | `data-enso-session` |
+| `code-corner` | 代码块右上沿 | 右 20px、上 -13px，24×24 | `data-enso-session` |
+| `todo-corner` | 时间线里待办卡片右上沿，紧贴输入框的那张不挂 | 右 6px、上 -30px，44×44 | `data-enso-session` |
+| `status-icon` | 状态行左侧 | 左 2px、垂直居中，20×20 | `data-enso-session` |
+| `panel-corner` | 右侧面板右下角 | 右下各 10px，72×72，不透明度 0.9 | `data-enso-session` |
+
+路径按主题 JSON 所在目录解析，必须是插件目录内的相对路径：不能以 `/` 开头，不能含 `..`、`.` 段、空段、反斜杠、`:`、`%`、`?`、`#`、引号、括号或空白。扩展名限 png、jpg、jpeg、gif、webp、bmp、svg、jfif、avif。不认识的槽位、不合法的路径或状态名只让这一个槽位作废，主题照常加载。
+
+生成的 CSS 放在主题 `css` 前面，每个槽位还有一个变量 `--enso-asset-<槽位>`，值是当前生效的 `url()`。主题 CSS 可以覆盖槽位的摆法，也可以引用变量叠加别的图层。只有 `assets`、没有 `css` 的主题不需要「修改界面样式」同意。槽位表和生成逻辑在 `src/shared/theme/assets.ts`，它只依赖同目录模块，主题生成器会原样拷用。
+
+## 主题背景
+
+主题 JSON 可以加 `background`，带一张铺满窗口的壁纸，参数和外观页「背景图」那组设置同义：
+
+```json
+"background": {
+  "image": { "src": "assets/background.webp", "dark": "assets/background-dark.webp" },
+  "size": "cover",
+  "opacity": 0.85,
+  "blur": 0,
+  "brightness": 1,
+  "saturation": 1,
+  "mask": 0.5,
+  "composerOpacity": 0.6,
+  "codeOpacity": 0.65
+}
+```
+
+`image` 和素材槽位的写法一样，`still`、`dark`、`states` 都能用，状态跟 `data-enso-activity`。路径规则同上。`image` 不合法时整个 `background` 作废，主题照常加载。
+
+| 字段 | 对应设置 | 范围 | 默认 |
+| --- | --- | --- | --- |
+| `size` | 填充方式 | `cover`、`contain`、`repeat`、`center` | `cover` |
+| `opacity` | 背景可见度，即整张壁纸的不透明度；普通面板全透，弹出层保底 0.92 | 0–1 | 0.85 |
+| `blur` | 模糊，单位 px | 0–20 | 0 |
+| `brightness` | 亮度 | 0–2 | 1 |
+| `saturation` | 饱和度 | 0–2 | 1 |
+| `mask` | 遮罩，按画布色压暗或提亮 | 0–1 | 0.5 |
+| `composerOpacity` | 输入框不透明度 | 0–1 | 0.6 |
+| `codeOpacity` | 代码块不透明度 | 0–1 | 0.65 |
+
+越界的数值钳到范围内，不是数字或不认识的 `size` 只丢这一个字段，缺的字段取默认值。
+
+用户在外观页自己开了背景图时，用户的设置优先，主题背景不生效。用户没开时，主题背景按上表参数生效，界面和用户背景图一样变成半透明面板。外观页会提示「当前主题自带背景」。主题背景只支持图片，不支持视频、文件夹随机和网络地址。图片地址在变量 `--enso-asset-background` 里，由背景层引用。谁生效由 `src/renderer/lib/effectiveBackground.ts` 判定。
+
 ## 用户 CSS
 
 外观页有「自定义 CSS」开关，对应 `appearance.userCssEnabled`，默认关。旁边是「打开 user.css」。文件是 Main 拥有的 `userData/user.css`，不写进 `settings.json`。文件还不存在时，打开动作会先写入一份模板，再用系统默认程序打开。保存后界面跟着变，不用重启。关掉开关就不再注入这份文件。
@@ -139,7 +228,7 @@ token 那一块写成两段，选择器是 `:where(:root)` 和 `:where(:root.dar
 
 1. 建一个目录，放 `enso-plugin.json`。`schemaVersion` 为 `1`，`permissions` 为 `[]`。不需要 `main`。
 2. 在 `contributes.themes` 里加一项。`id` 不含 `/`，并匹配 `^[a-z][a-z0-9-]{0,31}$`。`path` 是插件目录内的相对路径，以 `.json` 结尾，不能是绝对路径，不能含 `..` 或反斜杠。
-3. JSON 里写全 `light` 和 `dark` 的九个字段。要改某一个派生变量，再加 `tokens`。
+3. JSON 里写全 `light` 和 `dark` 的九个字段。要改某一个派生变量，再加 `tokens`。要放角色图，加 `assets`，见「素材槽位」。要带壁纸，加 `background`，见「主题背景」。
 4. 需要改圆角、间距或锚点上的布局时，再加 `css`，路径以 `.css` 结尾。只使用 `data-enso` 和上面的变量。可以用相对 `url()` 引用插件目录内的图片和字体。不要加载远程资源。这一步会触发「修改界面样式」的同意。
 5. 设置里安装这个目录并启用。外观页的画廊里选它。插件停用后界面回到 `enso`，设置里的键还在。
 

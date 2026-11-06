@@ -45,6 +45,9 @@ export const SETTINGS_DATA_COVERAGE = {
   rtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   computerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   computerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
+  openLinksInBuiltinBrowser: excluded(
+    'Chat link opening target is a desktop UI preference, not an Enso capability.'
+  ),
   memoryEmbeddingModel: excluded('Memory embedding model choice is a desktop preference.'),
   memoryEmbeddingAutoDownload: excluded('Memory model download policy is a device preference.'),
   memoryModelIdleMinutes: excluded('Memory model idle unloading policy is a device preference.'),
@@ -63,6 +66,9 @@ export const SETTINGS_DATA_COVERAGE = {
     'Experimental temporary chats toggle; device-local, not an Enso capability.'
   ),
   botMaxRunningTurns: excluded('Device-local Bot concurrency limit; not an Enso capability.'),
+  botDiscussModeEnabled: excluded(
+    'Experimental Bot group discussion toggle; device-local, not an Enso capability.'
+  ),
   botRouteClassifier: excluded('Bot group smart-routing model preference; not an Enso capability.'),
   botAssistantModel: excluded('Bot helper-task model preference; not an Enso capability.'),
   voiceInputDevice: excluded('Voice input is a device-local composer preference.'),
@@ -101,6 +107,7 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   pinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   chatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
+  chatTypography: excluded('Renderer conversation typography preference; not an Enso capability.'),
   notifyMainAgentOnly: excluded(
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
@@ -164,6 +171,8 @@ export const SETTINGS_DATA_COVERAGE = {
   backgroundBlur: excluded('Appearance-only background decoration.'),
   backgroundBrightness: excluded('Appearance-only background decoration.'),
   backgroundSaturation: excluded('Appearance-only background decoration.'),
+  backgroundMask: excluded('Appearance-only background decoration.'),
+  borderOpacity: excluded('Appearance-only border decoration.'),
   backgroundComposerOpacity: excluded('Appearance-only background decoration.'),
   backgroundCodeOpacity: excluded('Appearance-only background decoration.'),
   backgroundSizeMode: excluded('Appearance-only background decoration.'),
@@ -194,6 +203,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   setRtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   setComputerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   setComputerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
+  setOpenLinksInBuiltinBrowser: excluded(
+    'Chat link opening target is a desktop UI preference, not an Enso capability.'
+  ),
   setProtectedActionsInCode: excluded(
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
@@ -220,6 +232,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setBotAssistantModel: excluded('Bot helper-task model preference; not an Enso capability.'),
   setBotMaxRunningTurns: excluded('Device-local Bot concurrency limit; not an Enso capability.'),
+  setBotDiscussModeEnabled: excluded(
+    'Experimental Bot group discussion toggle; device-local, not an Enso capability.'
+  ),
   setVoiceInputDevice: excluded('Voice input is a device-local composer preference.'),
   setVoiceModel: excluded('Voice input is a device-local composer preference.'),
   setVoiceCorrectionEnabled: excluded('Voice input is a device-local composer preference.'),
@@ -258,6 +273,12 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setPinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   setChatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
+  setChatTypography: excluded(
+    'Renderer conversation typography preference; not an Enso capability.'
+  ),
+  resetChatTypography: excluded(
+    'Renderer conversation typography preference; not an Enso capability.'
+  ),
   setNotifyMainAgentOnly: excluded(
     'Desktop/phone completion notification preference; not an Enso capability.'
   ),
@@ -377,6 +398,8 @@ export const SETTINGS_ACTION_COVERAGE = {
   setBackgroundBlur: excluded('Appearance-only background decoration.'),
   setBackgroundBrightness: excluded('Appearance-only background decoration.'),
   setBackgroundSaturation: excluded('Appearance-only background decoration.'),
+  setBackgroundMask: excluded('Appearance-only background decoration.'),
+  setBorderOpacity: excluded('Appearance-only border decoration.'),
   setBackgroundComposerOpacity: excluded('Appearance-only background decoration.'),
   setBackgroundCodeOpacity: excluded('Appearance-only background decoration.'),
   setBackgroundSizeMode: excluded('Appearance-only background decoration.'),
@@ -511,6 +534,12 @@ export const IPC_PRODUCT_COVERAGE = {
   AGENT_SNAPSHOT: excluded('Worker recovery/debug snapshot transport.'),
   AGENT_CHILD_HISTORY_READ: excluded(
     'Read-only replay of an ended child safe journal; no product capability, no execution rights.'
+  ),
+  AGENT_CHILD_RUNS_LIST: excluded(
+    'Read-only list of a parent conversation child runs; summaries only, no paths, no execution rights.'
+  ),
+  AGENT_CHILD_RUN_READ: excluded(
+    'Read-only replay of one registered child run; path stays in Main, no execution rights.'
   ),
   AGENT_CONVERSATION_RELOAD: excluded(
     'Manual read-only reload of a conversation (live snapshot or safe journal); no spawn, no execution rights.'

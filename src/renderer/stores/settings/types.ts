@@ -1,3 +1,4 @@
+import type { ChatTypography } from '@shared/chatTypography';
 import type { CompactStrategy } from '@shared/compactStrategy';
 import type {
   DefaultModelNotice,
@@ -90,6 +91,8 @@ export interface SettingsState {
   accentColor: import('@shared/accentColor').AccentColor;
   /** 是否注入 userData/user.css */
   userCssEnabled: boolean;
+  /** 全局界面边框相对主题原色的不透明度，0–1；不影响文字与图标 */
+  borderOpacity: number;
   language: Locale;
 
   /**
@@ -139,6 +142,8 @@ export interface SettingsState {
   computerPreview: boolean;
   /** computer 操作任何 app 都不再询问（macOS），缺省关 */
   computerAllowAllApps: boolean;
+  /** 聊天网页链接默认在内置浏览器打开（需启用 browser 工具），Cmd/Ctrl+点击走系统浏览器 */
+  openLinksInBuiltinBrowser: boolean;
 
   /** Code 会话也启用受保护动作底线（Bot 会话恒开）；缺省关，新建或冷恢复会话生效。 */
   protectedActionsInCode: boolean;
@@ -182,6 +187,8 @@ export interface SettingsState {
   botAssistantModel: DefaultModelRef | null;
   /** Bot 全局并发上限（私聊/群聊/委派/例行共用）；缺省 4，范围 1–16 */
   botMaxRunningTurns: number;
+  /** 实验功能：Bot 群聊讨论模式；缺省关，关闭时群聊路由与 main 一致；只在本机，不参与同步 */
+  botDiscussModeEnabled: boolean;
   /** 桌面录音用的麦克风设备 id；SYSTEM_MICROPHONE 跟随系统 */
   voiceInputDevice: string;
   /** 本机语音识别模型 */
@@ -223,6 +230,8 @@ export interface SettingsState {
   pinUnfinishedTodos: boolean;
   /** 聊天列铺满：去掉两侧阶梯 max-w；缺省 false（居中阅读宽度） */
   chatWide: boolean;
+  /** 会话正文排版；标题、表格与行内代码按正文比例 */
+  chatTypography: ChatTypography;
   /** 仅主 agent 发送完成/失败通知；coworker 提问/审批仍提醒；缺省 true */
   notifyMainAgentOnly: boolean;
   /** 同一父会话同时在编 coworker 上限；缺省 5，范围 1–20 */
@@ -260,7 +269,7 @@ export interface SettingsState {
   backgroundRandomEnabled: boolean;
   /** 自动换图间隔（秒），setter 内 clamp 5–86400 */
   backgroundRandomInterval: number;
-  /** 背景可见度 0–1；前景面板 alpha = 1 - opacity（背景图本身不变透明） */
+  /** 背景可见度 0–1；整张壁纸（含遮罩）在画布上统一合成，普通面板不重复叠色 */
   backgroundOpacity: number;
   /** 模糊半径 0–20 px */
   backgroundBlur: number;
@@ -268,6 +277,8 @@ export interface SettingsState {
   backgroundBrightness: number;
   /** 饱和度 0–2（1 为原图） */
   backgroundSaturation: number;
+  /** 壁纸遮罩 0–1：主题色盖在图上的比例，0 为原图 */
+  backgroundMask: number;
   /** 底部输入框（Composer）的不透明度 0–1，独立于面板 alpha 单独可调 */
   backgroundComposerOpacity: number;
   /** 代码块 / diff 视图的不透明度 0–1，独立可调（保可读性同时透出背景） */
@@ -374,6 +385,7 @@ export interface SettingsState {
   setRtkEnabled: (value: boolean) => void;
   setComputerPreview: (value: boolean) => void;
   setComputerAllowAllApps: (value: boolean) => void;
+  setOpenLinksInBuiltinBrowser: (value: boolean) => void;
   setProtectedActionsInCode: (value: boolean) => void;
   setDcgEnabled: (value: boolean) => void;
   setMemoryEmbeddingModel: (value: string) => void;
@@ -388,6 +400,7 @@ export interface SettingsState {
   setBotRouteClassifier: (value: VirtualClassifierConfig | null) => void;
   setBotAssistantModel: (value: DefaultModelRef | null) => void;
   setBotMaxRunningTurns: (value: number) => void;
+  setBotDiscussModeEnabled: (value: boolean) => void;
   setVoiceInputDevice: (deviceId: string) => void;
   setVoiceModel: (model: SpeechModelId) => void;
   setVoiceCorrectionEnabled: (value: boolean) => void;
@@ -412,6 +425,8 @@ export interface SettingsState {
   setCollapseCompletedActivity: (value: boolean) => void;
   setPinUnfinishedTodos: (value: boolean) => void;
   setChatWide: (value: boolean) => void;
+  setChatTypography: (next: ChatTypography) => void;
+  resetChatTypography: () => void;
   setNotifyMainAgentOnly: (value: boolean) => void;
   setMaxActiveCoworkers: (value: number) => void;
   setAutoRetryLimit: (value: number) => void;
@@ -435,6 +450,8 @@ export interface SettingsState {
   setBackgroundBlur: (blur: number) => void;
   setBackgroundBrightness: (brightness: number) => void;
   setBackgroundSaturation: (saturation: number) => void;
+  setBackgroundMask: (mask: number) => void;
+  setBorderOpacity: (opacity: number) => void;
   setBackgroundComposerOpacity: (opacity: number) => void;
   setBackgroundCodeOpacity: (opacity: number) => void;
   setBackgroundSizeMode: (mode: BackgroundSizeMode) => void;

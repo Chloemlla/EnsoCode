@@ -6,6 +6,12 @@ import {
   normalizeBotMaxRunningTurns,
 } from '@shared/bots/concurrency';
 import {
+  type ChatTypography,
+  chatTypographyCssVars,
+  DEFAULT_CHAT_TYPOGRAPHY,
+  normalizeChatTypography,
+} from '@shared/chatTypography';
+import {
   type DefaultModelRef,
   oauthCredentialBlock,
   sanitizeDefaultModel,
@@ -106,6 +112,15 @@ function applyTerminalFont(fontFamily: string, fontSize: number): void {
   root.style.setProperty('--font-size-base', `${fontSize}px`);
 }
 
+function applyChatTypography(typography: ChatTypography): void {
+  if (typeof document === 'undefined') return;
+  const style = document.documentElement?.style;
+  if (!style) return;
+  for (const [name, value] of Object.entries(chatTypographyCssVars(typography))) {
+    style.setProperty(name, value);
+  }
+}
+
 // Apply app theme (dark/light mode)
 function applyAppTheme(theme: Theme, terminalTheme: string): void {
   const isDark =
@@ -124,6 +139,8 @@ function applySettings(state: {
   terminalFontSize: number;
   language: Locale;
   chatWide?: boolean;
+  borderOpacity?: number;
+  chatTypography?: ChatTypography;
 }): void {
   if (state.theme === 'sync-terminal') {
     applyTerminalThemeToApp(state.terminalTheme, true);
@@ -132,8 +149,13 @@ function applySettings(state: {
     applyAppTheme(state.theme, state.terminalTheme);
   }
   applyTerminalFont(state.terminalFontFamily, state.terminalFontSize);
+  document.documentElement.style.setProperty(
+    '--ui-border-opacity',
+    String(state.borderOpacity ?? 1)
+  );
   document.documentElement.lang = normalizeLocale(state.language) === 'zh' ? 'zh-CN' : 'en';
   document.documentElement.classList.toggle('enso-chat-wide', Boolean(state.chatWide));
+  applyChatTypography(state.chatTypography ?? DEFAULT_CHAT_TYPOGRAPHY);
 }
 
 function getDefaultLocale(): Locale {
@@ -170,6 +192,7 @@ const initialState = {
   rtkEnabled: true,
   computerPreview: true,
   computerAllowAllApps: false,
+  openLinksInBuiltinBrowser: true,
   protectedActionsInCode: false,
   dcgEnabled: false,
   editMode: 'apply_patch' as import('@shared/types').EditMode,
@@ -189,6 +212,7 @@ const initialState = {
   botRouteClassifier: null as VirtualClassifierConfig | null,
   botAssistantModel: null as import('@shared/defaultModel').DefaultModelRef | null,
   botMaxRunningTurns: DEFAULT_BOT_MAX_RUNNING_TURNS,
+  botDiscussModeEnabled: false,
   voiceInputDevice: SYSTEM_MICROPHONE,
   voiceModel: DEFAULT_SPEECH_MODEL_ID,
   voiceCorrectionEnabled: false,
@@ -208,6 +232,7 @@ const initialState = {
   collapseCompletedActivity: true,
   pinUnfinishedTodos: true,
   chatWide: false,
+  chatTypography: normalizeChatTypography(DEFAULT_CHAT_TYPOGRAPHY),
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
   autoRetryLimit: DEFAULT_AUTO_RETRY_LIMIT,
@@ -230,6 +255,8 @@ const initialState = {
   backgroundBlur: 0,
   backgroundBrightness: 1,
   backgroundSaturation: 1,
+  backgroundMask: 0.5,
+  borderOpacity: 1,
   backgroundComposerOpacity: 0.6,
   backgroundCodeOpacity: 0.65,
   backgroundSizeMode: 'cover' as BackgroundSizeMode,
@@ -355,6 +382,8 @@ export const useSettingsStore = create<SettingsState>()(
       setRtkEnabled: (rtkEnabled) => set({ rtkEnabled }),
       setComputerPreview: (computerPreview) => set({ computerPreview }),
       setComputerAllowAllApps: (computerAllowAllApps) => set({ computerAllowAllApps }),
+      setOpenLinksInBuiltinBrowser: (openLinksInBuiltinBrowser) =>
+        set({ openLinksInBuiltinBrowser }),
       setProtectedActionsInCode: (protectedActionsInCode) => set({ protectedActionsInCode }),
       setDcgEnabled: (dcgEnabled) => set({ dcgEnabled }),
       setMemoryEmbeddingModel: (memoryEmbeddingModel) => set({ memoryEmbeddingModel }),
@@ -373,6 +402,8 @@ export const useSettingsStore = create<SettingsState>()(
       setBotAssistantModel: (botAssistantModel) => set({ botAssistantModel }),
       setBotMaxRunningTurns: (value) =>
         set({ botMaxRunningTurns: normalizeBotMaxRunningTurns(value) }),
+      setBotDiscussModeEnabled: (botDiscussModeEnabled) =>
+        set({ botDiscussModeEnabled: botDiscussModeEnabled === true }),
       setVoiceInputDevice: (voiceInputDevice) => set({ voiceInputDevice }),
       setVoiceModel: (voiceModel) => set({ voiceModel }),
       setVoiceCorrectionEnabled: (voiceCorrectionEnabled) => set({ voiceCorrectionEnabled }),
@@ -406,6 +437,16 @@ export const useSettingsStore = create<SettingsState>()(
       setChatWide: (chatWide) => {
         document.documentElement.classList.toggle('enso-chat-wide', chatWide);
         set({ chatWide });
+      },
+      setChatTypography: (next) => {
+        const chatTypography = normalizeChatTypography(next);
+        applyChatTypography(chatTypography);
+        set({ chatTypography });
+      },
+      resetChatTypography: () => {
+        const chatTypography = normalizeChatTypography(DEFAULT_CHAT_TYPOGRAPHY);
+        applyChatTypography(chatTypography);
+        set({ chatTypography });
       },
       setNotifyMainAgentOnly: (notifyMainAgentOnly) => set({ notifyMainAgentOnly }),
       setMaxActiveCoworkers: (value) =>
@@ -444,6 +485,12 @@ export const useSettingsStore = create<SettingsState>()(
         set({ backgroundBrightness: clampNumber(brightness, 0, 2, 1) }),
       setBackgroundSaturation: (saturation) =>
         set({ backgroundSaturation: clampNumber(saturation, 0, 2, 1) }),
+      setBackgroundMask: (mask) => set({ backgroundMask: clampNumber(mask, 0, 1, 0.5) }),
+      setBorderOpacity: (value) => {
+        const borderOpacity = clampNumber(value, 0, 1, 1);
+        document.documentElement.style.setProperty('--ui-border-opacity', String(borderOpacity));
+        set({ borderOpacity });
+      },
       setBackgroundComposerOpacity: (opacity) =>
         set({ backgroundComposerOpacity: clampNumber(opacity, 0, 1, 0.6) }),
       setBackgroundCodeOpacity: (opacity) =>
@@ -1114,6 +1161,7 @@ export const useSettingsStore = create<SettingsState>()(
         ...state,
         fileOpenRules: normalizeFileOpenRules(state.fileOpenRules),
         contextMenuOpen: normalizeContextMenuOpen(state.contextMenuOpen),
+        chatTypography: normalizeChatTypography(state.chatTypography),
       }),
       onRehydrateStorage: () => (state, error) => {
         // merge 已完成：此后（含下面的补写）才允许落盘；读失败保持关闸
@@ -1176,6 +1224,9 @@ export const useSettingsStore = create<SettingsState>()(
         if (botMaxRunningTurns !== s.botMaxRunningTurns) {
           useSettingsStore.setState({ botMaxRunningTurns });
         }
+        if (typeof s.botDiscussModeEnabled !== 'boolean') {
+          useSettingsStore.setState({ botDiscussModeEnabled: false });
+        }
         const sshTimeoutSeconds = normalizeSshTimeoutSeconds(s.sshTimeoutSeconds);
         if (sshTimeoutSeconds !== s.sshTimeoutSeconds) {
           useSettingsStore.setState({ sshTimeoutSeconds });
@@ -1214,6 +1265,9 @@ export const useSettingsStore = create<SettingsState>()(
     }
   )
 );
+
+// 水合前先写默认变量，避免首帧字号落空
+applyChatTypography(DEFAULT_CHAT_TYPOGRAPHY);
 
 type ProjectEntry = SettingsState['projects'][number];
 

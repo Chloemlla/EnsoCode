@@ -243,6 +243,16 @@ describe('agent control tool protocol', () => {
       expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
   });
 
+  it('resume 只允许取值 true 的 prompt，不能用于 steer', () => {
+    const command = { type: 'prompt', identity: parent, text: 'hi', deliveryId: 'd', resume: true };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(
+      parseAgentCommand({ type: 'prompt', identity: parent, text: 'hi', resume: true })
+    ).not.toBeNull();
+    for (const patch of [{ type: 'steer' }, { resume: false }, { resume: 'true' }, { resume: 1 }])
+      expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
+  });
+
   it.each(['delivery-settled', 'delivery-rejected', 'delivery-deferred'])(
     '%s 只接受精确 identity、seq 与 deliveryId',
     (type) => {
@@ -659,6 +669,52 @@ describe('parent/child commands', () => {
     });
     expect(parseAgentCommand({ ...base, rolePrompt: '' })).toBeNull();
     expect(parseAgentCommand({ ...base, rolePrompt: 1 })).toBeNull();
+  });
+
+  it('spawn-parent 携 botDiscussMode：只接受布尔值，true 只能出现在 Bot 群聊成员会话', () => {
+    const base = { type: 'spawn-parent', identity: parent, cwd: '/repo', model };
+    const group = { ...base, botMode: true, botGroupTasks: true };
+    expect(parseAgentCommand({ ...group, botDiscussMode: true })).toEqual({
+      ...group,
+      botDiscussMode: true,
+    });
+    expect(parseAgentCommand({ ...group, botDiscussMode: false })).toEqual({
+      ...group,
+      botDiscussMode: false,
+    });
+    expect(parseAgentCommand({ ...base, botDiscussMode: false })).toEqual({
+      ...base,
+      botDiscussMode: false,
+    });
+    for (const value of ['true', 1, null, {}])
+      expect(parseAgentCommand({ ...group, botDiscussMode: value })).toBeNull();
+    // 私聊 / 非 Bot 会话没有群聊讨论：带 true 视为坏命令
+    expect(parseAgentCommand({ ...base, botDiscussMode: true })).toBeNull();
+    expect(parseAgentCommand({ ...base, botMode: true, botDiscussMode: true })).toBeNull();
+    expect(parseAgentCommand({ ...base, botGroupTasks: true, botDiscussMode: true })).toBeNull();
+  });
+
+  it('阶段13：spawn-parent / prompt / steer / retry 可带实例号，只收 UUID，prompt/steer/retry 只对父会话', () => {
+    const instanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const commands = [
+      { type: 'spawn-parent', identity: parent, cwd: '/repo', model },
+      { type: 'prompt', identity: parent, text: 'hi' },
+      { type: 'steer', identity: parent, text: 'hi' },
+      { type: 'retry', identity: parent },
+    ];
+    for (const command of commands) {
+      expect(parseAgentCommand(command)).toEqual(command);
+      expect(parseAgentCommand({ ...command, instanceId })).toEqual({ ...command, instanceId });
+      for (const bad of ['', 'not-a-uuid', 1, null, {}])
+        expect(parseAgentCommand({ ...command, instanceId: bad })).toBeNull();
+    }
+    for (const type of ['prompt', 'steer'])
+      expect(parseAgentCommand({ type, identity: child, text: 'hi', instanceId })).toBeNull();
+    expect(parseAgentCommand({ type: 'retry', identity: child, instanceId })).toBeNull();
+    expect(parseAgentCommand({ type: 'retry', identity: parent, instanceId, extra: 1 })).toBeNull();
+    // 不在归属范围内的命令不接受实例号
+    for (const type of ['abort', 'abort-retry', 'release-parent'])
+      expect(parseAgentCommand({ type, identity: parent, instanceId })).toBeNull();
   });
 
   it('spawn-parent 携 trustedProjectCode:字符串数组通过,脏值拒绝', () => {
@@ -1920,6 +1976,20 @@ describe('标题总结命令与事件', () => {
 });
 
 describe('generation lifecycle/events', () => {
+  it('阶段13：parent-rejected / parent-ended 可回显实例号；多字段、少字段、类型不对都拒绝', () => {
+    const instanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    for (const type of ['parent-rejected', 'parent-ended']) {
+      const event = { type, identity: parent, seq: 0, reason: 'gone' };
+      expect(parseAgentWorkerEvent(event)).toEqual(event);
+      expect(parseAgentWorkerEvent({ ...event, instanceId })).toEqual({ ...event, instanceId });
+      for (const bad of ['', 'not-a-uuid', 1, null])
+        expect(parseAgentWorkerEvent({ ...event, instanceId: bad })).toBeNull();
+      expect(parseAgentWorkerEvent({ ...event, instanceId, command: 'prompt' })).toBeNull();
+      const { reason: _reason, ...withoutReason } = event;
+      expect(parseAgentWorkerEvent({ ...withoutReason, instanceId })).toBeNull();
+    }
+  });
+
   it('parent/child ready 使用 exact profile proof，缺资源或伪字段拒绝', () => {
     expect(
       parseAgentWorkerEvent({
@@ -1982,6 +2052,25 @@ describe('generation lifecycle/events', () => {
     expect(parseAgentWorkerEvent({ ...retry, error: '' })).toBeNull();
     const { error: _dropped, ...withoutError } = retry;
     expect(parseAgentWorkerEvent(withoutError)).toBeNull();
+  });
+
+  it('retry-skipped 回执只认 busy / nothing-to-retry，缺字段、多字段或取值不符拒绝', () => {
+    const skipped = { type: 'retry-skipped', identity: parent, seq: 4, reason: 'nothing-to-retry' };
+    expect(parseAgentWorkerEvent(skipped)).toEqual(skipped);
+    expect(parseAgentWorkerEvent({ ...skipped, reason: 'busy' })).toEqual({
+      ...skipped,
+      reason: 'busy',
+    });
+    expect(parseAgentWorkerEvent({ ...skipped, identity: child })).toEqual({
+      ...skipped,
+      identity: child,
+    });
+    expect(parseAgentWorkerEvent({ ...skipped, reason: 'other' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...skipped, reason: '' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...skipped, error: 'x' })).toBeNull();
+    const { reason: _reason, ...withoutReason } = skipped;
+    expect(parseAgentWorkerEvent(withoutReason)).toBeNull();
+    expect(parseAgentWorkerEvent({ ...skipped, seq: -1 })).toBeNull();
   });
 
   it('session-meta 可带 usageTotals；脏统计只丢统计不丢事件', () => {
@@ -2375,6 +2464,28 @@ describe('memory-invoke / memory-result', () => {
     };
     expect(parseAgentWorkerEvent(event)).toEqual(event);
     expect(parseAgentWorkerEvent({ ...event, op: 'group_secrets' })).toBeNull();
+  });
+
+  it('delegation-invoke 接受 retry_delegation；turn-failed 只接受字面 true 的 retryExhausted', () => {
+    const event = {
+      type: 'delegation-invoke',
+      identity: parent,
+      seq: 1,
+      requestId: 'd-2',
+      op: 'retry_delegation',
+      params: { id: 'd1', note: 'again' },
+    };
+    expect(parseAgentWorkerEvent(event)).toEqual(event);
+    const failed = {
+      type: 'turn-failed',
+      identity: parent,
+      seq: 2,
+      turnId: 't',
+      error: 'socket hang up',
+      retryExhausted: true,
+    };
+    expect(parseAgentWorkerEvent(failed)).toEqual(failed);
+    expect(parseAgentWorkerEvent({ ...failed, retryExhausted: 'yes' })).toBeNull();
   });
 
   const invoke = {

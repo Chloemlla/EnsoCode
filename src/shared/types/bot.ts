@@ -51,14 +51,24 @@ export type BotChatWorkspace =
   | { kind: 'chat-home'; projectId: string }
   | { kind: 'project'; projectId: string };
 
-/** 人类消息不 @ 任何人时：boss 群主回复；smart 由便宜模型/分类器选一位成员 */
-export const BOT_ROUTING_MODES = ['boss', 'smart'] as const;
+/**
+ * 人类消息不 @ 任何人时：boss 群主回复；smart 由便宜模型/分类器选一位成员；
+ * turns 成员自选（#22，仅讨论模式开关打开时生效，关闭时按 smart）：成员按顺序多轮发言，各自判断说不说
+ */
+export const BOT_ROUTING_MODES = ['boss', 'smart', 'turns'] as const;
 export type BotRoutingMode = (typeof BOT_ROUTING_MODES)[number];
+/** 新建群（含内置团队模板建群）的默认路由模式；验收成员自选后再决定是否改为 turns */
+export const NEW_GROUP_ROUTING_MODE: BotRoutingMode = 'smart';
 
 export interface BotChatRouting {
   mode: BotRoutingMode;
   maxHops: number;
   maxTurnsPerBot: number;
+  /**
+   * 讨论安全上限（讨论模式开关打开时生效）：讨论主链里成员发言（含 [skip] 与失败）达到这个次数时交群主收尾。
+   * 缺省按 BOT_DISCUSS_MAX_TURNS.default 算，旧数据不迁移；只存群内，不随团队导出。
+   */
+  discussMaxTurns?: number;
   /** 静音成员：只在被点名 @ 时发言（@所有人、智能选人、群主兜底都跳过）；群主不可静音 */
   muted?: BotId[];
 }
@@ -139,6 +149,10 @@ export interface DelegationAppend {
   deliveryId: string;
   ok?: boolean;
 }
+export const DELEGATION_RETRY_BY = ['auto', 'delegator', 'human'] as const;
+export type DelegationRetryBy = (typeof DELEGATION_RETRY_BY)[number];
+/** retry_delegation 补充说明的长度上限 */
+export const DELEGATION_NOTE_MAX = 2000;
 
 export function isDelegationTimeoutMinutes(value: unknown): value is number {
   return (
@@ -181,6 +195,14 @@ export interface Delegation {
   taskId?: string;
   /** 由哪条委派重试而来；被指向的记录视为已重试，不能再次重试 */
   retryOf?: string;
+  /** 这次重试由谁发起：auto 自动重试 / delegator 委派人用 retry_delegation / human 界面上点的；旧数据缺省视为 human */
+  retryBy?: DelegationRetryBy;
+  /** 委派人重试时附的补充说明（从头重发时一并带上） */
+  retryNote?: string;
+  /** 失败后已排定自动重试的时刻（等待期间不唤醒委派人）；接替记录出现前持久化，重启后据此重排 */
+  autoRetryAt?: number;
+  /** failure 为 error 时：pi 回合内自动重试已用尽的瞬态错误（网络 / 限流 / 5xx） */
+  transient?: true;
   /** 本次委派的时限（分钟）：发起方 deadlineMinutes 与目标上限取小 */
   timeoutMinutes?: number;
   /** 发起方要求父回合被停止 / 中断后仍继续 */
@@ -194,6 +216,28 @@ export interface Delegation {
   appends?: DelegationAppend[];
   /** report_blocked 登记；本轮结束时执行记为 blocked */
   blocked?: DelegationBlocked;
+  /** 结果写进群时间线的那条成员消息的 seq（仅 completed 且发起方是成员当前群会话的第一层委派） */
+  resultSeq?: number;
+  /**
+   * 结果待写进群时间线：finish 时与 completed 终态同一行落盘，写入（或确认不写）后清除。
+   * 重启时据此补写 / 回填 resultSeq；功能上线前完成的记录没有此标记，不补发。turnId 为产出结果的子会话回合
+   */
+  pendingResultEntry?: { turnId?: string };
+  /**
+   * 子会话这一轮已结束，但它发起的下层委派还没结束（排队 / 运行 / 等待自动重试 / 结果还没送回）：
+   * 委派保持 running、不交回，等下层结果送回子会话、被唤醒的那一轮结束后再判定。
+   * text / turnId 为这一轮的输出。只有一种情况拿它当完成时的回退文本：仍在等待、子会话空闲，
+   * 而下层全部被外部作废（群开新对话 / 回退 / 停止等，结果不会再送回子会话）。
+   * 下层结果一旦送进子会话（含重启后从 jsonl 认出）即清除：整合轮在跑就等它结束判定，
+   * 没在跑（崩溃 / 重启）则标 interrupted 按自动重试续跑整合轮，不用暂存文本；进入终态时同样清除。
+   */
+  waiting?: { since: number; text: string; turnId?: string };
+  /**
+   * 已作为只读背景送进子会话的群消息水位（群 / 话题时间线 seq；群里还没消息时为 0）。
+   * 同一子会话上的续跑 / 重试 / 被下层结果唤醒只补此后的新增；换新子会话从头再给最近的。
+   * 功能上线前的记录没有此字段：下次往原子会话补背景时按首次处理（给最近的），之后照常增量。
+   */
+  groupContextSeq?: number;
 }
 
 export function parseDelegation(value: unknown): Delegation | undefined {
@@ -239,9 +283,30 @@ export function parseDelegation(value: unknown): Delegation | undefined {
   if (isText(value.batchId)) record.batchId = value.batchId;
   if (isBotId(value.taskId)) record.taskId = value.taskId;
   if (isText(value.retryOf)) record.retryOf = value.retryOf;
+  if (DELEGATION_RETRY_BY.includes(value.retryBy as DelegationRetryBy))
+    record.retryBy = value.retryBy as DelegationRetryBy;
+  if (isText(value.retryNote)) record.retryNote = value.retryNote.slice(0, DELEGATION_NOTE_MAX);
+  if (isTime(value.autoRetryAt)) record.autoRetryAt = value.autoRetryAt;
+  if (value.transient === true) record.transient = true;
   if (typeof value.timeoutMinutes === 'number' && value.timeoutMinutes > 0)
     record.timeoutMinutes = value.timeoutMinutes;
   if (value.keep === true) record.keep = true;
+  if (isSeq(value.resultSeq) && value.resultSeq > 0) record.resultSeq = value.resultSeq;
+  if (isSeq(value.groupContextSeq)) record.groupContextSeq = value.groupContextSeq;
+  if (isObject(value.pendingResultEntry))
+    record.pendingResultEntry = isText(value.pendingResultEntry.turnId)
+      ? { turnId: value.pendingResultEntry.turnId }
+      : {};
+  if (
+    isObject(value.waiting) &&
+    isTime(value.waiting.since) &&
+    typeof value.waiting.text === 'string'
+  )
+    record.waiting = {
+      since: value.waiting.since,
+      text: value.waiting.text,
+      ...(isText(value.waiting.turnId) ? { turnId: value.waiting.turnId } : {}),
+    };
   const check = parseTaskCheck(value.check);
   if (check) record.check = check;
   if (DELEGATION_TRIGGERS.includes(value.trigger as never))
@@ -343,10 +408,17 @@ export type GroupEntry =
       text: string;
       conversationId: string;
       turnId: string;
-      /** 该轮回复人由智能选人选出（群主兜底不标）；带意图时为 smart:<intent>；summary 为派单后的群主汇总 */
+      /**
+       * 该轮回复人由智能选人选出（群主兜底不标）；带意图时为 smart:<intent>；summary 为派单后的群主汇总；
+       * wrap-up 为讨论结束后的群主收尾
+       */
       routedBy?: BotRoutedBy;
       /** 产出该回复的模型 id（虚拟模型为实际路由到的真实模型） */
       model?: string;
+      /** 委派结果：系统以被委派成员名义写入，conversationId 为委派子会话；不参与群路由 */
+      delegationId?: string;
+      /** 不进该成员的群增量：重启补写的委派结果，发起人此前已随委派回传收到过全文 */
+      hiddenFrom?: BotId;
     })
   | (GroupEntryBase & {
       kind: 'delegation';
@@ -392,9 +464,12 @@ export const BOT_ROUTED_BY = [
   'smart:answer',
   'smart:discuss',
   'summary',
+  'wrap-up',
 ] as const;
 export type BotRoutedBy = (typeof BOT_ROUTED_BY)[number];
 const ROUTING_LIMITS = { maxHops: 20, maxTurnsPerBot: 10 } as const;
+/** 讨论安全上限的取值范围与缺省值 */
+export const BOT_DISCUSS_MAX_TURNS = { min: 5, max: 200, default: 50 } as const;
 
 export const BOT_NAME_MAX = 24;
 /** 群聊里 @ 全体的保留写法 */
@@ -595,6 +670,16 @@ export function parseBotChat(value: unknown): BotChat | undefined {
         ROUTING_LIMITS.maxTurnsPerBot,
         BOT_ROUTING_DEFAULTS.maxTurnsPerBot
       ),
+      ...(Number.isSafeInteger(routing.discussMaxTurns)
+        ? {
+            discussMaxTurns: intIn(
+              routing.discussMaxTurns,
+              BOT_DISCUSS_MAX_TURNS.min,
+              BOT_DISCUSS_MAX_TURNS.max,
+              BOT_DISCUSS_MAX_TURNS.default
+            ),
+          }
+        : {}),
       ...(muted.length > 0 ? { muted } : {}),
     },
     pinned: value.pinned === true,
@@ -651,6 +736,8 @@ export function parseGroupEntry(value: unknown): GroupEntry | undefined {
               ? { routedBy: value.routedBy as BotRoutedBy }
               : {}),
             ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+            ...(isText(value.delegationId) ? { delegationId: value.delegationId } : {}),
+            ...(isBotId(value.hiddenFrom) ? { hiddenFrom: value.hiddenFrom } : {}),
           }
         : undefined;
     case 'delegation': {

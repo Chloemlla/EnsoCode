@@ -1149,6 +1149,19 @@ export type ParentHistoryTailResult =
   | { ok: true; messages: ProjectedMessage[]; baseIndex: number }
   | { ok: false; code: 'not-found' | 'unavailable'; error: string };
 
+export interface ChildRunSummary {
+  childId: string;
+  name: string;
+  agentType?: string;
+  startedAt: number;
+  live: boolean;
+  available: boolean;
+}
+
+export type ChildRunListResult =
+  | { ok: true; items: ChildRunSummary[] }
+  | { ok: false; code: 'invalid'; error: string };
+
 export type DispatchProgressPhase =
   | 'received'
   | 'source-bound'
@@ -1267,6 +1280,16 @@ export type AgentCommand =
       botMode?: boolean;
       /** Bot 群聊成员会话：挂 group_tasks / group_history 工具（私聊 / 委派子会话不挂） */
       botGroupTasks?: boolean;
+      /**
+       * Bot 讨论模式（实验性）开启：群聊成员会话的 delegate 说明加讨论接力句。只能与 botMode + botGroupTasks
+       * 同时为 true；缺省 / false 时文案与 main 一致。worker 与 Main 同包发布，不存在跨版本组合。
+       */
+      botDiscussMode?: boolean;
+      /**
+       * Main 给这次 spawn 出的实例分配的号（UUID，目前只有 Bot 宿主传）。worker 存在会话上，parent-ended 回显它；
+       * 同代会话仍在而短路回 parent-ready 时改绑成这个号。与 generation 正交，不参与授权键。
+       */
+      instanceId?: string;
       /** Bot 私聊 / 群聊成员会话（非委派）：挂 routine_propose / send_image 工具 */
       botRoutines?: boolean;
       /** Bot 挂看板任务的委派会话：挂 report_blocked 工具 */
@@ -1332,6 +1355,18 @@ export type AgentCommand =
       deliveryId?: string;
       /** Bot 插话仅允许进入活轮；不再忙时交回 Main 重新准入。 */
       activeOnly?: true;
+      /**
+       * 仅 prompt：带新消息的断点续跑（委派续跑附说明 / 验收原因 / 群背景新增）。worker 在空闲会话上开新轮前
+       * 先按 retry 的语义把未完成（error / aborted / 停在工具调用）的最后一条 assistant 移出模型上下文；
+       * 会话仍在流式时照常插话。旧 worker 不认此字段会整条拒收；worker 由 Main 经 `?modulePath` 随同一次构建
+       * 打进同一应用包、启动时 fork，随应用退出，不存在跨版本组合。
+       */
+      resume?: true;
+      /**
+       * 仅父会话：这条命令发往的实例号（见 spawn-parent.instanceId）。会话不在而被拒时 parent-rejected 原样回显，
+       * Main 据此认出拒绝属于哪个实例。
+       */
+      instanceId?: string;
     }
   | { type: 'set-model'; identity: SessionIdentity; model: SpawnModelConfig }
   | { type: 'set-thinking'; identity: SessionIdentity; level: ThinkingLevel }
@@ -1523,7 +1558,8 @@ export type AgentCommand =
     }
   | { type: 'abort-classify-choice'; requestId: string }
   | { type: 'abort-retry'; identity: SessionIdentity }
-  | { type: 'retry'; identity: SessionIdentity }
+  /** instanceId 同 prompt：会话不在而被拒时 parent-rejected 回显 */
+  | { type: 'retry'; identity: SessionIdentity; instanceId?: string }
   /** 释放父会话：中断并销毁 worker 侧会话（含全部 coworker/child），jsonl 留盘可 resume。
    *  用于 Move to worktree 等需要换 cwd 重新 spawn 的场景。 */
   | { type: 'release-parent'; identity: SessionIdentity }
@@ -1769,8 +1805,17 @@ export type ParentLifecycleEvent =
       identity: SessionIdentity;
       seq: number;
       reason: string;
+      /** 被拒命令自己带的实例号（spawn-parent / prompt / steer / retry）；命令没带则缺省 */
+      instanceId?: string;
     }
-  | { type: 'parent-ended'; identity: SessionIdentity; seq: number; reason: string };
+  | {
+      type: 'parent-ended';
+      identity: SessionIdentity;
+      seq: number;
+      reason: string;
+      /** 被结束实例最近一次 spawn-parent 绑定的实例号；没绑过则缺省 */
+      instanceId?: string;
+    };
 
 export type ChildLifecycleEvent =
   | {
@@ -1847,6 +1892,10 @@ export type PluginMcpResultEvent =
   | { type: 'plugin-mcp-result'; requestId: string; ok: true; value: unknown }
   | { type: 'plugin-mcp-result'; requestId: string; ok: false; error: string };
 
+/** retry-skipped 的原因：busy = 会话不空闲；nothing-to-retry = 最后一条仍是已完成的 assistant */
+export const RETRY_SKIPPED_REASONS = ['busy', 'nothing-to-retry'] as const;
+export type RetrySkippedReason = (typeof RETRY_SKIPPED_REASONS)[number];
+
 export type AgentWorkerEvent =
   /** 会话外（辅助补全 / compaction）的脱敏记录，Main 写 ledger */
   | { type: 'privacy-mask-ledger'; record: PrivacyMaskRecord }
@@ -1899,6 +1948,8 @@ export type AgentWorkerEvent =
       error: string;
       /** 消息从未提交给 pi（僵尸轮超时等）：renderer 应收回乐观回显并把文本退回输入框 */
       undelivered?: true;
+      /** pi 回合内自动重试已用尽、最终仍是它判定的瞬态错误（网络 / 限流 / 5xx） */
+      retryExhausted?: true;
     }
   | {
       /** 瞬态错误后 pi 将自动重试：非终态，不 settle 轮次；下一个 status/turn-* 事件清除 */
@@ -1910,6 +1961,17 @@ export type AgentWorkerEvent =
       maxAttempts: number;
       delayMs: number;
       error: string;
+    }
+  | {
+      /**
+       * retry 命令没有开出新轮的明确回执：会话忙（压缩 / 分支摘要等非空闲状态）或最后一条仍是
+       * 已完成的 assistant（没有可重试的）。Main 据此结算等着这次续跑的轮次，不再靠计时器猜。
+       * worker 与 Main 同包发布，不存在「旧 worker 不发回执」的版本错配。
+       */
+      type: 'retry-skipped';
+      identity: SessionIdentity;
+      seq: number;
+      reason: RetrySkippedReason;
     }
   /** 工具执行中的输出快照（pi tool_execution_update 节流下发）：工具行运行中即可展开查看 */
   | {
@@ -2018,6 +2080,7 @@ export type AgentWorkerEvent =
       op:
         | 'delegate'
         | 'check_delegation'
+        | 'retry_delegation'
         | 'group_tasks'
         | 'group_history'
         | 'routine_propose'
@@ -3483,11 +3546,13 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'refusalRetryPrompt',
           'botMode',
           'botGroupTasks',
+          'botDiscussMode',
           'botRoutines',
           'botDelegationTask',
           'botWriteLock',
           'protectedActions',
           'planMode',
+          'instanceId',
         ]) ||
         !parseSessionIdentity(value.identity) ||
         typeof value.cwd !== 'string' ||
@@ -3549,6 +3614,9 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.refusalRetryPrompt !== undefined && !isNonEmptyString(value.refusalRetryPrompt)) ||
         (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
         (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
+        (value.botDiscussMode !== undefined && typeof value.botDiscussMode !== 'boolean') ||
+        (value.botDiscussMode === true &&
+          (value.botMode !== true || value.botGroupTasks !== true)) ||
         (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||
         (value.botDelegationTask !== undefined && typeof value.botDelegationTask !== 'boolean') ||
         (value.botWriteLock !== undefined &&
@@ -3556,7 +3624,8 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
             !isNonEmptyString(value.botWriteLock.label) ||
             !Array.isArray(value.botWriteLock.ancestors) ||
             !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
-        (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean')
+        (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean') ||
+        (value.instanceId !== undefined && !isUuid(value.instanceId))
       ) {
         return null;
       }
@@ -3711,6 +3780,8 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         'images',
         'deliveryId',
         'activeOnly',
+        'resume',
+        'instanceId',
       ]) &&
         parseAnySessionIdentity(value.identity) &&
         typeof value.text === 'string' &&
@@ -3720,7 +3791,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           (value.type === 'steer' &&
             value.activeOnly === true &&
             isDeliveryId(value.deliveryId))) &&
-        (value.deliveryId === undefined || isDeliveryId(value.deliveryId))
+        (value.resume === undefined || (value.type === 'prompt' && value.resume === true)) &&
+        (value.deliveryId === undefined || isDeliveryId(value.deliveryId)) &&
+        (value.instanceId === undefined ||
+          (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
         ? (value as unknown as AgentCommand)
         : null;
     }
@@ -3990,9 +4064,15 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
     }
     case 'abort':
     case 'abort-retry':
-    case 'retry':
     case 'release-parent':
       return hasExactKeys(value, ['type', 'identity']) && parseAnySessionIdentity(value.identity)
+        ? (value as unknown as AgentCommand)
+        : null;
+    case 'retry':
+      return hasOnlyKeys(value, ['type', 'identity', 'instanceId']) &&
+        parseAnySessionIdentity(value.identity) &&
+        (value.instanceId === undefined ||
+          (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
         ? (value as unknown as AgentCommand)
         : null;
     case 'append-session-custom-entry':
@@ -4071,6 +4151,11 @@ function parseLifecycleEvent(value: Record<string, unknown>): AgentWorkerEvent |
       return parseModelRef(value.model) ? (value as unknown as AgentWorkerEvent) : null;
     case 'parent-rejected':
     case 'parent-ended':
+      return hasOnlyKeys(value, ['type', 'identity', 'seq', 'reason', 'instanceId']) &&
+        isNonEmptyString(value.reason) &&
+        (value.instanceId === undefined || isUuid(value.instanceId))
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
     case 'child-rejected':
     case 'child-ended':
       return isNonEmptyString(value.reason) ? (value as unknown as AgentWorkerEvent) : null;
@@ -4313,6 +4398,7 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         isNonEmptyString(value.requestId) &&
         (value.op === 'delegate' ||
           value.op === 'check_delegation' ||
+          value.op === 'retry_delegation' ||
           value.op === 'group_tasks' ||
           value.op === 'group_history' ||
           value.op === 'routine_propose' ||
@@ -4412,7 +4498,8 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     case 'turn-failed':
       return isNonEmptyString(value.turnId) &&
         isNonEmptyString(value.error) &&
-        (value.undelivered === undefined || value.undelivered === true)
+        (value.undelivered === undefined || value.undelivered === true) &&
+        (value.retryExhausted === undefined || value.retryExhausted === true)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'turn-retry':
@@ -4422,6 +4509,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         (value.maxAttempts as number) >= 0 &&
         isSequence(value.delayMs) &&
         isNonEmptyString(value.error)
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    case 'retry-skipped':
+      return hasExactKeys(value, ['type', 'identity', 'seq', 'reason']) &&
+        RETRY_SKIPPED_REASONS.includes(value.reason as RetrySkippedReason)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'messages-truncated':

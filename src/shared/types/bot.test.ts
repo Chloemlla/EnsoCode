@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BOT_DISCUSS_MAX_TURNS,
   BOT_ROUTING_DEFAULTS,
+  BOT_ROUTING_MODES,
   BOT_THREAD_TITLE_MAX,
   checkBotName,
+  NEW_GROUP_ROUTING_MODE,
   parseBotBudget,
   parseBotChat,
   parseBotProfile,
@@ -181,6 +184,15 @@ describe('parseBotChat', () => {
     expect(parseBotChat(group)).toEqual(group);
   });
 
+  it('成员自选（turns）是合法路由模式；未知模式退回 boss；新建群默认仍为 smart', () => {
+    expect(BOT_ROUTING_MODES).toEqual(['boss', 'smart', 'turns']);
+    const turns = { ...group, routing: { ...group.routing, mode: 'turns' } };
+    expect(parseBotChat(turns)?.routing.mode).toBe('turns');
+    const unknown = { ...group, routing: { ...group.routing, mode: 'auto' } };
+    expect(parseBotChat(unknown)?.routing.mode).toBe(BOT_ROUTING_DEFAULTS.mode);
+    expect(NEW_GROUP_ROUTING_MODE).toBe('smart');
+  });
+
   it('keeps settle / snooze times and the pin order only while pinned', () => {
     expect(parseBotChat({ ...group, settledAt: 5, snoozedUntil: 9, pinOrder: 2 })).toMatchObject({
       settledAt: 5,
@@ -256,6 +268,18 @@ describe('parseBotChat', () => {
     expect(parse([BOT_A])?.routing).not.toHaveProperty('muted');
     expect(parse('x')?.routing).not.toHaveProperty('muted');
     expect(parseBotChat(group)?.routing).not.toHaveProperty('muted');
+  });
+
+  it('routing.discussMaxTurns：缺省不写入（按 50 算），越界夹到 5–200，非整数丢弃', () => {
+    expect(BOT_DISCUSS_MAX_TURNS).toEqual({ min: 5, max: 200, default: 50 });
+    const parse = (discussMaxTurns: unknown) =>
+      parseBotChat({ ...group, routing: { ...group.routing, discussMaxTurns } })?.routing;
+    expect(parseBotChat(group)?.routing).not.toHaveProperty('discussMaxTurns');
+    expect(parse(30)?.discussMaxTurns).toBe(30);
+    expect(parse(1)?.discussMaxTurns).toBe(5);
+    expect(parse(999)?.discussMaxTurns).toBe(200);
+    for (const bad of ['30', 12.5, null, Number.NaN, {}])
+      expect(parse(bad)).not.toHaveProperty('discussMaxTurns');
   });
 
   it('preserves valid distillation watermarks and drops malformed ones', () => {
@@ -480,7 +504,7 @@ describe('parseGroupEntry', () => {
     };
     expect(parseGroupEntry({ ...base, routedBy: 'smart' })).toEqual({ ...base, routedBy: 'smart' });
     expect(parseGroupEntry({ ...base, routedBy: 'other' })).toEqual(base);
-    for (const routedBy of ['smart:build', 'smart:answer', 'smart:discuss', 'summary'])
+    for (const routedBy of ['smart:build', 'smart:answer', 'smart:discuss', 'summary', 'wrap-up'])
       expect(parseGroupEntry({ ...base, routedBy })).toEqual({ ...base, routedBy });
     expect(parseGroupEntry({ ...base, routedBy: 'smart:x' })).toEqual(base);
   });
@@ -499,5 +523,44 @@ describe('parseGroupEntry', () => {
     expect(parseGroupEntry({ ...base, model: 'glm-5.3' })).toEqual({ ...base, model: 'glm-5.3' });
     expect(parseGroupEntry({ ...base, model: '' })).toEqual(base);
     expect(parseGroupEntry({ ...base, model: 3 })).toEqual(base);
+  });
+
+  it('bot 条目保留委派结果的 delegationId，非法值丢弃', () => {
+    const base = {
+      seq: 2,
+      id: 'delegation-result:d1',
+      at: 2,
+      kind: 'bot',
+      botId: BOT_A,
+      text: 'done',
+      conversationId: 'child',
+      turnId: 't1',
+    };
+    expect(parseGroupEntry({ ...base, delegationId: 'd1' })).toEqual({
+      ...base,
+      delegationId: 'd1',
+    });
+    expect(parseGroupEntry({ ...base, delegationId: '' })).toEqual(base);
+    expect(parseGroupEntry({ ...base, delegationId: 7 })).toEqual(base);
+  });
+
+  it('bot 条目保留合法的 hiddenFrom，非法值丢弃', () => {
+    const base = {
+      seq: 2,
+      id: 'delegation-result:d1',
+      at: 2,
+      kind: 'bot',
+      botId: BOT_A,
+      text: 'done',
+      conversationId: 'child',
+      turnId: 't1',
+      delegationId: 'd1',
+    };
+    expect(parseGroupEntry({ ...base, hiddenFrom: BOT_A })).toEqual({
+      ...base,
+      hiddenFrom: BOT_A,
+    });
+    expect(parseGroupEntry({ ...base, hiddenFrom: '' })).toEqual(base);
+    expect(parseGroupEntry({ ...base, hiddenFrom: 7 })).toEqual(base);
   });
 });
