@@ -1667,6 +1667,11 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_CHANGED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.EXTENSION_PLUGINS_CHANGED, listener);
     },
+    onNotice: (callback: (notice: ExtensionPluginNotice) => void): (() => void) => {
+      const listener = (_event: unknown, notice: ExtensionPluginNotice) => callback(notice);
+      ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_NOTICE, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.EXTENSION_PLUGINS_NOTICE, listener);
+    },
     pickAndStage: (
       kind: 'dir' | 'zip'
     ): Promise<
@@ -1696,6 +1701,11 @@ const electronAPI = {
     > => ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_MARKET_STAGE, id, version),
     setMarketChinaMirror: (on: boolean): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_MARKET_SET_MIRROR, on),
+    readme: (request: {
+      id: string;
+      from: 'installed' | 'market';
+    }): Promise<{ ok: true; markdown: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_README, request),
     commit: (token: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.EXTENSION_PLUGINS_COMMIT, token),
     discard: (token: string): Promise<{ ok: boolean }> =>
@@ -1807,6 +1817,7 @@ import type {
   ExtensionPluginConfigField,
   ExtensionPluginInstallPreview,
   ExtensionPluginMarketList,
+  ExtensionPluginNotice,
   ExtensionPluginSummary,
   RegistryNotice,
 } from '@shared/extensionPlugins/types';

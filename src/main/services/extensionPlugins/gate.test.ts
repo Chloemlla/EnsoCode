@@ -631,6 +631,18 @@ describe('PluginHostGate', () => {
     expect(sessionUi).toHaveBeenLastCalledWith({ sessionId: 's1', origin: null }, 'createSession', {
       text: '整理看板',
     });
+
+    await expect(
+      gate.handle('a.b', 'session.create', { presetId: 'plugin:a.b:review' }, uiCall())
+    ).resolves.toEqual({ sessionId: 's3' });
+    expect(sessionUi).toHaveBeenLastCalledWith({ sessionId: 's1', origin: null }, 'createSession', {
+      presetId: 'plugin:a.b:review',
+    });
+    for (const bad of ['a.b:review', 'plugin:other.plugin:review', 'plugin:a.b:']) {
+      await expect(
+        gate.handle('a.b', 'session.create', { presetId: bad }, uiCall())
+      ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    }
   });
 
   it('会话接口在调用不属于任何会话时拒绝', async () => {
@@ -767,6 +779,29 @@ describe('PluginHostGate', () => {
     expect(inject).toHaveBeenCalledTimes(5);
   });
 
+  it('拒绝跨会话注入时带上插件 id，同一会话或已授权不通知', async () => {
+    const onInjectDenied = vi.fn();
+    const inject = vi.fn(() => ({ ok: true as const }));
+    deps.onInjectDenied = onInjectDenied;
+    deps.inject = inject;
+    deps.manifest = () => manifest({ permissions: ['agent.inject'] });
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 'other' }, agentCall())
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(onInjectDenied).toHaveBeenCalledTimes(1);
+    expect(onInjectDenied).toHaveBeenCalledWith('a.b');
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall())
+    ).resolves.toBeNull();
+    deps.crossSessionInject = () => true;
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 'other' }, agentCall())
+    ).resolves.toBeNull();
+    expect(onInjectDenied).toHaveBeenCalledTimes(1);
+  });
+
   it('目标会话没在运行时先请主窗口启动，就绪后再注入；启动失败或一直没就绪时如实报错', async () => {
     const notRunning = { ok: false as const, error: '会话不在运行', notRunning: true as const };
     let attempts = 0;
@@ -780,7 +815,7 @@ describe('PluginHostGate', () => {
       gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall())
     ).resolves.toBeNull();
     expect(wakeSession).toHaveBeenCalledTimes(1);
-    expect(wakeSession).toHaveBeenCalledWith('s1');
+    expect(wakeSession).toHaveBeenCalledWith('s1', null);
     expect(inject).toHaveBeenCalledTimes(3);
 
     deps.inject = vi.fn(() => notRunning);

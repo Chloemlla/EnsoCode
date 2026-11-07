@@ -52,6 +52,7 @@ import type {
   ExtensionPluginConfigField,
   ExtensionPluginInstallPreview,
   ExtensionPluginMarketList,
+  ExtensionPluginNotice,
   ExtensionPluginSummary,
   PluginEventPlan,
   PluginToolDescriptor,
@@ -82,6 +83,7 @@ import { applyPluginAction, type PluginAction, type PluginRecord } from './lifec
 import { DEFAULT_LOG_TAIL_BYTES, PluginLogger } from './log';
 import { marketIconUrl, type PluginMarket } from './market';
 import { type PluginLogLevel, PluginProcess, pluginError } from './process';
+import { type ReadmeResult, readPackageReadme } from './readme';
 import {
   preserveUnreadableRegistry,
   REGISTRY_VERSION,
@@ -121,7 +123,7 @@ const RESIDENT_LIMIT = 5;
 const RESIDENT_RESTART_MS = 5_000;
 const PROGRESS_INTERVAL_MS = 200;
 const MAX_TOOL_RESULT_BYTES = 1024 * 1024;
-const MAX_UI_PAYLOAD_BYTES = 64 * 1024;
+const MAX_UI_PAYLOAD_BYTES = 1024 * 1024;
 const UI_RATE_PER_SECOND = 10;
 const BREAKER_FAILURES = 5;
 const BREAKER_COOLDOWN_MS = 30_000;
@@ -170,6 +172,8 @@ export interface ExtensionPluginServiceOptions {
   market?: PluginMarket;
   /** 拉起动态工具时单个插件的等待上限，测试可缩短 */
   prepareTimeoutMs?: number;
+  /** 缺省开启。返回 false 时市场更新只提示，不安装 */
+  autoUpdatePlugins?: () => boolean;
 }
 
 export type UiCallMethod = Exclude<PluginCallMethod, 'tool.execute'>;
@@ -239,6 +243,8 @@ export class ExtensionPluginService {
     { stamps: number[]; failures: number; openUntil: number }
   >();
   private readonly listeners = new Set<() => void>();
+  private readonly noticeListeners = new Set<(notice: ExtensionPluginNotice) => void>();
+  private readonly injectDeniedNotified = new Set<string>();
   private changeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly logger: PluginLogger;
   /** 检查更新的结果，只在内存；装上不低于该版本的包后清掉 */
@@ -288,6 +294,7 @@ export class ExtensionPluginService {
       },
       crossSessionInject: (pluginId) =>
         this.records.find((r) => r.id === pluginId)?.crossSessionInject === true,
+      onInjectDenied: (pluginId) => this.noteInjectDenied(pluginId),
       callPlugin: (callerId, targetId, name, args, depth, caller) =>
         this.callExport(callerId, targetId, name, args, depth, caller),
       registerContrib: (pluginId, input) => this.registerContrib(pluginId, input),
@@ -309,6 +316,11 @@ export class ExtensionPluginService {
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  onNotice(listener: (notice: ExtensionPluginNotice) => void): () => void {
+    this.noticeListeners.add(listener);
+    return () => this.noticeListeners.delete(listener);
   }
 
   list(): ExtensionPluginSummary[] {
@@ -495,6 +507,17 @@ export class ExtensionPluginService {
     this.options.market?.setChinaMirror(on);
   }
 
+  readme(id: string, from: 'installed' | 'market'): ReadmeResult | Promise<ReadmeResult> {
+    if (from === 'market') {
+      const market = this.options.market;
+      if (!market) return { ok: false, error: '当前环境不支持插件市场' };
+      return market.readme(id);
+    }
+    const record = this.records.find((item) => item.id === id);
+    if (!record) return { ok: false, error: '插件未安装' };
+    return readPackageReadme(pluginPackagePath(this.options.root, record.id, record.dir));
+  }
+
   /** 从记录的安装来源重新暂存；之后和普通更新一样确认、按授权是否扩大分流 */
   async restage(id: string) {
     return this.withIdLock(id, async () => {
@@ -569,6 +592,13 @@ export class ExtensionPluginService {
         if (!expands) {
           this.stopProcess(existing.id);
           removePackage(this.options.root, existing.id, oldDir);
+        } else {
+          this.emitNotice({
+            kind: 'update-needs-approval',
+            pluginId: existing.id,
+            name: manifest.name,
+            version: manifest.version,
+          });
         }
       }
       this.persist();
@@ -597,6 +627,7 @@ export class ExtensionPluginService {
       return { ok: false, error: '插件没有申请 agent.inject' };
     record.crossSessionInject = allowed;
     this.persist();
+    this.injectDeniedNotified.delete(id);
     return { ok: true };
   }
 
@@ -1414,7 +1445,7 @@ export class ExtensionPluginService {
           : manifest.contributes.triggers.some((t) => t.name === input.payload.name);
     if (!declared) throw pluginError('NOT_DECLARED', '清单没有声明这项能力');
     if (Buffer.byteLength(JSON.stringify(input.payload), 'utf8') > MAX_UI_PAYLOAD_BYTES)
-      throw pluginError('TOO_LARGE', '参数超过 64KB');
+      throw pluginError('TOO_LARGE', '参数超过 1MB');
     this.admitUiCall(input.pluginId);
     try {
       const value = await this.invoke(input.pluginId, input.method, input.payload, {
@@ -1427,7 +1458,7 @@ export class ExtensionPluginService {
         kind: 'ui',
       });
       if (Buffer.byteLength(JSON.stringify(value ?? null), 'utf8') > MAX_UI_PAYLOAD_BYTES)
-        throw pluginError('TOO_LARGE', '返回值超过 64KB');
+        throw pluginError('TOO_LARGE', '返回值超过 1MB');
       this.settleUiCall(input.pluginId, true);
       return value;
     } catch (error) {
@@ -1504,7 +1535,7 @@ export class ExtensionPluginService {
     run(UPDATE_CHECK_FIRST_DELAY_MS);
   }
 
-  /** GitHub 来源只拉清单比较版本；市场来源对比签名索引。不下载整包、不自动安装 */
+  /** GitHub 来源只比较版本。市场来源在自动更新开启时走和手动更新相同的安装流程 */
   async checkUpdates(options: { enabledOnly?: boolean } = {}) {
     const marketRecords = this.records.filter(
       (r) => r.source?.kind === 'market' && (!options.enabledOnly || r.state === 'enabled')
@@ -1543,17 +1574,61 @@ export class ExtensionPluginService {
   private async checkMarketUpdates(records: PluginRecord[]) {
     if (records.length === 0 || !this.options.market) return [];
     const r = await this.options.market.index({ refresh: true });
-    return records.map((record) => {
+    const results: Array<'available' | 'current' | 'failed'> = [];
+    for (const record of records) {
       if (!r.ok) {
         this.updates.set(record.id, { error: r.error });
-        return 'failed' as const;
+        results.push('failed');
+        continue;
       }
       const latest = r.index.plugins.find((p) => p.id === record.id)?.latest;
-      const update =
-        latest && isNewerPluginVersion(latest, record.version) ? { version: latest } : {};
-      this.updates.set(record.id, update);
-      return update.version ? ('available' as const) : ('current' as const);
+      const version = latest && isNewerPluginVersion(latest, record.version) ? latest : undefined;
+      this.updates.set(record.id, version ? { version } : {});
+      if (!version || record.source?.kind !== 'market' || !this.wantsPluginAutoUpdate()) {
+        results.push(version ? 'available' : 'current');
+        continue;
+      }
+      results.push(await this.installMarketUpdate(record.id, version));
+    }
+    return results;
+  }
+
+  private wantsPluginAutoUpdate(): boolean {
+    return this.options.autoUpdatePlugins?.() !== false;
+  }
+
+  private async installMarketUpdate(
+    id: string,
+    version: string
+  ): Promise<'available' | 'current' | 'failed'> {
+    const current = this.records.find((item) => item.id === id);
+    if (current?.pending?.version === version) return 'available';
+    const staged = await this.restage(id);
+    if (!staged.ok) {
+      this.updates.set(id, { version, error: staged.error });
+      return 'failed';
+    }
+    if (!staged.preview.expands && (this.processes.get(id)?.inflight ?? 0) > 0) {
+      this.discard(staged.preview.token);
+      this.updates.set(id, { version });
+      return 'available';
+    }
+    const committed = await this.commit(staged.preview.token);
+    if (!committed.ok) {
+      this.updates.set(id, { version, error: committed.error });
+      return 'failed';
+    }
+    if (staged.preview.expands) {
+      this.updates.set(id, { version });
+      return 'available';
+    }
+    this.emitNotice({
+      kind: 'auto-updated',
+      pluginId: id,
+      name: staged.preview.name,
+      version: staged.preview.version,
     });
+    return 'current';
   }
 
   private async probeVersion(id: string, probe: URL): Promise<string> {
@@ -1760,6 +1835,18 @@ export class ExtensionPluginService {
       for (const listener of this.listeners) listener();
     }, CHANGE_DEBOUNCE_MS);
     this.changeTimer.unref?.();
+  }
+
+  private emitNotice(notice: ExtensionPluginNotice): void {
+    for (const listener of this.noticeListeners) listener(notice);
+  }
+
+  private noteInjectDenied(pluginId: string): void {
+    if (this.injectDeniedNotified.has(pluginId)) return;
+    this.injectDeniedNotified.add(pluginId);
+    const record = this.records.find((item) => item.id === pluginId);
+    const name = record ? (this.load(record.id, record.dir)?.name ?? pluginId) : pluginId;
+    this.emitNotice({ kind: 'inject-denied', pluginId, name });
   }
 
   private inject(

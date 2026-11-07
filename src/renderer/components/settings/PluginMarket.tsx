@@ -8,17 +8,20 @@ import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { pluginPermissionLabel } from '@/plugins/pluginMeta';
+import { nextMarketLoadRequest, openMarketLoadRequest } from './marketLoad';
 import { filterMarketPlugins, marketCategories } from './pluginMarketFilter';
 
 export function PluginMarket({
   disabled,
   installedKey,
   onInstall,
+  onGuide,
 }: {
   disabled: boolean;
   /** 已装插件版本变化时刷新安装状态 */
   installedKey: string;
   onInstall: (id: string) => void;
+  onGuide: (id: string, name: string, homepage?: string) => void;
 }) {
   const { t } = useI18n();
   const api = window.electronAPI.extensionPlugins;
@@ -26,6 +29,9 @@ export function PluginMarket({
   const [loading, setLoading] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const [category, setCategory] = React.useState<string | null>(null);
+  const [loadRequest, setLoadRequest] = React.useState(() => openMarketLoadRequest(installedKey));
+  const nextRequest = nextMarketLoadRequest(loadRequest, installedKey);
+  if (nextRequest !== loadRequest) setLoadRequest(nextRequest);
 
   const load = React.useCallback(
     async (refresh: boolean) => {
@@ -46,9 +52,8 @@ export function PluginMarket({
   );
 
   React.useEffect(() => {
-    void installedKey;
-    void load(false);
-  }, [load, installedKey]);
+    void load(loadRequest.refresh);
+  }, [load, loadRequest]);
 
   const setMirror = async (on: boolean) => {
     await api.setMarketChinaMirror(on);
@@ -130,6 +135,9 @@ export function PluginMarket({
               </p>
             )}
           </div>
+          <Button size="sm" variant="ghost" onClick={() => onGuide(p.id, p.name, p.homepage)}>
+            {t('Usage guide')}
+          </Button>
           <div className="relative shrink-0">
             <Button
               aria-hidden

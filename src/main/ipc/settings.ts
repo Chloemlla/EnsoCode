@@ -85,6 +85,7 @@ export const SETTINGS_STATE_FIELDS = [
   'smartCompactMode',
   'autoUpdate',
   'autoRestartWhenIdle',
+  'pluginAutoUpdate',
   'proxyMode',
   'customProxyUrl',
   'openChangesOnFileEdit',
@@ -131,6 +132,7 @@ export const SETTINGS_STATE_FIELDS = [
   'defaultModelFollowLast',
   'titleSummaryEnabled',
   'titleSummaryModel',
+  'imageGenerationModel',
   'memoryDistillModel',
   'memoryChatModel',
   'memoryLanguage',
@@ -204,6 +206,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'contextMenuOpen',
   'autoUpdate',
   'autoRestartWhenIdle',
+  'pluginAutoUpdate',
   'proxyMode',
   'customProxyUrl',
   'sshTimeoutSeconds',
@@ -508,6 +511,7 @@ function scheduleWrite(
           pushBuiltinTools,
           pushModelDirectory,
           pushWebSearchConfig,
+          pushImageGenerationConfig,
         }) => {
           pushApprovalReviewer(await readStoredOauthCredentialKeys());
           pushCompactRoute(await readStoredOauthCredentialKeys());
@@ -519,6 +523,7 @@ function scheduleWrite(
           pushBuiltinTools();
           pushModelDirectory();
           pushWebSearchConfig();
+          pushImageGenerationConfig();
         }
       )
       .catch(() => {});
@@ -638,6 +643,7 @@ export function commitSettingsTransaction(
         pushBuiltinTools,
         pushModelDirectory,
         pushWebSearchConfig,
+        pushImageGenerationConfig,
       }) => {
         pushApprovalReviewer(await readStoredOauthCredentialKeys());
         pushCompactRoute(await readStoredOauthCredentialKeys());
@@ -649,6 +655,7 @@ export function commitSettingsTransaction(
         pushBuiltinTools();
         pushModelDirectory();
         pushWebSearchConfig();
+        pushImageGenerationConfig();
       }
     )
     .catch(() => {});

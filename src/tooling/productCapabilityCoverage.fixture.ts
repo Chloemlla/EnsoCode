@@ -91,6 +91,9 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   autoUpdate: surfaces('general.automatic-updates'),
   autoRestartWhenIdle: excluded('Device idle-restart update policy; not an Enso capability.'),
+  pluginAutoUpdate: excluded(
+    'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
+  ),
   proxyMode: surfaces('general.proxy-mode'),
   customProxyUrl: surfaces('general.custom-proxy-url'),
   openChangesOnFileEdit: excluded('Renderer side-panel preference; not an Enso capability.'),
@@ -130,6 +133,9 @@ export const SETTINGS_DATA_COVERAGE = {
   defaultThinkingLevel: surfaces('providers.default-model'),
   titleSummaryEnabled: excluded('Conversation title summary preference; not an Enso capability.'),
   titleSummaryModel: excluded('Conversation title summary preference; not an Enso capability.'),
+  imageGenerationModel: excluded(
+    'Independent image generation model preference; not an Enso capability.'
+  ),
   memoryDistillModel: excluded('Memory distillation model preference; not an Enso capability.'),
   memoryLanguage: excluded('Memory output language preference; not an Enso capability.'),
   memoryChatModel: excluded('Memory local/remote chat model preference; not an Enso capability.'),
@@ -255,6 +261,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setAutoUpdate: surfaces('general.automatic-updates'),
   setAutoRestartWhenIdle: excluded('Device idle-restart update policy; not an Enso capability.'),
+  setPluginAutoUpdate: excluded(
+    'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
+  ),
   setProxyMode: surfaces('general.proxy-mode'),
   setCustomProxyUrl: surfaces('general.custom-proxy-url'),
   setOpenChangesOnFileEdit: excluded('Renderer side-panel preference; not an Enso capability.'),
@@ -312,6 +321,7 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Conversation title summary preference; not an Enso capability.'
   ),
   setTitleSummaryModel: excluded('Conversation title summary preference; not an Enso capability.'),
+  setImageGenerationModel: excluded('Default image generation model; desktop settings only.'),
   setMemoryDistillModel: excluded('Memory distillation model preference; not an Enso capability.'),
   setMemoryLanguage: excluded('Memory output language preference; not an Enso capability.'),
   setMemoryChatModel: excluded(
@@ -407,6 +417,9 @@ export const SETTINGS_ACTION_COVERAGE = {
 } satisfies Record<SettingsActionKey, CoverageDisposition>;
 
 export const BUILTIN_TOOL_COVERAGE: Readonly<Record<string, CoverageDisposition>> = {
+  image_generation: excluded(
+    'ImageGen uses its dedicated default model; not an Enso app capability.'
+  ),
   subagent: surfaces('coding-tools.subagent'),
   workflow: surfaces('coding-tools.workflow'),
   todo: surfaces('coding-tools.todo'),
@@ -937,6 +950,7 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   EXTENSION_PLUGINS_DISMISS_REGISTRY_NOTICE: excluded('Enso 插件管理页：确认登记表提示。'),
   EXTENSION_PLUGINS_CHANGED: excluded('Enso 插件登记变更的跨窗口通知。'),
+  EXTENSION_PLUGINS_NOTICE: excluded('Enso 插件拦截、待授权与自动更新的跨窗口通知。'),
   EXTENSION_PLUGINS_COMMIT: excluded('Enso 插件安装确认：用户同意权限后落盘。'),
   EXTENSION_PLUGINS_DISCARD: excluded('Enso 插件安装取消：丢弃暂存。'),
   EXTENSION_PLUGINS_SET_ENABLED: excluded('Enso 插件启用 / 停用开关。'),
@@ -950,6 +964,7 @@ export const IPC_PRODUCT_COVERAGE = {
   EXTENSION_PLUGINS_MARKET_LIST: excluded('Enso 插件市场列表：签名索引与本机安装状态。'),
   EXTENSION_PLUGINS_MARKET_STAGE: excluded('Enso 插件从市场暂存，渲染层只传 id 与版本。'),
   EXTENSION_PLUGINS_MARKET_SET_MIRROR: excluded('Enso 插件市场国内镜像开关。'),
+  EXTENSION_PLUGINS_README: excluded('Enso 插件使用说明。渲染层只传插件 id 和来源。'),
   EXTENSION_PLUGINS_RESTAGE: excluded('Enso 插件从记录的安装来源重新暂存，渲染层只传 id。'),
   EXTENSION_PLUGINS_CALL: excluded('Enso 插件运行期调用：命令、挂件、侧栏页面与补全。'),
   EXTENSION_PLUGINS_ASSET: excluded('Enso 插件渲染资源读取：只收插件 id 与相对路径。'),

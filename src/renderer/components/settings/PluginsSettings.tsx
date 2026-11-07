@@ -7,6 +7,7 @@ import type {
 } from '@shared/extensionPlugins/types';
 import type { InstalledPluginInfo, PluginComponentSummary, PluginEntry } from '@shared/types';
 import {
+  BookOpen,
   ChevronDown,
   ChevronRight,
   Files,
@@ -54,6 +55,7 @@ import { usePluginThemesStore } from '@/stores/pluginThemes';
 import { useSettingsStore } from '@/stores/settings';
 import { NewSessionBadge } from './NewSessionBadge';
 import { PluginMarket } from './PluginMarket';
+import { PluginReadmeDialog } from './PluginReadmeDialog';
 import { RegistryNoticeBanner } from './RegistryNoticeBanner';
 
 /** 插件配置表单：密钥不回显，留空保持不变 */
@@ -405,11 +407,17 @@ const stagingInstallUrls = new Set<string>();
 export function EnsoPluginsSettings({
   requestedInstallUrl = null,
   onRequestedInstallUrlConsumed,
+  focusPluginId = null,
+  onFocusPluginConsumed,
 }: {
   requestedInstallUrl?: string | null;
   onRequestedInstallUrlConsumed?: () => void;
+  focusPluginId?: string | null;
+  onFocusPluginConsumed?: () => void;
 } = {}) {
   const { t } = useI18n();
+  const pluginAutoUpdate = useSettingsStore((state) => state.pluginAutoUpdate !== false);
+  const setPluginAutoUpdate = useSettingsStore((state) => state.setPluginAutoUpdate);
   const [plugins, setPlugins] = React.useState<ExtensionPluginSummary[]>([]);
   const themeErrors = usePluginThemesStore((state) => state.errors);
   const [preview, setPreview] = React.useState<ExtensionPluginInstallPreview | null>(null);
@@ -427,6 +435,12 @@ export function EnsoPluginsSettings({
   const [checkResult, setCheckResult] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<RegistryNotice | null>(null);
   const [marketOpen, setMarketOpen] = React.useState(false);
+  const [guide, setGuide] = React.useState<{
+    id: string;
+    name: string;
+    from: 'installed' | 'market';
+    homepage?: string;
+  } | null>(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -444,6 +458,19 @@ export function EnsoPluginsSettings({
       .catch(() => setNotice(null));
     return window.electronAPI.extensionPlugins.onChanged(() => void refresh());
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!focusPluginId) return;
+    setExpanded((prev) => (prev.includes(focusPluginId) ? prev : [...prev, focusPluginId]));
+    if (!plugins.some((plugin) => plugin.id === focusPluginId)) return;
+    const id = focusPluginId;
+    window.requestAnimationFrame(() => {
+      document.querySelector(`[data-plugin-id="${CSS.escape(id)}"]`)?.scrollIntoView({
+        block: 'center',
+      });
+    });
+    onFocusPluginConsumed?.();
+  }, [focusPluginId, plugins, onFocusPluginConsumed]);
 
   const stage = async (kind: 'dir' | 'zip') => {
     setError(null);
@@ -559,6 +586,18 @@ export function EnsoPluginsSettings({
               'Installing a plugin lets it run code on this machine. Review what it asks for before confirming.'
             )}
           </p>
+          <label className="mt-3 flex items-center gap-2 text-sm">
+            <Switch
+              checked={pluginAutoUpdate}
+              onCheckedChange={(on) => setPluginAutoUpdate?.(on)}
+            />
+            <span>
+              <span className="block">{t('Update plugins automatically')}</span>
+              <span className="block text-muted-foreground text-xs">
+                {t('Marketplace updates that do not ask for new permissions install on their own.')}
+              </span>
+            </span>
+          </label>
         </div>
         <div className="flex shrink-0 gap-2">
           {plugins.some(
@@ -639,6 +678,10 @@ export function EnsoPluginsSettings({
               onInstall={(id) => {
                 setMarketOpen(false);
                 void restage(id, true);
+              }}
+              onGuide={(id, name, homepage) => {
+                setMarketOpen(false);
+                setGuide({ id, name, from: 'market', homepage });
               }}
             />
           </DialogPanel>
@@ -723,6 +766,7 @@ export function EnsoPluginsSettings({
         {plugins.map((plugin) => (
           <div
             key={plugin.id}
+            data-plugin-id={plugin.id}
             className={cn(
               'overflow-hidden rounded-lg border bg-card transition-colors',
               plugin.state === 'crashed' && 'border-destructive/50'
@@ -841,6 +885,15 @@ export function EnsoPluginsSettings({
                   }
                 >
                   <Files className="size-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={t('Usage guide')}
+                  title={t('Usage guide')}
+                  onClick={() => setGuide({ id: plugin.id, name: plugin.name, from: 'installed' })}
+                >
+                  <BookOpen className="size-4" />
                 </Button>
                 <Button
                   size="icon"
@@ -980,6 +1033,13 @@ export function EnsoPluginsSettings({
           </DialogPanel>
         </DialogContent>
       </Dialog>
+      <PluginReadmeDialog
+        pluginId={guide?.id ?? null}
+        name={guide?.name ?? ''}
+        from={guide?.from ?? 'installed'}
+        homepage={guide?.homepage}
+        onClose={() => setGuide(null)}
+      />
     </div>
   );
 }

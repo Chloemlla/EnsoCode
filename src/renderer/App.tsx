@@ -67,6 +67,7 @@ import {
 } from '@/lib/sidePanelDock';
 import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
+import { PluginNotices } from '@/plugins/PluginNotices';
 import { PluginUiHost } from '@/plugins/PluginUiHost';
 import { useBotsStore } from '@/stores/bots';
 import {
@@ -396,8 +397,9 @@ export default function App() {
   );
   const modeSwitch = botModeEnabled && !remoteNodeActive ? <ModeSwitch /> : null;
   // 桌面外壳：右侧面板顶到窗口顶部，tab 条与顶栏同一行；Windows 原生按钮由面板 tab 条右端让位，
-  // Linux 自绘按钮在顶栏里会被面板盖住，保持独立卡片
-  const titleRowPanel = desktopShell && (chromeKind === 'mac' || chromeKind === 'windows');
+  // Linux 自绘按钮在顶栏里会被面板盖住，保持独立卡片；网页版没有窗口按钮，同 mac
+  const titleRowPanel =
+    desktopShell && (chromeKind === 'mac' || chromeKind === 'windows' || chromeKind === 'web');
   const sideInTitleRow =
     titleRowPanel && sideOpen && !isMobile && !botModeActive && !remoteNodeActive;
   const sideToggle = remoteNodeActive ? null : (
@@ -446,6 +448,7 @@ export default function App() {
     >
       {/* 全局 toast 出口（addToast 依赖；不挂则静默失效） */}
       <ToastProvider />
+      <PluginNotices />
       <BackgroundLayer />
       <OauthCredentialBootstrap />
       {chromeKind !== 'mobile' ? (

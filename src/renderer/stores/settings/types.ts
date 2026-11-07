@@ -208,6 +208,8 @@ export interface SettingsState {
   autoUpdate: boolean;
   /** 包已下好且空闲连续 5 分钟后自动重启安装；缺省关 */
   autoRestartWhenIdle: boolean;
+  /** 权限不变的插件市场更新自动安装；缺省开，只在本机 */
+  pluginAutoUpdate: boolean;
 
   /** 网络代理：系统 / 直连 / 自定义；缺省 system */
   proxyMode: ProxyMode;
@@ -300,6 +302,7 @@ export interface SettingsState {
   titleSummaryEnabled: boolean;
   /** 标题总结独立模型；null = 跟随全局默认模型 */
   titleSummaryModel: DefaultModelRef | null;
+  imageGenerationModel: DefaultModelRef | null;
   /** 记忆提炼模型；null = 跟随标题模型 → 全局默认的既有回退链 */
   memoryDistillModel: DefaultModelRef | null;
   /** 记忆补全走远程还是本地 GGUF；`remote` 或 `local:*` 注册表 id */
@@ -415,6 +418,7 @@ export interface SettingsState {
   setSmartCompactMode: (value: import('@shared/smartCompactMode').SmartCompactMode) => void;
   setAutoUpdate: (value: boolean) => void;
   setAutoRestartWhenIdle: (value: boolean) => void;
+  setPluginAutoUpdate: (value: boolean) => void;
   setProxyMode: (mode: ProxyMode) => void;
   setCustomProxyUrl: (url: string) => void;
   setOpenChangesOnFileEdit: (value: boolean) => void;
@@ -480,6 +484,7 @@ export interface SettingsState {
   setTitleSummaryEnabled: (value: boolean) => void;
   /** 设置标题总结独立模型；null = 回到跟随全局默认 */
   setTitleSummaryModel: (model: DefaultModelRef | null) => void;
+  setImageGenerationModel: (model: DefaultModelRef | null) => void;
   /** 记忆提炼独立模型；null = 回落到标题模型 → 全局默认 */
   setMemoryDistillModel: (model: DefaultModelRef | null) => void;
   setMemoryChatModel: (modelId: string) => void;
