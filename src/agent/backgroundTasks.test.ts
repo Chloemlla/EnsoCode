@@ -13,6 +13,8 @@ import {
   resolveBackgroundLaunch,
   shellBackgroundEscape,
   shellReadHint,
+  shellSleepHint,
+  shellTimeoutHint,
   type TaskEvents,
   withBackground,
 } from './backgroundTasks';
@@ -87,7 +89,7 @@ describe('withBackground promptSnippet 跟随工具名', () => {
     expect(wrapped.promptSnippet).toMatch(/^powershell:/);
   });
 
-  it('提示词：snippet 讲让位语义，rules 只追加两条且保留原工具的', () => {
+  it('提示词：snippet 讲让位语义，rules 追加后台/让位/timeout 三条且保留原工具的', () => {
     const manager = makeManager().manager;
     const base = {
       name: 'bash',
@@ -100,15 +102,23 @@ describe('withBackground promptSnippet 跟随工具名', () => {
     const wrapped = withBackground(base, manager, 's1', '/tmp');
     expect(wrapped.promptSnippet).toMatch(/tracked jobs/);
     expect(wrapped.promptSnippet).toMatch(/background=true/);
-    expect(wrapped.promptGuidelines).toHaveLength(3);
+    expect(wrapped.promptSnippet).toMatch(/timeout only kills/i);
+    expect(wrapped.promptGuidelines).toHaveLength(4);
     expect(wrapped.promptGuidelines?.[0]).toContain('PI_*');
     expect(wrapped.promptGuidelines?.[1]).toMatch(/nohup/);
     expect(wrapped.promptGuidelines?.[2]).toMatch(/do not rerun/i);
+    expect(wrapped.promptGuidelines?.[3]).toMatch(/timeout only kills/i);
+    expect(wrapped.promptGuidelines?.[3]).toMatch(/background: true/);
+    expect(wrapped.promptGuidelines?.[3]).toMatch(/sleep, ps, pgrep/);
     expect(wrapped.description).toMatch(/fresh shell/i);
+    expect(wrapped.description).toMatch(/Do not poll/);
+    expect(wrapped.description).toMatch(/background: true/);
     const props = (wrapped.parameters as { properties: Record<string, { description: string }> })
       .properties;
     expect(props.timeout.description).toMatch(/kill/i);
+    expect(props.timeout.description).toMatch(/Do not set timeout to wait/i);
     expect(props.background.description).toMatch(/notified/);
+    expect(props.background.description).toMatch(/outlast/i);
   });
 });
 
@@ -890,6 +900,35 @@ describe('shellReadHint', () => {
   });
 });
 
+describe('shellSleepHint', () => {
+  it('前台固定等待或 sleep 轮询循环提示改用后台条件等待', () => {
+    expect(shellSleepHint('sleep 40 && ssh host "select 1"')).toMatch(/background: true/);
+    expect(shellSleepHint('make deploy; sleep 1m; curl -f localhost')).toMatch(/until/);
+    expect(shellSleepHint('for i in 1 2 3; do curl -f x && break; sleep 5; done')).toMatch(
+      /background: true/
+    );
+  });
+
+  it('短暂等待、引号里的 sleep 不提示', () => {
+    expect(shellSleepHint('sleep 2 && curl localhost')).toBe('');
+    expect(shellSleepHint('echo "sleep 60 for i in"')).toBe('');
+    expect(shellSleepHint('pnpm test')).toBe('');
+  });
+});
+
+describe('shellTimeoutHint', () => {
+  it('前台显式 timeout ≥ 让位默认值时提示 timeout 不能延长等待', () => {
+    expect(shellTimeoutHint(45)).toMatch(/timeout only kills/i);
+    expect(shellTimeoutHint(60)).toMatch(/background: true/);
+    expect(shellTimeoutHint(300)).toMatch(/sleep, ps, pgrep/);
+  });
+
+  it('未设 timeout 或短于让位默认值不提示', () => {
+    expect(shellTimeoutHint(undefined)).toBe('');
+    expect(shellTimeoutHint(30)).toBe('');
+  });
+});
+
 describe('withBackground 前台预算与回执', () => {
   const makeTool = () => {
     const seen: Array<Record<string, unknown>> = [];
@@ -910,7 +949,7 @@ describe('withBackground 前台预算与回执', () => {
     const { manager } = makeManager();
     const { base, seen } = makeTool();
     const wrapped = withBackground(base, manager, 's1', '/tmp');
-    await wrapped.execute(
+    const result = await wrapped.execute(
       't1',
       { command: 'npm run build', timeout: 300 },
       undefined,
@@ -918,6 +957,9 @@ describe('withBackground 前台预算与回执', () => {
       undefined as never
     );
     expect(seen[0]).toEqual({ command: 'npm run build', timeout: 300 });
+    const text = result.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+    expect(text).toMatch(/timeout only kills/i);
+    expect(text).toMatch(/^timeout only kills[\s\S]*\nok$/);
   });
 
   it('后台启动回执说明：没有独立工作就结束本轮，完成会唤醒', async () => {

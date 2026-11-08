@@ -231,8 +231,10 @@ const initialState = {
   expandLiveReasoning: true,
   autoCollapseTurns: false,
   collapseCompletedActivity: true,
+  collapseLiveActivity: false,
   pinUnfinishedTodos: true,
   chatWide: false,
+  navRailSide: 'left' as const,
   chatTypography: normalizeChatTypography(DEFAULT_CHAT_TYPOGRAPHY),
   notifyMainAgentOnly: true,
   maxActiveCoworkers: DEFAULT_MAX_ACTIVE_COWORKERS,
@@ -437,11 +439,16 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoCollapseTurns: (autoCollapseTurns) => set({ autoCollapseTurns }),
       setCollapseCompletedActivity: (collapseCompletedActivity) =>
         set({ collapseCompletedActivity }),
+      setCollapseLiveActivity: (collapseLiveActivity) => set({ collapseLiveActivity }),
       setPinUnfinishedTodos: (pinUnfinishedTodos) => set({ pinUnfinishedTodos }),
       setChatWide: (chatWide) => {
         document.documentElement.classList.toggle('enso-chat-wide', chatWide);
         set({ chatWide });
       },
+      setNavRailSide: (navRailSide) =>
+        set({
+          navRailSide: navRailSide === 'right' || navRailSide === 'off' ? navRailSide : 'left',
+        }),
       setChatTypography: (next) => {
         const chatTypography = normalizeChatTypography(next);
         applyChatTypography(chatTypography);

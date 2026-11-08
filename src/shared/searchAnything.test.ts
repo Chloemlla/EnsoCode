@@ -202,7 +202,9 @@ describe('buildSettingsCatalog', () => {
     'appearance.expandLiveReasoning',
     'appearance.autoCollapseTurns',
     'appearance.collapseCompletedActivity',
+    'appearance.collapseLiveActivity',
     'appearance.pinUnfinishedTodos',
+    'appearance.navRailSide',
     'general.notifyMainAgentOnly',
     'general.smartCompactEnabled',
     'general.compactReserveTokens',
@@ -246,7 +248,9 @@ describe('buildSettingsCatalog', () => {
       'expandLiveReasoning',
       'autoCollapseTurns',
       'collapseCompletedActivity',
+      'collapseLiveActivity',
       'pinUnfinishedTodos',
+      'navRailSide',
     ];
     for (const suffix of moved) {
       expect(catalog.find((entry) => entry.id === `appearance.${suffix}`)?.category).toBe(

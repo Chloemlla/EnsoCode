@@ -846,8 +846,11 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT, sessionId),
     abortRetry: (sessionId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT_RETRY, sessionId),
-    retry: (sessionId: string): Promise<AgentActionResult> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AGENT_RETRY, sessionId),
+    retry: (
+      sessionId: string,
+      options?: { unfinishedOnly?: boolean }
+    ): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_RETRY, sessionId, options),
     /** 释放父会话（worker 侧销毁，jsonl 留盘），之后可携新 cwd resume（Move to worktree） */
     release: (sessionId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_RELEASE, sessionId),
@@ -1186,13 +1189,19 @@ const electronAPI = {
   updater: {
     checkForUpdates: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
     downloadUpdate: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_DOWNLOAD_UPDATE),
-    quitAndInstall: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL),
+    /** 有回合在跑时等它们结束再重启；now 立即重启 */
+    quitAndInstall: (options?: { now?: boolean }): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL, options),
+    cancelRestart: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CANCEL_RESTART),
     setAutoUpdateEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_AUTO_UPDATE_ENABLED, enabled),
     setAutoRestartWhenIdle: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_AUTO_RESTART_WHEN_IDLE, enabled),
     getState: (): Promise<UpdaterState> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_GET_STATE),
     restart: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_RESTART),
+    /** 取走上次更新重启时被打断的会话 id（取一次即清空） */
+    takeInterruptedSessions: (): Promise<string[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.UPDATER_TAKE_INTERRUPTED_SESSIONS),
     onStatus: (callback: (status: UpdateStatus) => void): (() => void) => {
       const listener = (_: unknown, status: UpdateStatus) => callback(status);
       ipcRenderer.on(IPC_CHANNELS.UPDATER_STATUS, listener);
@@ -1785,6 +1794,8 @@ const electronAPI = {
           | 'insertText'
           | 'replaceDraft'
           | 'focusSession'
+          | 'focusSubagent'
+          | 'openChildRun'
           | 'createSession'
           | 'ensureSession';
         payload: Record<string, unknown>;

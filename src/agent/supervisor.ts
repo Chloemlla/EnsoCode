@@ -205,6 +205,7 @@ import {
   resetOauthPoolActivity,
   resolveOauthPoolModel,
 } from './oauthAccountPool';
+import { withPathHints } from './pathHints';
 import { PendingNotificationStore } from './pendingNotifications';
 import { createSubmitPlanTool, PlanController, withPlanGate } from './planMode';
 import {
@@ -265,7 +266,11 @@ import {
   withAgentRead,
 } from './structuredYield';
 import { CoworkerIdleReminder, createUnifiedSubagentTool, lastAssistantText } from './subagent';
-import { SystemReminderRegistry } from './systemReminder';
+import {
+  SystemReminderRegistry,
+  systemReminderExtension,
+  withSystemReminders,
+} from './systemReminder';
 import {
   buildInitialTitleUserText,
   buildRollingTitleUserText,
@@ -561,6 +566,7 @@ function createSessionResourceLoader(options: {
   };
   pluginEvents?: { invoker: PluginEventInvoker };
   exploreFold?: ReturnType<typeof createExploreFoldState>;
+  reminders?: SystemReminderRegistry;
   /** codemode / tool_search 与按需 MCP；排在最前，mcp_servers 段先于 persona 强制提示词写入 */
   codemode?: InlineExtension;
   /** 仅父会话：互斥压缩策略。 */
@@ -621,6 +627,7 @@ function createSessionResourceLoader(options: {
         },
       } satisfies InlineExtension,
       ...(options.exploreFold ? [exploreFoldExtension(options.exploreFold)] : []),
+      ...(options.reminders ? [systemReminderExtension(options.reminders)] : []),
       ...(options.remoteSsh
         ? [
             {
@@ -1852,7 +1859,8 @@ export class SessionSupervisor {
           return;
         }
         const agent = managed.session.agent;
-        editLatestAssistantForRetry(managed.session);
+        if (command.unfinishedOnly) editUnfinishedAssistantForResume(managed.session);
+        else editLatestAssistantForRetry(managed.session);
         if (agent.state.messages.at(-1)?.role === 'assistant') {
           this.emitRetrySkipped(managed, 'nothing-to-retry');
           return;
@@ -2397,6 +2405,7 @@ export class SessionSupervisor {
           });
         })
       : undefined;
+    const reminders = new SystemReminderRegistry();
     const resourceLoader = createSessionResourceLoader({
       branchContext: this.branchContextExtension(() => managedRef),
       oauthPoolRecovery: this.oauthPoolRecovery(),
@@ -2418,6 +2427,7 @@ export class SessionSupervisor {
       pluginHooks: { hooks: pluginHooks, role: { kind: 'parent' }, resumed: Boolean(resumeFile) },
       ...(pluginEventInvoker ? { pluginEvents: { invoker: pluginEventInvoker } } : {}),
       exploreFold,
+      reminders,
       codemode: codemodeHost.extension,
       persona: systemPrompt,
       systemPromptAppend,
@@ -2495,7 +2505,6 @@ export class SessionSupervisor {
       this.persistPendingReminders(managedRef);
       return taken;
     };
-    const reminders = new SystemReminderRegistry();
     // 无人值守开关翻转的提示优先走工具结果（无人值守时可能很久没有用户消息，等不到下一条就白说了）
     reminders.register('unattended', () => {
       const managed = managedRef ?? this.sessions.get(sessionId);
@@ -2531,8 +2540,8 @@ export class SessionSupervisor {
               grep: createRemoteGrepToolDefinition(cwd, sshExecutor) as unknown as Def,
             }
           : {
-              read: wrapRead(createReadToolDefinition(cwd) as unknown as Def),
-              grep: createGrepToolDefinition(cwd) as unknown as Def,
+              read: withPathHints(wrapRead(createReadToolDefinition(cwd) as unknown as Def), cwd),
+              grep: withPathHints(createGrepToolDefinition(cwd) as unknown as Def, cwd),
             };
       const { grep } = stock;
       const read = withProtectedFloor(toolGate, 'read', stock.read);
@@ -2546,8 +2555,8 @@ export class SessionSupervisor {
         : [
             read,
             grep,
-            createFindToolDefinition(cwd) as unknown as Def,
-            createLsToolDefinition(cwd) as unknown as Def,
+            withPathHints(createFindToolDefinition(cwd) as unknown as Def, cwd),
+            withPathHints(createLsToolDefinition(cwd) as unknown as Def, cwd),
           ];
     };
     // Bot 写成员（本地工作区）参与同工作区写协调
@@ -2756,6 +2765,7 @@ export class SessionSupervisor {
           managed.silentTurnNudgeUsed = true;
           managed.silentTurnKind = kind;
         });
+        const childReminders = new SystemReminderRegistry();
         const subLoader = isLockedEnso
           ? createEnsoResourceLoader(
               cwd,
@@ -2789,6 +2799,7 @@ export class SessionSupervisor {
               },
               ...(childPlugins?.events ? { pluginEvents: { invoker: childPlugins.events } } : {}),
               ...(childExploreFold ? { exploreFold: childExploreFold } : {}),
+              reminders: childReminders,
               codemode: childCodemode.extension,
               childContract: true,
               autoRejectApprovals: childGate.autoReject,
@@ -2859,7 +2870,6 @@ export class SessionSupervisor {
               ...(childExploreFold ? createExploreFoldTools(childExploreFold) : []),
             ];
         const childRunaway = new RunawayGuard();
-        const childReminders = new SystemReminderRegistry();
         const requestBudget = new RequestBudget();
         // 到软预算时把一次性收尾提示排进下一条工具结果；锁定会话工具不装饰，提示无处可注入
         if (!isLockedEnso) {
@@ -2878,7 +2888,6 @@ export class SessionSupervisor {
         const rawSubTools = childTools;
         const decorateChild = (tools: Def[]) =>
           decorateSessionTools(tools, {
-            reminders: childReminders,
             runaway: childRunaway,
             budget: childBudget,
           });
@@ -2917,7 +2926,11 @@ export class SessionSupervisor {
         });
         const childExtraTools = childCodemode.activeToolNames();
         const childCursor = isCursorModel(subModel)
-          ? attachCursorBridgeToSession(session, subTools, cwd)
+          ? attachCursorBridgeToSession(
+              session,
+              subTools.map((tool) => withSystemReminders(tool, childReminders)),
+              cwd
+            )
           : undefined;
         if (childIdentity && !isLockedEnso) {
           const childServers = typed
@@ -2931,7 +2944,8 @@ export class SessionSupervisor {
                 childCodemode,
                 childIdentity.sessionId,
                 decorateChild(tools.map((tool) => withApproval(childGate, 'mcp', tool))),
-                childCursor
+                childCursor,
+                childReminders
               );
             }
           );
@@ -3204,11 +3218,11 @@ export class SessionSupervisor {
         ...planGated(sessionTools),
         ...builtin('plan', [createSubmitPlanTool(planHost, randomUUID)]),
       ],
-      { reminders, runaway, budget }
+      { runaway, budget }
     );
     codemodeHost.bindDeferredTools(
       deferredMcpLoader(gate, (tools) =>
-        decorateSessionTools(planGated(tools), { reminders, runaway, budget })
+        decorateSessionTools(planGated(tools), { runaway, budget })
       )
     );
 
@@ -3227,7 +3241,11 @@ export class SessionSupervisor {
     });
     const codemodeTools = codemodeHost.activeToolNames();
     const cursorBridge = isCursorModel(piModel)
-      ? attachCursorBridgeToSession(session, customTools, cwd)
+      ? attachCursorBridgeToSession(
+          session,
+          customTools.map((tool) => withSystemReminders(tool, reminders)),
+          cwd
+        )
       : undefined;
     if (!cursorBridge) ensureAssistantUsage(session.messages as unknown[]);
     console.log(
@@ -3254,11 +3272,11 @@ export class SessionSupervisor {
           codemodeHost,
           sessionId,
           decorateSessionTools(planGated(tools.map((tool) => withApproval(gate, 'mcp', tool))), {
-            reminders,
             runaway,
             budget,
           }),
-          cursorBridge
+          cursorBridge,
+          reminders
         );
       }
     );
@@ -4167,14 +4185,17 @@ export class SessionSupervisor {
     host: CodemodeHost,
     sessionId: string,
     tools: readonly ToolDefinition[],
-    cursor?: CursorSessionBridge
+    cursor?: CursorSessionBridge,
+    reminders?: SystemReminderRegistry
   ): void {
     const added = new Set(host.adoptDirectTools(tools));
     if (added.size === 0) return;
     if (cursor) {
       for (const tool of tools) {
         if (!added.has(tool.name)) continue;
-        const bridgeTool = indexCursorTools([tool]).get(tool.name);
+        const bridgeTool = indexCursorTools([
+          reminders ? withSystemReminders(tool, reminders) : tool,
+        ]).get(tool.name);
         if (bridgeTool) cursor.tools.set(tool.name, bridgeTool);
       }
     }

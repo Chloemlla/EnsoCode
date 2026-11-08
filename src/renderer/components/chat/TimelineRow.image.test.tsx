@@ -33,15 +33,36 @@ describe('ReadImagePreview', () => {
     );
     const item = timeline[0];
     expect(item).toMatchObject({ kind: 'tool', generatedImages: images });
-    const folded = foldTimeline(
-      [
-        { kind: 'thinking', key: 'think', text: 'thinking', streaming: false, durationMs: null },
-        item,
-      ],
-      false,
-      new Set(),
-      { collapseCompletedActivity: true }
-    );
+    const bash = (key: string): TimelineItem =>
+      ({
+        kind: 'tool',
+        key,
+        name: 'bash',
+        summary: key,
+        output: null,
+        state: 'ok',
+        edits: null,
+        writeContent: null,
+        todos: null,
+        durationMs: null,
+        agentMeta: null,
+      }) as TimelineItem;
+    const rows = [
+      {
+        kind: 'thinking' as const,
+        key: 'think',
+        text: 'thinking',
+        streaming: false,
+        durationMs: null,
+      },
+      bash('a'),
+      bash('b'),
+      item,
+    ];
+    const folded = foldTimeline(rows, false, new Set(), {
+      collapseCompletedActivity: true,
+    });
+    expect(folded.some((row) => row.kind === 'tool-group')).toBe(true);
     expect(folded).toContain(item);
     const html = renderToStaticMarkup(createElement(TimelineRow, { item }));
     expect(html).toContain('src="local-image://posix/tmp/generated.png"');

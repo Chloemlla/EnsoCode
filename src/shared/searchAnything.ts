@@ -168,9 +168,19 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     title: 'Collapse activity after reply',
   },
   {
+    id: 'appearance.collapseLiveActivity',
+    category: 'appearance',
+    title: 'Collapse finished activity while replying',
+  },
+  {
     id: 'appearance.pinUnfinishedTodos',
     category: 'appearance',
     title: 'Pin unfinished todos',
+  },
+  {
+    id: 'appearance.navRailSide',
+    category: 'appearance',
+    title: 'Turn marks',
   },
   {
     id: 'appearance.chatTypography',

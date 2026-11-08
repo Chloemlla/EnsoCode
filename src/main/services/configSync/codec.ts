@@ -106,8 +106,10 @@ const STATE_KEYS = [
   'expandLiveReasoning',
   'autoCollapseTurns',
   'collapseCompletedActivity',
+  'collapseLiveActivity',
   'pinUnfinishedTodos',
   'chatWide',
+  'navRailSide',
   'chatTypography',
   'notifyMainAgentOnly',
   'maxActiveCoworkers',
@@ -1021,12 +1023,21 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
     'expandLiveReasoning',
     'autoCollapseTurns',
     'collapseCompletedActivity',
+    'collapseLiveActivity',
     'pinUnfinishedTodos',
     'chatWide',
     'notifyMainAgentOnly',
     'autoArchiveMergedWorktrees',
   ])
     booleanField(state, key, 'state', false);
+  if (
+    state.navRailSide !== undefined &&
+    state.navRailSide !== 'left' &&
+    state.navRailSide !== 'right' &&
+    state.navRailSide !== 'off'
+  ) {
+    throw new Error('Invalid state.navRailSide');
+  }
   if (state.chatTypography !== undefined && !isStoredChatTypography(state.chatTypography)) {
     throw new Error('Invalid state.chatTypography');
   }

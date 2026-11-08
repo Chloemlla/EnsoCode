@@ -108,8 +108,10 @@ export const SETTINGS_DATA_COVERAGE = {
   collapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
+  collapseLiveActivity: excluded('Renderer timeline collapse preference; not an Enso capability.'),
   pinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   chatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
+  navRailSide: excluded('Renderer turn-mark position preference; not an Enso capability.'),
   chatTypography: excluded('Renderer conversation typography preference; not an Enso capability.'),
   notifyMainAgentOnly: excluded(
     'Desktop/phone completion notification preference; not an Enso capability.'
@@ -280,8 +282,12 @@ export const SETTINGS_ACTION_COVERAGE = {
   setCollapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
+  setCollapseLiveActivity: excluded(
+    'Renderer timeline collapse preference; not an Enso capability.'
+  ),
   setPinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   setChatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
+  setNavRailSide: excluded('Renderer turn-mark position preference; not an Enso capability.'),
   setChatTypography: excluded(
     'Renderer conversation typography preference; not an Enso capability.'
   ),
@@ -682,6 +688,10 @@ export const IPC_PRODUCT_COVERAGE = {
   UPDATER_SET_AUTO_UPDATE_ENABLED: surfaces('general.automatic-updates'),
   UPDATER_SET_AUTO_RESTART_WHEN_IDLE: excluded(
     'Device idle-restart update policy; not an Enso capability.'
+  ),
+  UPDATER_CANCEL_RESTART: surfaces('updates.install'),
+  UPDATER_TAKE_INTERRUPTED_SESSIONS: excluded(
+    'Startup handoff that resumes turns interrupted by an update restart.'
   ),
   PROXY_APPLY: surfaces('general.proxy-mode', 'general.custom-proxy-url'),
   APPEARANCE_USER_CSS_GET: excluded('User CSS injects a device-local user.css file.'),

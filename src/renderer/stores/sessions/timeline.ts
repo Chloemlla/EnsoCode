@@ -389,6 +389,8 @@ export interface SandboxView {
   status: 'completed' | 'failed';
   value?: unknown;
   error?: string;
+  /** codemode 的 console.* 输出，已去掉 <console_output> 标签 */
+  console?: string;
   calls: SandboxCallView[];
 }
 
@@ -408,15 +410,26 @@ export function stripCodemodeHeader(output: string | null): string | null {
   return output.replace(CODEMODE_HEADER, '') || null;
 }
 
+const CONSOLE_BLOCK = /(?:^|\n)<console_output>\n([\s\S]*?)\n<\/console_output>(?:\n|$)/;
+
+function splitConsoleOutput(text: string): { body: string; console?: string } {
+  const match = CONSOLE_BLOCK.exec(text);
+  if (!match) return { body: text };
+  const before = text.slice(0, match.index);
+  const after = text.slice(match.index + match[0].length);
+  return { body: [before, after].filter(Boolean).join('\n'), console: match[1] };
+}
+
 export function codemodeView(
   body: string | null,
   isError: boolean,
   calls: readonly SandboxCallView[] | null
 ): SandboxView {
-  const text = body ?? '';
+  const { body: text, console: logs } = splitConsoleOutput(body ?? '');
+  const extra = logs === undefined ? {} : { console: logs };
   return isError
-    ? { status: 'failed', error: text, calls: [...(calls ?? [])] }
-    : { status: 'completed', value: text, calls: [...(calls ?? [])] };
+    ? { status: 'failed', error: text, ...extra, calls: [...(calls ?? [])] }
+    : { status: 'completed', value: text, ...extra, calls: [...(calls ?? [])] };
 }
 
 export function parseSandboxOutput(output: string | null): SandboxView | null {
@@ -1716,41 +1729,68 @@ function activitySegment(
   return expanded ? [group, ...segment.flatMap(withExploreChildren)] : [group];
 }
 
-/**
- * 工具行分组折叠（折中方案）：
- * - 段 = 连续的 tool/thinking 行（text/user/error 打断）；thinking 收进段内，门槛只数 tool。
- * - 带 diff 的 edit 行不进组，紧跟组头之后平铺（改动是核心产物，不折）。
- * - 默认：running 时最后一个 user 之后的段不折（进行中的轮实时展示）。
- * - compact（对齐 Cursor 的 Explored）：段只收只读工具（read/grep/find/ls/glob），
- *   bash 等其它工具打断段并平铺；live 也折，running 只读行进组，组头标 exploring。
- * - collapseCompletedActivity（对齐 deepchat）：已完成轮次里连续的思考 + 成功工具（不分类型，
- *   含 edit/write/todo）≥2 条折成一个过程组；失败/未完成工具与目标信号打断段。进行中的轮不受影响。
- * - 成功配对的 explore_mark → explore_fold 先收成探索组：平时独立成行，完成后并入过程组。
- * - expandedKeys 含组 key 时组头后平铺 children（参与虚拟化）。
- * 纯函数。
- */
-export function foldTimeline(
+/** 过程中的尾段安静下来之后再等多久才收。不是设置项，只有 nextActivityRelease 读它。 */
+export const ACTIVITY_FOLD_DELAY_MS = 2000;
+
+export interface ActivityWitness {
+  /** 还没折进去的后缀。后缀一变就重新计时，已经折起的前缀不重开。 */
+  readonly signature: string;
+  readonly closedAt: number | null;
+  /** 这条活尾段里已经等满、可以留在过程组里的成员 anchor，按出现顺序 */
+  readonly held: readonly string[];
+}
+
+export const EMPTY_ACTIVITY_WITNESS: ActivityWitness = {
+  signature: '',
+  closedAt: null,
+  held: [],
+};
+
+export interface ActivityRelease {
+  readonly witness: ActivityWitness;
+  readonly released: ReadonlySet<string>;
+  readonly wakeAt: number | null;
+}
+
+export interface TimelinePrep {
+  compact?: boolean;
+  /** 用户显式操作过的轮次：key → 是否折叠；优先于自动折叠默认值 */
+  turnOverrides?: ReadonlyMap<string, boolean>;
+  autoCollapseCompletedTurns?: boolean;
+  collapseCompletedActivity?: boolean;
+  /** 这一轮还在跑时，也把已经结束的尾段收成过程组 */
+  collapseLiveActivity?: boolean;
+}
+
+export type TimelineFoldOptions = TimelinePrep & {
+  /** collapseLiveActivity 打开时，这些 anchor 才可以折进行中的尾段 */
+  releasedLiveActivity?: ReadonlySet<string>;
+};
+
+/** 探索组取配对前的第一行，mark 收进 explore- 组后身份不变。 */
+function activityAnchor(row: TimelineItem): string {
+  return row.kind === 'tool-group' && row.children[0] ? row.children[0].key : row.key;
+}
+
+function isActivityMember(item: TimelineItem): boolean {
+  if (item.kind === 'tool' && item.generatedImages?.length) return false;
+  if (item.kind === 'thinking' || item.kind === 'tool-group') return true;
+  if (item.kind !== 'tool') return false;
+  return item.state === 'ok' && !item.name.startsWith('goal_') && item.name !== 'submit_plan';
+}
+
+function prepareTimeline(
   items: TimelineItem[],
   running: boolean,
   expandedKeys: ReadonlySet<string>,
-  options: {
-    compact?: boolean;
-    /** 用户显式操作过的轮次：key → 是否折叠；优先于自动折叠默认值 */
-    turnOverrides?: ReadonlyMap<string, boolean>;
-    autoCollapseCompletedTurns?: boolean;
-    collapseCompletedActivity?: boolean;
-  } = {}
-): TimelineItem[] {
-  const compact = options.compact === true;
-  const autoCollapse = options.autoCollapseCompletedTurns === true;
-  const turnOverrides = options.turnOverrides;
+  prep: TimelinePrep
+): { sourceItems: TimelineItem[]; lastUserIndex: number; liveFrom: number } {
+  const autoCollapse = prep.autoCollapseCompletedTurns === true;
+  const turnOverrides = prep.turnOverrides;
   const origLastUserIndex = items.findLastIndex(
     (item) => item.kind === 'user' && !item.deliveryState
   );
-
-  // 第一步：轮次折叠。正在生成的最新一轮不折叠，确保实时输出可见；
-  // 自动折叠只作用于历史轮次（最后一轮默认展开），显式操作优先于默认值。
-  // 压缩标记和错误行是会话状态，不随轮次隐藏。
+  // 正在生成的最新一轮不折叠。自动折叠只作用于历史轮次。压缩标记和错误行不随轮次隐藏。
   let sourceItems: TimelineItem[] = items;
   if (autoCollapse || (turnOverrides && turnOverrides.size > 0)) {
     const nextItems: TimelineItem[] = [];
@@ -1780,17 +1820,140 @@ export function foldTimeline(
     }
     sourceItems = nextItems;
   }
-  sourceItems = pairExploreFolds(sourceItems, expandedKeys, compact);
+  sourceItems = pairExploreFolds(sourceItems, expandedKeys, prep.compact === true);
   const lastUserIndex = sourceItems.findLastIndex(
     (item) => item.kind === 'user' && !item.deliveryState
   );
-  // 生成中只有最后一段正文之后的尾段仍在进行；被正文隔开的前段已完成，可立即折叠
+  // 步骤之间还没有新正文时，尾段仍算进行中。
   const liveFrom = Math.max(
     lastUserIndex,
     sourceItems.findLastIndex((item) => item.kind === 'text')
   );
+  return { sourceItems, lastUserIndex, liveFrom };
+}
+
+/**
+ * 活尾段里已经停下的成员，按段分开。
+ * 正在流的思考从这里截断，它前面已经安静的前缀仍然算数。
+ */
+function quietLiveSegments(
+  items: TimelineItem[],
+  running: boolean,
+  prep: TimelinePrep
+): { segments: string[][]; blocked: boolean } | null {
+  if (prep.collapseLiveActivity !== true || !running) return null;
+  const { sourceItems, liveFrom } = prepareTimeline(items, running, new Set(), prep);
+  const segments: string[][] = [];
+  let blocked = false;
+  let i = 0;
+  while (i < sourceItems.length) {
+    if (!(i > liveFrom) || !isActivityMember(sourceItems[i])) {
+      i += 1;
+      continue;
+    }
+    const keys: string[] = [];
+    let end = i;
+    while (end < sourceItems.length && isActivityMember(sourceItems[end])) {
+      const row = sourceItems[end];
+      if (row.kind === 'thinking' && row.streaming) {
+        blocked = true;
+        break;
+      }
+      keys.push(activityAnchor(row));
+      end += 1;
+    }
+    if (keys.length > 0) segments.push(keys);
+    while (end < sourceItems.length && isActivityMember(sourceItems[end])) end += 1;
+    i = end;
+  }
+  if (segments.length === 0) return null;
+  return { segments, blocked };
+}
+
+export function nextActivityRelease(
+  items: TimelineItem[],
+  running: boolean,
+  prep: TimelinePrep,
+  prev: ActivityWitness,
+  now: number
+): ActivityRelease {
+  const plan = quietLiveSegments(items, running, prep);
+  if (!plan) return { witness: EMPTY_ACTIVITY_WITNESS, released: new Set(), wakeAt: null };
+  const { segments, blocked } = plan;
+  const prevHeld = new Set(prev.held);
+  const held: string[] = [];
+  const pending: string[] = [];
+  let releasing = true;
+  for (const segment of segments) {
+    for (const key of segment) {
+      if (releasing && prevHeld.has(key)) held.push(key);
+      else {
+        releasing = false;
+        pending.push(key);
+      }
+    }
+  }
+  const releasedNow = new Set(held);
+  if (blocked) {
+    return {
+      witness: { signature: '', closedAt: null, held },
+      released: releasedNow,
+      wakeAt: null,
+    };
+  }
+  const canGrow = segments.some((segment) => {
+    const pendingCount = segment.filter((key) => !releasedNow.has(key)).length;
+    return pendingCount > 0 && segment.length >= 2;
+  });
+  if (pending.length === 0 || !canGrow) {
+    return {
+      witness: { signature: '', closedAt: null, held },
+      released: releasedNow,
+      wakeAt: null,
+    };
+  }
+  const signature = pending.join('\0');
+  const same = prev.signature === signature && prev.closedAt !== null;
+  const at = same ? prev.closedAt : now;
+  const due = at + ACTIVITY_FOLD_DELAY_MS;
+  if (now < due) {
+    return { witness: { signature, closedAt: at, held }, released: releasedNow, wakeAt: due };
+  }
+  const nextHeld = [...held, ...pending];
+  return {
+    witness: { signature: '', closedAt: null, held: nextHeld },
+    released: new Set(nextHeld),
+    wakeAt: null,
+  };
+}
+
+function foldPrepared(
+  sourceItems: TimelineItem[],
+  running: boolean,
+  expandedKeys: ReadonlySet<string>,
+  compact: boolean,
+  collapseCompleted: boolean,
+  releasedLive: ReadonlySet<string> | null,
+  lastUserIndex: number,
+  liveFrom: number
+): TimelineItem[] {
   const activityAt = (index: number): boolean =>
-    options.collapseCompletedActivity === true && !(running && index > liveFrom);
+    collapseCompleted && !(running && index > liveFrom);
+  const releasedPrefixEnd = (index: number): number => {
+    if (!releasedLive || !running || !(index > liveFrom) || !isActivityMember(sourceItems[index])) {
+      return index;
+    }
+    if (!releasedLive.has(activityAnchor(sourceItems[index]))) return index;
+    let end = index;
+    while (
+      end < sourceItems.length &&
+      isActivityMember(sourceItems[end]) &&
+      releasedLive.has(activityAnchor(sourceItems[end]))
+    ) {
+      end += 1;
+    }
+    return end - index >= 2 ? end : index;
+  };
   const inSegment = (s: TimelineItem, index: number): boolean =>
     !(s.kind === 'tool' && s.generatedImages?.length) &&
     (s.kind === 'thinking' ||
@@ -1803,14 +1966,27 @@ export function foldTimeline(
   let i = 0;
   while (i < sourceItems.length) {
     const item = sourceItems[i];
+    const prefixEnd = releasedPrefixEnd(i);
+    if (prefixEnd > i) {
+      result.push(
+        ...activitySegment(mergeAdjacentThinking(sourceItems.slice(i, prefixEnd)), expandedKeys)
+      );
+      i = prefixEnd;
+      continue;
+    }
     if (!inSegment(item, i)) {
       result.push(...withExploreChildren(item));
       i += 1;
       continue;
     }
-    // 收集连续段
     let end = i;
-    while (end < sourceItems.length && inSegment(sourceItems[end], end)) end += 1;
+    while (
+      end < sourceItems.length &&
+      inSegment(sourceItems[end], end) &&
+      releasedPrefixEnd(end) === end
+    ) {
+      end += 1;
+    }
     const segment = mergeAdjacentThinking(sourceItems.slice(i, end));
     if (activityAt(i)) {
       result.push(...activitySegment(segment, expandedKeys));
@@ -1818,9 +1994,7 @@ export function foldTimeline(
       continue;
     }
     const liveSegment = !compact && running && lastUserIndex >= 0 && i > lastUserIndex;
-    // 钉住的行不进组：edit 的 diff、write 的内容、图片预览、todo 清单是核心产物。
-    // compact 下 running 只读行进组（避免完成后从平铺跳进组头抽动）；
-    // 非 compact 仍把 running 钉在组外，方便看此刻在跑什么。
+    // edit / write / 图片 / todo 是产物，钉在组外。compact 下 running 的只读行仍进组，避免完成后抽动。
     const pinned = (s: TimelineItem): boolean => {
       if (s.kind !== 'tool') return false;
       if (
@@ -1862,11 +2036,53 @@ export function foldTimeline(
             )),
         children: groupRows,
       });
-      // 展开：原始顺序全量平铺；收拢：仅 edit 行（diff）跟在组头后
+      // 展开：原始顺序全量平铺；收拢：仅钉住的行跟在组头后
       if (expanded) result.push(...segment);
       else result.push(...editRows);
     }
     i = end;
   }
   return result;
+}
+
+/**
+ * 工具行分组折叠（折中方案）：
+ * - 段 = 连续的 tool/thinking 行（text/user/error 打断）；thinking 收进段内，门槛只数 tool。
+ * - 带 diff 的 edit 行不进组，紧跟组头之后平铺（改动是核心产物，不折）。
+ * - 默认：running 时最后一个 user 之后的段不折（进行中的轮实时展示）。
+ * - compact（对齐 Cursor 的 Explored）：段只收只读工具（read/grep/find/ls/glob），
+ *   bash 等其它工具打断段并平铺；live 也折，running 只读行进组，组头标 exploring。
+ * - collapseCompletedActivity：已离开活尾段的思考 + 成功工具（含 edit/write/todo）≥2 立刻折成过程组。
+ *   失败工具与目标信号打断段。running 且在 liveFrom 之后的尾段不进这个开关。
+ * - collapseLiveActivity：上面那条尾段在工具和思考都结束后再等一段时间，anchor 进入
+ *   releasedLiveActivity 才折。已经折起的前缀留在组里，新完成的调用单独再等一段时间。
+ *   正在流的思考从安静前缀后面截断，不把前面已经折起的部分重新打开。
+ * - 成功配对的 explore_mark → explore_fold 先收成探索组：平时独立成行，完成后并入过程组。
+ * - expandedKeys 含组 key 时组头后平铺 children（参与虚拟化）。
+ * 纯函数。
+ */
+export function foldTimeline(
+  items: TimelineItem[],
+  running: boolean,
+  expandedKeys: ReadonlySet<string>,
+  options: TimelineFoldOptions = {}
+): TimelineItem[] {
+  const { sourceItems, lastUserIndex, liveFrom } = prepareTimeline(
+    items,
+    running,
+    expandedKeys,
+    options
+  );
+  const releasedLive =
+    options.collapseLiveActivity === true ? (options.releasedLiveActivity ?? null) : null;
+  return foldPrepared(
+    sourceItems,
+    running,
+    expandedKeys,
+    options.compact === true,
+    options.collapseCompletedActivity === true,
+    releasedLive,
+    lastUserIndex,
+    liveFrom
+  );
 }

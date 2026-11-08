@@ -179,6 +179,11 @@ export const zhTranslations: Record<string, string> = {
     '新版本 {{version}} 已就绪 —— 重启以更新。',
   'Update check failed': '检查更新失败',
   'Restart to update': '重启更新',
+  'Restart now': '立即重启',
+  'Will restart to update {{version}} when the running turns finish.':
+    '当前回合结束后将自动重启并更新到 {{version}}。',
+  'Continued {{count}} conversation(s) interrupted by the update':
+    '已从断点继续 {{count}} 个因更新中断的会话',
   'Update failed: {{error}}': '更新失败：{{error}}',
   'Download update': '下载更新',
   'Release notes': '更新日志',
@@ -469,12 +474,20 @@ export const zhTranslations: Record<string, string> = {
     'read/grep/find/ls 显示为单行，agent 运行中也折叠连续的工具调用',
   'Auto-collapse previous turns': '自动折叠历史轮次',
   'Collapse activity after reply': '回答完成后折叠过程',
+  'Collapse finished activity while replying': '过程中折叠已完成的调用',
   'Pin unfinished todos': '固定显示未完成待办',
+  'Turn marks': '轮次刻度',
+  'Marks along the conversation for each turn. Hover to preview, click to jump. Hidden when the chat uses the full width.':
+    '对话旁边的轮次刻度。悬停预览，点击跳转。聊天铺满宽度时不显示。',
+  Left: '左',
+  Right: '右',
   'Keep the latest todo list above the input while it has unfinished items, so it does not scroll away with the timeline':
     '最新任务清单还有未完成项时，固定显示在输入框上方，不随时间线滚走',
   'Hide until the todo list updates': '隐藏，清单更新后再显示',
   'When a reply finishes, fold consecutive thinking and tool calls (including edits and commands) into one summary row; failed calls stay visible':
     '回答结束后，把连续的思考和工具调用（包括编辑、命令）折成一行摘要；失败的调用仍单独显示',
+  'While a reply is still running, wait a moment after tools and thinking finish, then fold that stretch into one row. Calls still running stay visible, and failed calls stay visible':
+    '回答还在进行时，工具和思考都结束后稍等片刻，把这一段折成一行。正在跑的调用不收，失败的调用仍单独显示',
   'Worked for {{duration}}': '已工作 {{duration}}',
   '{{count}} thinking steps': '{{count}} 段思考',
   Activity: '过程',
