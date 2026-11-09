@@ -1,5 +1,6 @@
 import type { ApprovalReviewRecord } from '@shared/approvalReviewRecord';
 import type { PluginArtifactInfo } from '@shared/extensionPlugins/protocol';
+import { liveActivityFoldDelayMs } from '@shared/liveActivityFoldDelay';
 import { IMAGE_EXTENSIONS, mediaExtension } from '@shared/localImage';
 import { type MaskReport, mergeMaskReports } from '@shared/privacyMask/report';
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
@@ -1729,9 +1730,6 @@ function activitySegment(
   return expanded ? [group, ...segment.flatMap(withExploreChildren)] : [group];
 }
 
-/** 过程中的尾段安静下来之后再等多久才收。不是设置项，只有 nextActivityRelease 读它。 */
-export const ACTIVITY_FOLD_DELAY_MS = 2000;
-
 export interface ActivityWitness {
   /** 还没折进去的后缀。后缀一变就重新计时，已经折起的前缀不重开。 */
   readonly signature: string;
@@ -1760,6 +1758,10 @@ export interface TimelinePrep {
   collapseCompletedActivity?: boolean;
   /** 这一轮还在跑时，也把已经结束的尾段收成过程组 */
   collapseLiveActivity?: boolean;
+  /** 尾段安静后等多久再折，单位秒。缺省 5，超出 1–60 会被收窄 */
+  liveActivityFoldDelaySec?: number;
+  /** 用户展开了、并且这行还在视窗里。这些工具留在过程组外面。 */
+  heldOpenTools?: ReadonlySet<string>;
 }
 
 export type TimelineFoldOptions = TimelinePrep & {
@@ -1915,7 +1917,7 @@ export function nextActivityRelease(
   const signature = pending.join('\0');
   const same = prev.signature === signature && prev.closedAt !== null;
   const at = same ? prev.closedAt : now;
-  const due = at + ACTIVITY_FOLD_DELAY_MS;
+  const due = at + liveActivityFoldDelayMs(prep.liveActivityFoldDelaySec);
   if (now < due) {
     return { witness: { signature, closedAt: at, held }, released: releasedNow, wakeAt: due };
   }
@@ -1935,19 +1937,24 @@ function foldPrepared(
   collapseCompleted: boolean,
   releasedLive: ReadonlySet<string> | null,
   lastUserIndex: number,
-  liveFrom: number
+  liveFrom: number,
+  heldOpenTools: ReadonlySet<string> | null
 ): TimelineItem[] {
+  const heldOpen = (row: TimelineItem): boolean =>
+    row.kind === 'tool' && heldOpenTools?.has(row.key) === true;
   const activityAt = (index: number): boolean =>
     collapseCompleted && !(running && index > liveFrom);
   const releasedPrefixEnd = (index: number): number => {
     if (!releasedLive || !running || !(index > liveFrom) || !isActivityMember(sourceItems[index])) {
       return index;
     }
+    if (heldOpen(sourceItems[index])) return index;
     if (!releasedLive.has(activityAnchor(sourceItems[index]))) return index;
     let end = index;
     while (
       end < sourceItems.length &&
       isActivityMember(sourceItems[end]) &&
+      !heldOpen(sourceItems[end]) &&
       releasedLive.has(activityAnchor(sourceItems[end]))
     ) {
       end += 1;
@@ -1955,6 +1962,7 @@ function foldPrepared(
     return end - index >= 2 ? end : index;
   };
   const inSegment = (s: TimelineItem, index: number): boolean =>
+    !heldOpen(s) &&
     !(s.kind === 'tool' && s.generatedImages?.length) &&
     (s.kind === 'thinking' ||
       (s.kind === 'tool-group' && activityAt(index)) ||
@@ -2056,6 +2064,7 @@ function foldPrepared(
  *   失败工具与目标信号打断段。running 且在 liveFrom 之后的尾段不进这个开关。
  * - collapseLiveActivity：上面那条尾段在工具和思考都结束后再等一段时间，anchor 进入
  *   releasedLiveActivity 才折。已经折起的前缀留在组里，新完成的调用单独再等一段时间。
+ *   heldOpenTools 里的工具不进过程组或只读组，左右邻行仍按原规则折。
  *   正在流的思考从安静前缀后面截断，不把前面已经折起的部分重新打开。
  * - 成功配对的 explore_mark → explore_fold 先收成探索组：平时独立成行，完成后并入过程组。
  * - expandedKeys 含组 key 时组头后平铺 children（参与虚拟化）。
@@ -2083,6 +2092,7 @@ export function foldTimeline(
     options.collapseCompletedActivity === true,
     releasedLive,
     lastUserIndex,
-    liveFrom
+    liveFrom,
+    options.heldOpenTools ?? null
   );
 }

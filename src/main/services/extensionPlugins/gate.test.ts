@@ -418,6 +418,101 @@ describe('PluginHostGate', () => {
     });
   });
 
+  it('有 ui.view 时不需要手势就能把事件交给宿主', async () => {
+    const viewEvent = vi.fn();
+    deps.viewEvent = viewEvent;
+    deps.manifest = (id) =>
+      id === 'a.b' ? manifest({ permissions: ['ui.view', 'ui.notify'] }) : null;
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'ui.viewEvent', { name: 'snapshot', data: { n: 1 } }, agentCall())
+    ).resolves.toBeNull();
+    expect(viewEvent).toHaveBeenCalledWith('a.b', 'snapshot', { n: 1 });
+  });
+
+  it('没有 ui.view、名字不合法或数据过大时拒绝侧栏事件', async () => {
+    deps.viewEvent = vi.fn();
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'ui.viewEvent', { name: 'snapshot', data: null }, agentCall())
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    deps.manifest = (id) => (id === 'a.b' ? manifest({ permissions: ['ui.view'] }) : null);
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'ui.viewEvent', { name: 'Snapshot', data: null }, agentCall())
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await expect(
+      gate.handle(
+        'a.b',
+        'ui.viewEvent',
+        { name: 'snapshot', data: 'x'.repeat(300_000) },
+        agentCall()
+      )
+    ).rejects.toMatchObject({ code: 'TOO_LARGE' });
+  });
+
+  it('ui.viewOpen 在会话调用里打开或定位已声明的侧栏视图（缺省首个视图，子会话落到根会话）', async () => {
+    const sessionUi = vi.fn(async () => null);
+    deps.sessionUi = sessionUi;
+    deps.manifest = (id) =>
+      id === 'a.b'
+        ? manifest({
+            permissions: ['ui.view'],
+            contributes: {
+              ...manifest().contributes,
+              views: [
+                { id: 'bridge', title: '跨会话桥', entry: 'bridge.html' },
+                { id: 'logs', title: '日志', entry: 'logs.html' },
+              ],
+            },
+          })
+        : null;
+    gate = new PluginHostGate(deps);
+    const childInv = gate.invocations.create({
+      pluginId: 'a.b',
+      sessionId: 's1::sub1',
+      projectRoot: root,
+      gesture: false,
+      origin: 9,
+    });
+    await expect(gate.handle('a.b', 'ui.viewOpen', {}, childInv)).resolves.toBeNull();
+    expect(sessionUi).toHaveBeenCalledWith({ sessionId: 's1', origin: 9 }, 'openPluginView', {
+      pluginId: 'a.b',
+      viewId: 'bridge',
+      title: '跨会话桥',
+    });
+    await expect(
+      gate.handle('a.b', 'ui.viewOpen', { viewId: 'logs' }, agentCall())
+    ).resolves.toBeNull();
+    expect(sessionUi).toHaveBeenLastCalledWith(
+      { sessionId: 's1', origin: null },
+      'openPluginView',
+      { pluginId: 'a.b', viewId: 'logs', title: '日志' }
+    );
+    deps.sessions = {
+      list: () => [
+        { id: 's1', title: '一', updatedAt: 1, state: 'idle' },
+        { id: 's2', title: '二', updatedAt: 2, state: 'running' },
+      ],
+    };
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'ui.viewOpen', { viewId: 'bridge', sessionId: 's2' }, agentCall())
+    ).resolves.toBeNull();
+    expect(sessionUi).toHaveBeenLastCalledWith(
+      { sessionId: 's2', origin: null },
+      'openPluginView',
+      { pluginId: 'a.b', viewId: 'bridge', title: '跨会话桥' }
+    );
+    await expect(
+      gate.handle('a.b', 'ui.viewOpen', { viewId: 'missing' }, agentCall())
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await expect(gate.handle('a.b', 'ui.viewOpen', {}, undefined)).rejects.toMatchObject({
+      code: 'NO_INVOCATION',
+    });
+  });
+
   it('草稿读写需要用户手势，令牌 30 秒后过期', async () => {
     await expect(gate.handle('a.b', 'composer.readDraft', {}, agentCall())).rejects.toMatchObject({
       code: 'GESTURE_REQUIRED',

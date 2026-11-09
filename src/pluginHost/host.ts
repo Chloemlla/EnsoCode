@@ -395,6 +395,12 @@ export function runPluginHost(transport: HostTransport): void {
       ui: {
         notify: (title: string, body?: string) =>
           hostCall('ui.notify', { title, body: body ?? '' }),
+        view: {
+          emit: (name: string, data?: unknown) =>
+            hostCall('ui.viewEvent', { name, data: data ?? null }),
+          open: (input?: string | { viewId?: string; sessionId?: string }) =>
+            hostCall('ui.viewOpen', typeof input === 'string' ? { viewId: input } : (input ?? {})),
+        },
         clipboard: { writeText: (text: string) => hostCall('ui.clipboard', { text }) },
         openExternal: (url: string) => hostCall('ui.openExternal', { url }),
       },

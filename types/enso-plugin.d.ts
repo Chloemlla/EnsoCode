@@ -142,6 +142,8 @@ export interface EnsoHostApi {
   'fs.writeText': (path: string, text: string) => Promise<void>;
   'net.fetch': (url: string, init?: EnsoFetchInit) => Promise<EnsoFetchResponse>;
   'ui.notify': (title: string, body?: string) => Promise<void>;
+  'ui.viewEvent': (name: string, data?: unknown) => Promise<void>;
+  'ui.viewOpen': (input?: string | { viewId?: string; sessionId?: string }) => Promise<void>;
   'composer.readDraft': () => Promise<EnsoDraft>;
   'composer.insertText': (input: { text: string }) => Promise<EnsoDraftRev>;
   'composer.replaceDraft': (input: {
@@ -292,6 +294,12 @@ export interface EnsoMain {
   net: { fetch: EnsoHostApi['net.fetch'] };
   ui: {
     notify: EnsoHostApi['ui.notify'];
+    /** 推给本插件已打开的侧栏页面；页面用 `enso.on` 订阅。需要 `ui.view`，不需要用户手势 */
+    view: {
+      emit: EnsoHostApi['ui.viewEvent'];
+      /** 打开右侧栏并创建或聚焦本插件的侧栏页面（缺省首个视图）。需要 `ui.view` */
+      open: EnsoHostApi['ui.viewOpen'];
+    };
     clipboard: { writeText: EnsoHostApi['ui.clipboard'] };
     openExternal: EnsoHostApi['ui.openExternal'];
   };

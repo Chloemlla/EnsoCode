@@ -109,6 +109,9 @@ export const SETTINGS_DATA_COVERAGE = {
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
   collapseLiveActivity: excluded('Renderer timeline collapse preference; not an Enso capability.'),
+  liveActivityFoldDelaySec: excluded(
+    'Renderer timeline collapse delay preference; not an Enso capability.'
+  ),
   pinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   chatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
   navRailSide: excluded('Renderer turn-mark position preference; not an Enso capability.'),
@@ -284,6 +287,9 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setCollapseLiveActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
+  ),
+  setLiveActivityFoldDelaySec: excluded(
+    'Renderer timeline collapse delay preference; not an Enso capability.'
   ),
   setPinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
   setChatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
@@ -792,6 +798,27 @@ export const IPC_PRODUCT_COVERAGE = {
   BROWSER_DESIGN_MODE_EVENT: excluded(
     'Side panel browser Design Mode pick event; renderer UI only.'
   ),
+  BROWSER_DESCRIBE_SELECTION: excluded(
+    'Side panel browser Design Mode selection inspection; renderer UI only.'
+  ),
+  BROWSER_MOVE_SELECTION: excluded(
+    'Side panel browser Design Mode DOM traversal; renderer UI only.'
+  ),
+  BROWSER_CLEAR_SELECTION: excluded(
+    'Side panel browser Design Mode selection reset; renderer UI only.'
+  ),
+  BROWSER_SET_ANNOTATION_PINS: excluded(
+    'Side panel browser Design Mode annotation pin sync; renderer UI only.'
+  ),
+  BROWSER_OPEN_ANNOTATION_PIN: excluded(
+    'Side panel browser Design Mode annotation pin open/scroll; renderer UI only.'
+  ),
+  BROWSER_READ_DESIGN_CSS: excluded(
+    'Side panel browser Design Mode CSS inspector read; renderer UI only.'
+  ),
+  BROWSER_PREVIEW_DESIGN_CSS: excluded(
+    'Side panel browser Design Mode CSS live preview; renderer UI only.'
+  ),
   SSH_CONNECTIONS_LIST: surfaces('projects.ssh-connections'),
   SSH_CONNECTIONS_UPSERT: surfaces(
     'projects.ssh-connections.add',
@@ -979,6 +1006,7 @@ export const IPC_PRODUCT_COVERAGE = {
   EXTENSION_PLUGINS_CALL: excluded('Enso 插件运行期调用：命令、挂件、侧栏页面与补全。'),
   EXTENSION_PLUGINS_ASSET: excluded('Enso 插件渲染资源读取：只收插件 id 与相对路径。'),
   EXTENSION_PLUGINS_DRAFT_REQUEST: excluded('Enso 插件草稿请求：Main 推给发起手势的窗口。'),
+  EXTENSION_PLUGINS_VIEW_EVENT: excluded('Enso 插件侧栏事件：Main 推给已打开的侧栏页面。'),
   EXTENSION_PLUGINS_DRAFT_RESPONSE: excluded('Enso 插件草稿请求的回包。'),
   EXTENSION_PLUGINS_CONFIG_GET: excluded('Enso 插件配置项读取：密钥只报告是否已设置。'),
   EXTENSION_PLUGINS_CONFIG_SET: excluded('Enso 插件配置项写入，Main 私有文件保存。'),
