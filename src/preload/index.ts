@@ -60,6 +60,7 @@ import type {
 } from '@shared/resources';
 import type { BrowserSearchTab } from '@shared/searchAnything';
 import type { SettingsDeepLink } from '@shared/settingsDeepLink';
+import type { ShellIntegration } from '@shared/shellIntegration';
 import type {
   AssetOccupancyRow,
   CollectedAsset,
@@ -850,6 +851,8 @@ const electronAPI = {
       deliveryId?: string
     ): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_STEER, sessionId, text, images, deliveryId),
+    withdrawSteer: (sessionId: string, deliveryId: string): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_WITHDRAW_STEER, sessionId, deliveryId),
     abort: (sessionId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT, sessionId),
     abortRetry: (sessionId: string): Promise<AgentActionResult> =>
@@ -1329,6 +1332,17 @@ const electronAPI = {
       const listener = (_event: unknown, prefill: AgentComposerPrefillEvent) => callback(prefill);
       ipcRenderer.on(IPC_CHANNELS.AGENT_COMPOSER_PREFILL, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_COMPOSER_PREFILL, listener);
+    },
+    takeOpenFolders: (): Promise<string[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_TAKE_OPEN_FOLDERS),
+    installShellIntegration: (kind: ShellIntegration): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_INSTALL_SHELL_INTEGRATION, kind),
+    shellIntegrationStatus: (): Promise<Record<ShellIntegration, boolean>> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SHELL_INTEGRATION_STATUS),
+    onOpenFolderRequested: (callback: () => void): (() => void) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.WINDOW_OPEN_FOLDER_REQUESTED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_OPEN_FOLDER_REQUESTED, listener);
     },
     onMaximizedChange: (callback: (maximized: boolean) => void): (() => void) => {
       const listener = (_: unknown, maximized: boolean) => callback(maximized);

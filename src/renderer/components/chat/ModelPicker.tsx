@@ -1,6 +1,6 @@
 import { pickModelCapabilityOverrides, resolveCustomModelView } from '@shared/modelCatalog';
 import { clampProjectThinkingLevel, visibleThinkingLevels } from '@shared/modelThinking';
-import { CUSTOM_VENDOR_ID, groupProviders } from '@shared/providerGroups';
+import { CUSTOM_VENDOR_ID, groupProviders, type ProviderGroup } from '@shared/providerGroups';
 import type {
   ModelCapabilityOverrides,
   ModelEntry,
@@ -11,25 +11,16 @@ import type {
 import { THINKING_LEVELS, type ThinkingLevel } from '@shared/types/agent';
 import {
   findVirtualModel,
+  selectableVirtualModels,
   VIRTUAL_PROVIDER_ID,
   type VirtualModelEntry,
 } from '@shared/virtualModels';
-import { BadgeCheck, Brain, Check, ChevronDown, KeyRound, Shuffle } from 'lucide-react';
+import { Brain, Check, ChevronDown, Shuffle, Star } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { providerDisplayName } from '@/components/settings/chatgptPool';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Menu,
-  MenuGroup,
-  MenuGroupLabel,
-  MenuItem,
-  MenuPopup,
-  MenuSub,
-  MenuSubPopup,
-  MenuSubTrigger,
-  MenuTrigger,
-} from '@/components/ui/menu';
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from '@/components/ui/menu';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { prefetchAccountUsage, useCachedAccountUsage } from '@/hooks/useAccountUsage';
@@ -37,7 +28,7 @@ import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useModelMeta } from '@/stores/modelMeta';
 import { formatTokens } from '@/stores/sessions/stats';
-import { interceptRootCascadeEscape, markSubmenuOpen } from './modelPickerCascadeEsc';
+import { interceptRootCascadeEscape } from './modelPickerCascadeEsc';
 import { type SessionUsageAccount, usageAccountKeyForProvider } from './sessionUsageAccount';
 
 export const OPEN_CHAT_MODEL_PICKER_EVENT = 'enso:open-chat-model-picker';
@@ -48,6 +39,163 @@ export const MODEL_PICKER_FORM_TRIGGER_CLASS =
 
 export function requestOpenChatModelPicker() {
   window.dispatchEvent(new Event(OPEN_CHAT_MODEL_PICKER_EVENT));
+}
+
+export type ModelPickerNavTarget =
+  | { readonly kind: 'favorites' }
+  | { readonly kind: 'vendor'; readonly vendorId: string };
+
+export const PINNED_MODELS_STORAGE_KEY = 'enso:model-picker:pinned-models';
+
+export function pinnedModelKey(providerId: string, modelId: string): string {
+  return `${providerId}/${modelId}`;
+}
+
+export function parsePinnedModelKeys(raw: string | null | undefined): Set<string> {
+  if (!raw) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return new Set();
+  }
+  if (!Array.isArray(parsed)) return new Set();
+  const keys = new Set<string>();
+  for (const item of parsed) {
+    if (typeof item === 'string' && item.length > 0) keys.add(item);
+  }
+  return keys;
+}
+
+export function togglePinnedModelKey(current: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
+function readStoredPinnedModelKeys(): Set<string> {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return new Set();
+    return parsePinnedModelKeys(storage.getItem(PINNED_MODELS_STORAGE_KEY));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredPinnedModelKeys(keys: ReadonlySet<string>): void {
+  try {
+    globalThis.localStorage?.setItem(PINNED_MODELS_STORAGE_KEY, JSON.stringify([...keys]));
+  } catch {
+    // 隐私模式或 node 测试环境没有可写的 localStorage，本次内存里的收藏仍然有效。
+  }
+}
+
+function providerInGroup(
+  group: ProviderGroup,
+  providerId: string | undefined
+): ModelProvider | undefined {
+  if (!providerId) return undefined;
+  return group.providers.find((provider) => provider.id === providerId);
+}
+
+function activeProviderForGroup(
+  group: ProviderGroup,
+  selectedProviderId: string,
+  activeProviderByVendor: Readonly<Record<string, string>> | undefined
+): ModelProvider | undefined {
+  return (
+    providerInGroup(group, activeProviderByVendor?.[group.vendorId]) ??
+    providerInGroup(group, selectedProviderId) ??
+    group.providers[0]
+  );
+}
+
+export function expandWorkbenchGroups(groups: readonly ProviderGroup[]): ProviderGroup[] {
+  const out: ProviderGroup[] = [];
+  for (const group of groups) {
+    if (group.vendorId !== CUSTOM_VENDOR_ID) {
+      out.push(group);
+      continue;
+    }
+    for (const provider of group.providers) {
+      out.push({
+        vendorId: `${CUSTOM_VENDOR_ID}:${provider.id}`,
+        label: provider.name,
+        providers: [provider],
+      });
+    }
+  }
+  return out;
+}
+
+export function resolveActiveWorkbenchView(options: {
+  groups: readonly ProviderGroup[];
+  selectableVirtualModels: readonly VirtualModelEntry[];
+  pinnedCount: number;
+  selectedProviderId: string;
+  activeNav: ModelPickerNavTarget | null;
+  activeProviderByVendor?: Readonly<Record<string, string>>;
+}): {
+  activeNav: ModelPickerNavTarget;
+  activeGroup: ProviderGroup | undefined;
+  activeProvider: ModelProvider | undefined;
+  showFavoritesNav: boolean;
+} {
+  const showFavoritesNav = options.selectableVirtualModels.length > 0 || options.pinnedCount > 0;
+  const favorites = {
+    activeNav: { kind: 'favorites' } as const,
+    activeGroup: undefined,
+    activeProvider: undefined,
+    showFavoritesNav,
+  };
+  const explicit = options.activeNav;
+  if (explicit?.kind === 'favorites' && showFavoritesNav) return favorites;
+  if (explicit?.kind === 'vendor') {
+    const group = options.groups.find((entry) => entry.vendorId === explicit.vendorId);
+    if (group) {
+      return {
+        activeNav: { kind: 'vendor', vendorId: group.vendorId },
+        activeGroup: group,
+        activeProvider: activeProviderForGroup(
+          group,
+          options.selectedProviderId,
+          options.activeProviderByVendor
+        ),
+        showFavoritesNav,
+      };
+    }
+  }
+
+  if (
+    options.selectedProviderId === VIRTUAL_PROVIDER_ID &&
+    options.selectableVirtualModels.length > 0
+  ) {
+    return favorites;
+  }
+  const selectedGroup = options.groups.find((group) =>
+    group.providers.some((provider) => provider.id === options.selectedProviderId)
+  );
+  const vendorId = selectedGroup
+    ? selectedGroup.vendorId
+    : showFavoritesNav
+      ? undefined
+      : options.groups[0]?.vendorId;
+  if (!vendorId) return favorites;
+  const activeGroup = options.groups.find((group) => group.vendorId === vendorId);
+  return {
+    activeNav: { kind: 'vendor', vendorId },
+    activeGroup,
+    activeProvider: activeGroup
+      ? activeProviderForGroup(
+          activeGroup,
+          options.selectedProviderId,
+          options.activeProviderByVendor
+        )
+      : undefined,
+    showFavoritesNav,
+  };
 }
 
 /** catalog 未声明支持集时只改展示，不回写。 */
@@ -167,7 +315,7 @@ function stopTypeaheadOnly(e: KeyboardEvent<HTMLInputElement>): void {
 
 interface ModelPickerProps {
   providers: ModelProvider[];
-  /** 传入时在顶部列出虚拟模型（仅会话主模型与默认模型的选择场景） */
+  /** 传入时在顶部列出可选虚拟模型 */
   virtualModels?: readonly VirtualModelEntry[];
   /** 选中虚拟模型时附在触发器上的实际路由模型 */
   routedModelLabel?: string;
@@ -265,31 +413,49 @@ function ModelMetaBridge({
   return null;
 }
 
-/**
- * 一行模型的内容：名称 + （可选）所属条目标签 + 上下文窗口 + 选中标记。
- * 同一条目里显示名重复时，id 单独放在名称下一行（小字），避免和名称挤在同一行被截断。
- * 窗口缺失时整段不渲染
- * （不留占位符，有值才显示；`catalog-fallback` 来源仍标「估算」——那是有值，只是不够权威，
- * ⛔ 不编造数字）。
- *
- * ⚠️ 选中标记的槽位恒定占宽（`selected` 为 false 时槽位仍渲染，只是内部空着），不能写成
- * `selected && <Check/>` 那种整个节点条件渲染——`MenuItem` 是 flex 行，名称那一列用的是
- * `flex-1`（会自动吃掉行内剩余空间），选中标记要是时有时无，行内其余 shrink-0 兄弟元素的
- * 总宽度就会跟着变，挤压/放宽名称列，导致上下文窗口值的横坐标随选中状态左右跳动。槽位恒定后，
- * 同一份内容（同名称/同条目标签）无论选中与否，窗口值都落在同一个横坐标上。
- */
+function ModelPinButton({
+  pin,
+}: {
+  pin: { key: string; pinned: boolean; onToggle: (key: string) => void };
+}) {
+  return (
+    <button
+      type="button"
+      data-model-pin={pin.key}
+      aria-pressed={pin.pinned}
+      onClick={(event) => {
+        event.stopPropagation();
+        pin.onToggle(pin.key);
+      }}
+    >
+      <Star
+        className={cn(
+          'h-3.5 w-3.5 shrink-0',
+          pin.pinned ? 'fill-current text-primary' : 'text-muted-foreground/60'
+        )}
+      />
+    </button>
+  );
+}
+
 function ModelRowContent({
   model,
   meta,
   entryTag,
   selected,
   showId,
+  pin,
 }: {
   model: ModelEntry;
   meta: ModelMeta | undefined;
   entryTag?: string;
   selected: boolean;
   showId?: boolean;
+  pin?: {
+    key: string;
+    pinned: boolean;
+    onToggle: (key: string) => void;
+  };
 }) {
   const { t } = useI18n();
   // 行覆盖（ModelEntry.contextWindow，含 Fetch Models 落地的元数据）优先于 catalog；
@@ -302,12 +468,13 @@ function ModelRowContent({
     meta?.source === 'catalog-fallback';
   return (
     <>
+      {pin && <ModelPinButton pin={pin} />}
       {showId ? (
-        <span className="flex min-w-0 flex-1 flex-col items-start">
-          <span className="max-w-full truncate">{model.label ?? model.id}</span>
+        <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
+          <span className="shrink-0 truncate">{model.label ?? model.id}</span>
           <span
             data-model-row-id={model.id}
-            className="max-w-full truncate font-mono text-[10px] leading-3 text-muted-foreground"
+            className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground/70"
           >
             {model.id}
           </span>
@@ -327,9 +494,7 @@ function ModelRowContent({
           {estimated ? '*' : ''}
         </span>
       )}
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-        {selected && <Check className="h-3.5 w-3.5 text-primary" />}
-      </span>
+      {selected && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
     </>
   );
 }
@@ -382,12 +547,16 @@ function ProviderSubmenuList({
   meta,
   selectedProviderId,
   selectedModelId,
+  pinnedKeys,
+  onTogglePin,
   onSelectModel,
 }: {
   provider: ModelProvider;
   meta: Record<string, ModelMeta> | undefined;
   selectedProviderId: string;
   selectedModelId: string;
+  pinnedKeys: ReadonlySet<string>;
+  onTogglePin: (key: string) => void;
   onSelectModel: (modelId: string) => void;
 }) {
   const { t } = useI18n();
@@ -417,41 +586,44 @@ function ProviderSubmenuList({
   return (
     <>
       {showFilter && (
-        <div className="-mx-1 -mt-1 mb-1 border-b p-1.5">
+        <div className="mb-1 flex shrink-0 items-center gap-1.5 border-b pb-1">
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={stopTypeaheadOnly}
             placeholder={t('Filter models in this entry')}
-            className="h-7 w-full rounded-md border bg-transparent px-2 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
+            className="h-6 min-w-0 flex-1 rounded border bg-transparent px-2 text-[11px] outline-none placeholder:text-muted-foreground focus:border-ring"
           />
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
+            {visibleModels.length}/{enabledModels.length}
+          </span>
         </div>
       )}
-      <div className="max-h-64 overflow-y-auto">
-        {visibleModels.map((model) => (
-          <MenuItem key={model.id} onClick={() => onSelectModel(model.id)}>
-            <ModelRowContent
-              model={model}
-              meta={meta?.[model.id]}
-              showId={duplicatedLabels.has(model.label ?? model.id)}
-              selected={provider.id === selectedProviderId && model.id === selectedModelId}
-            />
-          </MenuItem>
-        ))}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {visibleModels.map((model) => {
+          const key = pinnedModelKey(provider.id, model.id);
+          return (
+            <MenuItem
+              key={model.id}
+              className="min-h-6 gap-1.5 px-1.5 py-0.5 text-xs sm:min-h-6 sm:text-xs"
+              onClick={() => onSelectModel(model.id)}
+            >
+              <ModelRowContent
+                model={model}
+                meta={meta?.[model.id]}
+                showId={duplicatedLabels.has(model.label ?? model.id)}
+                selected={provider.id === selectedProviderId && model.id === selectedModelId}
+                pin={{ key, pinned: pinnedKeys.has(key), onToggle: onTogglePin }}
+              />
+            </MenuItem>
+          );
+        })}
         {visibleModels.length === 0 && (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">
             {t('No models found')}
           </p>
         )}
       </div>
-      {showFilter && (
-        <p className="-mx-1 -mb-1 mt-1 border-t px-2 py-1 text-[10px] text-muted-foreground/60">
-          {t('Showing {{shown}} of {{total}} models', {
-            shown: visibleModels.length,
-            total: enabledModels.length,
-          })}
-        </p>
-      )}
     </>
   );
 }
@@ -462,7 +634,7 @@ function SubmenuUsage({ accountKey }: { accountKey: string }) {
   const info = useCachedAccountUsage(accountKey);
   if (!info || info.error || info.windows.length === 0) return null;
   return (
-    <div className="-mx-1 -mt-1 mb-1 space-y-1 border-b px-3 py-2">
+    <div className="mb-1 shrink-0 space-y-0.5 border-b px-1.5 pb-1">
       {info.windows.map((windowInfo) => (
         <div key={windowInfo.label} className="flex min-w-0 items-center gap-2 text-[10px]">
           <span className="w-8 shrink-0 truncate text-muted-foreground" title={windowInfo.label}>
@@ -503,11 +675,7 @@ interface SearchHit {
   score: number;
 }
 
-/**
- * composer 工具行的模型选择：级联菜单 —— 一级是供应商「条目」（按厂商用组标题归拢，
- * 同厂商多账号/自定义多网关各占独立一级项），hover/点击展开二级模型子菜单；
- * 关键词非空时改为跨条目的扁平模糊搜索列表。
- */
+/** composer 工具行的模型选择。 */
 export function ModelPicker({
   providers,
   virtualModels,
@@ -540,29 +708,24 @@ export function ModelPicker({
   const thinkingInherited = reasoningMode !== undefined && !modelCapabilityOverrides?.thinkingLevel;
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState('');
+  const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(readStoredPinnedModelKeys);
+  const [activeNav, setActiveNav] = useState<ModelPickerNavTarget | null>(null);
+  const [activeProviderByVendor, setActiveProviderByVendor] = useState<
+    Readonly<Record<string, string>>
+  >({});
   const openSubmenuIdsRef = useRef(new Set<string>());
   const searchFocusedRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const pendingSearchFocusRef = useRef(false);
   const openRef = useRef(open);
   openRef.current = open;
-  const [hoverLockedIds, setHoverLockedIds] = useState<ReadonlySet<string>>(new Set());
   const [oauthInfos, setOauthInfos] = useState<OauthProviderInfo[]>([]);
   const [metaByProvider, setMetaByProvider] = useState<Record<string, Record<string, ModelMeta>>>(
     {}
   );
 
-  const selectableVirtualModels = useMemo(
-    () =>
-      (virtualModels ?? []).filter(
-        (entry) =>
-          entry.enabled &&
-          providers.some(
-            (p) =>
-              p.id === entry.primary.providerId &&
-              p.models.some((m) => m.id === entry.primary.modelId && m.enabled !== false)
-          )
-      ),
+  const visibleVirtualModels = useMemo(
+    () => selectableVirtualModels(virtualModels, providers),
     [virtualModels, providers]
   );
   const currentVirtual = findVirtualModel(virtualModels, { providerId, modelId });
@@ -590,7 +753,22 @@ export function ModelPicker({
         : modelName
       : emptyLabel || t('Select model'));
 
-  const groups = useMemo(() => groupProviders(providers, oauthInfos), [providers, oauthInfos]);
+  const groups = useMemo(
+    () => expandWorkbenchGroups(groupProviders(providers, oauthInfos)),
+    [providers, oauthInfos]
+  );
+  const view = useMemo(
+    () =>
+      resolveActiveWorkbenchView({
+        groups,
+        selectableVirtualModels: visibleVirtualModels,
+        pinnedCount: pinnedKeys.size,
+        selectedProviderId: providerId,
+        activeNav,
+        activeProviderByVendor,
+      }),
+    [groups, visibleVirtualModels, pinnedKeys, providerId, activeNav, activeProviderByVendor]
+  );
 
   // 弹层打开时才刷新订阅账号展示名（登录/登出可能已发生），关闭时不必轮询。
   // 同时预热所有订阅账号的额度：额度探测要打厂商端点（可能秒级延迟），
@@ -616,8 +794,8 @@ export function ModelPicker({
   useEffect(() => {
     if (!open) return;
     setKeyword('');
+    setActiveNav(null);
     openSubmenuIdsRef.current.clear();
-    setHoverLockedIds(new Set());
     const focusSearch = pendingSearchFocusRef.current;
     pendingSearchFocusRef.current = false;
     searchFocusedRef.current = focusSearch;
@@ -671,7 +849,9 @@ export function ModelPicker({
       }
     > = {};
     for (const group of groups) {
-      const vendorLabel = group.vendorId === CUSTOM_VENDOR_ID ? t('Custom') : group.label;
+      const isCustomGroup =
+        group.vendorId === CUSTOM_VENDOR_ID || group.vendorId.startsWith(`${CUSTOM_VENDOR_ID}:`);
+      const vendorLabel = isCustomGroup ? t('Custom') : group.label;
       for (const provider of group.providers) {
         const { primary, secondary, plan, isSubscription } = entryLabelOf(
           provider,
@@ -684,18 +864,46 @@ export function ModelPicker({
     return table;
   }, [groups, oauthAccountsByKey, t]);
 
+  const pinnedHits = useMemo(() => {
+    const hits: Array<{
+      provider: ModelProvider;
+      model: ModelEntry;
+      entryTag: string;
+      showId: boolean;
+    }> = [];
+    for (const provider of providers) {
+      const info = entryInfoByProviderId[provider.id];
+      const entryTag = info ? `${info.vendorLabel} · ${info.primary}` : provider.name;
+      const duplicatedLabels = duplicateModelLabels(provider.models);
+      for (const model of provider.models) {
+        if (model.enabled === false) continue;
+        if (!pinnedKeys.has(pinnedModelKey(provider.id, model.id))) continue;
+        hits.push({
+          provider,
+          model,
+          entryTag,
+          showId: duplicatedLabels.has(model.label ?? model.id),
+        });
+      }
+    }
+    return hits;
+  }, [providers, entryInfoByProviderId, pinnedKeys]);
+
   const handleMetaData = useCallback((pid: string, meta: Record<string, ModelMeta>) => {
     setMetaByProvider((prev) => (prev[pid] === meta ? prev : { ...prev, [pid]: meta }));
+  }, []);
+
+  const handleTogglePin = useCallback((key: string) => {
+    setPinnedKeys((current) => {
+      const next = togglePinnedModelKey(current, key);
+      writeStoredPinnedModelKeys(next);
+      return next;
+    });
   }, []);
 
   const searching = keyword.trim().length > 0;
   const searchingRef = useRef(searching);
   searchingRef.current = searching;
-
-  useEffect(() => {
-    if (!searching) return;
-    openSubmenuIdsRef.current.clear();
-  }, [searching]);
 
   const searchHits = useMemo<SearchHit[]>(() => {
     if (!searching) return [];
@@ -728,23 +936,22 @@ export function ModelPicker({
   const virtualHits = useMemo(
     () =>
       searching
-        ? selectableVirtualModels.filter(
+        ? visibleVirtualModels.filter(
             (entry) => fuzzyMatchScore(keyword.trim(), entry.name) !== null
           )
-        : selectableVirtualModels,
-    [searching, keyword, selectableVirtualModels]
+        : visibleVirtualModels,
+    [searching, keyword, visibleVirtualModels]
   );
   const virtualItems = virtualHits.map((entry) => (
     <MenuItem
       key={`virtual/${entry.id}`}
+      className="min-h-6 gap-1.5 px-1.5 py-0.5 text-xs sm:min-h-6 sm:text-xs"
       data-model-picker-virtual={entry.id}
       onClick={() => handleSelectModel(VIRTUAL_PROVIDER_ID, entry.id)}
     >
       <Shuffle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-        {currentVirtual?.id === entry.id && <Check className="h-3.5 w-3.5 text-primary" />}
-      </span>
+      {currentVirtual?.id === entry.id && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
     </MenuItem>
   ));
 
@@ -849,18 +1056,76 @@ export function ModelPicker({
           searchFocused: searchFocusedRef.current || searchingRef.current,
         })
       ) {
-        setHoverLockedIds(new Set(openSubmenuIdsRef.current));
         return;
       }
       if (!nextOpen) {
         openSubmenuIdsRef.current.clear();
         searchFocusedRef.current = false;
-        setHoverLockedIds(new Set());
       }
       setOpen(nextOpen);
     },
     []
   );
+
+  const detailGroup = view.activeNav.kind === 'vendor' ? view.activeGroup : undefined;
+  const detailProvider = view.activeNav.kind === 'vendor' ? view.activeProvider : undefined;
+  const detailAccountKey = detailProvider
+    ? usageAccountKeyForProvider(detailProvider, activeAccount)
+    : undefined;
+  const rememberAccount = (vendorId: string, accountId: string) => {
+    setActiveProviderByVendor((prev) =>
+      prev[vendorId] === accountId ? prev : { ...prev, [vendorId]: accountId }
+    );
+  };
+  const thinkingSlider =
+    displayedReasoningEnabled && visibleLevels.length > 0 ? (
+      <div className={cn(reasoningMode ? 'mt-2' : 'min-w-0 flex-1 px-1.5 pt-0.5')}>
+        <Slider
+          tabIndex={-1}
+          aria-label={t('Thinking level')}
+          thumbAlignment="center"
+          className="[&_[data-slot=slider-indicator]]:ms-0 [&_[data-slot=slider-track]]:before:inset-x-0"
+          min={0}
+          max={Math.max(1, visibleLevels.length - 1)}
+          step={1}
+          value={levelIndex}
+          disabled={visibleLevels.length === 1}
+          onValueChange={(value) => {
+            const index = Array.isArray(value) ? value[0] : value;
+            const target = visibleLevels[index] ?? visibleLevels[0];
+            onThinkingChange(target);
+          }}
+        />
+        <div className="relative mt-0.5 h-4">
+          {visibleLevels.map((entry, index) => (
+            <button
+              key={entry}
+              type="button"
+              tabIndex={-1}
+              data-thinking-tick={entry}
+              style={{
+                left: `${(index / Math.max(1, visibleLevels.length - 1)) * 100}%`,
+              }}
+              onClick={() => onThinkingChange(entry)}
+              className="absolute top-0 flex w-0 flex-col items-center"
+            >
+              <span className="h-1 w-px shrink-0 bg-muted-foreground/40" />
+              <span
+                className={cn(
+                  'whitespace-nowrap text-[10px] leading-3 transition-colors',
+                  index === 0 ? 'self-start' : index === visibleLevels.length - 1 && 'self-end',
+                  entry === displayedThinkingLevel
+                    ? 'font-medium text-primary'
+                    : 'text-muted-foreground/70 hover:text-foreground'
+                )}
+              >
+                {t(LEVEL_LABEL_KEYS[entry])}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    ) : null;
 
   return (
     <div className={cn(triggerClassName && 'w-full min-w-0')}>
@@ -902,14 +1167,14 @@ export function ModelPicker({
           data-model-picker="root"
           side={side}
           align="start"
-          className="w-80"
+          className="w-[560px] max-w-[calc(100vw-2rem)]"
           zIndex={zIndex}
         >
           {providers.map((provider) => (
             <ModelMetaBridge key={provider.id} provider={provider} onData={handleMetaData} />
           ))}
 
-          <div className="-mx-1 -mt-1 mb-1 border-b p-2">
+          <div className="-mx-1 -mt-1 mb-1 border-b px-2 py-1.5">
             <input
               ref={searchInputRef}
               data-model-picker="search"
@@ -924,144 +1189,258 @@ export function ModelPicker({
               }}
               onKeyDown={stopTypeaheadOnly}
               placeholder={t('Search models')}
-              className="h-8 w-full rounded-md border bg-transparent px-2.5 text-sm outline-none placeholder:text-muted-foreground focus:border-ring"
+              className="h-7 w-full rounded-md border bg-transparent px-2 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
             />
           </div>
 
-          <div className="max-h-72 overflow-y-auto">
+          <div className="max-h-[268px] overflow-y-auto">
             {searching ? (
               <>
                 {virtualItems}
-                {searchHits.map(({ provider, model, entryTag, showId }) => (
-                  <MenuItem
-                    key={`${provider.id}/${model.id}`}
-                    onClick={() => handleSelectModel(provider.id, model.id)}
-                  >
-                    <ModelRowContent
-                      model={model}
-                      meta={metaByProvider[provider.id]?.[model.id]}
-                      entryTag={entryTag}
-                      showId={showId}
-                      selected={provider.id === providerId && model.id === modelId}
-                    />
-                  </MenuItem>
-                ))}
+                {searchHits.map(({ provider, model, entryTag, showId }) => {
+                  const key = pinnedModelKey(provider.id, model.id);
+                  return (
+                    <MenuItem
+                      key={`${provider.id}/${model.id}`}
+                      className="min-h-6 gap-1.5 px-1.5 py-0.5 text-xs sm:min-h-6 sm:text-xs"
+                      onClick={() => handleSelectModel(provider.id, model.id)}
+                    >
+                      <ModelRowContent
+                        model={model}
+                        meta={metaByProvider[provider.id]?.[model.id]}
+                        entryTag={entryTag}
+                        showId={showId}
+                        selected={provider.id === providerId && model.id === modelId}
+                        pin={{ key, pinned: pinnedKeys.has(key), onToggle: handleTogglePin }}
+                      />
+                    </MenuItem>
+                  );
+                })}
                 {searchHits.length === 0 && virtualItems.length === 0 && (
                   <p className="px-1 py-4 text-center text-xs text-muted-foreground">
                     {t('No models found')}
                   </p>
                 )}
               </>
+            ) : groups.length === 0 && virtualItems.length === 0 ? (
+              <p className="px-1 py-4 text-center text-xs text-muted-foreground">
+                {t('No models found')}
+              </p>
             ) : (
-              <>
-                {virtualItems.length > 0 && (
-                  <MenuGroup>
-                    <MenuGroupLabel>{t('Virtual models')}</MenuGroupLabel>
-                    {virtualItems}
-                  </MenuGroup>
-                )}
-                {groups.map((group) => (
-                  <MenuGroup key={group.vendorId}>
-                    <MenuGroupLabel>
-                      {group.vendorId === CUSTOM_VENDOR_ID ? t('Custom') : group.label}
-                    </MenuGroupLabel>
-                    {group.providers.map((provider) => {
-                      const info = entryInfoByProviderId[provider.id];
-                      const accountKey = usageAccountKeyForProvider(provider, activeAccount);
-                      const isSubscription =
-                        info?.isSubscription ?? Boolean(provider.oauthAccountKey);
-                      return (
-                        <MenuSub
-                          key={provider.id}
-                          onOpenChange={(next) => {
-                            markSubmenuOpen(openSubmenuIdsRef.current, provider.id, next);
-                          }}
-                        >
-                          <MenuSubTrigger
-                            openOnHover={!hoverLockedIds.has(provider.id)}
-                            onPointerLeave={() => {
-                              setHoverLockedIds((prev) => {
-                                if (!prev.has(provider.id)) return prev;
-                                const next = new Set(prev);
-                                next.delete(provider.id);
-                                return next;
-                              });
-                            }}
+              <div data-model-picker="workbench" className="flex h-[268px] overflow-hidden">
+                <div className="w-44 shrink-0 overflow-y-auto border-r pr-1">
+                  {view.showFavoritesNav && (
+                    <button
+                      type="button"
+                      data-model-picker-nav="favorites"
+                      onMouseEnter={() => setActiveNav({ kind: 'favorites' })}
+                      onClick={() => setActiveNav({ kind: 'favorites' })}
+                      className={cn(
+                        'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs hover:bg-accent',
+                        view.activeNav.kind === 'favorites' && 'bg-accent'
+                      )}
+                    >
+                      <Star className="h-3.5 w-3.5 shrink-0 text-primary" />
+                      <span className="min-w-0 flex-1 truncate">{t('Starred & virtual')}</span>
+                      <Badge variant="outline" size="sm" className="shrink-0 text-[9px]">
+                        {visibleVirtualModels.length + pinnedHits.length}
+                      </Badge>
+                    </button>
+                  )}
+                  {groups.map((group) => {
+                    const vendorLabel =
+                      group.vendorId === CUSTOM_VENDOR_ID ? t('Custom') : group.label;
+                    const sole = group.providers.length === 1 ? group.providers[0] : undefined;
+                    const soleInfo = sole ? entryInfoByProviderId[sole.id] : undefined;
+                    const solePrimary = sole ? (soleInfo?.primary ?? sole.name) : undefined;
+                    const soleSubtitle = sole
+                      ? solePrimary === vendorLabel
+                        ? (soleInfo?.secondary ?? t('Custom'))
+                        : solePrimary
+                      : undefined;
+                    const selectedHere = group.providers.some(
+                      (provider) => provider.id === providerId
+                    );
+                    const navActive =
+                      view.activeNav.kind === 'vendor' &&
+                      view.activeNav.vendorId === group.vendorId;
+                    return (
+                      <button
+                        key={group.vendorId}
+                        type="button"
+                        data-model-picker-nav={`vendor:${group.vendorId}`}
+                        data-model-picker-vendor={group.vendorId}
+                        onMouseEnter={() =>
+                          setActiveNav({ kind: 'vendor', vendorId: group.vendorId })
+                        }
+                        onClick={() => setActiveNav({ kind: 'vendor', vendorId: group.vendorId })}
+                        className={cn(
+                          'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs hover:bg-accent',
+                          navActive && 'bg-accent'
+                        )}
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{vendorLabel}</span>
+                          <span className="block truncate text-[10px] text-muted-foreground/70">
+                            {sole
+                              ? soleSubtitle
+                              : t('{{count}} accounts', { count: group.providers.length })}
+                          </span>
+                        </span>
+                        {sole && soleInfo?.plan && (
+                          <Badge
+                            variant="outline"
+                            size="sm"
+                            className="max-w-16 shrink-0 truncate text-[9px] uppercase"
                           >
-                            {isSubscription ? (
-                              <BadgeCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            )}
-                            <span className="flex min-w-0 flex-1 flex-col items-start overflow-hidden">
-                              <span className="w-full truncate text-left">
-                                {info?.primary ?? provider.name}
-                              </span>
-                              {info?.secondary && (
-                                <span className="w-full truncate text-left text-[10px] text-muted-foreground/60">
-                                  {info.secondary}
-                                </span>
-                              )}
-                            </span>
-                            {info?.plan && (
-                              <Badge
-                                variant="outline"
-                                size="sm"
-                                className="max-w-20 shrink-0 truncate text-[9px] uppercase"
-                              >
-                                {info.plan}
-                              </Badge>
-                            )}
-                            <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                              {provider.id === providerId && (
-                                <Check className="h-3.5 w-3.5 text-primary" />
-                              )}
-                            </span>
-                          </MenuSubTrigger>
-                          <MenuSubPopup
-                            data-model-picker="submenu"
-                            className="w-72"
-                            zIndex={zIndex}
+                            {soleInfo.plan}
+                          </Badge>
+                        )}
+                        {!sole && (
+                          <Badge variant="outline" size="sm" className="shrink-0 text-[9px]">
+                            {group.providers.length}
+                          </Badge>
+                        )}
+                        {selectedHere && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col overflow-hidden pl-1.5">
+                  {view.activeNav.kind === 'favorites' ? (
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      {virtualItems}
+                      {pinnedHits.map(({ provider, model, entryTag, showId }) => {
+                        const key = pinnedModelKey(provider.id, model.id);
+                        return (
+                          <MenuItem
+                            key={`pin/${key}`}
+                            className="min-h-6 gap-1.5 px-1.5 py-0.5 text-xs sm:min-h-6 sm:text-xs"
+                            onClick={() => handleSelectModel(provider.id, model.id)}
                           >
-                            {accountKey && <SubmenuUsage accountKey={accountKey} />}
-                            <ProviderSubmenuList
-                              provider={provider}
-                              meta={metaByProvider[provider.id]}
-                              selectedProviderId={providerId}
-                              selectedModelId={modelId}
-                              onSelectModel={(mid) => handleSelectModel(provider.id, mid)}
+                            <ModelRowContent
+                              model={model}
+                              meta={metaByProvider[provider.id]?.[model.id]}
+                              entryTag={entryTag}
+                              showId={showId}
+                              selected={provider.id === providerId && model.id === modelId}
+                              pin={{ key, pinned: true, onToggle: handleTogglePin }}
                             />
-                          </MenuSubPopup>
-                        </MenuSub>
-                      );
-                    })}
-                  </MenuGroup>
-                ))}
-                {groups.length === 0 && virtualItems.length === 0 && (
-                  <p className="px-1 py-4 text-center text-xs text-muted-foreground">
-                    {t('No models found')}
-                  </p>
-                )}
-              </>
+                          </MenuItem>
+                        );
+                      })}
+                    </div>
+                  ) : detailGroup && detailProvider ? (
+                    <>
+                      {detailGroup.providers.length > 1 ? (
+                        <div
+                          data-model-picker="account-tabs"
+                          className="mb-1 flex flex-wrap gap-1 border-b pb-1.5"
+                        >
+                          {detailGroup.providers.map((provider) => {
+                            const info = entryInfoByProviderId[provider.id];
+                            const current = provider.id === detailProvider.id;
+                            return (
+                              <button
+                                key={provider.id}
+                                type="button"
+                                data-model-picker-account={provider.id}
+                                aria-pressed={current}
+                                onMouseEnter={() =>
+                                  rememberAccount(detailGroup.vendorId, provider.id)
+                                }
+                                onClick={() => rememberAccount(detailGroup.vendorId, provider.id)}
+                                className={cn(
+                                  'flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[11px]',
+                                  current ? 'border-primary bg-accent' : 'hover:bg-accent'
+                                )}
+                              >
+                                <span className="truncate">{info?.primary ?? provider.name}</span>
+                                {info?.plan && (
+                                  <Badge
+                                    variant="outline"
+                                    size="sm"
+                                    className="max-w-16 shrink-0 truncate text-[9px] uppercase"
+                                  >
+                                    {info.plan}
+                                  </Badge>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div
+                          data-model-picker="account-header"
+                          className={cn(
+                            'mb-1 flex items-center justify-between gap-2 border-b px-1 pb-1 text-[11px]',
+                            (!entryInfoByProviderId[detailProvider.id]?.secondary ||
+                              (entryInfoByProviderId[detailProvider.id]?.primary ??
+                                detailProvider.name) === detailGroup.label) &&
+                              'sr-only'
+                          )}
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5 truncate">
+                            <span className="truncate">
+                              {entryInfoByProviderId[detailProvider.id]?.primary ??
+                                detailProvider.name}
+                            </span>
+                            {entryInfoByProviderId[detailProvider.id]?.secondary && (
+                              <span className="truncate text-[10px] text-muted-foreground/70">
+                                {entryInfoByProviderId[detailProvider.id]?.secondary}
+                              </span>
+                            )}
+                          </span>
+                          {entryInfoByProviderId[detailProvider.id]?.plan && (
+                            <Badge
+                              variant="outline"
+                              size="sm"
+                              className="max-w-20 shrink-0 truncate text-[9px] uppercase"
+                            >
+                              {entryInfoByProviderId[detailProvider.id]?.plan}
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+                      {detailAccountKey && <SubmenuUsage accountKey={detailAccountKey} />}
+                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                        <ProviderSubmenuList
+                          key={detailProvider.id}
+                          provider={detailProvider}
+                          meta={metaByProvider[detailProvider.id]}
+                          selectedProviderId={providerId}
+                          selectedModelId={modelId}
+                          pinnedKeys={pinnedKeys}
+                          onTogglePin={handleTogglePin}
+                          onSelectModel={(mid) => handleSelectModel(detailProvider.id, mid)}
+                        />
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              </div>
             )}
           </div>
 
           {showReasoningControls && (
-            <div className="-mx-1 -mb-1 mt-1 border-t p-3">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1 text-xs">
-                  <Brain className="h-3.5 w-3.5 text-muted-foreground" />
-                  {t('Reasoning')}
-                </span>
-                {!reasoningMode && (
-                  <Switch
-                    tabIndex={-1}
-                    aria-label={t('Reasoning')}
-                    checked={displayedReasoningEnabled}
-                    onCheckedChange={onReasoningChange}
-                    disabled={reasoningUnsupported}
-                  />
-                )}
+            <div className="-mx-1 -mb-1 mt-1 border-t px-2.5 py-1.5">
+              <div className={cn(!reasoningMode && 'flex items-center gap-4')}>
+                <div className="flex shrink-0 items-center justify-between gap-2">
+                  <span className="flex items-center gap-1 text-xs">
+                    <Brain className="h-3.5 w-3.5 text-muted-foreground" />
+                    {t('Reasoning')}
+                  </span>
+                  {!reasoningMode && (
+                    <Switch
+                      tabIndex={-1}
+                      aria-label={t('Reasoning')}
+                      checked={displayedReasoningEnabled}
+                      onCheckedChange={onReasoningChange}
+                      disabled={reasoningUnsupported}
+                    />
+                  )}
+                </div>
+                {!reasoningMode && thinkingSlider}
               </div>
               {reasoningMode && (
                 <div className="mt-2 flex gap-1" role="group" aria-label={t('Reasoning')}>
@@ -1095,56 +1474,7 @@ export function ModelPicker({
                   {t('Depth: {{level}}', { level: t(LEVEL_LABEL_KEYS[displayedThinkingLevel]) })}
                 </p>
               )}
-              {displayedReasoningEnabled && visibleLevels.length > 0 && (
-                <div className="mt-3">
-                  <Slider
-                    tabIndex={-1}
-                    aria-label={t('Thinking level')}
-                    thumbAlignment="center"
-                    className="[&_[data-slot=slider-indicator]]:ms-0 [&_[data-slot=slider-track]]:before:inset-x-0"
-                    min={0}
-                    max={Math.max(1, visibleLevels.length - 1)}
-                    step={1}
-                    value={levelIndex}
-                    disabled={visibleLevels.length === 1}
-                    onValueChange={(value) => {
-                      const index = Array.isArray(value) ? value[0] : value;
-                      const target = visibleLevels[index] ?? visibleLevels[0];
-                      onThinkingChange(target);
-                    }}
-                  />
-                  <div className="relative mt-1 h-6">
-                    {visibleLevels.map((entry, index) => (
-                      <button
-                        key={entry}
-                        type="button"
-                        tabIndex={-1}
-                        data-thinking-tick={entry}
-                        style={{
-                          left: `${(index / Math.max(1, visibleLevels.length - 1)) * 100}%`,
-                        }}
-                        onClick={() => onThinkingChange(entry)}
-                        className="absolute top-0 flex w-0 flex-col items-center"
-                      >
-                        <span className="h-1.5 w-px shrink-0 bg-muted-foreground/40" />
-                        <span
-                          className={cn(
-                            'whitespace-nowrap text-[10px] transition-colors',
-                            index === 0
-                              ? 'self-start'
-                              : index === visibleLevels.length - 1 && 'self-end',
-                            entry === displayedThinkingLevel
-                              ? 'font-medium text-primary'
-                              : 'text-muted-foreground/70 hover:text-foreground'
-                          )}
-                        >
-                          {t(LEVEL_LABEL_KEYS[entry])}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {reasoningMode && thinkingSlider}
             </div>
           )}
         </MenuPopup>

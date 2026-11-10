@@ -471,6 +471,56 @@ describe('Main-owned source authority contracts', () => {
     ).toBeNull();
   });
 
+  it('session-meta 的 occupancy 可带上下文拆分条目，脏条目拒绝', () => {
+    const occupancy = {
+      buckets: {
+        system: 1,
+        instructions: 2,
+        skills: 0,
+        tools: 1,
+        conversation: 10,
+        compaction: 0,
+        projectMemory: 0,
+        reminders: 0,
+      },
+      used: 14,
+      estimated: true as const,
+      compactedMessageCount: 0,
+      compactionModelMismatch: false,
+    };
+    const parts = [
+      { kind: 'tools', tokens: 1, items: [{ name: 'mcp__github', tag: 'mcp', n: 2, tokens: 1 }] },
+      { kind: 'chat', tokens: 10, items: [{ name: '1', tag: 'turn', tokens: 10 }] },
+    ];
+    const event = {
+      type: 'session-meta',
+      identity: parent,
+      seq: 4,
+      occupancy: { ...occupancy, parts },
+    };
+    expect(parseAgentWorkerEvent(event)).toEqual(event);
+    expect(
+      parseAgentWorkerEvent({
+        ...event,
+        occupancy: { ...occupancy, parts: [{ kind: 'nope', tokens: 1, items: [] }] },
+      })
+    ).toBeNull();
+    expect(
+      parseAgentWorkerEvent({
+        ...event,
+        occupancy: {
+          ...occupancy,
+          parts: [{ kind: 'tools', tokens: 1, items: [{ name: '', tag: '', tokens: 1 }] }],
+        },
+      })
+    ).toBeNull();
+    const after = { ...event, occupancy: { ...occupancy, compactionTokensAfter: 12 } };
+    expect(parseAgentWorkerEvent(after)).toEqual(after);
+    expect(
+      parseAgentWorkerEvent({ ...event, occupancy: { ...occupancy, compactionTokensAfter: -1 } })
+    ).toBeNull();
+  });
+
   it('project/conversation 专用 mutations strict，id 由 Main result 生成', () => {
     expect(parseCreateProjectAuthorityRequest({ requestId: 'p1', path: '/repo' })).not.toBeNull();
     expect(
@@ -1283,6 +1333,28 @@ describe('parent/child commands', () => {
         model: { ...model, settingsProviderId: '' },
       })
     ).toBeNull();
+  });
+
+  it('spawn model 收下合法请求头，并丢掉非法条目', () => {
+    const command = {
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/repo',
+      model: {
+        ...model,
+        headers: { 'X-Ok': 'one', 'bad name': 'no', 'X-Break': 'a\nb' },
+      },
+    };
+    expect(parseAgentCommand(command)).toEqual({
+      ...command,
+      model: { ...model, headers: { 'X-Ok': 'one' } },
+    });
+    expect(
+      parseAgentCommand({
+        ...command,
+        model: { ...model, headers: { nope: 1 } },
+      })
+    ).toEqual({ ...command, model });
   });
 
   it('set-web-search-config 链收窄：合法透传，非法/超限拒收', () => {
@@ -2137,6 +2209,15 @@ describe('generation lifecycle/events', () => {
     expect(parseAgentCommand({ type: 'abort-retry' })).toBeNull();
   });
 
+  it('withdraw-steer 命令携 identity 与合法 deliveryId，多余字段拒绝', () => {
+    const command = { type: 'withdraw-steer', identity: parent, deliveryId: 'd-1' };
+    expect(parseAgentCommand(command)).toEqual(command);
+    expect(parseAgentCommand({ ...command, extra: true })).toBeNull();
+    expect(parseAgentCommand({ ...command, deliveryId: '' })).toBeNull();
+    expect(parseAgentCommand({ ...command, deliveryId: 'x'.repeat(129) })).toBeNull();
+    expect(parseAgentCommand({ type: 'withdraw-steer', identity: parent })).toBeNull();
+  });
+
   it('retry 命令只携 identity，多余字段拒绝', () => {
     const command = { type: 'retry', identity: parent };
     expect(parseAgentCommand(command)).toEqual(command);
@@ -2968,6 +3049,20 @@ describe('等人超时协议', () => {
     expect(parseAgentWorkerEvent(ask)).toEqual(ask);
     expect(
       parseAgentWorkerEvent({ ...ask, ask: { ...ask.ask, expiresAt: Number.NaN } })
+    ).toBeNull();
+  });
+
+  it('ask-request 的推荐项必须是选项之一', () => {
+    const ask = {
+      type: 'ask-request',
+      identity: parent,
+      seq: 3,
+      ask: { requestId: 'q', question: 'q', options: ['a', 'b'], recommended: 'b' },
+    };
+    expect(parseAgentWorkerEvent(ask)).toEqual(ask);
+    expect(parseAgentWorkerEvent({ ...ask, ask: { ...ask.ask, recommended: 'c' } })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...ask, ask: { requestId: 'q', question: 'q', recommended: 'a' } })
     ).toBeNull();
   });
 });

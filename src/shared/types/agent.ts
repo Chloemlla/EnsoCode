@@ -35,11 +35,13 @@ import type {
   PluginEventName,
   PluginInterceptEvent,
 } from '../extensionPlugins/events';
+
 import {
   AGENT_END_TEXT_MAX,
   CONTEXT_PART_ITEMS,
   CONTEXT_PART_KINDS,
   CONTEXT_USAGE_BUCKETS,
+  type ContextPart,
   isChildInterceptEvent,
   isInterceptEvent,
   PLUGIN_EVENTS,
@@ -81,6 +83,7 @@ import {
 } from '../privacyMask/report';
 import { type PrivacyMaskSettings, parsePrivacyMaskSettings } from '../privacyMask/settings';
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
+import { parseProviderHeaders } from '../providers/providerHeaders';
 import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsage';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { resolveShellLimits, type ShellLimits } from '../shellLimits';
@@ -134,6 +137,7 @@ export interface WorkerCustomProvider {
   baseUrl: string;
   apiKey: string;
   models: ModelEntry[];
+  headers?: Record<string, string>;
 }
 
 /** 会话状态。waiting/done 属权限门与 subagent 刀，M1 不引入 */
@@ -192,6 +196,8 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
    * Validated sequential pool configuration; identifies the route, while Main remains authoritative for live membership and cursors.
    */
   oauthAccountPool?: { accountKeys: string[] };
+  /** 该供应商的额外 HTTP 请求头。空表不下发。 */
+  headers?: Record<string, string>;
 }
 
 /** pi catalog 里的分类器 provider/model 与凭证 */
@@ -301,6 +307,8 @@ export interface AskRequestInfo {
   question: string;
   /** 可选快捷选项（用户也可自由输入） */
   options?: string[];
+  /** 推荐项：ask_user 的 default_option 恰为某个选项时才有 */
+  recommended?: string;
   /** 等人回答的截止时间（ms）；到期由 Main 按未回答处理 */
   expiresAt?: number;
 }
@@ -395,7 +403,7 @@ export interface AgentTypeSpawnConfig {
 
 /**
  * 下发 worker 的子代理可选模型（设置页集中配置，main 已解析凭证）。
- * name 是给 LLM 看的唯一键（`{provider.name}/{modelId}`，冲突时追加 #n）；
+ * name 是给 LLM 看的唯一键：物理为 `{provider.name}/{modelId}`，虚拟为条目 name，不是 `enso-virtual/{id}`；冲突时追加 #n。
  * description 是用户写的选型依据，注入工具参数说明。
  */
 export interface SubagentModelOption {
@@ -927,6 +935,8 @@ export type ContextOccupancyBucketId = (typeof CONTEXT_OCCUPANCY_BUCKETS)[number
 
 export type ContextOccupancyBuckets = Record<ContextOccupancyBucketId, number>;
 
+export type { ContextPart };
+
 export interface ContextOccupancy {
   buckets: ContextOccupancyBuckets;
   used: number;
@@ -936,6 +946,10 @@ export interface ContextOccupancy {
   contextWindow?: number;
   percent?: number;
   compactionEntryId?: string;
+  /** 最近一次压缩刚结束时的估算用量（固定开销 + 摘要 + 保留消息）；没压缩过缺省 */
+  compactionTokensAfter?: number;
+  /** 七类拆分条目（系统、工具、技能、指令、读入文件、工具输出、会话）；缺省时面板只显示分桶 */
+  parts?: ContextPart[];
 }
 
 /** worker 按完整消息记录算的会话用量（手机只持有尾窗消息，靠它显示全量） */
@@ -1564,6 +1578,8 @@ export type AgentCommand =
     }
   | { type: 'abort-classify-choice'; requestId: string }
   | { type: 'abort-retry'; identity: SessionIdentity }
+  /** 撤回模型尚未取用的插话；撤回成功以 delivery-rejected 回执，已取用则无事发生 */
+  | { type: 'withdraw-steer'; identity: SessionIdentity; deliveryId: string }
   /** instanceId 同 prompt：会话不在而被拒时 parent-rejected 回显 */
   | {
       type: 'retry';
@@ -2685,6 +2701,8 @@ export function parseContextOccupancy(value: unknown): ContextOccupancy | null {
     if (!isSequence(tokens)) return null;
     buckets[id] = tokens;
   }
+  const parts = value.parts === undefined ? undefined : parseContextParts(value.parts);
+  if (value.parts !== undefined && !parts) return null;
   if (
     !isSequence(value.used) ||
     !isSequence(value.compactedMessageCount) ||
@@ -2692,11 +2710,43 @@ export function parseContextOccupancy(value: unknown): ContextOccupancy | null {
     (value.contextWindow !== undefined &&
       !(typeof value.contextWindow === 'number' && value.contextWindow > 0)) ||
     (value.percent !== undefined && !isSequence(value.percent)) ||
-    (value.compactionEntryId !== undefined && !isNonEmptyString(value.compactionEntryId))
+    (value.compactionEntryId !== undefined && !isNonEmptyString(value.compactionEntryId)) ||
+    (value.compactionTokensAfter !== undefined && !isSequence(value.compactionTokensAfter))
   ) {
     return null;
   }
-  return value as unknown as ContextOccupancy;
+  return { ...(value as unknown as ContextOccupancy), ...(parts ? { parts } : {}) };
+}
+
+function parseContextParts(value: unknown): ContextPart[] | null {
+  if (!Array.isArray(value) || value.length > CONTEXT_PART_KINDS.length) return null;
+  const seen = new Set<string>();
+  for (const part of value) {
+    if (
+      !isRecord(part) ||
+      !CONTEXT_PART_KINDS.includes(part.kind as (typeof CONTEXT_PART_KINDS)[number]) ||
+      seen.has(part.kind as string) ||
+      !isSequence(part.tokens) ||
+      !Array.isArray(part.items) ||
+      part.items.length > CONTEXT_PART_ITEMS
+    ) {
+      return null;
+    }
+    seen.add(part.kind as string);
+    for (const item of part.items) {
+      if (
+        !isRecord(item) ||
+        !isNonEmptyString(item.name) ||
+        typeof item.tag !== 'string' ||
+        item.tag.length > 32 ||
+        !isSequence(item.tokens) ||
+        (item.n !== undefined && (!isSequence(item.n) || item.n < 1))
+      ) {
+        return null;
+      }
+    }
+  }
+  return value as ContextPart[];
 }
 
 const isNonNegativeNumber = (value: unknown): value is number =>
@@ -2803,6 +2853,7 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
       'thinkingLevel',
       'contextWindow',
       'maxTokens',
+      'headers',
     ]) ||
     !MODEL_API_KINDS.includes(value.api as ModelApiKind) ||
     typeof value.baseUrl !== 'string' ||
@@ -2816,6 +2867,11 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
         value.apiKey !== ''))
   ) {
     return null;
+  }
+  if (value.headers !== undefined) {
+    const headers = parseProviderHeaders(value.headers);
+    if (headers) value.headers = headers;
+    else delete value.headers;
   }
   return value as unknown as SpawnModelConfig;
 }
@@ -4091,6 +4147,12 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
       return hasExactKeys(value, ['type', 'identity']) && parseAnySessionIdentity(value.identity)
         ? (value as unknown as AgentCommand)
         : null;
+    case 'withdraw-steer':
+      return hasExactKeys(value, ['type', 'identity', 'deliveryId']) &&
+        parseAnySessionIdentity(value.identity) &&
+        isDeliveryId(value.deliveryId)
+        ? (value as unknown as AgentCommand)
+        : null;
     case 'retry':
       return hasOnlyKeys(value, ['type', 'identity', 'instanceId', 'unfinishedOnly']) &&
         parseAnySessionIdentity(value.identity) &&
@@ -4613,7 +4675,9 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       return isRecord(value.ask) &&
         isNonEmptyString(value.ask.requestId) &&
         isNonEmptyString(value.ask.question) &&
-        isOptionalTimestamp(value.ask.expiresAt)
+        isOptionalTimestamp(value.ask.expiresAt) &&
+        (value.ask.recommended === undefined ||
+          (Array.isArray(value.ask.options) && value.ask.options.includes(value.ask.recommended)))
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'subagent-update':

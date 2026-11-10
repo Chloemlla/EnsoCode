@@ -44,6 +44,7 @@ import { eligibleOauthPoolAccountKeys, isOauthAccountPool } from '@shared/oauthA
 import { ensureAccountProvider } from '@shared/piAccounts';
 import { parsePrivacyMaskSettings } from '@shared/privacyMask/settings';
 import { isClassifierOnlyProvider } from '@shared/providerCatalog';
+import { parseProviderHeaders } from '@shared/providers/providerHeaders';
 import { providerKeyFor } from '@shared/providers/providerKey';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
 import { resolveShellLimits, type ShellLimits } from '@shared/shellLimits';
@@ -143,7 +144,7 @@ import {
 import { recordPrivacyMaskLedger } from './privacyMask';
 import { killAndWaitExit } from './processExit';
 import { bundledRtkPath } from './rtkBinary';
-import { pickSubagentModelRefs } from './subagentModels';
+import { pickSubagentModelRefs, type SubagentModelRef } from './subagentModels';
 import { readStoredSystemPrompt } from './systemPromptStore';
 import { workspaceCommandBlocked } from './workspaceCommandGate';
 import { WorkspaceLockRequests } from './workspaceLockRequests';
@@ -582,8 +583,9 @@ export function agentTypeRegistrySnapshot(): AgentTypeRegistrySnapshot {
 }
 
 /**
- * 解析模型引用并组装下发配置。虚拟模型只在 `allowVirtual` 的场景（会话主模型）下发为虚拟配置；
- * 其他场景（标题、代审、子代理固定模型…）落到虚拟引用时取其快模型（无则主模型）。
+ * 解析模型引用并组装下发配置。只有显式 `allowVirtual` 的调用方得到 `config.virtual`；
+ * 今天是会话主模型（含跟随父会话、set-model、插件预设换模）和子代理目录。
+ * 其他场景（标题、代审、类型化 agent 的 fixed 模型、压缩摘要、btw…）落到虚拟引用时取其快模型（无则主模型）。
  */
 export function resolveModelSelection(
   providerId: string,
@@ -1847,6 +1849,13 @@ export function abortRetrySession(identity: SessionIdentity): { ok: boolean; err
   return sendAgentCommand({ type: 'abort-retry', identity });
 }
 
+export function withdrawSteerSession(
+  identity: SessionIdentity,
+  deliveryId: string
+): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'withdraw-steer', identity, deliveryId });
+}
+
 /** 终态失败后手动续跑：不新增 user 消息，从当前上下文 continue */
 export function retrySession(
   identity: SessionIdentity,
@@ -2082,56 +2091,80 @@ export function configuredAgentTypes(
   return [...builtins, ...customs, ...members];
 }
 
-/** 设置页「允许子代理指定模型」列表 → 解析凭证后随 spawn-parent 下发（开关关闭/不可用静默跳过） */
-function configuredSubagentModels(
+function resolveConfiguredSubagentSelection(
+  ref: SubagentModelRef,
   authenticatedAccountKeys: ReadonlySet<string>
-): SubagentModelOption[] {
+): ResolvedModelSelection | undefined {
+  const resolved = resolveModelSelection(
+    ref.providerId,
+    ref.modelId,
+    authenticatedAccountKeys,
+    isVirtualRef(ref) ? { allowVirtual: true } : undefined
+  );
+  if (!resolved.ok) return undefined;
+  return {
+    ...resolved.selection,
+    config: {
+      ...resolved.selection.config,
+      ...(ref.reasoning ? { reasoning: ref.reasoning } : {}),
+      ...(ref.thinkingLevel ? { thinkingLevel: ref.thinkingLevel } : {}),
+    },
+  };
+}
+
+interface ConfiguredSubagentSelection {
+  name: string;
+  description?: string;
+  selection: ResolvedModelSelection;
+}
+
+function listConfiguredSubagentSelections(
+  authenticatedAccountKeys: ReadonlySet<string>
+): ConfiguredSubagentSelection[] {
   const state = readSettingsState();
   if (state?.subagentModelsEnabled !== true) return [];
   const entries = Array.isArray(state.subagentModels)
     ? state.subagentModels.filter(isSubagentModelEntry)
     : [];
-  const options: SubagentModelOption[] = [];
-  for (const ref of pickSubagentModelRefs(entries, providersFromSettings())) {
-    const resolved = resolveModelSelection(ref.providerId, ref.modelId, authenticatedAccountKeys);
-    if (resolved.ok) {
-      options.push({
-        name: ref.name,
-        // 条目级推理覆盖赢过模型行覆盖；缺省保留行级/跟随语义
-        config: {
-          ...resolved.selection.config,
-          ...(ref.reasoning ? { reasoning: ref.reasoning } : {}),
-          ...(ref.thinkingLevel ? { thinkingLevel: ref.thinkingLevel } : {}),
-        },
-        ...(ref.description ? { description: ref.description } : {}),
-      });
-    }
+  const selections: ConfiguredSubagentSelection[] = [];
+  for (const ref of pickSubagentModelRefs(
+    entries,
+    providersFromSettings(),
+    virtualModelsFromSettings()
+  )) {
+    const selection = resolveConfiguredSubagentSelection(ref, authenticatedAccountKeys);
+    if (!selection) continue;
+    selections.push({
+      name: ref.name,
+      ...(ref.description ? { description: ref.description } : {}),
+      selection,
+    });
   }
-  return options;
+  return selections;
+}
+
+/** 设置页「允许子代理指定模型」列表 → 解析凭证后随 spawn-parent 下发（开关关闭/不可用静默跳过） */
+function configuredSubagentModels(
+  authenticatedAccountKeys: ReadonlySet<string>
+): SubagentModelOption[] {
+  return listConfiguredSubagentSelections(authenticatedAccountKeys).map(
+    ({ name, description, selection }) => ({
+      name,
+      config: selection.config,
+      ...(description ? { description } : {}),
+    })
+  );
 }
 
 export function resolveSubagentModelSelection(
   name: string,
   authenticatedAccountKeys: ReadonlySet<string>
 ): { ok: true; selection: ResolvedModelSelection } | { ok: false; error: string } {
-  const selected = configuredSubagentModels(authenticatedAccountKeys).find(
+  const selected = listConfiguredSubagentSelections(authenticatedAccountKeys).find(
     (entry) => entry.name === name
   );
   if (!selected) return { ok: false, error: `Subagent model is unavailable: ${name}` };
-  return {
-    ok: true,
-    selection: {
-      ref: {
-        providerId: selected.config.settingsProviderId,
-        modelId: selected.config.modelId,
-      },
-      runtimeRef: {
-        providerId: selected.config.oauthAccountKey ?? selected.config.settingsProviderId,
-        modelId: selected.config.modelId,
-      },
-      config: selected.config,
-    },
-  };
+  return { ok: true, selection: selected.selection };
 }
 
 function isSubagentModelEntry(value: unknown): value is SubagentModelEntry {
@@ -2468,6 +2501,7 @@ function customProvidersForWorker(): WorkerCustomProvider[] {
       continue;
     }
     if (!Array.isArray(provider.models)) continue;
+    const headers = parseProviderHeaders(provider.headers);
     out.push({
       settingsId: provider.id,
       name: provider.name,
@@ -2475,6 +2509,7 @@ function customProvidersForWorker(): WorkerCustomProvider[] {
       baseUrl: provider.baseUrl,
       apiKey: provider.apiKey,
       models: provider.models,
+      ...(headers ? { headers } : {}),
     });
   }
   return out;
@@ -2532,12 +2567,14 @@ function spawnModelConfig(
   if (provider.oauthAccountPool !== undefined && !isOauthAccountPool(provider))
     throw new Error('Invalid ChatGPT OAuth pool configuration.');
   const entry = provider.models.find((model: ModelEntry) => model.id === modelId);
+  const headers = parseProviderHeaders(provider.headers);
   return {
     api: provider.api,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     modelId,
     settingsProviderId: provider.id,
+    ...(headers ? { headers } : {}),
     ...(provider.oauthAccountKey ? { oauthAccountKey: provider.oauthAccountKey } : {}),
     ...(isOauthAccountPool(provider) ? { oauthAccountPool: provider.oauthAccountPool } : {}),
     // 统一目录后 OAuth 条目 models 只承载稀疏用户覆盖（enabled/别名/能力/档位），

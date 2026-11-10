@@ -100,6 +100,11 @@ asarUnpack:
   - node_modules/@vscode/ripgrep/bin/**
 mac:
   category: public.app-category.developer-tools
+  extraResources:
+    - from: build/bin/enso
+      to: bin/enso
+    - from: build/finder
+      to: finder
   hardenedRuntime: true
   gatekeeperAssess: false
   # 公证与 staple 由 scripts/after-sign.mjs 负责，staple 断网可重试
@@ -110,14 +115,24 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: EnsoCode uses the microphone for voice input. Speech is transcribed locally on this Mac.
     NSAppleEventsUsageDescription: EnsoCode uses Apple Events to activate app windows for the computer tool.
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: Folder
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - public.folder
   target:
     - dmg
     - zip
 win:
   target:
     - nsis
+  extraResources:
+    - from: build/bin/enso.cmd
+      to: bin/enso.cmd
 nsis:
   artifactName: ${productName}-Setup-${version}.exe
+  include: build/installer.nsh
 linux:
   target:
     - AppImage

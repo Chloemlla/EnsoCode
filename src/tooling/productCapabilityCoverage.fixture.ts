@@ -481,6 +481,18 @@ export const IPC_PRODUCT_COVERAGE = {
   SETTINGS_DEEP_LINK: excluded('Settings window deep-link transport.'),
   SETTINGS_DEEP_LINK_CONSUME: excluded('Settings window deep-link handshake.'),
   WINDOW_POPUP_MENU: excluded('Native application menu popup; renderer chrome only.'),
+  WINDOW_TAKE_OPEN_FOLDERS: excluded(
+    'Startup handoff that opens a folder chosen in the Windows shell.'
+  ),
+  WINDOW_OPEN_FOLDER_REQUESTED: excluded(
+    'Renderer wake-up for a Windows shell open-folder request.'
+  ),
+  WINDOW_INSTALL_SHELL_INTEGRATION: excluded(
+    'Host-only installer that writes outside userData and may ask for an admin password.'
+  ),
+  WINDOW_SHELL_INTEGRATION_STATUS: excluded(
+    'Host-only read of whether the macOS shell integrations exist on disk.'
+  ),
   APP_CLOSE_REQUEST: excluded('Main-to-renderer quit confirm handshake.'),
   APP_CLOSE_RESPONSE: excluded('Renderer-to-main quit confirm handshake.'),
   APP_FLUSH_PERSIST_REQUEST: excluded(
@@ -552,6 +564,7 @@ export const IPC_PRODUCT_COVERAGE = {
   AGENT_SPAWN: excluded('Lazy worker lifecycle command behind conversation send.'),
   AGENT_PROMPT: surfaces('conversations.send'),
   AGENT_STEER: surfaces('conversations.queue.send-now'),
+  AGENT_WITHDRAW_STEER: surfaces('conversations.queue.remove'),
   AGENT_ABORT: surfaces('conversations.abort'),
   AGENT_ABORT_RETRY: surfaces('conversations.abort'),
   AGENT_RETRY: surfaces('conversations.retry-turn'),

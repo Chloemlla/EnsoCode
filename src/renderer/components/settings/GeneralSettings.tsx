@@ -1,5 +1,6 @@
 import { AUTO_RETRY_LIMIT_OPTIONS, UNLIMITED_AUTO_RETRY } from '@shared/autoRetry';
 import { isValidProxyUrl, type ProxyMode } from '@shared/proxy';
+import type { ShellIntegration } from '@shared/shellIntegration';
 import { GENERATION_STALL_TIMEOUT_MINUTES } from '@shared/stallTimeout';
 import { type TerminalShell, terminalShellsForPlatform } from '@shared/terminalShell';
 import type { ServerUpdateMode, UpdaterState, UpdateStatus } from '@shared/types/updater';
@@ -95,6 +96,89 @@ export function GeneralSettings() {
         <WindowsLocalShellSection />
         <TerminalShellSection />
       </section>
+
+      {window.electronAPI.env.platform === 'darwin' && (
+        <section className="space-y-3">
+          <h4 className="border-b pb-2 text-base font-semibold">{t('Integrations')}</h4>
+          <ShellIntegrationRow
+            kind="ensoCommand"
+            title={t("'enso' terminal command")}
+            description={t(
+              'Run `enso .` in a terminal to open the current folder in EnsoCode. Links the command into /usr/local/bin and may ask for your password.'
+            )}
+          />
+          <ShellIntegrationRow
+            kind="finderQuickAction"
+            title={t('Finder Quick Action')}
+            description={t(
+              'Right-click a folder in Finder and choose Services > Open with EnsoCode.'
+            )}
+          />
+        </section>
+      )}
+    </div>
+  );
+}
+
+function ShellIntegrationRow({
+  kind,
+  title,
+  description,
+}: {
+  kind: ShellIntegration;
+  title: string;
+  description: string;
+}) {
+  const { t } = useI18n();
+  const [installed, setInstalled] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void window.electronAPI.window.shellIntegrationStatus().then((status) => {
+        if (active) setInstalled(status[kind]);
+      });
+    };
+    refresh();
+    window.addEventListener('focus', refresh);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refresh);
+    };
+  }, [kind]);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await window.electronAPI.window.installShellIntegration(kind);
+    } finally {
+      try {
+        const status = await window.electronAPI.window.shellIntegrationStatus();
+        setInstalled(status[kind]);
+      } finally {
+        setBusy(false);
+      }
+    }
+  };
+  return (
+    <div
+      className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5"
+      data-settings-row={`general.${kind}`}
+    >
+      <div className="min-w-0">
+        <p className="text-sm">{title}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="shrink-0"
+        disabled={busy}
+        onClick={() => void toggle()}
+      >
+        {busy ? t('In progress…') : t(installed ? 'Uninstall' : 'Install')}
+      </Button>
     </div>
   );
 }

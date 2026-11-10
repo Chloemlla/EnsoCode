@@ -1,9 +1,13 @@
 import { pluginInstallSettingsLink } from '@shared/extensionPlugins/pluginProtocol';
+import { openFolderPathsFromArgv } from '@shared/openFolder';
+import { parseShellIntegration } from '@shared/shellIntegration';
 import { IPC_CHANNELS } from '@shared/types';
 import { parseAgentSummonRequest } from '@shared/types/mentions';
 import { parseTitleBarAppearance, windowSurfaceColor } from '@shared/windowControls';
 import { BrowserWindow, dialog, ipcMain, Menu } from 'electron';
+import { readShellIntegrationStatusSync, shellIntegrationAction } from '../desktop/shellCommand';
 import { agentTypeRegistrySnapshot } from '../services/agentHost';
+import { installAppMenu } from '../services/appMenu';
 import {
   getWindowWebContents,
   sendToWindow,
@@ -12,8 +16,22 @@ import {
 import { focusMainWindow } from '../windows/MainWindow';
 import { openSettingsWindow } from '../windows/SettingsWindow';
 import { parseOpenSettingsRequest } from './searchAnything';
+import { readLocale } from './settings';
 
 let pendingDeepLink: ReturnType<typeof parseOpenSettingsRequest> = null;
+const pendingOpenFolders: string[] = [];
+
+export function noteOpenFolder(folder: string): void {
+  if (!pendingOpenFolders.includes(folder)) pendingOpenFolders.push(folder);
+}
+
+export function noteOpenFolderArgv(argv: readonly string[]): void {
+  for (const folder of openFolderPathsFromArgv(argv)) noteOpenFolder(folder);
+}
+
+export function notifyOpenFolderRequested(): void {
+  sendToWindow(focusMainWindow(), IPC_CHANNELS.WINDOW_OPEN_FOLDER_REQUESTED);
+}
 
 function openSettingsDeepLink(link: ReturnType<typeof parseOpenSettingsRequest>): void {
   const win = openSettingsWindow();
@@ -123,6 +141,24 @@ export function registerWindowHandlers(): void {
     const link = pendingDeepLink;
     pendingDeepLink = null;
     return link;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WINDOW_TAKE_OPEN_FOLDERS, (): string[] =>
+    pendingOpenFolders.splice(0)
+  );
+
+  ipcMain.handle(IPC_CHANNELS.WINDOW_INSTALL_SHELL_INTEGRATION, async (_event, raw: unknown) => {
+    const kind = parseShellIntegration(raw);
+    if (process.platform !== 'darwin' || !kind) return;
+    await shellIntegrationAction(kind, readLocale());
+    installAppMenu(readLocale());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WINDOW_SHELL_INTEGRATION_STATUS, () => {
+    if (process.platform !== 'darwin') {
+      return { ensoCommand: false, finderQuickAction: false };
+    }
+    return readShellIntegrationStatusSync();
   });
 
   ipcMain.handle(

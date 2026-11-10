@@ -57,6 +57,11 @@ import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig } from '@shared/providers/antigravity';
 import { installCodexLinkedRefresh } from '@shared/providers/codexAuth';
 import { DEVIN_PROVIDER_ID, devinProviderConfig } from '@shared/providers/devin';
+import {
+  QODER_CN_PROVIDER_ID,
+  QODER_PROVIDER_ID,
+  qoderProviderConfig,
+} from '@shared/providers/qoder';
 import { looksLikeRefusal } from '@shared/refusalRetry';
 import type { RequestBodyUsage } from '@shared/requestBodyUsage';
 import { computeStats, toUsageTotals } from '@shared/sessionStats';
@@ -74,6 +79,7 @@ import type {
   ApprovalMode,
   AttachedImage,
   ChildConversationMetadata,
+  ContextPart,
   CoworkerInfo,
   McpOAuthRefreshResult,
   McpServerSpawnConfig,
@@ -232,12 +238,14 @@ import { projectMessages, projectResumeTail } from './resumeSnapshots';
 import { withRtkOptimization } from './rtk';
 import { RunawayGuard } from './runawayGuard';
 import {
+  batchSteering,
   buildSessionDisplayMessages,
   continueSessionActivity,
   editLatestAssistantForRetry,
   editUnfinishedAssistantForResume,
   silentTurnRecoveryExtension,
   steerActiveSession,
+  steerDetachable,
 } from './sessionAdapter';
 import {
   EVICTION_SWEEP_INTERVAL_MS,
@@ -446,7 +454,8 @@ interface ManagedSession {
   /** 下一条 prompt 产生的 user 消息的投递回执；id 为 null 表示该投递无乐观回显 */
   promptDelivery?: { id: string | null };
   /** 已入 pi steer 队列、尚未上屏的投递回执，与 pi 队列同序 */
-  steerDeliveries?: { id: string | null; detach?: () => boolean }[];
+  /** detach：Bot 插话结算时交回 Main；withdraw：用户在模型取用前撤回 */
+  steerDeliveries?: { id: string | null; detach?: () => boolean; withdraw?: () => boolean }[];
   pendingBranch?: string;
   pendingBranchRequestId?: string;
   pendingVerifications?: number;
@@ -874,6 +883,8 @@ export async function initializeWorkerRuntime(runtime: ModelRuntime): Promise<Mo
   // 推理发生在本进程：Main 侧注册过不算，worker 不注册就会以「未知 provider」流不起来
   runtime.registerProvider(ANTIGRAVITY_PROVIDER_ID, antigravityProviderConfig());
   runtime.registerProvider(DEVIN_PROVIDER_ID, devinProviderConfig());
+  runtime.registerProvider(QODER_PROVIDER_ID, qoderProviderConfig('global'));
+  runtime.registerProvider(QODER_CN_PROVIDER_ID, qoderProviderConfig('cn'));
   await loadCursorProvider(runtime);
   // 已关联 Codex 的账号也可能在 worker 里触发刷新，必须同样接管；须在按需注册克隆之前
   installCodexLinkedRefresh(runtime);
@@ -883,6 +894,8 @@ export async function initializeWorkerRuntime(runtime: ModelRuntime): Promise<Mo
   // await 而非 fire-and-forget：resolveBaseModel 紧接着就要用这份清单。
   await refreshWorkerProviderModels(runtime, ANTIGRAVITY_PROVIDER_ID);
   await refreshWorkerProviderModels(runtime, DEVIN_PROVIDER_ID);
+  await refreshWorkerProviderModels(runtime, QODER_PROVIDER_ID);
+  await refreshWorkerProviderModels(runtime, QODER_CN_PROVIDER_ID);
   await refreshWorkerProviderModels(runtime, CURSOR_PROVIDER_ID);
   installModelContextCompat(runtime);
   return runtime;
@@ -1850,6 +1863,19 @@ export class SessionSupervisor {
       case 'abort-retry':
         this.must(command.identity).session.abortRetry();
         return;
+      case 'withdraw-steer': {
+        const managed = this.must(command.identity);
+        const slot = managed.steerDeliveries?.find((item) => item.id === command.deliveryId);
+        if (!slot?.withdraw?.()) return;
+        managed.steerDeliveries = managed.steerDeliveries?.filter((item) => item !== slot);
+        this.options.emit({
+          type: 'delivery-rejected',
+          identity: managed.identity,
+          seq: ++managed.seq,
+          deliveryId: command.deliveryId,
+        });
+        return;
+      }
       case 'retry': {
         const managed = this.must(command.identity);
         // 没开出新轮的两条路都要回执：Main 的 bot 宿主据此结算等着这次续跑的轮次，
@@ -3401,6 +3427,7 @@ export class SessionSupervisor {
       requestBudget?: RequestBudget;
     } = {}
   ): ManagedSession {
+    batchSteering(session);
     const customEntries = session.sessionManager.getBranch().flatMap((entry) => {
       if (entry.type !== 'custom' || entry.customType !== 'enso-agent-session') return [];
       const parsed = parseAgentSessionCustomEntry(entry.data);
@@ -4905,11 +4932,17 @@ export class SessionSupervisor {
     images?: { type: 'image'; data: string; mimeType: string }[],
     deliveryId?: string
   ): Promise<void> {
-    const slot = { id: deliveryId ?? null };
+    const slot: NonNullable<ManagedSession['steerDeliveries']>[number] = { id: deliveryId ?? null };
     managed.steerDeliveries ??= [];
     managed.steerDeliveries.push(slot);
-    return managed.session
-      .steer(withPendingPlanNote(managed, text), images)
+    return steerDetachable(
+      managed.session,
+      withPendingPlanNote(managed, text),
+      images,
+      (detach) => {
+        slot.withdraw = detach;
+      }
+    )
       .then((disposition) => {
         // Pi 可在 input hook 中消费输入，而不向队列添加 user 消息，因此不能保留对应投递标记。
         //
@@ -5206,36 +5239,38 @@ export class SessionSupervisor {
     } catch {
       occupancy = undefined;
     }
+    let parts: ContextPart[] | undefined;
+    if (occupancy) {
+      try {
+        const inputs = this.occupancyInputs(managed);
+        parts = buildContextParts({
+          buckets: contextUsagePayload(occupancy, managed.messages).buckets,
+          agentsFiles: inputs.agentsFiles,
+          skills: inputs.skills,
+          tools: inputs.tools,
+          reminders: inputs.pendingTaskReminders ?? [],
+          messages: inputs.contextMessages,
+          estimate: (message) => this.estimateSessionMessage(message),
+        }).parts;
+      } catch {
+        // 拆分失败只少了条目，分类合计照发
+      }
+    }
     this.options.emit({
       type: 'session-meta',
       identity: managed.identity,
       seq: ++managed.seq,
       sessionFile: managed.session.sessionFile,
-      ...(occupancy ? { occupancy } : {}),
+      ...(occupancy ? { occupancy: { ...occupancy, ...(parts ? { parts } : {}) } } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       // 渲染层冷会话不留正文、手机只持尾窗：按 worker 的完整记录算好随占用下发
       usageTotals: toUsageTotals(computeStats(managed.messages)),
     });
     if (occupancy && managed.pluginEvents?.plan.observe.includes('context_usage')) {
-      const payload = contextUsagePayload(occupancy, managed.messages);
-      try {
-        const inputs = this.occupancyInputs(managed);
-        Object.assign(
-          payload,
-          buildContextParts({
-            buckets: payload.buckets,
-            agentsFiles: inputs.agentsFiles,
-            skills: inputs.skills,
-            tools: inputs.tools,
-            reminders: inputs.pendingTaskReminders ?? [],
-            messages: inputs.contextMessages,
-            estimate: (message) => this.estimateSessionMessage(message),
-          })
-        );
-      } catch {
-        // 拆分失败只少了条目，分类合计照发
-      }
-      managed.pluginEvents.notify('context_usage', payload);
+      managed.pluginEvents.notify(
+        'context_usage',
+        contextUsagePayload({ ...occupancy, ...(parts ? { parts } : {}) }, managed.messages)
+      );
     }
   }
 
@@ -5952,7 +5987,12 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
   // 成员会互相挤出目录（pi 路由时按目录重新取模型）。同 id 仍覆盖，保持 spawn 重解析。
   registerCustomProviderModels(
     runtime,
-    { api: model.api, baseUrl: model.baseUrl, apiKey: model.apiKey },
+    {
+      api: model.api,
+      baseUrl: model.baseUrl,
+      apiKey: model.apiKey,
+      ...(model.headers ? { headers: model.headers } : {}),
+    },
     [entry]
   );
   const registered = runtime.getModel(providerId, model.modelId);
