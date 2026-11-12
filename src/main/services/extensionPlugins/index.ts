@@ -9,6 +9,7 @@ import {
   utilityProcess,
 } from '@platform';
 import type { PluginHostCapabilities } from '@shared/extensionPlugins/protocol';
+import { isHeadlessRun } from '@shared/headlessRun';
 import { IPC_CHANNELS } from '@shared/types';
 import { readSettings } from '../../ipc/settings';
 import { setNativeAgentTypeSource } from '../pluginRuntime';
@@ -198,14 +199,24 @@ export function getExtensionPlugins(): ExtensionPluginService {
       mcpCall: (target, server, tool, args, signal) =>
         mcpBridge ? mcpBridge.mcpCall(target, server, tool, args, signal) : noMcp(),
       now: Date.now,
-      ...(capabilities.clipboard ? { clipboard: (text: string) => clipboard.writeText(text) } : {}),
+      ...(capabilities.clipboard
+        ? {
+            clipboard: (text: string) =>
+              void clipboard
+                .writeText(text)
+                .catch((error) => console.warn('[plugins] clipboard write failed', error)),
+          }
+        : {}),
       ...(capabilities.openExternal
         ? { openExternal: (url: string) => shell.openExternal(url) }
         : {}),
     },
   });
-  service.startUpdateChecks();
-  service.startBackground();
+  // 单次 run 不拉插件市场、不起常驻插件进程。
+  if (!isHeadlessRun()) {
+    service.startUpdateChecks();
+    service.startBackground();
+  }
   setNativeAgentTypeSource(service.agentTypeSource());
   app.on('before-quit', () => service?.dispose());
   return service;

@@ -18,6 +18,7 @@ import {
   ContextMenu,
   ContextMenuItem,
   ContextMenuPopup,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { addToast } from '@/components/ui/toast';
@@ -34,11 +35,18 @@ import { useSessionsStore } from '@/stores/sessions';
 import { hasAuthoritativeMessages } from '@/stores/sessions/messageCache';
 import { buildTimeline, completedEditWriteFingerprint } from '@/stores/sessions/timeline';
 import { useSettingsStore } from '@/stores/settings';
+import {
+  fileViewerKey,
+  pluginFileViewersFor,
+  usePluginFileViewers,
+} from '../../plugins/fileViewers';
+import { PluginFrame } from '../../plugins/PluginView';
 import { FilesSearchPane } from './FilesSearchPane';
 import { fileTypeIcon, fileTypeIconClass } from './fileIcons';
 import { FileMarkdownPreview } from './filePreviewMarkdown';
 import { ancestorDirs, applyCompletedWrites } from './filesTreeRefresh';
 import {
+  fileTabPathMenuItems,
   fromPreviewKey,
   type RelMutation,
   remapRelForRename,
@@ -49,7 +57,7 @@ import {
   wasPathInvalidated,
 } from './filesViewRel';
 import { readWorkspaceDocument, refreshWorkspaceDocument } from './filesWorkspaceRefresh';
-import { FileTreeMenu, isMarkdownRel } from './fileTreeMenu';
+import { FileTreeMenu, isMarkdownRel, revealLabel } from './fileTreeMenu';
 import { idsToClose } from './tabCloseActions';
 
 const FILE_OPTIONS = {
@@ -87,6 +95,8 @@ interface OpenDoc {
   preview?: boolean;
   /** 同 tab 内的 source/preview 切换（仅 Markdown）；undefined 视为 source */
   viewMode?: 'source' | 'preview';
+  /** 正在用的插件文件查看器（pluginId:viewerId）；undefined 为编辑器 */
+  viewer?: string;
 }
 
 const EMPTY_MESSAGES: ProjectedMessage[] = [];
@@ -123,6 +133,9 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   const [ready, setReady] = useState(false);
   const [openDocs, setOpenDocs] = useState<OpenDoc[]>([]);
   const [activeRel, setActiveRel] = useState<string | null>(null);
+  const fileViewers = usePluginFileViewers();
+  const fileViewersRef = useRef(fileViewers);
+  fileViewersRef.current = fileViewers;
   // 窄屏下文件树与编辑区逐级显示：打开文件进编辑区，返回回到文件树
   const isMobile = useIsMobile();
   const [mobileTree, setMobileTree] = useState(true);
@@ -205,7 +218,9 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
       const existing = openDocsRef.current.find((doc) => doc.rel === rel);
       if (existing) {
         if (viewMode) {
-          setOpenDocs((docs) => docs.map((doc) => (doc.rel === rel ? { ...doc, viewMode } : doc)));
+          setOpenDocs((docs) =>
+            docs.map((doc) => (doc.rel === rel ? { ...doc, viewMode, viewer: undefined } : doc))
+          );
         }
         showDoc(rel);
         return;
@@ -243,6 +258,14 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
           dirty: false,
           conflict: false,
           viewMode,
+          viewer: viewMode
+            ? undefined
+            : (() => {
+                const preferred = pluginFileViewersFor(rel, fileViewersRef.current).find(
+                  (viewer) => viewer.default
+                );
+                return preferred ? fileViewerKey(preferred) : undefined;
+              })(),
         },
       ]);
       showDoc(rel);
@@ -522,14 +545,22 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
           line &&
           attached?.rel === rel &&
           activeRelRef.current === rel &&
-          doc?.viewMode !== 'preview'
+          doc?.viewMode !== 'preview' &&
+          !doc?.viewer
         ) {
           pendingLineRef.current = null;
           attached.editor.focus({ lineNumber: line });
           return;
         }
         if (viewer === 'markdown' && !line) void openPreview(rel, true);
-        else void openFile(rel, 'source');
+        else
+          void openFile(
+            rel,
+            // 不跳行时让插件的默认查看器生效
+            !line && pluginFileViewersFor(rel, fileViewersRef.current).some((v) => v.default)
+              ? undefined
+              : 'source'
+          );
       }),
     [conversationId, openFile, openPreview]
   );
@@ -608,6 +639,18 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
     );
   }, []);
 
+  const setDocViewer = useCallback((rel: string, viewer: string | undefined) => {
+    setOpenDocs((docs) => docs.map((doc) => (doc.rel === rel ? { ...doc, viewer } : doc)));
+  }, []);
+
+  const setDocDraft = useCallback((rel: string, next: string) => {
+    setOpenDocs((docs) =>
+      docs.map((doc) =>
+        doc.rel === rel ? { ...doc, draft: next, dirty: next !== doc.contents } : doc
+      )
+    );
+  }, []);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
@@ -620,6 +663,13 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
   }, [activeRel, save]);
 
   const active = openDocs.find((doc) => doc.rel === activeRel) ?? null;
+  const activeViewers =
+    active && !active.preview && !active.tooLarge
+      ? pluginFileViewersFor(active.rel, fileViewers)
+      : [];
+  const activeViewer = active?.viewer
+    ? activeViewers.find((viewer) => fileViewerKey(viewer) === active.viewer)
+    : undefined;
   const editOptions = useMemo<EditorOptions<undefined>>(
     () => ({
       enabledSelectionAction: true,
@@ -949,6 +999,35 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
                   <ContextMenu key={doc.rel}>
                     <ContextMenuTrigger render={tab as ReactElement<Record<string, unknown>>} />
                     <ContextMenuPopup className="min-w-40">
+                      {fileTabPathMenuItems(doc.rel, local).map((item) =>
+                        item.id === 'copy-path' ? (
+                          <ContextMenuItem
+                            key={item.id}
+                            onClick={() =>
+                              void window.electronAPI.workspaceFiles.copyPath({
+                                ...req,
+                                rel: item.rel,
+                                mode: item.mode,
+                              })
+                            }
+                          >
+                            {t('Copy Path')}
+                          </ContextMenuItem>
+                        ) : (
+                          <ContextMenuItem
+                            key={item.id}
+                            onClick={() =>
+                              void window.electronAPI.workspaceFiles.reveal({
+                                ...req,
+                                rel: item.rel,
+                              })
+                            }
+                          >
+                            {t(revealLabel())}
+                          </ContextMenuItem>
+                        )
+                      )}
+                      <ContextMenuSeparator />
                       {!doc.preview && (
                         <ContextMenuItem
                           onClick={() =>
@@ -1058,24 +1137,60 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
             </div>
           )}
           <div className="relative min-h-0 flex-1">
-            {active && !active.preview && !active.tooLarge && isMarkdownRel(active.rel) && (
-              <div className="absolute top-2 right-2 z-10">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  aria-label={active.viewMode === 'preview' ? t('View Source') : t('Preview')}
-                  onClick={() => toggleDocViewMode(active.rel)}
-                >
-                  {active.viewMode === 'preview' ? (
-                    <Code2 className="h-3.5 w-3.5" />
+            {active &&
+              !active.preview &&
+              !active.tooLarge &&
+              (isMarkdownRel(active.rel) || activeViewers.length > 0) && (
+                <div className="absolute top-2 right-2 z-10 flex gap-1">
+                  {activeViewer ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={t('View Source')}
+                      onClick={() => setDocViewer(active.rel, undefined)}
+                    >
+                      <Code2 className="h-3.5 w-3.5" />
+                      {t('View Source')}
+                    </Button>
                   ) : (
-                    <Eye className="h-3.5 w-3.5" />
+                    <>
+                      {activeViewers.map((viewer) => (
+                        <Button
+                          key={fileViewerKey(viewer)}
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          aria-label={viewer.title}
+                          title={viewer.pluginName}
+                          onClick={() => setDocViewer(active.rel, fileViewerKey(viewer))}
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          {viewer.title}
+                        </Button>
+                      ))}
+                      {isMarkdownRel(active.rel) && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          aria-label={
+                            active.viewMode === 'preview' ? t('View Source') : t('Preview')
+                          }
+                          onClick={() => toggleDocViewMode(active.rel)}
+                        >
+                          {active.viewMode === 'preview' ? (
+                            <Code2 className="h-3.5 w-3.5" />
+                          ) : (
+                            <Eye className="h-3.5 w-3.5" />
+                          )}
+                          {active.viewMode === 'preview' ? t('View Source') : t('Preview')}
+                        </Button>
+                      )}
+                    </>
                   )}
-                  {active.viewMode === 'preview' ? t('View Source') : t('Preview')}
-                </Button>
-              </div>
-            )}
+                </div>
+              )}
             {!ready || !active ? (
               <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">
                 {ready ? t('Open a file from the tree.') : t('Loading...')}
@@ -1084,6 +1199,19 @@ export function FilesView({ conversationId, projectId }: FilesViewProps) {
               <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
                 {t('This file is too large to open in the editor.')}
               </div>
+            ) : activeViewer ? (
+              <PluginFrame
+                key={`${active.rel}:${fileViewerKey(activeViewer)}`}
+                pluginId={activeViewer.pluginId}
+                entry={activeViewer.entry}
+                title={activeViewer.title}
+                sessionId={conversationId}
+                file={{
+                  rel: active.rel,
+                  text: active.draft,
+                  onEdit: (text) => setDocDraft(active.rel, text),
+                }}
+              />
             ) : active.preview || (active.viewMode === 'preview' && isMarkdownRel(active.rel)) ? (
               <div className="h-full overflow-auto px-3 py-2 text-sm">
                 <FileMarkdownPreview

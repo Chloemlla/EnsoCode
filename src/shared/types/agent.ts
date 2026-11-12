@@ -10,20 +10,19 @@ import { parseAutoRetryLimit } from '../autoRetry';
 import {
   type AgentTypeKey,
   type ChildSessionIdentity,
-  ENSO_LOCKED_PROFILE_ID,
-  ENSO_LOCKED_TOOL_IDS,
   isSameChildSessionIdentity,
   isUuid,
+  isValidLegacyProfile,
+  LEGACY_ENSO_TYPE_KEY,
+  type LegacyEnsoProfileId,
   parseAgentTypeKey,
   parseChildSessionIdentity,
   parseSessionIdentity,
   type SessionIdentity,
 } from '../builtinAgents';
 import {
-  type CapabilityExecutionEnvelope,
   type CapabilityReceipt,
   type CapabilityResult,
-  parseCapabilityExecutionEnvelope,
   parseCapabilityReceipt,
   parseCapabilityResult,
 } from '../capabilities/types';
@@ -38,6 +37,7 @@ import type {
 
 import {
   AGENT_END_TEXT_MAX,
+  BEFORE_AGENT_START_PROMPT_MAX,
   CONTEXT_PART_ITEMS,
   CONTEXT_PART_KINDS,
   CONTEXT_USAGE_BUCKETS,
@@ -45,6 +45,7 @@ import {
   isChildInterceptEvent,
   isInterceptEvent,
   PLUGIN_EVENTS,
+  PLUGIN_INTERCEPT_EVENTS,
 } from '../extensionPlugins/events';
 import {
   PLUGIN_INJECT_MAX_CHARS,
@@ -89,6 +90,7 @@ import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { resolveShellLimits, type ShellLimits } from '../shellLimits';
 import { parseSmartCompactMode, type SmartCompactMode } from '../smartCompactMode';
 import { parseSshTimeoutSeconds } from '../sshTimeout';
+import { parseToolBatchDigest, type ToolBatchDigest } from '../toolBatchLabel';
 import {
   isWebSearchChainEntry,
   WEB_SEARCH_CHAIN_MAX,
@@ -1048,7 +1050,7 @@ export interface ResolvedAgentTypeSpawnConfig {
   spawnSpecId: string;
   systemPrompt: string;
   model: SpawnModelConfig;
-  tools: 'all' | 'readonly' | 'enso-locked';
+  tools: 'all' | 'readonly';
   /**
    * 类型级推理预设（子代理类型上配置的档位）：优先级 派发 thinking > 类型预设 >
    * 模型条目预设 > 父会话。缺省 = 跟随模型条目/父会话。与 AgentTypeSpawnConfig 同语义。
@@ -1062,7 +1064,6 @@ export interface ResolvedAgentTypeSpawnConfig {
   mcpServers: readonly McpServerSpawnConfig[];
   mcpBindingIds: readonly string[];
   systemPromptHash: string;
-  lockedProfileId?: typeof ENSO_LOCKED_PROFILE_ID;
 }
 
 export interface ResolvedChildProfileProof {
@@ -1083,7 +1084,8 @@ export interface ChildConversationMetadata {
   agentInstanceName: string;
   dispatchOrigin: 'typed-mention' | 'manual' | 'agent-tool';
   mode?: AgentMode;
-  lockedProfileId?: typeof ENSO_LOCKED_PROFILE_ID;
+  /** 仅历史 Enso child 的元数据带此值（读兼容） */
+  lockedProfileId?: LegacyEnsoProfileId;
 }
 
 export interface SafeChildRef {
@@ -1120,7 +1122,9 @@ export type AgentSessionCustomEntry =
       message: string;
       at: number;
     }
-  | { kind: 'capability-receipt'; receipt: CapabilityReceipt };
+  | { kind: 'capability-receipt'; receipt: CapabilityReceipt }
+  /** 工具批次一句话标签：callId 为批次首个工具调用 id，时间线工具组头据此显示 */
+  | { kind: 'tool-batch-label'; callId: string; label: string; at: number };
 
 export type SafeJournalRecord =
   | { type: 'safe-user-text'; text: string; at: number }
@@ -1260,6 +1264,8 @@ export type AgentCommand =
       pluginHooks?: PluginHookSpawn[];
       /** 已启用 Enso 插件的 agent 工具；执行经 plugin-tool-invoke 回到 Main */
       pluginTools?: PluginToolDescriptor[];
+      /** 已启用 Enso 插件的 workflow 预设文件（绝对路径，已按插件预设圈定） */
+      workflowPresetFiles?: string[];
       /** 已启用插件的事件订阅；Bot 会话不下发 */
       pluginEvents?: PluginEventPlan;
       instruction?: { path: string; content: string };
@@ -1453,13 +1459,6 @@ export type AgentCommand =
   | { type: 'set-model-directory'; snapshot: unknown; customProviders: unknown }
   | { type: 'compact'; identity: SessionIdentity; instructions?: string }
   | { type: 'ask-respond'; identity: SessionIdentity; requestId: string; answer: string }
-  | {
-      type: 'capability-result';
-      child: ChildSessionIdentity;
-      turnId: string;
-      requestId: string;
-      envelope: CapabilityExecutionEnvelope;
-    }
   | {
       type: 'browser-result';
       identity: SessionIdentity | ChildSessionIdentity;
@@ -1884,6 +1883,7 @@ export type RendererAgentEvent =
       | PluginMcpResultEvent
       | { type: 'oauth-pool-select' }
       | { type: 'privacy-mask-ledger' }
+      | { type: 'tool-batch-completed' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -1901,7 +1901,10 @@ export type RendererAgentEvent =
       | { type: 'session-reloaded' }
     >
   | RendererChildLifecycleEvent
-  | { type: 'worker-exited' };
+  | WorkerExitedEvent;
+
+/** detail：Main 汇总的退出原因（退出码 / worker 致命异常首行） */
+export type WorkerExitedEvent = { type: 'worker-exited'; detail?: string };
 
 export function workspaceBranchChangedNote(branch: string): string {
   return `<workspace-branch-changed>\nThe current workspace is now on Git branch ${JSON.stringify(branch)}. The directory is unchanged, but file contents may differ. Re-read relevant files before relying on earlier observations or edits. This is background information only, not a task or goal.\n</workspace-branch-changed>`;
@@ -2080,15 +2083,6 @@ export type AgentWorkerEvent =
       coworkerIdentity?: SessionIdentity;
     }
   | {
-      type: 'capability-invoke';
-      child: ChildSessionIdentity;
-      seq: number;
-      turnId: string;
-      requestId: string;
-      capabilityId: ProductSurfaceId;
-      params: unknown;
-    }
-  | {
       type: 'browser-invoke';
       identity: SessionIdentity | ChildSessionIdentity;
       seq: number;
@@ -2197,6 +2191,12 @@ export type AgentWorkerEvent =
       type: 'title-generated';
       conversationId: string;
       title: string;
+    }
+  | {
+      /** 父会话一个工具批次结束：Main 旁路消费生成标签，不进渲染层事件流、不占 seq */
+      type: 'tool-batch-completed';
+      identity: SessionIdentity;
+      digest: ToolBatchDigest;
     }
   | {
       /** 标题总结全部候选均失败：同为旁路事件；error 为人可读的最后一次失败原因（含模型标识） */
@@ -2310,7 +2310,14 @@ function isPluginToolList(value: unknown): value is PluginToolDescriptor[] {
   for (const tool of value) {
     if (
       !isRecord(tool) ||
-      !hasOnlyKeys(tool, ['name', 'description', 'parameters', 'pluginId', 'timeoutMs']) ||
+      !hasOnlyKeys(tool, [
+        'name',
+        'description',
+        'parameters',
+        'pluginId',
+        'timeoutMs',
+        'readOnly',
+      ]) ||
       tool.name === undefined ||
       tool.description === undefined ||
       tool.parameters === undefined ||
@@ -2320,6 +2327,7 @@ function isPluginToolList(value: unknown): value is PluginToolDescriptor[] {
       tool.description.length > 1024 ||
       !isRecord(tool.parameters) ||
       (tool.timeoutMs !== undefined && !isPluginToolTimeout(tool.timeoutMs)) ||
+      (tool.readOnly !== undefined && typeof tool.readOnly !== 'boolean') ||
       parsePluginToolName(tool.name)?.pluginId !== tool.pluginId ||
       names.has(tool.name)
     )
@@ -2346,7 +2354,8 @@ function isPluginEventPlan(value: unknown): value is PluginEventPlan {
   )
     return false;
   if (new Set(value.observe).size !== value.observe.length) return false;
-  if (!Array.isArray(value.intercept) || value.intercept.length > 3) return false;
+  if (!Array.isArray(value.intercept) || value.intercept.length > PLUGIN_INTERCEPT_EVENTS.length)
+    return false;
   const events = new Set<string>();
   for (const item of value.intercept) {
     if (!isRecord(item) || !hasOnlyKeys(item, ['event', 'tools']) || typeof item.event !== 'string')
@@ -2389,6 +2398,7 @@ const isPluginObserveData = (event: string, data: unknown): boolean => {
         (typeof data.text === 'string' && data.text.length <= AGENT_END_TEXT_MAX))
     );
   if (event === 'context_usage') return isContextUsagePayload(data);
+  if (event === 'model_select') return isModelSelectPayload(data);
   return (
     (event === 'session_start' || event === 'session_end' || event === 'after_compact') &&
     hasExactKeys(data, ['reason']) &&
@@ -2399,6 +2409,22 @@ const isPluginObserveData = (event: string, data: unknown): boolean => {
 
 const isTokenCount = (value: unknown): boolean =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const isModelRefPart = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 256;
+
+const isModelSelectPayload = (data: Record<string, unknown>): boolean => {
+  if (!hasOnlyKeys(data, ['provider', 'modelId', 'previous', 'source'])) return false;
+  if (!isModelRefPart(data.provider) || !isModelRefPart(data.modelId)) return false;
+  if (data.source !== 'set' && data.source !== 'cycle' && data.source !== 'restore') return false;
+  if (data.previous === undefined) return true;
+  return (
+    isRecord(data.previous) &&
+    hasExactKeys(data.previous, ['provider', 'modelId']) &&
+    isModelRefPart(data.previous.provider) &&
+    isModelRefPart(data.previous.modelId)
+  );
+};
 
 const isTokenRecord = (value: unknown, keys: readonly string[]): boolean =>
   isRecord(value) && hasExactKeys(value, keys) && keys.every((key) => isTokenCount(value[key]));
@@ -2448,6 +2474,13 @@ const isContextPart = (value: unknown): boolean =>
 
 const isPluginInterceptPayload = (event: string, payload: unknown): boolean => {
   if (!isRecord(payload)) return false;
+  if (event === 'before_agent_start') {
+    return (
+      hasExactKeys(payload, ['prompt', 'kind']) &&
+      isBoundedText(payload.prompt, BEFORE_AGENT_START_PROMPT_MAX) &&
+      (payload.kind === 'user' || payload.kind === 'custom')
+    );
+  }
   if (event === 'before_compact') {
     return (
       hasExactKeys(payload, ['reason']) &&
@@ -2827,7 +2860,7 @@ function parseVirtualSpawnConfig(value: unknown): boolean {
   );
 }
 
-/** 只有会话主模型（spawn-parent / set-model / 子会话继承）接受虚拟配置；其余用途一律真实模型。 */
+/** 只有会话主模型（spawn-parent / set-model / 子会话继承 / 子代理模型目录）接受虚拟配置；其余用途一律真实模型。 */
 function parseSessionModelConfig(value: unknown): SpawnModelConfig | null {
   if (!isRecord(value)) return null;
   if (value.virtual === undefined) return parsePhysicalSpawnModelConfig(value);
@@ -2883,7 +2916,7 @@ function parseSubagentModelOption(value: unknown): SubagentModelOption | null {
     !isRecord(value) ||
     !hasOnlyKeys(value, ['name', 'config', 'description']) ||
     !isNonEmptyString(value.name) ||
-    !parseSpawnModelConfig(value.config) ||
+    !parseSessionModelConfig(value.config) ||
     (value.description !== undefined && typeof value.description !== 'string')
   ) {
     return null;
@@ -3189,8 +3222,7 @@ export function parseChildConversationMetadata(value: unknown): ChildConversatio
       value.dispatchOrigin !== 'manual' &&
       value.dispatchOrigin !== 'agent-tool') ||
     (value.mode !== undefined && value.mode !== 'task' && value.mode !== 'coworker') ||
-    (typeKey === 'agent:enso' && value.lockedProfileId !== ENSO_LOCKED_PROFILE_ID) ||
-    (typeKey !== 'agent:enso' && value.lockedProfileId !== undefined)
+    !isValidLegacyProfile(typeKey, value.lockedProfileId)
   ) {
     return null;
   }
@@ -3239,6 +3271,16 @@ export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustom
     const receipt = parseCapabilityReceipt(value.receipt);
     return receipt ? { kind: 'capability-receipt', receipt } : null;
   }
+  if (value.kind === 'tool-batch-label') {
+    return hasExactKeys(value, ['kind', 'callId', 'label', 'at']) &&
+      isNonEmptyString(value.callId) &&
+      isNonEmptyString(value.label) &&
+      value.label.length <= 200 &&
+      typeof value.at === 'number' &&
+      Number.isFinite(value.at)
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  }
   const child = parseSafeChildRef(value.child);
   if (!child || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
   if (value.kind === 'agent-dispatch' && hasExactKeys(value, ['kind', 'child', 'at'])) {
@@ -3284,15 +3326,6 @@ export function parseResolvedChildProfileProof(value: unknown): ResolvedChildPro
     !Array.isArray(value.loadedMcpBindingIds) ||
     !value.loadedMcpBindingIds.every(isNonEmptyString) ||
     !isNonEmptyString(value.systemPromptHash)
-  ) {
-    return null;
-  }
-  if (
-    value.typeKey === 'agent:enso' &&
-    (value.toolIds.length !== ENSO_LOCKED_TOOL_IDS.length ||
-      value.toolIds.some((toolId, index) => toolId !== ENSO_LOCKED_TOOL_IDS[index]) ||
-      value.loadedSkillBindingIds.length !== 0 ||
-      value.loadedMcpBindingIds.length !== 0)
   ) {
     return null;
   }
@@ -3420,7 +3453,6 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
       'mcpServers',
       'mcpBindingIds',
       'systemPromptHash',
-      'lockedProfileId',
     ]) ||
     Object.keys(value).length < 12
   ) {
@@ -3434,12 +3466,13 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
   const mcpBindingIds = Array.isArray(value.mcpBindingIds) ? value.mcpBindingIds : null;
   if (
     !typeKey ||
+    typeKey === LEGACY_ENSO_TYPE_KEY ||
     !model ||
     !isUuid(value.spawnSpecId) ||
     !isNonEmptyString(value.displayName) ||
     typeof value.description !== 'string' ||
     typeof value.systemPrompt !== 'string' ||
-    (value.tools !== 'all' && value.tools !== 'readonly' && value.tools !== 'enso-locked') ||
+    (value.tools !== 'all' && value.tools !== 'readonly') ||
     (value.allowedToolIds !== undefined &&
       (!Array.isArray(value.allowedToolIds) || !value.allowedToolIds.every(isNonEmptyString))) ||
     !skillPaths ||
@@ -3462,22 +3495,6 @@ function parseResolvedAgentTypeSpawnConfig(value: unknown): ResolvedAgentTypeSpa
       !MODEL_REASONING_OVERRIDES.includes(value.reasoning as ModelReasoningOverride)) ||
     (value.thinkingLevel !== undefined &&
       !MODEL_THINKING_LEVEL_OVERRIDES.includes(value.thinkingLevel as ModelThinkingLevelOverride))
-  ) {
-    return null;
-  }
-  if (
-    (typeKey === 'agent:enso' &&
-      (value.lockedProfileId !== ENSO_LOCKED_PROFILE_ID ||
-        value.tools !== 'enso-locked' ||
-        value.reasoning !== undefined ||
-        value.thinkingLevel !== undefined ||
-        value.allowedToolIds !== undefined ||
-        skillPaths.length !== 0 ||
-        skillBindingIds.length !== 0 ||
-        mcpServers.length !== 0 ||
-        mcpBindingIds.length !== 0)) ||
-    (typeKey !== 'agent:enso' &&
-      (value.lockedProfileId !== undefined || value.tools === 'enso-locked'))
   ) {
     return null;
   }
@@ -3597,6 +3614,7 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'mcpServers',
           'pluginCommands',
           'pluginTools',
+          'workflowPresetFiles',
           'pluginEvents',
           'pluginHooks',
           'instruction',
@@ -3644,6 +3662,14 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         (value.pluginCommands !== undefined &&
           parsePluginCommands(value.pluginCommands) === null) ||
         (value.pluginTools !== undefined && !isPluginToolList(value.pluginTools)) ||
+        (value.workflowPresetFiles !== undefined &&
+          !(
+            Array.isArray(value.workflowPresetFiles) &&
+            value.workflowPresetFiles.length <= 500 &&
+            value.workflowPresetFiles.every(
+              (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
+            )
+          )) ||
         (value.pluginEvents !== undefined && !isPluginEventPlan(value.pluginEvents)) ||
         (value.pluginHooks !== undefined && parsePluginHooks(value.pluginHooks) === null) ||
         (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
@@ -4012,14 +4038,6 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         isNonEmptyString(value.answer)
         ? (value as unknown as AgentCommand)
         : null;
-    case 'capability-result':
-      return hasExactKeys(value, ['type', 'child', 'turnId', 'requestId', 'envelope']) &&
-        parseChildSessionIdentity(value.child) &&
-        isNonEmptyString(value.turnId) &&
-        isNonEmptyString(value.requestId) &&
-        parseCapabilityExecutionEnvelope(value.envelope)
-        ? (value as unknown as AgentCommand)
-        : null;
     case 'browser-result':
     case 'memory-result':
     case 'delegation-result':
@@ -4358,16 +4376,6 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       ? (value as unknown as AgentWorkerEvent)
       : null;
   }
-  if (value.type === 'capability-invoke') {
-    return parseChildSessionIdentity(value.child) &&
-      isSequence(value.seq) &&
-      isNonEmptyString(value.turnId) &&
-      isNonEmptyString(value.requestId) &&
-      isProductSurfaceId(value.capabilityId) &&
-      Object.hasOwn(value, 'params')
-      ? (value as unknown as AgentWorkerEvent)
-      : null;
-  }
   if (value.type === 'mcp-status') {
     // 该事件会广播到全部窗口，字段白名单 + 逐项类型都要卡死
     return hasOnlyKeys(value, [
@@ -4407,6 +4415,13 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     return hasExactKeys(value, ['type', 'conversationId', 'error']) &&
       isNonEmptyString(value.conversationId) &&
       isNonEmptyString(value.error)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+  if (value.type === 'tool-batch-completed') {
+    return hasExactKeys(value, ['type', 'identity', 'digest']) &&
+      parseSessionIdentity(value.identity) &&
+      parseToolBatchDigest(value.digest)
       ? (value as unknown as AgentWorkerEvent)
       : null;
   }

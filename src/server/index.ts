@@ -40,6 +40,7 @@ import {
 } from '../main/services/pairHost';
 import { getProxyConfig } from '../main/services/proxyConfig';
 import { refreshRemoteLeadership, setupRemoteRenderer } from '../main/services/remoteRenderer';
+import { readySecureStores } from '../main/services/secureStores';
 import {
   disposeAllTerminals,
   hasPendingPtys,
@@ -48,6 +49,7 @@ import {
 import { isRunning, runCommand, USAGE } from './cli';
 import { applyConfigEnv, readServerConfig } from './config';
 import { type PluginControlCommand, parseControlCommand } from './control';
+import { runCli } from './run/cli';
 import { registerServerUpdater } from './update/ipc';
 import type { ServerUpdater } from './update/serverUpdater';
 import { startWeb } from './web';
@@ -102,6 +104,9 @@ async function handlePlugin(command: PluginControlCommand): Promise<unknown> {
     case 'inject-anywhere':
     case 'inject-current':
       return plugins.setCrossSessionInject(command.id, command.action === 'inject-anywhere');
+    case 'dev-on':
+    case 'dev-off':
+      return plugins.setDevWatch(command.id, command.action === 'dev-on');
     case 'config-get':
       return plugins.configView(command.id);
     case 'restage':
@@ -160,6 +165,7 @@ function listenControl(updater: ServerUpdater, web: WebConfig | null): void {
 async function serve(web: WebConfig | null): Promise<void> {
   // 先占端口：端口被占时直接失败，不留半启动的宿主
   const relay = web ? await startWeb(web) : null;
+  await readySecureStores();
   setupRemoteRenderer();
   registerIpcHandlers();
   const updater = registerServerUpdater();
@@ -219,6 +225,10 @@ async function serve(web: WebConfig | null): Promise<void> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (argv[0] === 'run') {
+    const code = await runCli(argv.slice(1));
+    process.exit(code);
+  }
   if (argv[0] === 'start') {
     const config = readServerConfig(app.getPath('userData'));
     if (!config.ok) {
