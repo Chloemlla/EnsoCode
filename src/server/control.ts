@@ -1,6 +1,8 @@
 import { isAbsolute } from 'node:path';
 import { parsePluginInstallUrl } from '@shared/extensionPlugins/installUrl';
 
+export { serveControlConnection } from '@shared/controlSocket';
+
 const PLUGIN_ID_ACTIONS = [
   'enable',
   'disable',

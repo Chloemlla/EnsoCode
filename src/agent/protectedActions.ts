@@ -1,4 +1,8 @@
+import os from 'node:os';
+import nodePath from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ApprovalKind, ProtectedActionCategory } from '@shared/types/agent';
+import { globToRegExp } from './globMatch';
 
 /**
  * 受保护动作底线的规则分类器：对外发送 / 删除 / 付款 / 部署改生产 / 读取或外传密钥。
@@ -17,6 +21,221 @@ export function isSecretFilePath(path: string): boolean {
   return SECRET_BASENAMES.test(base) || SECRET_PATH_SUFFIX.test(normalized);
 }
 
+/** 家目录下的凭据目录。只认家目录下的：仓库里的 .docker/、.kube/ 是普通配置；pi-agent/auth.json 由文件规则覆盖。 */
+const SECRET_HOME_DIRS = ['.ssh', '.aws', '.docker', '.kube', '.gnupg'];
+
+export function isUnderSecretDirectory(expanded: string): boolean {
+  const fold = (value: string) => {
+    const normalized = value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'linux' ? normalized : normalized.toLowerCase();
+  };
+  const target = fold(expanded);
+  const home = fold(os.homedir());
+  if (!target || !home) return false;
+  return SECRET_HOME_DIRS.some((dir) => {
+    const root = `${home}/${dir}`;
+    return target === root || target.startsWith(`${root}/`);
+  });
+}
+
+/**
+ * isSecretFilePath 能认出的代表名。通配 glob 用它们判断「必然或主要指向密钥」，
+ * 而不是把任何能套到 credentials.json 的宽模式都拦下来。
+ */
+const SECRET_GLOB_PROBES = [
+  '.env',
+  '.env.local',
+  'id_rsa',
+  'id_ed25519',
+  'a.pem',
+  'a.key',
+  'cert.p12',
+  'credentials.json',
+  'oauth-accounts.json',
+  'secrets.json',
+  'secret.yaml',
+  '.npmrc',
+  '.netrc',
+  '.ssh/id_rsa',
+  '.aws/credentials',
+  '.docker/config.json',
+  '.kube/config',
+  'pi-agent/auth.json',
+];
+/** 普通文件。命中任一则说明该 glob 太宽（`*`、`*.json`、`a.*`）。 */
+const UNRELATED_GLOB_PROBES = [
+  'src/app.ts',
+  'src/App.tsx',
+  'README.md',
+  'package.json',
+  'tsconfig.json',
+  'src/config.json',
+  'notes.txt',
+  'a.ts',
+  'a.json',
+  'a.md',
+  'a.txt',
+  'x',
+];
+
+function topLevelBrace(pattern: string): number {
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern[i] === '[') {
+      const close = pattern.indexOf(']', i + 1);
+      if (close !== -1) {
+        i = close;
+        continue;
+      }
+    }
+    if (pattern[i] === '{') return i;
+  }
+  return -1;
+}
+
+function matchBrace(pattern: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < pattern.length; i++) {
+    if (pattern[i] === '[') {
+      const close = pattern.indexOf(']', i + 1);
+      if (close !== -1) {
+        i = close;
+        continue;
+      }
+    }
+    if (pattern[i] === '{') depth++;
+    else if (pattern[i] === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function splitTopLevelCommas(body: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let brace = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '[') {
+      const close = body.indexOf(']', i + 1);
+      if (close !== -1) {
+        current += body.slice(i, close + 1);
+        i = close;
+        continue;
+      }
+    }
+    if (ch === '{') brace++;
+    if (ch === '}' && brace > 0) brace--;
+    if (ch === ',' && brace === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/** 花括号候选上限；超出时按指向密钥处理，避免组合爆炸卡住 worker。 */
+const MAX_BRACE_ALTERNATIVES = 256;
+
+class BraceLimitError extends Error {}
+
+/** ripgrep `{a,b}`；单项 `{.env}` 在 rg 里同样是选择，等同 `.env`。 */
+function expandBraceAlternatives(pattern: string): string[] {
+  const start = topLevelBrace(pattern);
+  if (start < 0) return [pattern];
+  const end = matchBrace(pattern, start);
+  if (end < 0) return [pattern];
+  const parts = splitTopLevelCommas(pattern.slice(start + 1, end));
+  const prefix = pattern.slice(0, start);
+  const suffix = pattern.slice(end + 1);
+  const tails = expandBraceAlternatives(suffix);
+  if (parts.length * tails.length > MAX_BRACE_ALTERNATIVES) throw new BraceLimitError();
+  const out: string[] = [];
+  for (const part of parts) {
+    for (const tail of tails) {
+      out.push(...expandBraceAlternatives(prefix + part + tail));
+      if (out.length > MAX_BRACE_ALTERNATIVES) throw new BraceLimitError();
+    }
+  }
+  return out;
+}
+
+function alternativeTargetsSecrets(pattern: string): boolean {
+  let matched: (probe: string) => boolean;
+  try {
+    const re = new RegExp(globToRegExp(pattern, { classes: true }).source, 'i');
+    matched = (probe) => re.test(probe);
+  } catch {
+    return true;
+  }
+  if (!SECRET_GLOB_PROBES.some(matched)) return false;
+  return !UNRELATED_GLOB_PROBES.some(matched);
+}
+
+/**
+ * 无通配符仍按文件名规则。有 `*?[]{}` 时：任一花括号候选命中密钥探针、且不命中无关文件，才算主要指向密钥。
+ * `.env.example` 这类近失不在无关探针里，因此 `.env*` 仍拦；`*.json` / `*` 会套到普通文件，不拦。
+ */
+function globTargetsSecrets(glob: string): boolean {
+  const trimmed = glob.trim();
+  if (!trimmed || trimmed.startsWith('!')) return false;
+  if (!/[*?[\]{}]/.test(trimmed)) return isSecretFilePath(trimmed);
+  let alternatives: string[];
+  try {
+    alternatives = expandBraceAlternatives(trimmed);
+  } catch (error) {
+    if (error instanceof BraceLimitError) return true;
+    throw error;
+  }
+  return alternatives.some(
+    (alt) => alt.length > 0 && !alt.startsWith('!') && alternativeTargetsSecrets(alt)
+  );
+}
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * 按 pi 内置文件工具（read/grep/edit/write 的 resolveToCwd）的规则展开路径，不拼 cwd：
+ * Unicode 空格转半角、去一个前导 @、Windows 下转换 Git Bash 盘符路径、展开 ~、file:// 转本地路径。
+ * 安全判定必须和工具真实访问的路径同源，否则 @.env、~/x 这类写法按字面判定会被绕过；
+ * pi 包入口没导出这组函数，只能对照 pi-coding-agent 的 dist/utils/paths.js 复刻，升级 pi 时要一起核对。
+ */
+export function expandPiToolPath(
+  input: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  const win = platform === 'win32';
+  let normalized = input.replace(UNICODE_SPACES, ' ');
+  if (normalized.startsWith('@')) normalized = normalized.slice(1);
+  if (win) normalized = windowsShellPath(normalized);
+  const home = os.homedir();
+  if (normalized === '~') return home;
+  if (normalized.startsWith('~/') || (win && normalized.startsWith('~\\')))
+    return (win ? nodePath.win32 : nodePath.posix).join(home, normalized.slice(2));
+  if (/^file:\/\//.test(normalized)) {
+    try {
+      return fileURLToPath(normalized);
+    } catch {
+      // 非法 file URL 在 pi 里同样抛错、不会访问文件，保留原文即可
+      return normalized;
+    }
+  }
+  return normalized;
+}
+
+/** pi 的 normalizeWindowsShellPath：/c/x、/mnt/c/x、/cygdrive/c/x → C:\x */
+function windowsShellPath(filePath: string): string {
+  if (!filePath.startsWith('/') || filePath.startsWith('//') || filePath.includes('\\'))
+    return filePath;
+  const match = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(filePath);
+  if (!match) return filePath;
+  return `${match[1].toUpperCase()}:\\${match[2]?.replaceAll('/', '\\') ?? ''}`;
+}
+
 const WRAPPERS = new Set([
   'sudo',
   'doas',
@@ -28,6 +247,41 @@ const WRAPPERS = new Set([
   'nice',
   'xargs',
 ]);
+/**
+ * 包装程序里要带值的选项（短选项字母 / 长选项名）：值可粘连（-n10、--user=x）也可是下一个 token。
+ * 不跳过值会把 sudo -u postgres 的 postgres、nice -n 10 的 10 当成程序名，后面的危险命令整段漏判。
+ * env -S 故意不列：它的值本身就是命令行，按空白切开后紧跟的正是程序名。
+ */
+const WRAPPER_VALUE_OPTIONS: Record<string, { short: string; long: readonly string[] }> = {
+  sudo: {
+    short: 'CDgpRrTtUu',
+    long: [
+      'chdir',
+      'chroot',
+      'close-from',
+      'command-timeout',
+      'group',
+      'host',
+      'other-user',
+      'prompt',
+      'role',
+      'type',
+      'user',
+    ],
+  },
+  doas: { short: 'aCu', long: [] },
+  env: { short: 'aCLPUu', long: ['argv0', 'chdir', 'unset'] },
+  nice: { short: 'n', long: ['adjustment'] },
+  time: { short: 'fo', long: ['format', 'output'] },
+  exec: { short: 'a', long: [] },
+  xargs: {
+    short: 'adEIJLnPRSs',
+    long: ['arg-file', 'delimiter', 'max-args', 'max-chars', 'max-procs', 'process-slot-var'],
+  },
+  timeout: { short: 'ks', long: ['kill-after', 'signal'] },
+};
+/** shell 保留字之后才是真正执行的命令（then rm -rf x、! git push -f）；{ ( 已由 unquote 清空 */
+const RESERVED_WORDS = new Set(['!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'fish']);
 const SCRIPT_RUNNERS = new Set([
   'node',
@@ -90,22 +344,49 @@ function unquote(token: string): string {
   return token.replace(/^[({'"]+|[)}'";]+$/g, '');
 }
 
-/** 把一段命令拆成去引号的 token，并剥掉 env 赋值与 sudo/xargs 之类的包装程序 */
+/** 跳过包装程序自己的选项及其值，返回第一个非选项 token 的下标 */
+function skipWrapperOptions(tokens: string[], start: number, wrapper: string): number {
+  const spec = WRAPPER_VALUE_OPTIONS[wrapper];
+  let i = start;
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const token = tokens[i++];
+    if (token === '--') break;
+    if (!spec) continue;
+    if (token.startsWith('--')) {
+      if (!token.includes('=') && spec.long.includes(token.slice(2))) i++;
+      continue;
+    }
+    // 短选项可合并（-iu postgres）：首个带值字母之后的部分就是它的值，位于末尾时值是下一个 token
+    const letters = token.slice(1);
+    const at = [...letters].findIndex((letter) => spec.short.includes(letter));
+    if (at !== -1 && at === letters.length - 1) i++;
+  }
+  return i;
+}
+
+/** 把一段命令拆成去引号的 token，并剥掉 shell 保留字、env 赋值与 sudo/xargs 之类的包装程序 */
 export function programTokens(segment: string): string[] {
-  let tokens = segment.trim().split(/\s+/).map(unquote).filter(Boolean);
+  // 被 unquote 清空的 token（{}、""）先占位，选项值才能和原命令行对齐（xargs -I {} rm …）
+  const tokens = segment.trim().split(/\s+/).map(unquote);
+  let i = 0;
   for (;;) {
-    while (tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
-    const head = basename(tokens[0] ?? '');
+    while (
+      i < tokens.length &&
+      (!tokens[i] || RESERVED_WORDS.has(tokens[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))
+    )
+      i++;
+    const head = basename(tokens[i] ?? '');
     if (WRAPPERS.has(head)) {
-      tokens = tokens.slice(1);
-      while (tokens.length && tokens[0].startsWith('-')) tokens = tokens.slice(1);
+      i = skipWrapperOptions(tokens, i + 1, head);
       continue;
     }
     if (head === 'timeout') {
-      tokens = tokens.slice(1).filter((t, i) => i > 0 || !/^\d/.test(t));
+      i = skipWrapperOptions(tokens, i + 1, head);
+      // 选项之后是时长参数，再之后才是被包装的命令
+      if (/^\d/.test(tokens[i] ?? '')) i++;
       continue;
     }
-    return tokens;
+    return tokens.slice(i).filter(Boolean);
   }
 }
 
@@ -434,7 +715,7 @@ function classifyMcpTool(name: string): ProtectedActionCategory | null {
   return null;
 }
 
-/** read 不是 ApprovalKind：只有底线会拦它（读取密钥文件），平时免审 */
+/** read 不是 ApprovalKind：只读工具（read/grep）只有底线会拦（读取密钥文件），平时免审 */
 export function classifyProtectedTool(
   toolName: string,
   kind: ApprovalKind | 'read',
@@ -446,7 +727,12 @@ export function classifyProtectedTool(
   }
   if (kind === 'read') {
     const path = record.path ?? record.file_path;
-    return typeof path === 'string' && isSecretFilePath(path) ? 'secret' : null;
+    if (typeof path === 'string') {
+      const expanded = expandPiToolPath(path);
+      if (isSecretFilePath(expanded) || isUnderSecretDirectory(expanded)) return 'secret';
+    }
+    // grep 的 --glob 会越过 .gitignore，glob 直接点名密钥文件等同显式读取它
+    return typeof record.glob === 'string' && globTargetsSecrets(record.glob) ? 'secret' : null;
   }
   if (kind === 'mcp') return classifyMcpTool(toolName);
   return null;

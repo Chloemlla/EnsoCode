@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { app, ipcMain, powerMonitor, type RendererContents } from '@platform';
 import { browserSessionKey } from '@shared/bots/browser';
@@ -45,6 +45,7 @@ import {
   parseCreateConversationAuthorityRequest,
   parseTitleSummaryInput,
   parseUpdateConversationSelectionRequest,
+  STALE_SESSION_ERROR,
   THINKING_LEVELS,
 } from '@shared/types/agent';
 import { DELEGATION_NOTE_MAX, parseTaskCheck } from '@shared/types/bot';
@@ -55,6 +56,7 @@ import {
   parseParentSourceBindingRequest,
 } from '@shared/types/mentions';
 import { EnsoSafeJournal } from '../../agent/ensoSafeJournal';
+import { isSecretFilePath, isUnderSecretDirectory } from '../../agent/protectedActions';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
 import { ActiveConversationRegistry } from '../services/activeConversationRegistry';
 import { AgentDispatchService } from '../services/agentDispatchService';
@@ -112,16 +114,27 @@ import {
 import { validateAgentRun } from '../services/agentRunValidation';
 import { AgentService } from '../services/agentService';
 import { HumanRequestTimeouts } from '../services/bots/humanRequestTimeouts';
-import { pickBrowserFileRoot, setBrowserFileRootResolver } from '../services/browserFileRoot';
+import { readBotSessionMessages } from '../services/bots/sessionMessages';
+import {
+  pickBrowserFileRoot,
+  resolveLocalCwdForBrowser,
+  setBrowserFileRootResolver,
+} from '../services/browserFileRoot';
 import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
 import { listChildRuns, resolveChildRunFile } from '../services/childRunCatalog';
 import { reloadConversation } from '../services/conversationReload';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
-import { getExtensionPlugins, setPluginSessionDirectory } from '../services/extensionPlugins';
-import { SessionStateTracker } from '../services/extensionPlugins/sessionState';
+import {
+  getExtensionPlugins,
+  peekExtensionPlugins,
+  setPluginSessionDirectory,
+} from '../services/extensionPlugins';
+import { SessionStateTracker, turnEndSessionId } from '../services/extensionPlugins/sessionState';
 import { listAllSessions, listProjectSessions } from '../services/extensionPlugins/sessions';
+import { resolveExternalRevealTarget, sessionWrittenPaths } from '../services/externalFileReveal';
 import { searchFiles } from '../services/fileSearch';
+import { resolveLocalUnderCwd } from '../services/filesWorkspace';
 import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
 import {
   localChatModelPathIfReady,
@@ -289,6 +302,16 @@ function broadcastAgentEvent(event: RendererAgentEvent): void {
   forwardAgentEvent(event);
   handlePairHeadlessAgentEvent(event);
   publishPluginSessionStatus(event);
+  publishPluginTurnEnd(event);
+}
+
+/** 主会话一轮结束（完成、失败、中止各只发一次）时通知订阅了 onTurnEnd 的插件进程 */
+function publishPluginTurnEnd(event: RendererAgentEvent): void {
+  const sessionId = turnEndSessionId(event);
+  if (!sessionId) return;
+  // 与其他插件事件一致：Bot 会话不发
+  if (sourceAuthority?.conversation(sessionId)?.bot) return;
+  peekExtensionPlugins()?.notifyTurnEnd(sessionId);
 }
 
 /** 主会话汇总状态变化时通知订阅了 session_status 的插件 */
@@ -331,6 +354,8 @@ const subagentProgressPush = new SubagentProgressPush((sessionId, runs) => {
 function exactIdentity(sessionId: unknown): SessionIdentity | ChildSessionIdentity | undefined {
   return isNonEmptyString(sessionId) ? agentSessionIndex.currentIdentity(sessionId) : undefined;
 }
+
+const DETACHED_SESSION_ERROR = '会话已从后台释放（闲置回收或重启），请重新发送以恢复会话';
 
 function rootIdentity(sessionId: unknown): SessionIdentity | undefined {
   const identity = exactIdentity(sessionId);
@@ -390,6 +415,7 @@ function removeConversationFiles(conversation: {
   sessionFile?: string;
 }): void {
   const project = sourceAuthority?.project(conversation.projectId);
+  peekExtensionPlugins()?.forgetSession(conversation.conversationId);
   removeConversationSessionFiles({
     sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
     conversationId: conversation.conversationId,
@@ -561,6 +587,187 @@ async function readChildHistory(conversationId: string): Promise<ChildHistoryRes
 
 function agentSessionDir(): string {
   return path.join(app.getPath('userData'), 'agent', 'sessions');
+}
+
+/** 根会话 pi jsonl：直接位于 sessions 目录下的 .jsonl，且不是 child 的 enso- safe journal */
+function rootSessionFile(sessionDir: string, file: string): string | null {
+  const resolved = resolveParentHistoryFile(sessionDir, file);
+  if (!resolved || path.dirname(resolved) !== path.resolve(sessionDir)) return null;
+  const name = path.basename(resolved);
+  return name.endsWith('.jsonl') && !name.startsWith('enso-') ? resolved : null;
+}
+
+/** 占用判断：文件名（含会话 uuid）相同，或两边 realpath 后是同一个文件 */
+function sameSessionFile(recorded: string, candidate: string): boolean {
+  if (path.basename(recorded) === path.basename(candidate)) return true;
+  const identity = (file: string) => {
+    try {
+      return realpathSync(file);
+    } catch {
+      return path.resolve(file);
+    }
+  };
+  return identity(recorded) === identity(candidate);
+}
+
+/**
+ * spawn 的 resumeFile 只认 Main 权威记录：worker 会把它交给 SessionManager.open（读入并追加写），
+ * 渲染层传来的路径不能直接采信。
+ * - 会话已绑定 sessionFile：恢复权威文件，渲染层的值只表示「要恢复」；
+ * - 尚未绑定（导入外部会话后的首次 spawn，导入只在渲染层记下文件）：只接受 sessions 目录下、
+ *   未被其他会话占用的根会话文件，避免借新会话读写别人的历史。
+ * 返回 null 表示不合法，调用方拒绝整条请求。
+ */
+function authoritativeResumeFile(
+  sessionId: string,
+  requested: string | undefined
+): { file?: string } | null {
+  if (requested === undefined) return {};
+  const sessionDir = agentSessionDir();
+  const bound = sourceAuthority?.conversation(sessionId)?.sessionFile;
+  if (bound) {
+    const file = rootSessionFile(sessionDir, bound);
+    if (file) return { file };
+    // 旧版迁移进登记表的路径是 realpath，userData 在符号链接下时目录部分对不上：
+    // 渲染层的路径落在 sessions 目录内、且文件名（含会话 uuid）与权威记录一致才采信
+    const same = rootSessionFile(sessionDir, requested);
+    return same && path.basename(same) === path.basename(bound) ? { file: same } : null;
+  }
+  const file = rootSessionFile(sessionDir, requested);
+  const claimed =
+    file !== null &&
+    sourceAuthority
+      ?.projection()
+      .conversations.some(
+        (other) =>
+          other.conversationId !== sessionId &&
+          other.sessionFile !== undefined &&
+          sameSessionFile(other.sessionFile, file)
+      );
+  return file && !claimed ? { file } : null;
+}
+
+/**
+ * edit diff 还原上下文用的工作区文件：渲染层只传会话标识与工作区相对路径。
+ * 根目录由 Main 按会话权威记录推导（SSH 等非本机工作区返回 null；bot-home 单独放行），
+ * 再过 resolveLocalUnderCwd 的词法 + realpath 双重边界，防 `../` 与符号链接逃逸。
+ */
+function conversationFile(request: unknown): string | null {
+  const record = asRecord(request);
+  const conversationId = record?.conversationId;
+  const projectId = record?.projectId;
+  const rel = record?.rel;
+  if (!isNonEmptyString(conversationId) || !isNonEmptyString(projectId) || !isNonEmptyString(rel)) {
+    return null;
+  }
+  if (sourceAuthority?.conversation(conversationId)?.projectId !== projectId) return null;
+  const cwd = filesReadCwd(conversationId);
+  return cwd ? resolveLocalUnderCwd(cwd, rel) : null;
+}
+
+/**
+ * files.read 的工作区根。bot-home 不走浏览器 file:// 的 pickBrowserFileRoot
+ * （那里会拒绝），这里单独放行：会话未结束、项目 active、属于该项目，
+ * 有 bot 标记时校验 botId / chatId 形状；根目录是 canonicalPath 的 realpath。
+ */
+function filesReadCwd(conversationId: string): string | null {
+  const conversation = sourceAuthority?.conversation(conversationId);
+  const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
+  if (project?.kind === 'bot-home') {
+    const bot = conversation?.bot;
+    const botOk = !bot || (isUuid(bot.botId) && (bot.chatId === null || isUuid(bot.chatId)));
+    if (
+      conversation &&
+      conversation.lifecycle !== 'ended' &&
+      project.state === 'active' &&
+      conversation.projectId === project.projectId &&
+      botOk
+    ) {
+      try {
+        const root = realpathSync(project.canonicalPath);
+        return statSync(root).isDirectory() ? root : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  return resolveLocalCwdForBrowser(conversationId);
+}
+
+/**
+ * 后台任务完成提示里给出的完整日志路径（TaskNoteRow 解析后回传）。该路径等价于任务 id：
+ * 只取文件名（兼容 Windows 盘符），必须是 task-logs 目录里的普通文件，符号链接与逃逸一律拒绝。
+ */
+function taskLogFile(raw: string): string | null {
+  if (raw.includes('\0')) return null;
+  const name = raw.split(/[/\\]/).at(-1) ?? '';
+  if (!/^task-\d+-[0-9a-z]+\.log$/.test(name)) return null;
+  const dir = path.join(app.getPath('userData'), 'agent', 'pi-agent', 'task-logs');
+  const file = path.join(dir, name);
+  try {
+    const listed = lstatSync(file);
+    if (!listed.isFile() || listed.isSymbolicLink()) return null;
+    const root = realpathSync(dir);
+    const real = realpathSync(file);
+    const rel = path.relative(root, real);
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+    return real;
+  } catch {
+    return null;
+  }
+}
+
+function readBounded(file: string | null): string | null {
+  if (!file) return null;
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > 2_000_000) return null;
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 工作区外、本会话 write/edit/apply_patch 写过的文件。
+ * 请求路径须与写入记录词法相同且末端不是符号链接（写后换成链接不能借道读别处），
+ * 解析后的真实文件也不能是密钥。messages 走会话 jsonl（readBotSessionMessages 按 mtime+size 缓存）。
+ */
+async function externalWrittenFile(request: unknown): Promise<string | null> {
+  const record = asRecord(request);
+  if (!record) return null;
+  const conversationId = record.conversationId;
+  const projectId = record.projectId;
+  if (!isNonEmptyString(conversationId) || !isNonEmptyString(projectId)) return null;
+  if (sourceAuthority?.conversation(conversationId)?.projectId !== projectId) return null;
+  const target = resolveExternalRevealTarget(record.path);
+  if (!target.ok) return null;
+  const requested = path.resolve(record.path as string);
+  if (isSecretFilePath(target.real) || isUnderSecretDirectory(target.real)) return null;
+  const cwd = filesReadCwd(conversationId);
+  if (!cwd) return null;
+  try {
+    if (lstatSync(requested).isSymbolicLink()) return null;
+    const messages = await readBotSessionMessages(
+      path.join(app.getPath('userData'), 'agent', 'sessions'),
+      sourceAuthority?.conversation(conversationId)?.sessionFile
+    );
+    return sessionWrittenPaths(messages, cwd).has(requested) ? target.real : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 工作区文件 { conversationId, projectId, rel }、会话写过的外部绝对路径，或后台任务日志路径 */
+async function readFilesRequest(request: unknown): Promise<string | null> {
+  if (typeof request === 'string') return readBounded(taskLogFile(request));
+  const record = asRecord(request);
+  if (!record) return null;
+  // 带 rel 时只认工作区相对路径，附带的 path 不能改读别的文件
+  if ('rel' in record) return readBounded(conversationFile(request));
+  if ('path' in record) return readBounded(await externalWrittenFile(request));
+  return null;
 }
 
 function listChildRunSummaries(parentId: string): ChildRunListResult {
@@ -1354,6 +1561,20 @@ export function registerAgentHandlers(): void {
       );
       sourceBindings?.invalidateBindingsForConversation(workerEvent.identity.sessionId);
     }
+    // 非 STALE 的 parent-rejected 只来自 spawn 失败：真实原因落主进程日志，renderer 侧会被后续 STALE 掩盖
+    if (
+      workerEvent.type === 'parent-rejected' &&
+      !workerEvent.reason.startsWith(STALE_SESSION_ERROR)
+    ) {
+      const selection = sourceAuthority?.conversation(workerEvent.identity.sessionId)?.selection;
+      console.warn('[agent] spawn rejected', {
+        sessionId: workerEvent.identity.sessionId,
+        generation: workerEvent.identity.generation,
+        providerId: selection?.providerId,
+        modelId: selection?.modelId,
+        reason: workerEvent.reason,
+      });
+    }
     if (workerEvent.type === 'fork-done') {
       const pending = pendingWorktreeForks.get(workerEvent.targetConversationId);
       if (
@@ -2007,6 +2228,13 @@ export function registerAgentHandlers(): void {
     if (!parsed || !persistedRootSpawn(parsed, event.sender.id)) {
       return { ok: false, error: 'invalid spawn request' };
     }
+    // resumeFile 同 cwd，只认权威记录；在 prepareParent 之前拒绝，非法请求不留下任何登记
+    const { resumeFile: requestedResume, ...spawnBase } = parsed;
+    const resume = authoritativeResumeFile(parsed.sessionId, requestedResume);
+    if (!resume) return { ok: false, error: 'invalid resume file' };
+    const resumable: AgentSpawnRequest = resume.file
+      ? { ...spawnBase, resumeFile: resume.file }
+      : spawnBase;
     const identity = exactIdentity(parsed.sessionId) ?? {
       sessionId: parsed.sessionId,
       generation: randomUUID(),
@@ -2024,7 +2252,7 @@ export function registerAgentHandlers(): void {
       return { ok: false, error: 'worktree operation in progress' };
     }
     const currentCwd = authoritativeSpawnCwd(parsed.sessionId);
-    const currentRequest = currentCwd ? { ...parsed, cwd: currentCwd } : parsed;
+    const currentRequest = currentCwd ? { ...resumable, cwd: currentCwd } : resumable;
     if (!persistedRootSpawn(currentRequest, event.sender.id)) {
       return { ok: false, error: 'conversation authority changed' };
     }
@@ -2060,6 +2288,8 @@ export function registerAgentHandlers(): void {
       ) {
         return { ok: false, error: 'invalid prompt or stale session generation' };
       }
+      if (agentSessionIndex.isDetached(identity))
+        return { ok: false, error: DETACHED_SESSION_ERROR };
       return promptSession(
         identity,
         text as string,
@@ -2088,6 +2318,8 @@ export function registerAgentHandlers(): void {
       ) {
         return { ok: false, error: 'invalid steer or stale session generation' };
       }
+      if (agentSessionIndex.isDetached(identity))
+        return { ok: false, error: DETACHED_SESSION_ERROR };
       return steerSession(
         identity,
         text as string,
@@ -2296,10 +2528,17 @@ export function registerAgentHandlers(): void {
       ) {
         return { ok: false, error: 'invalid approval mode or stale generation' };
       }
+      let credentialKeys: ReadonlySet<string>;
+      try {
+        credentialKeys = await readStoredOauthCredentialKeys();
+      } catch {
+        // 与 AGENT_SET_MODEL 同口径：异常不跨 IPC 抛出，渲染层据 ok:false 回滚乐观切换的档位
+        return { ok: false, error: 'model credentials unavailable' };
+      }
       return setSessionApprovalMode(
         identity,
         mode as ApprovalMode,
-        await readStoredOauthCredentialKeys(),
+        credentialKeys,
         autoReject === undefined ? undefined : autoReject
       );
     }
@@ -2501,16 +2740,8 @@ export function registerAgentHandlers(): void {
     return searchFiles(root, query);
   });
 
-  ipcMain.handle(IPC_CHANNELS.FILES_READ, (_event, filePath: unknown): string | null => {
-    if (!isNonEmptyString(filePath)) return null;
-    try {
-      const stat = statSync(filePath);
-      if (!stat.isFile() || stat.size > 2_000_000) return null;
-      return readFileSync(filePath, 'utf8');
-    } catch {
-      return null;
-    }
-  });
+  // 不收任意路径（那等于开放任意文件读取，远端同样可调）：工作区相对路径、会话写过的外部文件，或任务日志
+  ipcMain.handle(IPC_CHANNELS.FILES_READ, (_event, request: unknown) => readFilesRequest(request));
 
   ipcMain.handle(IPC_CHANNELS.SESSIONS_SCAN_EXTERNAL, (_event, projectPath: unknown) => {
     if (!isNonEmptyString(projectPath)) return [];

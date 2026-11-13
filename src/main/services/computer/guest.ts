@@ -12,7 +12,11 @@ import { ComputerError, ReadOnlyError, StaleRefError } from '@shared/computer/er
 import { type CaptureFrame, mapScreenshotPoint, pixelFingerprint } from '@shared/computer/frame';
 import { COORDINATE_SAFE_MAX_HEIGHT, COORDINATE_SAFE_MAX_WIDTH } from '@shared/computer/params';
 import { isReadOnlyAllowed } from '@shared/computer/readOnly';
-import type { ComputerRunResult, ComputerScreenshot } from '@shared/computer/types';
+import type {
+  ComputerRunResult,
+  ComputerScreenshot,
+  ComputerWindowInfo,
+} from '@shared/computer/types';
 import { JSException, type JSValueHandle, QuickJS } from 'quickjs-wasi';
 import { describeAxOutcome, describeAxWorkerExited } from './axStatus';
 import { AX_WORKER_EXITED } from './axWorkerClient';
@@ -20,6 +24,7 @@ import type { DesktopBackend, PointerOptions } from './backend';
 import { cropPngAround } from './clickCrop';
 import { hiddenBehindOthers } from './coverage';
 import { resolveMacKey } from './macKey';
+import { pointerPlacement } from './pointerPlacement';
 import { isProtectedAuthText, PROTECTED_SETTING_MESSAGE } from './protectedSetting';
 import { normalizeScrollDelta } from './scrollDelta';
 import { matchWindow, resolveWindow } from './windowMatch';
@@ -77,7 +82,7 @@ export function disposeComputerGuestVm(session: ComputerGuestSession): void {
   try {
     session.vm?.dispose();
   } catch {
-    // ignore
+    // 忽略
   }
   session.vm = undefined;
   session.primed = false;
@@ -102,6 +107,44 @@ type Delivery = NonNullable<PointerOptions['delivery']>;
 
 const NOT_FRONT_MESSAGE = (target: string) =>
   `window '${target}' could not be brought to the front; input was not sent so it cannot land in another app. Ask the user to bring it forward.`;
+
+const NOT_ON_TARGET_MESSAGE = (target: string) =>
+  `the point is not on window '${target}' (outside it or covered by another window); foreground input was not sent so it cannot land in another app. Take a new screenshot and use a visible point inside the window.`;
+
+function pointInside(window: ComputerWindowInfo, point: { x: number; y: number }): boolean {
+  return (
+    point.x >= window.x &&
+    point.y >= window.y &&
+    point.x < window.x + window.width &&
+    point.y < window.y + window.height
+  );
+}
+
+/** 进程身份是 pid（macOS 的 owner pid）；任一边缺 pid 就不算同进程，同名 App 可能是别的进程。 */
+function sameProcessWindow(target: ComputerWindowInfo, top: ComputerWindowInfo): boolean {
+  return typeof target.pid === 'number' && target.pid === top.pid;
+}
+
+/**
+ * 原生窗口列表不可用时（回退列表全是 0×0）没有几何信息，跳过检查。
+ * 否则落点须在目标上，或被同一进程的弹层 / sheet 覆盖；目标缺失、0×0、落窗外、被别的进程盖住都拒绝。
+ */
+function foregroundPointBlocked(
+  windows: ComputerWindowInfo[],
+  targetId: string,
+  point: { x: number; y: number }
+): boolean {
+  if (windows.length > 0 && windows.every((item) => item.width <= 0 || item.height <= 0)) {
+    return false;
+  }
+  const placement = pointerPlacement(windows, targetId, point);
+  if (!placement) return true;
+  if (placement.exposed) return false;
+  const target = windows.find((item) => item.id === targetId);
+  const top = windows.find((item) => pointInside(item, point));
+  if (target && top && sameProcessWindow(target, top)) return false;
+  return true;
+}
 
 const HIDDEN_WINDOW_NOTE =
   'window is covered by other windows; Chrome/Electron-based apps stop repainting while covered, so this image may be stale — verify with ax()/el.value instead of raising it';
@@ -503,6 +546,10 @@ export async function runComputerGuest(input: {
           await input.backend.raise(target);
           await settle();
           if (!(await front())) throw new Error(NOT_FRONT_MESSAGE(target));
+        }
+        // 窗口在最前不代表落点在它上面：真实指针点在窗口外或被别的浮窗盖住时会落进别的 App
+        if (point && foregroundPointBlocked(await input.backend.windows(), target, point)) {
+          throw new Error(NOT_ON_TARGET_MESSAGE(target));
         }
       }
       outcome = await fn(opts);
@@ -1161,7 +1208,7 @@ export async function runComputerGuest(input: {
       try {
         vm.dispose();
       } catch {
-        // ignore
+        // 忽略
       }
     } else if (!clean) {
       // 中止/超时时 guest 仍挂着半截 async 与宿主等待，VM 不再可信

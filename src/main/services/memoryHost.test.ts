@@ -736,7 +736,7 @@ function countEntities(): number {
 
 describe('memoryHost embedding 配置与生命周期', () => {
   const remoteSettings = (baseUrl = 'https://old.invalid', apiKey = 'old-key') => ({
-    memoryEmbeddingModel: 'remote:openai-compatible',
+    memoryEmbeddingModel: 'remote:text-embedding-3-small',
     memoryEmbeddingRemoteProviderId: 'p',
     providers: [{ id: 'p', baseUrl, apiKey }],
   });
@@ -812,9 +812,95 @@ describe('memoryHost embedding 配置与生命周期', () => {
       `${baseUrl}/v1/embeddings`,
       expect.objectContaining({
         headers: expect.objectContaining({ authorization: `Bearer ${apiKey}` }),
-        body: JSON.stringify({ model: 'openai-compatible', input: ['private after edit'] }),
+        body: JSON.stringify({ model: 'text-embedding-3-small', input: ['private after edit'] }),
       }),
     ]);
+  });
+
+  it.each([
+    {
+      name: '未选择服务商',
+      patch: { memoryEmbeddingRemoteProviderId: null },
+      expected: ['选择'],
+    },
+    {
+      name: '服务商已被删除',
+      patch: { providers: [] },
+      expected: ['已被删除'],
+    },
+    {
+      name: '服务商 baseUrl 为空',
+      patch: { providers: [{ id: 'p', name: 'Acme', baseUrl: '', apiKey: 'k' }] },
+      expected: ['Base URL', 'Acme'],
+    },
+    {
+      name: '只有订阅登录没有 API Key',
+      patch: {
+        providers: [
+          { id: 'p', name: 'Claude', baseUrl: '', apiKey: '', oauthAccountKey: 'anthropic' },
+        ],
+      },
+      expected: ['API Key', '订阅登录不能用于向量化', '本地向量模型'],
+    },
+    {
+      name: '选中的是对话模型',
+      patch: {
+        memoryEmbeddingModel: 'remote:Qwen4-Max-Preview',
+        providers: [
+          {
+            id: 'p',
+            name: 'Qwen',
+            baseUrl: 'https://q.invalid',
+            apiKey: 'k',
+            models: [{ id: 'Qwen4-Max-Preview' }, { id: 'text-embedding-v3' }],
+          },
+        ],
+      },
+      expected: ['Qwen4-Max-Preview', '对话模型', '/embeddings'],
+    },
+    {
+      name: '服务商下完全没有向量模型',
+      patch: {
+        memoryEmbeddingModel: 'remote:Qwen4-Max-Preview',
+        providers: [
+          {
+            id: 'p',
+            name: 'Qwen',
+            baseUrl: 'https://q.invalid',
+            apiKey: 'k',
+            models: [{ id: 'Qwen4-Max-Preview' }],
+          },
+        ],
+      },
+      expected: ['Qwen', '没有向量模型'],
+    },
+  ])(
+    '远程向量不可用（$name）：给出可诊断的中文原因，不外发、不报缺凭证',
+    async ({ patch, expected }) => {
+      memoryDatabase();
+      syncMemoryEmbeddingFromSettings({ ...remoteSettings(), language: 'zh', ...patch });
+      expect(await getMemoryEmbedder()).toBeNull();
+      await awaitMemoryReembed();
+      const error = getMemoryEmbeddingError() ?? '';
+      for (const text of expected) expect(error).toContain(text);
+      expect(error).not.toContain('needs remote credentials');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it('远程向量不可用时记忆照常落库（fail-open）', async () => {
+    syncMemoryEmbeddingFromSettings({
+      ...remoteSettings(),
+      language: 'zh',
+      memoryEmbeddingModel: 'remote:Qwen4-Max-Preview',
+    });
+    const result = (await invokeMemory(
+      'capture',
+      { content: 'embedding 不可用也要写入', importance: 0.6, spaceId: 'global' },
+      null
+    )) as { memory?: { id: string } };
+    expect(result.memory?.id).toBeTruthy();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1230,7 +1316,7 @@ describe('memoryHost embedding 配置与生命周期', () => {
     const joined = getMemoryEmbedder();
     next.resolve(next.model);
     const [first, second] = await Promise.all([nextPending, joined]);
-    expect(error).not.toContain('obsolete load failed');
+    expect(error ?? '').not.toContain('obsolete load failed');
     expect(second).toBe(first);
     expect(first?.model).toBe(next.modelId);
     expect(acquireModel).toHaveBeenCalledTimes(2);
@@ -1532,6 +1618,56 @@ describe('editMemory（成员记忆手动编辑）', () => {
     editMemory(memory.id, { title: '', content: 'we deploy with Kubernetes' });
     await awaitMemoryKg();
     expect(complete).toHaveBeenCalledTimes(1);
+    configureMemoryKg({ enabled: false, complete: null });
+  });
+
+  const kgEntities = (...names: string[]) =>
+    JSON.stringify({
+      entities: names.map((name) => ({ name, type: 'TOOL', confidence: 0.9 })),
+      relationships: [],
+    });
+  const linkedEntities = (memoryId: string) =>
+    (
+      memoryDatabase()
+        ?.prepare(
+          `SELECT e.name FROM mentions m JOIN entities e ON e.id = m.entity_id
+           WHERE m.memory_id = ? ORDER BY e.name`
+        )
+        .all(memoryId) as { name: string }[] | undefined
+    )?.map((row) => row.name);
+
+  // 真实场景：KG 指纹只算正文，只改标题时不会重抽；旧实现却先删了提及，开库清孤儿再把实体一并删掉
+  it('只改标题不丢实体关联：KG 关闭时改完重开库，实体仍挂在这条记忆上', async () => {
+    configureMemoryKg({ enabled: true, complete: () => async () => kgEntities('Terraform') });
+    const { memory } = await capture('infra is provisioned with terraform modules');
+    await awaitMemoryKg();
+    configureMemoryKg({ enabled: false, complete: null });
+    editMemory(memory.id, {
+      title: '基础设施',
+      content: 'infra is provisioned with terraform modules',
+    });
+    closeMemoryDb();
+    await invokeMemory('search', { query: 'terraform', limit: 5, spaceId: 'global' }, null);
+    expect(linkedEntities(memory.id)).toEqual(['Terraform']);
+  });
+
+  // 抽取输入是「标题\n正文」：只改标题也要按新标题重抽，抽完整体替换旧提及
+  it('KG 开启时只改标题也按新标题重新抽取实体', async () => {
+    const complete = vi
+      .fn(async (_system: string, _user: string) => kgEntities('Worker'))
+      .mockResolvedValueOnce(kgEntities('Worker'))
+      .mockResolvedValueOnce(kgEntities('Sidekiq'));
+    configureMemoryKg({ enabled: true, complete: () => complete });
+    const { memory } = await capture('the queue worker retries failed jobs');
+    await awaitMemoryKg();
+    editMemory(memory.id, {
+      title: 'Sidekiq 重试',
+      content: 'the queue worker retries failed jobs',
+    });
+    await awaitMemoryKg();
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[1]).toContain('Sidekiq 重试');
+    expect(linkedEntities(memory.id)).toEqual(['Sidekiq']);
     configureMemoryKg({ enabled: false, complete: null });
   });
 });

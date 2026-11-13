@@ -208,6 +208,22 @@ export const zhTranslations: Record<string, string> = {
   'Custom proxy': '自定义代理',
   'Proxy URL': '代理地址',
   'Enter an http(s) proxy URL': '请输入 http(s) 代理地址',
+  'Custom CA certificate': '自定义 CA 证书',
+  'Trust an extra CA (PEM file) for model endpoints signed by a private CA. TLS verification stays on.':
+    '为私有 CA 签发的模型接口额外信任一个 CA（PEM 文件），TLS 校验保持开启。',
+  'Choose certificate file': '选择证书文件',
+  'Set: {{path}}': '已设置：{{path}}',
+  'Using NODE_EXTRA_CA_CERTS from the launch environment: {{path}}':
+    '已使用启动环境中的 NODE_EXTRA_CA_CERTS（优先于此设置）：{{path}}',
+  'Not set; using NODE_EXTRA_CA_CERTS from the login shell: {{path}}':
+    '未设置，使用登录 shell 中的 NODE_EXTRA_CA_CERTS：{{path}}',
+  'Certificate file unavailable ({{reason}}): {{path}}': '证书文件不可用（{{reason}}）：{{path}}',
+  'Path must be absolute': '须为绝对路径',
+  'File not found': '文件不存在',
+  'Not a file': '不是文件',
+  'File is not readable': '文件不可读',
+  'Changes restart the agent process right away (running turns are interrupted). Requests made by the app main process take effect after restarting the app.':
+    '修改后会立即重启 Agent 进程（进行中的回合会中断）；主进程侧需重启应用生效。',
   Shortcuts: '快捷键',
   'Click a shortcut to rebind it. Backspace removes it; Esc cancels.':
     '点击键位改绑。Backspace 删除；Esc 取消。',
@@ -490,6 +506,12 @@ export const zhTranslations: Record<string, string> = {
   'Seconds to wait after tools and thinking finish': '工具和思考都结束后再等这么多秒',
   sec: '秒',
   'Pin unfinished todos': '固定显示未完成待办',
+  'Show active sessions in the title bar': '在顶栏显示活跃会话',
+  'Show active conversations as tabs above the conversation. Hold ⌘/Ctrl to see number shortcuts. Hidden while Bot mode is enabled.':
+    '在对话区上方以标签显示活跃中的会话，按住 ⌘/Ctrl 显示数字快捷键。开启 Bot 模式时不显示。',
+  'Also show recent conversations': '同时显示最近会话',
+  'Conversations with messages within this window. Off shows only Active ones.':
+    '这段时间内有过消息的会话；关闭则只显示活跃中的会话。',
   'Turn marks': '轮次刻度',
   'Marks along the conversation for each turn. Hover to preview, click to jump. Hidden when the chat uses the full width.':
     '对话旁边的轮次刻度。悬停预览，点击跳转。聊天铺满宽度时不显示。',
@@ -579,7 +601,7 @@ export const zhTranslations: Record<string, string> = {
   'Git diff is not available for this workspace.': '当前工作区不支持 Git diff。',
   'Terminal appearance': '终端外观',
   'Theme mode': '主题模式',
-  // Background image
+  // 背景图
   'Background image': '背景图',
   'Show a custom image behind the interface': '在界面背后显示自定义背景图',
   'The current theme has its own background. Turn this on to replace it with your image.':
@@ -607,13 +629,13 @@ export const zhTranslations: Record<string, string> = {
   Contain: '完整显示',
   Repeat: '平铺',
   Center: '居中原图',
-  // Model providers
+  // 模型供应商
   Search: '搜索',
   'No results': '无匹配结果',
   'Semantic similarity': '语义相似度',
   'Preset is locked after the conversation starts': '对话开始后预设已锁定，不能中途替换',
   Path: '路径',
-  // Onboarding
+  // 首次运行引导
   'Welcome to EnsoCode': '欢迎使用 EnsoCode',
   'Import your providers and assets from local AI apps to get started. You can skip any step.':
     '从本地 AI 应用导入模型服务与资源即可开始，每一步都可跳过。',
@@ -742,7 +764,7 @@ export const zhTranslations: Record<string, string> = {
     '退出会完全关闭应用，手机将无法连接。最小化到托盘后应用会在后台继续运行，手机仍可连接。',
   'Minimize to tray': '最小化到托盘',
   Exit: '退出',
-  // Unified provider setup, default model, and Enso
+  // 统一的供应商设置、默认模型与 Enso
   'Add a provider subscription or API Key, or import providers from local AI apps':
     '添加提供商订阅或 API Key，也可从本地 AI 应用导入模型服务',
   'Add model or provider': '添加模型 / 提供商',
@@ -856,6 +878,10 @@ export const zhTranslations: Record<string, string> = {
   'A file or folder with that name already exists.': '已存在同名文件或文件夹。',
   'Invalid name.': '名称无效。',
   'Could not complete the file action.': '无法完成该文件操作。',
+  'Search needs ripgrep (rg). Install it and make sure it is on PATH.':
+    '搜索依赖 ripgrep（rg）：请安装并确保它在 PATH 里。',
+  'Search timed out. Try a more specific query or a smaller folder.':
+    '搜索超时，请换更具体的关键词或缩小目录范围。',
   'Could not open local file link': '无法打开本地文件链接',
   'The link is outside the current workspace.': '链接位于当前工作区之外。',
   'This link is not available on the local computer.': '此链接不在本机工作区中，无法打开。',
@@ -932,7 +958,7 @@ export const zhTranslations: Record<string, string> = {
   Coworker: '队员',
   'Could not load subscription providers': '无法加载订阅提供商',
   Save: '保存',
-  // Skills & MCP
+  // 技能与 MCP
   Skills: '技能',
   Skill: '技能',
   'Skills registered by reference; files stay in their original location':
@@ -987,7 +1013,7 @@ export const zhTranslations: Record<string, string> = {
   'Imported {{count}} entries': '已导入 {{count}} 项',
   'Instruction Files': '指令文件',
 
-  // Phone second screen
+  // 手机副屏
   Phone: '手机',
   'Use your phone as a second screen. Keep this app running.':
     '把手机当作第二块屏幕。需保持本应用运行。',
@@ -1076,6 +1102,10 @@ export const zhTranslations: Record<string, string> = {
   'Fit to original size': '适应初始大小',
   'View fullscreen': '全屏查看',
   'Exit fullscreen': '退出全屏',
+  'Export SVG': '导出 SVG',
+  'Export PNG': '导出 PNG',
+  'Diagram is too large for PNG, exported SVG instead': '图太大，无法导出 PNG，已改为导出 SVG',
+  'PNG export failed, exported SVG instead': 'PNG 导出失败，已改为导出 SVG',
   Projects: '项目',
   All: '全部',
   Ungrouped: '未分组',
@@ -1098,6 +1128,17 @@ export const zhTranslations: Record<string, string> = {
   'Adding...': '正在添加...',
   'Add a project to start': '添加一个项目开始',
   'Temporary chats': '临时会话',
+  'Drop shelf': '拖放浮窗',
+  'When you drag files in Finder, a small panel appears at the top right of the screen. Drop them on it to reference them in the current conversation, or drop folders to open them as projects, even when EnsoCode is minimized or in the tray.':
+    '在访达中拖动文件时，屏幕右上角会出现一个小浮窗：把文件拖到上面即可引用到当前会话，拖文件夹还可选择作为项目打开；EnsoCode 最小化或在托盘时同样可用。',
+  'Drop here to add to the conversation': '拖到这里，添加到会话',
+  'Reference files in the current conversation': '松手即可引用到当前会话',
+  'Reference as files': '作为文件引用',
+  'Opening project': '正在打开项目',
+  'Opening {{count}} projects': '正在打开 {{count}} 个项目',
+  'Added 1 file': '已添加 1 个文件',
+  'Added {{count}} files': '已添加 {{count}} 个文件',
+  '{{name}} and more': '{{name}} 等',
   'Start a temporary chat': '开始临时会话',
   'Chats that are not tied to a project. Tools follow your global settings.':
     '不挂项目的会话。工具跟随全局设置。',
@@ -1229,10 +1270,15 @@ export const zhTranslations: Record<string, string> = {
   'Password (leave blank to keep)': '密码(留空则保持原密码)',
   'Failed to add project': '添加项目失败',
   'Failed to add project.': '添加项目失败。',
-  'Drop folders to add projects': '拖入文件夹以添加项目',
+  'New project': '新建项目',
   'Only folders can be added as projects': '只能将文件夹添加为项目',
-  'Only the first {{count}} folders were added': '一次最多添加 {{count}} 个文件夹',
-  'Could not read the path of the dropped folder': '无法读取拖入文件夹的路径',
+  'At most {{count}} folders can be added at once': '一次最多添加 {{count}} 个文件夹',
+  'Release to add': '松开以添加',
+  'Open as project': '作为项目打开',
+  'Add {{count}} projects': '将添加 {{count}} 个项目',
+  'Add all': '全部添加',
+  'Add to current conversation': '添加到当前会话',
+  'Open a conversation to add files': '请先打开一个会话再添加文件',
   Browse: '浏览',
   'No matching projects found': '没有匹配的项目',
   Add: '添加',
@@ -1508,6 +1554,22 @@ export const zhTranslations: Record<string, string> = {
   Backfill: '补齐',
   'Backfilling…': '补齐中…',
   'Vectors unavailable: {{reason}}': '无法生成向量：{{reason}}',
+  'No remote embedding provider is selected. Choose a provider with an API key, or switch to a local embedding model.':
+    '还没有选择远程向量服务商：请选择一个填了 API Key 的服务商，或改用本地向量模型。',
+  'The selected embedding provider no longer exists. Choose another provider, or switch to a local embedding model.':
+    '所选的向量服务商已被删除：请重新选择服务商，或改用本地向量模型。',
+  'Provider "{{provider}}" has no Base URL. Fill it in, or choose another provider.':
+    '服务商「{{provider}}」没有填写 Base URL：请补全，或换一个服务商。',
+  'Provider "{{provider}}" has no API key. Subscription sign-in cannot be used for embeddings; choose a provider with an API key, or switch to a local embedding model.':
+    '服务商「{{provider}}」没有 API Key：订阅登录不能用于向量化，请换一个填了 API Key 的服务商，或改用本地向量模型。',
+  'No remote embedding model is selected. Choose a model that supports /embeddings.':
+    '还没有选择远程向量模型：请选择支持 /embeddings 的模型。',
+  '"{{model}}" is a chat model and cannot be used for embeddings. Choose a model that supports /embeddings, or switch to a local embedding model.':
+    '「{{model}}」是对话模型，不能用于向量化：请选择支持 /embeddings 的模型，或改用本地向量模型。',
+  'Provider "{{provider}}" has no embedding model ("{{model}}" is a chat model). Add one that supports /embeddings (e.g. text-embedding-3-small), or switch to a local embedding model.':
+    '服务商「{{provider}}」下没有向量模型（「{{model}}」是对话模型）：请在该服务商里添加支持 /embeddings 的模型（如 text-embedding-3-small），或改用本地向量模型。',
+  'No model can be used for embeddings: it needs a provider with an API key and an embedding model (e.g. text-embedding-3-small). Subscription sign-in cannot be used for embeddings.':
+    '没有可用于向量化的模型：需要填了 API Key 的服务商，且其中有向量模型（如 text-embedding-3-small）。订阅登录不能用于向量化。',
   'Database size': '库体积',
   Spaces: '空间数',
   'Distill past sessions': '提炼历史会话',
@@ -2134,7 +2196,7 @@ export const zhTranslations: Record<string, string> = {
   'This conversation will be removed from the list.': '该对话将从列表移除。',
   Reasoning: '推理',
   'Load local skills': '加载本机 skill',
-  // Presets
+  // 预设
   Presets: '预设',
   'New preset': '新建预设',
   'Edit preset': '编辑预设',
@@ -2177,6 +2239,8 @@ export const zhTranslations: Record<string, string> = {
   'Request headers': '请求头',
   'Add header': '添加请求头',
   'Remove header': '移除请求头',
+  'Header values can only contain tab and single-byte characters (no Chinese, newlines, or NUL).':
+    '请求头的值只能包含制表符和单字节字符（不能有中文、换行或空字符）。',
   'Rewrites the role paragraph or appends text to the system prompt.':
     '改写角色段落，或往系统提示词末尾追加内容。',
   'Import URL': '从 URL 导入',

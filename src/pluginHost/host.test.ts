@@ -1,9 +1,10 @@
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MainToPluginHost, PluginHostToMain } from '@shared/extensionPlugins/protocol';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureConsole, runPluginHost } from './host';
+import { captureConsole, createProcessTransport, type HostProcess, runPluginHost } from './host';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -129,6 +130,43 @@ describe('runPluginHost', () => {
     });
   });
 
+  it('session.onTurnEnd：首个监听开订阅、回合结束回调、全部取消后关订阅', async () => {
+    const h = harness(`const seen = []; let offs = [];
+    export function activate(enso) {
+      offs.push(enso.session.onTurnEnd((e) => seen.push('a:' + e.sessionId)));
+      offs.push(enso.session.onTurnEnd(() => { throw new Error('listener boom'); }));
+      enso.tools.register('seen', async () => seen.join(','));
+      enso.tools.register('off', async () => { offs.forEach((off) => off()); offs = []; return 'ok'; });
+    }`);
+    await h.next((m) => m.t === 'ready');
+    const watches = () => h.sent.filter((m) => m.t === 'call' && m.api === 'session.watchTurnEnd');
+    expect(watches()).toEqual([
+      { t: 'call', id: expect.any(String), api: 'session.watchTurnEnd', args: { on: true } },
+    ]);
+    h.deliver({ t: 'session-turn-end', sessionId: 's1' });
+    h.deliver(call('7', 'tool.execute', { name: 'seen', args: {} }));
+    expect(await h.next((m) => m.t === 'res' && m.id === '7')).toMatchObject({
+      value: { content: 'a:s1' },
+    });
+    expect(h.sent.some((m) => m.t === 'log' && m.message.includes('listener boom'))).toBe(true);
+
+    h.deliver(call('8', 'tool.execute', { name: 'off', args: {} }));
+    await h.next((m) => m.t === 'res' && m.id === '8');
+    // 关订阅脱离调用上下文，不带 invocationId
+    expect(watches()).toHaveLength(2);
+    expect(watches()[1]).toEqual({
+      t: 'call',
+      id: expect.any(String),
+      api: 'session.watchTurnEnd',
+      args: { on: false },
+    });
+    h.deliver({ t: 'session-turn-end', sessionId: 's2' });
+    h.deliver(call('9', 'tool.execute', { name: 'seen', args: {} }));
+    expect(await h.next((m) => m.t === 'res' && m.id === '9')).toMatchObject({
+      value: { content: 'a:s1' },
+    });
+  });
+
   it('处理器内的宿主调用自动带上本次调用 id，并转发回 Main', async () => {
     const h = harness(`export function activate(enso) {
       enso.renderer.handle('read', async () => enso.fs.readText('a.txt'));
@@ -175,7 +213,10 @@ describe('runPluginHost', () => {
     });
   });
 
-  it('shutdown 调用 deactivate，超时后杀掉子进程并退出', async () => {
+  // Main（extensionPlugins/process.ts 的 SHUTDOWN_GRACE_MS）发出 shutdown 后 3 秒就 SIGTERM，且计时比宿主先开始；
+  // 宿主截止若也是 3 秒，deactivate 卡住时总是先挨 SIGTERM，来不及 killTrackedChildren，插件子进程成孤儿
+  it('shutdown 调用 deactivate，超时后赶在 Main 的 SIGTERM 之前杀掉子进程并退出', async () => {
+    const MAIN_SHUTDOWN_GRACE_MS = 3_000;
     const h = harness(`import { spawn } from 'node:child_process';
       export function activate() {
         spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10000); setInterval(() => {}, 1000)']);
@@ -186,9 +227,10 @@ describe('runPluginHost', () => {
     vi.useFakeTimers();
     try {
       h.deliver({ t: 'shutdown' });
-      await vi.advanceTimersByTimeAsync(2999);
+      await vi.advanceTimersByTimeAsync(2_000);
       expect(h.exited()).toBeNull();
-      await vi.advanceTimersByTimeAsync(1);
+      // 至少留出几百毫秒给 IPC 延迟与收子进程
+      await vi.advanceTimersByTimeAsync(MAIN_SHUTDOWN_GRACE_MS - 2_000 - 300);
       expect(h.exited()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -225,6 +267,52 @@ describe('子进程收敛', () => {
     await h.next(() => h.exited() !== null);
     for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => setTimeout(r, 10));
     expect(alive(pid)).toBe(false);
+  });
+});
+
+describe('createProcessTransport', () => {
+  /** 两种真实宿主进程的替身：桌面 utilityProcess 经 parentPort 收 { data }，服务端 child_process 经 IPC 收原始消息 */
+  function fakeProcess(kind: 'parentPort' | 'ipc') {
+    const sent: PluginHostToMain[] = [];
+    const inbox = new EventEmitter();
+    const exit = vi.fn();
+    const proc: HostProcess =
+      kind === 'parentPort'
+        ? {
+            parentPort: Object.assign(inbox, {
+              postMessage: (m: unknown) => sent.push(m as PluginHostToMain),
+            }),
+            on: () => undefined,
+            exit,
+          }
+        : {
+            send: (m) => sent.push(m as PluginHostToMain),
+            on: (_event, listener) => inbox.on('message', listener),
+            exit,
+          };
+    const deliver = (msg: MainToPluginHost) =>
+      inbox.emit('message', kind === 'parentPort' ? { data: msg } : msg);
+    return { proc, sent, deliver, exit };
+  }
+
+  // 真实问题：index.ts 构造 transport 时没传 exit，宿主收到 shutdown 后不退出，
+  // Main 每次停进程都等满 3 秒再 SIGTERM，期间新旧进程重叠
+  it.each([
+    ['桌面 utilityProcess', 'parentPort'],
+    ['服务端 child_process', 'ipc'],
+  ] as const)('%s：收到 shutdown 后宿主自己退出', async (_label, kind) => {
+    const dir = mkdtempSync(join(tmpdir(), 'plugin-host-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'main.mjs'), 'export function activate() {}');
+    const { proc, sent, deliver, exit } = fakeProcess(kind);
+    runPluginHost(createProcessTransport(proc));
+    deliver({ t: 'init', pluginId: 'a.b', pluginRoot: dir, main: 'main.mjs', dataDir: dir });
+    for (let i = 0; i < 200 && !sent.some((m) => m.t === 'ready'); i++)
+      await new Promise((r) => setTimeout(r, 5));
+    expect(sent.some((m) => m.t === 'ready')).toBe(true);
+    deliver({ t: 'shutdown' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(exit).toHaveBeenCalledWith(0);
   });
 });
 

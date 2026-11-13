@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { IPC_CHANNELS } from '@shared/types';
@@ -304,5 +304,29 @@ describe('settings广播策略', () => {
     expect(writeTrayPreventDisplaySleep(false)).toBe(true);
     expect(readTraySleepPolicy()).toBe('never');
     expect(readTrayPreventDisplaySleep()).toBe(false);
+  });
+});
+
+// settings.json 里有 providers 的 apiKey、MCP env 明文；默认 0644 时本机其他用户都能读到
+describe.skipIf(process.platform === 'win32')('settings 落盘权限', () => {
+  it('落盘后的 settings.json 只有本人可读写（0600）', async () => {
+    const settings = await import('./settings');
+    expect(settings.patchSettingsState('theme', 'light')).toMatchObject({ ok: true });
+    expect(settings.flushSettings()).toBe(true);
+    expect(statSync(path.join(userData, 'settings.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('残留的 0644 临时文件再次落盘后收紧为 0600', async () => {
+    const settings = await import('./settings');
+    const file = path.join(userData, 'settings.json');
+    const tmp = `${file}.tmp`;
+    writeFileSync(file, '{"stale":true}\n', { mode: 0o644 });
+    chmodSync(file, 0o644);
+    writeFileSync(tmp, 'leftover', { mode: 0o644 });
+    chmodSync(tmp, 0o644);
+    expect(statSync(tmp).mode & 0o777).toBe(0o644);
+    expect(settings.patchSettingsState('theme', 'dark')).toMatchObject({ ok: true });
+    expect(settings.flushSettings()).toBe(true);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 });

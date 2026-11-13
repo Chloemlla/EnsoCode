@@ -21,6 +21,7 @@ import {
   useBrowserAnnotateSession,
 } from './BrowserAnnotateOverlay';
 import { isCoveredBy, overlayBoxes } from './overlayCover';
+import { usePanelHotkeyTarget } from './panelVisibility';
 
 const EMPTY: BrowserTabState = {
   tabId: null,
@@ -124,6 +125,9 @@ function DesktopBrowserView({ conversationId, panelApi, active }: BrowserViewPro
   );
   const isActiveConversation = useSessionsStore((s) => s.activeId === dockConversationId);
   const hostVisible = active ?? (sidebarOpen && isActiveConversation);
+  // 标注快捷键：Bot 面板由宿主传 active。Code 侧栏按可见优先，多个可见浏览器才用分组是否激活区分
+  const browserHotkeys = usePanelHotkeyTarget('browser', active === undefined);
+  const hotkeysActive = active ?? browserHotkeys;
   const [state, setState] = useState<BrowserTabState>(EMPTY);
   const [address, setAddress] = useState('');
   const [editing, setEditing] = useState(false);
@@ -155,6 +159,7 @@ function DesktopBrowserView({ conversationId, panelApi, active }: BrowserViewPro
     url: state.url,
     designMode: state.designMode,
     onDesignModeState: setState,
+    active: hotkeysActive,
   });
 
   useEffect(() => {
@@ -449,6 +454,7 @@ function DesktopBrowserView({ conversationId, panelApi, active }: BrowserViewPro
               onCloseOpenPin={annotate.closeOpenPin}
               onSendQueue={annotate.sendQueue}
               onStrokeStateChange={annotate.setMarkupStrokeActive}
+              active={hotkeysActive}
             />
           )}
           {!state.url.startsWith('http') && !state.url.startsWith('file:') && (

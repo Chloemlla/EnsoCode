@@ -88,6 +88,7 @@ export const SETTINGS_STATE_FIELDS = [
   'pluginAutoUpdate',
   'proxyMode',
   'customProxyUrl',
+  'customCaCertPath',
   'openChangesOnFileEdit',
   'fileOpenRules',
   'contextMenuOpen',
@@ -100,6 +101,8 @@ export const SETTINGS_STATE_FIELDS = [
   'liveActivityFoldDelaySec',
   'pinUnfinishedTodos',
   'pinnedModels',
+  'headerSessionTabs',
+  'headerRecentMinutes',
   'chatWide',
   'navRailSide',
   'chatTypography',
@@ -169,6 +172,7 @@ export const SETTINGS_STATE_FIELDS = [
   'voiceInputEnabled',
   'botModeEnabled',
   'scratchSessionsEnabled',
+  'dropShelfEnabled',
   'botMaxRunningTurns',
   'botDiscussModeEnabled',
   'botRouteClassifier',
@@ -192,7 +196,7 @@ export const SETTINGS_STATE_FIELDS = [
 
 export type SettingsStateField = (typeof SETTINGS_STATE_FIELDS)[number];
 
-/** Device-local keys that config-sync must never fingerprint or write back. */
+/** 仅限本机的字段：config-sync 绝不计入指纹，也绝不回写。 */
 const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'hashlineEditEnabled',
   'pinnedModels',
@@ -214,6 +218,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'pluginAutoUpdate',
   'proxyMode',
   'customProxyUrl',
+  'customCaCertPath',
   'sshTimeoutSeconds',
   'backgroundImageEnabled',
   'backgroundSourceType',
@@ -231,6 +236,7 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'voiceInputEnabled',
   'botModeEnabled',
   'scratchSessionsEnabled',
+  'dropShelfEnabled',
   'botMaxRunningTurns',
   'botDiscussModeEnabled',
   'botRouteClassifier',
@@ -245,6 +251,8 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'voiceVocabulary',
   'voiceGeminiApiKey',
   'onboarded',
+  'headerSessionTabs',
+  'headerRecentMinutes',
   'plugins',
   'projects',
   'projectGroups',
@@ -278,6 +286,10 @@ function notifyMemoryEmbeddingSettings(settings: Record<string, unknown>): void 
 function notifyTrayToggleShortcut(settings: Record<string, unknown>): void {
   const keybindings = settingsStateOf(settings).keybindings;
   appDesktop().syncTrayToggleShortcut(keybindings);
+}
+
+function notifyDropShelf(settings: Record<string, unknown>): void {
+  appDesktop().syncDropShelf(settingsStateOf(settings).dropShelfEnabled === true);
 }
 
 function notifyAppLanguage(
@@ -340,8 +352,10 @@ function atomicWriteSettings(data: Record<string, unknown>): boolean {
   try {
     const settingsPath = getSettingsPath();
     const tempPath = `${settingsPath}.tmp`;
-    writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+    // 含供应商 apiKey、MCP env 明文：只给本人读写，rename 后 settings.json 沿用这个权限
+    writeFileSync(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
     renameSync(tempPath, settingsPath);
+    tightenOwnerOnly(settingsPath);
     // 正文只能在引用成功落盘后回收；失败/防抖窗口内必须保留旧磁盘配置的正文。
     if (pendingSystemPromptDeletes.size > 0) {
       const referenced = systemPromptIds(data);
@@ -352,6 +366,16 @@ function atomicWriteSettings(data: Record<string, unknown>): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** mode 只在新建时生效；残留的 0644 .tmp 被 rename 上来后这里再收紧。失败不挡住落盘。 */
+function tightenOwnerOnly(file: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    // 权限收紧失败不让设置写盘失败
   }
 }
 
@@ -367,7 +391,7 @@ export function flushSettings(): boolean {
 
   if (isDirty && cachedSettings !== null) {
     const written = atomicWriteSettings(cachedSettings);
-    // Keep dirty state on failure so a later transaction/quit can retry the flush.
+    // 写入失败时保留 dirty 状态，之后的事务或退出时可再次尝试 flush。
     if (written) isDirty = false;
     return written;
   }
@@ -455,6 +479,7 @@ function scheduleWrite(
     isDirty = true;
     notifyMemoryEmbeddingSettings(data);
     notifyTrayToggleShortcut(data);
+    notifyDropShelf(data);
     notifySpeechSettings(data);
     notifyAppLanguage(previous, data);
     if (
@@ -552,7 +577,7 @@ function scheduleWrite(
   }
 }
 
-/** Fingerprint only portable settings fields used by import preview. */
+/** 只对导入预览用到的可迁移设置字段计算指纹。 */
 export function settingsFingerprint(settings: Record<string, unknown> | null): string {
   const state = settingsStateOf(settings);
   const portable: Record<string, unknown> = {};
@@ -569,10 +594,9 @@ export interface SettingsTransactionResult {
 }
 
 /**
- * Apply a full sync allowlist patch as one durable settings transaction.
- * There is deliberately no await in this critical section: callers must not
- * observe a cache update or broadcast until the backup and atomic rename both
- * succeed.
+ * 把完整的同步白名单补丁作为一次持久化设置事务应用。
+ * 这段临界区刻意不含 await：备份和原子 rename 都成功之前，
+ * 调用方不能观察到缓存更新或广播。
  */
 export function commitSettingsTransaction(
   expectedFingerprint: string,
@@ -594,7 +618,7 @@ export function commitSettingsTransaction(
     `settings.config-sync-backup-${stamp}-${randomUUID()}.json`
   );
   try {
-    // A complete pre-import snapshot is mandatory, including all unrelated stores.
+    // 导入前必须先做完整快照，包括所有不相关的 store。
     if (existsSync(settingsPath)) copyFileSync(settingsPath, backupPath);
     else writeFileSync(backupPath, JSON.stringify(latest, null, 2), 'utf8');
     chmodSync(backupPath, 0o600);
@@ -609,7 +633,7 @@ export function commitSettingsTransaction(
       .slice(0, -MAX_BACKUPS);
     for (const file of stale) rmSync(join(dir, file), { force: true });
   } catch {
-    // Rotation is best-effort; a leftover extra backup must not fail the import.
+    // 轮转尽力而为；多留下一份旧备份不能导致导入失败。
   }
 
   const persisted =
@@ -639,12 +663,13 @@ export function commitSettingsTransaction(
   isDirty = false;
   notifyMemoryEmbeddingSettings(next);
   notifyTrayToggleShortcut(next);
+  notifyDropShelf(next);
   notifySpeechSettings(next);
   notifyAppLanguage(latest, next);
   try {
     broadcastToRenderers(IPC_CHANNELS.SETTINGS_CHANGED);
   } catch {
-    // Durable write already succeeded; a dead renderer must not fail the import.
+    // 持久化写入已成功；renderer 已失效也不能让导入失败。
   }
   void import('../services/agentHost')
     .then(
@@ -738,6 +763,23 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** 当前设置 state 快照（本机配置 CLI 读取用） */
+export function readSettingsState(): Record<string, unknown> {
+  return settingsStateOf(readSettings());
+}
+
+/** 丢弃内存副本并以磁盘为准重读，再走与普通写入相同的通知与广播（本机配置 CLI 的 reload） */
+export function reloadSettingsFromDisk(): boolean {
+  if (pendingWrite) clearTimeout(pendingWrite);
+  if (maxWaitTimer) clearTimeout(maxWaitTimer);
+  pendingWrite = null;
+  maxWaitTimer = null;
+  isDirty = false;
+  cachedSettings = null;
+  const data = readSettings();
+  return data !== null && scheduleWrite(data, undefined, 'all-renderers');
+}
+
 const TRAY_SETTINGS_KEY = 'enso-tray';
 
 export function readTraySleepPolicy(): TraySleepPolicy {
@@ -760,9 +802,6 @@ export function readSshTimeoutSeconds(): number {
 
 /**
  * 从 Main 持久化设置读取本机打开规则，坏配置只回退默认行为，绝不采信请求中的动作或应用路径。
- *
- * Read device-local opening rules from Main's persisted settings; invalid configuration only falls
- * back to defaults, never to actions or application paths supplied by a request.
  */
 export function readFileOpenRules(): FileOpenRule[] {
   return normalizeFileOpenRules(settingsStateOf(readSettings()).fileOpenRules);

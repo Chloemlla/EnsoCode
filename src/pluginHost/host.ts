@@ -22,6 +22,30 @@ export interface HostTransport {
   exit?(code: number): void;
 }
 
+/** 宿主所在进程的最小接口：桌面 utilityProcess 有 parentPort，服务端 child_process 走 IPC */
+export interface HostProcess {
+  parentPort?: (NodeJS.EventEmitter & { postMessage(message: unknown): void }) | null;
+  send?(message: unknown): unknown;
+  on(event: 'message', listener: (message: unknown) => void): unknown;
+  exit(code: number): void;
+}
+
+export function createProcessTransport(proc: HostProcess): HostTransport {
+  const parentPort = proc.parentPort;
+  return {
+    send: (message) => {
+      if (parentPort) parentPort.postMessage(message);
+      else proc.send?.(message);
+    },
+    onMessage: (handler) => {
+      if (parentPort) parentPort.on('message', (event: { data: unknown }) => handler(event.data));
+      else proc.on('message', handler);
+    },
+    // 消息监听会一直挂住事件循环，shutdown 收尾后必须显式退出；否则 Main 要等满宽限期再 SIGTERM
+    exit: (code) => proc.exit(code),
+  };
+}
+
 interface Invocation {
   id: string;
   controller: AbortController;
@@ -40,6 +64,7 @@ interface HandlerContext {
 }
 
 type Handler = (...args: unknown[]) => unknown;
+type TurnEndListener = (event: { sessionId: string }) => unknown;
 interface TriggerHandlers {
   candidates: (query: string, ctx: HandlerContext) => unknown;
   pick: (item: unknown, ctx: HandlerContext) => unknown;
@@ -57,7 +82,11 @@ interface Declared {
   dynamicCommands: number;
 }
 
-const SHUTDOWN_MS = 3_000;
+/**
+ * 给 deactivate 的上限。必须比 Main 的 SHUTDOWN_GRACE_MS（extensionPlugins/process.ts，3 秒）短并留出余量：
+ * Main 计时先开始，到点即 SIGTERM，宿主来不及 killTrackedChildren，插件拉起的子进程会成孤儿
+ */
+const SHUTDOWN_MS = 2_500;
 const TOOL = /^[a-z][a-z0-9_]*$/;
 const LOCAL_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -189,6 +218,7 @@ export function runPluginHost(transport: HostTransport): void {
   const scheduleHandlers = new Map<string, Handler>();
   const exportHandlers = new Map<string, Handler>();
   const written = new Map<string, string[]>();
+  const turnEndListeners = new Set<TurnEndListener>();
   const pendingRegs: Promise<unknown>[] = [];
   const pending = new Map<
     string,
@@ -242,6 +272,38 @@ export function runPluginHost(transport: HostTransport): void {
       map.set(name, handler);
       return () => map.delete(name);
     };
+
+  /** 订阅属于进程而不是某次调用，脱离调用上下文发出，免得随调用取消 */
+  const watchTurnEnd = (on: boolean) =>
+    current.exit(() =>
+      hostCall('session.watchTurnEnd', { on }).catch((error: unknown) =>
+        transport.send(logMessage('error', ['session.onTurnEnd 订阅失败：', error]))
+      )
+    );
+
+  const onTurnEnd = (listener: unknown) => {
+    if (typeof listener !== 'function') throw new TypeError('onTurnEnd 需要函数');
+    // 每次注册各自独立，同一函数注册两次也要分别取消
+    const entry: TurnEndListener = (event) => listener(event);
+    if (turnEndListeners.size === 0) void watchTurnEnd(true);
+    turnEndListeners.add(entry);
+    return () => {
+      if (turnEndListeners.delete(entry) && turnEndListeners.size === 0) void watchTurnEnd(false);
+    };
+  };
+
+  const emitTurnEnd = (sessionId: string) => {
+    const report = (error: unknown) =>
+      transport.send(logMessage('error', ['session.onTurnEnd 回调失败：', error]));
+    for (const listener of [...turnEndListeners]) {
+      try {
+        const result = listener({ sessionId });
+        if (result instanceof Promise) result.catch(report);
+      } catch (error) {
+        report(error);
+      }
+    }
+  };
 
   const dynamicTool = (name: string, handler: Handler, meta: unknown) => {
     if (!declared.known) throw new TypeError('找不到清单，不能动态注册工具');
@@ -383,6 +445,7 @@ export function runPluginHost(transport: HostTransport): void {
         openChildRun: (parentId: string, childId: string) =>
           hostCall('session.openChildRun', { parentId, childId }),
         create: (input?: unknown) => hostCall('session.create', input ?? {}),
+        onTurnEnd,
       },
       host: { capabilities: () => hostCall('host.capabilities', {}) },
       fs: {
@@ -559,6 +622,9 @@ export function runPluginHost(transport: HostTransport): void {
         return;
       case 'shutdown':
         void shutdown();
+        return;
+      case 'session-turn-end':
+        if (typeof message.sessionId === 'string') emitTurnEnd(message.sessionId);
         return;
       case 'cancel': {
         const invocation = invocations.get(message.invocationId);

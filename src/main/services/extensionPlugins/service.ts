@@ -248,6 +248,8 @@ export class ExtensionPluginService {
   private readonly idTails = new Map<string, Promise<void>>();
   private readonly observeLanes = new Map<string, ObserveLane>();
   private readonly processes = new Map<string, PluginProcess>();
+  /** 调过 session.watchTurnEnd 的进程；按进程实例记，换了进程就不再投递 */
+  private readonly turnEndWatchers = new Map<string, PluginProcess>();
   private readonly staged = new Map<
     string,
     { staged: StagedPlugin; at: number; source: PluginInstallSource }
@@ -295,6 +297,8 @@ export class ExtensionPluginService {
     {
       running: boolean;
       timer: ReturnType<typeof setInterval>;
+      /** 当前生效的定义；换版后由 armSchedules 就地替换，计时器触发时读这里而不是闭包里的旧定义 */
+      schedule: ExtensionPluginManifest['contributes']['schedules'][number];
       lastRunAt?: number;
       lastError?: string;
     }
@@ -648,8 +652,10 @@ export class ExtensionPluginService {
         if (available && !isNewerPluginVersion(available, manifest.version))
           this.updates.delete(existing.id);
         if (!expands) {
-          this.stopProcess(existing.id);
+          await this.stopProcessAndWait(existing.id);
           removePackage(this.options.root, existing.id, oldDir);
+          // 旧进程退出后再拉起，避免优雅退出期间双实例，且旧目录已被删掉
+          this.syncBackground();
         } else {
           this.emitNotice({
             kind: 'update-needs-approval',
@@ -666,8 +672,10 @@ export class ExtensionPluginService {
 
   async setEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
     return this.withIdLock(id, async () => {
-      if (!enabled) this.stopProcess(id);
-      else {
+      if (!enabled) {
+        this.stopProcess(id);
+        this.gate.forgetPlugin(id);
+      } else {
         this.recentErrors.delete(id);
         this.prepareFailed.delete(id);
       }
@@ -759,7 +767,7 @@ export class ExtensionPluginService {
       if (result.ok && oldDir) {
         this.prepareFailed.delete(id);
         this.invalidatePackageCache(id);
-        this.stopProcess(id);
+        await this.stopProcessAndWait(id);
         removePackage(this.options.root, id, oldDir);
         this.syncBackground();
       }
@@ -788,6 +796,7 @@ export class ExtensionPluginService {
       this.records = this.records.filter((r) => r.id !== id);
       this.persist();
       this.stopProcess(id);
+      this.gate.forgetPlugin(id);
       this.removeLocalFiles(id);
       await this.logger.discard(id);
       rmSync(this.logPath(id), { force: true });
@@ -1377,6 +1386,19 @@ export class ExtensionPluginService {
     );
   }
 
+  /** 主会话一轮结束；只推给订阅了且看得见这个会话的进程 */
+  notifyTurnEnd(sessionId: string): void {
+    for (const [id, proc] of this.turnEndWatchers) {
+      if (this.processes.get(id) !== proc || !this.gate.canSeeSession(id, sessionId)) continue;
+      proc.notifyTurnEnd(sessionId);
+    }
+  }
+
+  /** 会话删除：插件不再据它判定可见范围 */
+  forgetSession(sessionId: string): void {
+    this.gate.forgetSession(sessionId);
+  }
+
   async intercept<E extends PluginInterceptEvent>(input: {
     sessionId: string;
     projectRoot: string | null;
@@ -1838,6 +1860,7 @@ export class ExtensionPluginService {
     if (signal?.aborted) throw pluginError('ABORTED', '调用已取消');
     const proc = this.processFor(pluginId);
     const spawn = proc.ready();
+    if (ctx.sessionId) this.gate.noteSession(pluginId, ctx.sessionId);
     const invocationId = this.gate.invocations.create({
       pluginId,
       sessionId: ctx.sessionId,
@@ -1914,10 +1937,18 @@ export class ExtensionPluginService {
           main: manifest.main ?? '',
           dataDir,
         },
-        handleHostCall: (api, args, invocationId) =>
-          this.gate.handle(manifest.id, api, args, invocationId),
+        handleHostCall: async (api, args, invocationId) => {
+          const value = await this.gate.handle(manifest.id, api, args, invocationId);
+          if (api !== 'session.watchTurnEnd') return value;
+          if (value === true) this.turnEndWatchers.set(manifest.id, proc);
+          else if (this.turnEndWatchers.get(manifest.id) === proc)
+            this.turnEndWatchers.delete(manifest.id);
+          return null;
+        },
         onExit: ({ unexpected }) => {
           if (unexpected) this.appendLog(manifest.id, 'warn', '插件进程意外退出');
+          if (this.turnEndWatchers.get(manifest.id) === proc)
+            this.turnEndWatchers.delete(manifest.id);
           if (this.processes.get(manifest.id) === proc && this.dynamic.clear(manifest.id))
             this.touch();
           onExit(unexpected);
@@ -1968,7 +1999,15 @@ export class ExtensionPluginService {
     this.gate.invocations.cancelPlugin(id);
     this.processes.get(id)?.stop();
     this.processes.delete(id);
+    this.turnEndWatchers.delete(id);
     if (this.dynamic.clear(id)) this.touch();
+  }
+
+  /** 从表里拿掉后一直等到进程退出。stop 只是开始优雅退出，最长约 3 秒。 */
+  private async stopProcessAndWait(id: string): Promise<void> {
+    const stopping = this.processes.get(id);
+    this.stopProcess(id);
+    await stopping?.whenStopped();
   }
 
   private touch(): void {
@@ -2168,16 +2207,21 @@ export class ExtensionPluginService {
         for (const schedule of manifest.contributes.schedules) {
           const key = scheduleKey(id, schedule.id);
           wanted.add(key);
-          if (this.scheduleRuns.has(key)) continue;
-          const state: {
-            running: boolean;
-            timer: ReturnType<typeof setInterval>;
-            lastRunAt?: number;
-            lastError?: string;
-          } = {
+          const existing = this.scheduleRuns.get(key);
+          if (existing) {
+            // 换版后同 id 的定时任务：间隔没变就沿用计时器、只换定义（如 timeoutMs）；间隔变了按新间隔重建
+            if (existing.schedule.intervalSeconds === schedule.intervalSeconds) {
+              existing.schedule = schedule;
+              continue;
+            }
+            clearInterval(existing.timer);
+            this.scheduleRuns.delete(key);
+          }
+          const state: NonNullable<ReturnType<typeof this.scheduleRuns.get>> = {
             running: false,
+            schedule,
             timer: setInterval(
-              () => void this.runSchedule(id, schedule),
+              () => void this.runSchedule(id, state.schedule),
               schedule.intervalSeconds * 1000
             ),
           };

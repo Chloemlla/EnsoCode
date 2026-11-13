@@ -51,6 +51,7 @@ vi.mock('./ipc/settings', () => ({
   consumeTrayReenterAfterUpdate: () => mocks.consumeTrayReenter(),
 }));
 vi.mock('./ipc/desktop', () => ({ registerDesktopIpcHandlers: vi.fn() }));
+vi.mock('./desktop/dropShelf', () => ({ syncDropShelf: vi.fn() }));
 vi.mock('./ipc/window', () => ({
   openPluginInstallFromProtocol: vi.fn(),
   noteOpenFolder: vi.fn(),
@@ -85,6 +86,9 @@ vi.mock('./services/proxyConfig', () => ({
     initFromConfig: vi.fn(),
     whenReady: () => Promise.resolve(true),
   }),
+}));
+vi.mock('./services/caCert', () => ({
+  getCaCertConfig: () => ({ initFromConfig: vi.fn(), applyShellValue: vi.fn() }),
 }));
 vi.mock('./services/secureStores', () => ({
   readySecureStores: vi.fn(async () => {

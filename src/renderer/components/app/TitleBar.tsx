@@ -7,18 +7,17 @@ import { LinuxWindowButtons, useWindowChromeKind } from './WindowChrome';
 interface TitleBarProps {
   title?: string;
   className?: string;
-  /** Optional no-drag actions; omitted props preserve the existing title bar layout. */
+  /** 可选的 no-drag 操作区；不传时保持原有标题栏布局。 */
   actions?: React.ReactNode;
-  /** Optional no-drag content shown in place of the title. */
+  /** 可选的 no-drag 内容，显示在标题的位置。 */
   leading?: React.ReactNode;
   /**
    * 可选的居中内容使用独立覆盖层，固定在整个窗口正中。
    * 它保留左侧标题；macOS 隐藏标题以免挤占系统红绿灯。
-   *
-   * Center optional content over the entire window, independent of panel widths.
-   * Keep the left title except on macOS, where traffic lights take precedence.
    */
   centered?: React.ReactNode;
+  /** 可选的中段内容，占满 leading 与 actions 之间的空白；自身保持拖拽区，子元素自行 no-drag */
+  middle?: React.ReactNode;
 }
 
 /**
@@ -26,11 +25,8 @@ interface TitleBarProps {
  * - macOS: 仅作为拖拽区域（traffic lights 由系统渲染，左侧预留空间）
  * - Windows: 给原生窗口按钮预留空间，保留系统贴靠入口
  * - Linux: 自绘最小化/最大化/关闭按钮
- *
- * Preserve native caption controls and Snap Layouts on Windows, traffic lights
- * on macOS, and renderer caption controls on Linux.
  */
-export function TitleBar({ title, className, actions, leading, centered }: TitleBarProps) {
+export function TitleBar({ title, className, actions, leading, centered, middle }: TitleBarProps) {
   const kind = useWindowChromeKind();
   const isMac = kind === 'mac';
   const isWindows = kind === 'windows';
@@ -56,6 +52,8 @@ export function TitleBar({ title, className, actions, leading, centered }: Title
       ) : !centered || !isMac ? (
         <span className="text-sm font-medium text-muted-foreground">{title}</span>
       ) : null}
+
+      {middle}
 
       {centered && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">

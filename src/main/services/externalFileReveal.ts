@@ -8,8 +8,6 @@ const WRITE_TOOLS = new Set(['write', 'edit']);
 
 /**
  * 工作区外链接的定位目标：只收绝对路径，按真实目标判断，必须是普通文件（目录、不存在一律拒绝）。
- *
- * Reveal target for out-of-workspace links: absolute paths only, judged by the real target, regular files only.
  */
 export function resolveExternalRevealTarget(
   input: unknown
@@ -30,15 +28,21 @@ export function resolveExternalRevealTarget(
   }
 }
 
-function realOf(cwd: string, raw: string): string | null {
+function lexicalOf(cwd: string, raw: string): string | null {
   const trimmed = raw.trim().replace(/^@/, '');
   if (!trimmed) return null;
   const expanded =
     trimmed === '~' || trimmed.startsWith('~/')
       ? path.join(os.homedir(), trimmed.slice(1))
       : trimmed;
+  return path.resolve(cwd, expanded);
+}
+
+function realOf(cwd: string, raw: string): string | null {
+  const lexical = lexicalOf(cwd, raw);
+  if (!lexical) return null;
   try {
-    return realpathSync(path.resolve(cwd, expanded));
+    return realpathSync(lexical);
   } catch {
     return null;
   }
@@ -46,12 +50,25 @@ function realOf(cwd: string, raw: string): string | null {
 
 /**
  * 本会话写入类工具（write / edit / apply_patch）成功写过、现仍存在的文件真实路径。
- *
- * Real paths of files that this session's write tools successfully wrote and that still exist.
  */
 export function sessionWrittenFiles(
   messages: readonly ProjectedMessage[],
   cwd: string
+): Set<string> {
+  return collectWritten(messages, (raw) => realOf(cwd, raw));
+}
+
+/** 同上，但按工具参数的词法绝对路径收集（不解析符号链接），供 files.read 先做词法比对。 */
+export function sessionWrittenPaths(
+  messages: readonly ProjectedMessage[],
+  cwd: string
+): Set<string> {
+  return collectWritten(messages, (raw) => lexicalOf(cwd, raw));
+}
+
+function collectWritten(
+  messages: readonly ProjectedMessage[],
+  map: (raw: string) => string | null
 ): Set<string> {
   const succeeded = new Set<string>();
   for (const message of messages) {
@@ -60,8 +77,8 @@ export function sessionWrittenFiles(
   }
   const written = new Set<string>();
   const add = (raw: unknown) => {
-    const real = typeof raw === 'string' ? realOf(cwd, raw) : null;
-    if (real) written.add(real);
+    const mapped = typeof raw === 'string' ? map(raw) : null;
+    if (mapped) written.add(mapped);
   };
   for (const message of messages) {
     if (message.role === 'toolResult' && message.toolName === 'apply_patch') {

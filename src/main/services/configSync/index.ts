@@ -54,7 +54,7 @@ const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 type ConfigSyncFieldPolicy = { mode: 'portable' } | { mode: 'excluded'; reason: string };
 
-/** Every persisted settings field must be deliberately classified before it can drift into sync. */
+/** 每个持久化设置字段都必须先显式归类，避免未经审视就混进同步。 */
 export const CONFIG_SYNC_FIELD_POLICY = {
   theme: { mode: 'portable' },
   language: { mode: 'portable' },
@@ -101,6 +101,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
     mode: 'excluded',
     reason: 'temporary chats are a device-local experiment',
   },
+  dropShelfEnabled: { mode: 'excluded', reason: 'macOS drop shelf is a device-local experiment' },
   botMaxRunningTurns: { mode: 'excluded', reason: 'device-local Bot concurrency limit' },
   botDiscussModeEnabled: {
     mode: 'excluded',
@@ -122,6 +123,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   pluginAutoUpdate: { mode: 'excluded', reason: 'device update policy' },
   proxyMode: { mode: 'excluded', reason: 'device network configuration' },
   customProxyUrl: { mode: 'excluded', reason: 'device network configuration may contain secrets' },
+  customCaCertPath: { mode: 'excluded', reason: 'device-local certificate file path' },
   sshTimeoutSeconds: { mode: 'excluded', reason: 'device network configuration' },
   openChangesOnFileEdit: { mode: 'portable' },
   compactReadOnlyTools: { mode: 'portable' },
@@ -133,6 +135,8 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   liveActivityFoldDelaySec: { mode: 'portable' },
   pinUnfinishedTodos: { mode: 'portable' },
   pinnedModels: { mode: 'excluded', reason: 'starred keys reference device-local provider ids' },
+  headerSessionTabs: { mode: 'excluded', reason: 'desktop window chrome layout preference' },
+  headerRecentMinutes: { mode: 'excluded', reason: 'desktop window chrome layout preference' },
   chatWide: { mode: 'portable' },
   navRailSide: { mode: 'portable' },
   chatTypography: { mode: 'portable' },
@@ -306,8 +310,8 @@ function portableState(state: Record<string, unknown>): Record<string, unknown> 
       (instruction as Record<string, unknown>).local = false;
     }
   }
-  // OAuth login state is never portable, even in encrypted packages. Keep an omission marker so
-  // preview can surface the otherwise unreachable re-authentication warning.
+  // OAuth 登录态绝不可迁移，加密包也一样。保留省略标记，
+  // 让预览能展示原本无从触发的重新登录提醒。
   for (const provider of Array.isArray(result.providers) ? result.providers : []) {
     if (provider && typeof provider === 'object') {
       const entry = provider as Record<string, unknown>;
@@ -348,7 +352,7 @@ function collectBundle(secretsIncluded: boolean): {
       skills.push(collectSkillResource(skill.id, skill.path));
       keptSkillIds.add(skill.id);
     } catch {
-      // Skip unreadable, missing, or symlink skills so the rest of the package still exports.
+      // 跳过不可读、缺失或为符号链接的技能，保证包里其余内容照常导出。
     }
   }
   state.skills = portableSkills.filter(
@@ -571,8 +575,8 @@ export async function previewImportForSender(
     return resultError('Import session expired.');
   try {
     if (entry.encrypted && entry.bundle) {
-      // A successful decrypt/validation is cached against this sender-bound token.
-      // Mode changes must not force the renderer to retain or resend a password.
+      // 解密/校验成功的结果按这个绑定 sender 的 token 缓存。
+      // 切换模式不能迫使 renderer 保留或重发密码。
       const current = stateOf(readSettings());
       const plan = planImport(current, entry.bundle, mode);
       entry.mode = mode;

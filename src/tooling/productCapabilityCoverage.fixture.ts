@@ -65,6 +65,7 @@ export const SETTINGS_DATA_COVERAGE = {
   scratchSessionsEnabled: excluded(
     'Experimental temporary chats toggle; device-local, not an Enso capability.'
   ),
+  dropShelfEnabled: excluded('Experimental macOS drop shelf toggle; device-local window.'),
   botMaxRunningTurns: excluded('Device-local Bot concurrency limit; not an Enso capability.'),
   botDiscussModeEnabled: excluded(
     'Experimental Bot group discussion toggle; device-local, not an Enso capability.'
@@ -96,6 +97,7 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   proxyMode: surfaces('general.proxy-mode'),
   customProxyUrl: surfaces('general.custom-proxy-url'),
+  customCaCertPath: excluded('Device-local CA certificate file path for TLS trust.'),
   openChangesOnFileEdit: excluded('Renderer side-panel preference; not an Enso capability.'),
   fileOpenRules: excluded('Device-local user file opening preferences; not an Enso capability.'),
   contextMenuOpen: excluded('Device-local preference for right-clicking chat file links.'),
@@ -114,6 +116,12 @@ export const SETTINGS_DATA_COVERAGE = {
     'Renderer timeline collapse delay preference; not an Enso capability.'
   ),
   pinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
+  headerSessionTabs: excluded(
+    'Renderer title bar session tabs preference; not an Enso capability.'
+  ),
+  headerRecentMinutes: excluded(
+    'Renderer title bar session tabs preference; not an Enso capability.'
+  ),
   chatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
   navRailSide: excluded('Renderer turn-mark position preference; not an Enso capability.'),
   chatTypography: excluded('Renderer conversation typography preference; not an Enso capability.'),
@@ -239,6 +247,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   setScratchSessionsEnabled: excluded(
     'Experimental temporary chats toggle; device-local, not an Enso capability.'
   ),
+  setDropShelfEnabled: excluded('Experimental macOS drop shelf toggle; device-local window.'),
   setBotRouteClassifier: excluded(
     'Bot group smart-routing model preference; not an Enso capability.'
   ),
@@ -272,6 +281,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setProxyMode: surfaces('general.proxy-mode'),
   setCustomProxyUrl: surfaces('general.custom-proxy-url'),
+  setCustomCaCertPath: excluded('Device-local CA certificate file path for TLS trust.'),
   setOpenChangesOnFileEdit: excluded('Renderer side-panel preference; not an Enso capability.'),
   setFileOpenRules: excluded('Device-local user file opening preferences; not an Enso capability.'),
   setContextMenuOpen: excluded('Device-local preference for right-clicking chat file links.'),
@@ -294,6 +304,12 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Renderer timeline collapse delay preference; not an Enso capability.'
   ),
   setPinUnfinishedTodos: excluded('Renderer pinned todo bar preference; not an Enso capability.'),
+  setHeaderSessionTabs: excluded(
+    'Renderer title bar session tabs preference; not an Enso capability.'
+  ),
+  setHeaderRecentMinutes: excluded(
+    'Renderer title bar session tabs preference; not an Enso capability.'
+  ),
   setChatWide: excluded('Renderer chat column width preference; not an Enso capability.'),
   setNavRailSide: excluded('Renderer turn-mark position preference; not an Enso capability.'),
   setChatTypography: excluded(
@@ -503,6 +519,10 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   APP_FLUSH_PERSIST_RESPONSE: excluded('Renderer-to-main persist flush ack.'),
   APP_SET_BADGE_COUNT: excluded('Renderer-to-main Dock badge count for waiting conversations.'),
+  DROP_SHELF_STATE: excluded('Main-to-shelf window visual state for the macOS drop shelf.'),
+  DROP_SHELF_DROP: excluded('Drop shelf window hands dropped Finder paths to main.'),
+  DROP_SHELF_PENDING: excluded('Main-to-renderer ping that drop shelf paths are waiting.'),
+  DROP_SHELF_TAKE: excluded('Local main renderer takes paths dropped on the shelf.'),
   PROVIDERS_SCAN_LOCAL: surfaces('providers.import-local'),
   PROVIDERS_COLLECT_IMPORT: excluded('Second phase of the reviewed provider import flow.'),
   PROVIDERS_LIST_MODELS: surfaces('providers.fetch-models'),
@@ -713,6 +733,8 @@ export const IPC_PRODUCT_COVERAGE = {
     'Startup handoff that resumes turns interrupted by an update restart.'
   ),
   PROXY_APPLY: surfaces('general.proxy-mode', 'general.custom-proxy-url'),
+  CA_CERT_STATUS: excluded('Device-local CA certificate status for TLS trust.'),
+  CA_CERT_APPLY: excluded('Device-local CA certificate file path for TLS trust.'),
   APPEARANCE_USER_CSS_GET: excluded('User CSS injects a device-local user.css file.'),
   APPEARANCE_USER_CSS_OPEN: excluded('Opens user.css in the host default editor.'),
   APPEARANCE_USER_CSS_CHANGED: excluded('user.css change notification transport.'),

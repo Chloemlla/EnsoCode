@@ -183,6 +183,11 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     title: 'Pin unfinished todos',
   },
   {
+    id: 'appearance.headerSessionTabs',
+    category: 'appearance',
+    title: 'Show active sessions in the title bar',
+  },
+  {
     id: 'appearance.navRailSide',
     category: 'appearance',
     title: 'Turn marks',
@@ -230,6 +235,13 @@ const STATIC_CATALOG: SettingsSearchEntry[] = [
     category: 'general',
     title: 'Network proxy',
     description: 'Used by model requests, the built-in browser, and agent tools',
+  },
+  {
+    id: 'general.caCert',
+    category: 'general',
+    title: 'Custom CA certificate',
+    description:
+      'Trust an extra CA (PEM file) for model endpoints signed by a private CA. TLS verification stays on.',
   },
   { id: 'general.updates', category: 'general', title: 'Updates' },
   {

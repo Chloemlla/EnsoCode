@@ -89,6 +89,7 @@ const ENV_ALLOWLIST = [
   'https_proxy',
   'all_proxy',
   'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
 ];
 
 /** 插件进程不继承 Main 的环境变量，只给运行 Node 必需的几项和代理设置 */
@@ -111,6 +112,11 @@ export function setPluginMcpBridge(bridge: PluginMcpBridge | null): void {
 }
 
 const noMcp = () => Promise.reject(pluginError('UNSUPPORTED', '当前环境无法调用 MCP'));
+
+/** 只取已创建的实例：订阅与可见范围都在实例里，没创建就无需通知或清理 */
+export function peekExtensionPlugins(): ExtensionPluginService | null {
+  return service;
+}
 
 export function getExtensionPlugins(): ExtensionPluginService {
   if (service) return service;

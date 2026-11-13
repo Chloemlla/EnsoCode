@@ -151,9 +151,13 @@
     -webkit-app-region: no-drag;
   }
 
-  /* 卡片顶栏整行可拖，行内的可交互元素逐个豁免，免得每处手写 no-drag */
+  /**
+   * 卡片顶栏整行可拖，行内的可交互元素逐个豁免，免得每处手写 no-drag。
+   * 需要 !important：Windows 无边框窗口（titleBarOverlay + thickFrame，见 main/windows/windowChrome.ts）上
+   * 普通声明的 no-drag 会被窗口拖拽层覆盖，顶栏按钮点击被当成拖动窗口；与下方菜单规则是同一个坑，macOS 不受影响但无害。
+   */
   .drag-region :is(button, a, input, textarea, select, [role]) {
-    -webkit-app-region: no-drag;
+    -webkit-app-region: no-drag !important;
   }
 
   /**
@@ -284,6 +288,11 @@ html.bg-image-enabled .shiki span {
 /* 聊天列铺满：覆盖 CHAT_COL 的阶梯 max-w，两侧只留 padding */
 html.enso-chat-wide .enso-chat-col {
   max-width: none;
+}
+
+/* OS 文件拖入期间 iframe（插件页等）不接指针，否则拖到其上父文档收不到 dragover/drop */
+html[data-file-dragging] iframe {
+  pointer-events: none;
 }
 
 /**

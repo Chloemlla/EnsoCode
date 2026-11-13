@@ -205,6 +205,7 @@ describe('buildSettingsCatalog', () => {
     'appearance.collapseLiveActivity',
     'appearance.liveActivityFoldDelaySec',
     'appearance.pinUnfinishedTodos',
+    'appearance.headerSessionTabs',
     'appearance.navRailSide',
     'general.notifyMainAgentOnly',
     'general.smartCompactEnabled',
@@ -212,6 +213,7 @@ describe('buildSettingsCatalog', () => {
     'general.generationStallTimeout',
     'general.autoRetryLimit',
     'general.proxy',
+    'general.caCert',
     'general.updates',
     'general.ensoCommand',
     'general.finderQuickAction',
@@ -254,6 +256,7 @@ describe('buildSettingsCatalog', () => {
       'collapseLiveActivity',
       'liveActivityFoldDelaySec',
       'pinUnfinishedTodos',
+      'headerSessionTabs',
       'navRailSide',
     ];
     for (const suffix of moved) {

@@ -13,6 +13,7 @@ import {
   type RendererAgentEvent,
   type SessionIdentity,
   type SlashCommand,
+  STALE_SESSION_ERROR,
   type SubagentInfo,
   shouldApplyDispatchMainEvent,
 } from '@shared/types/agent';
@@ -250,6 +251,8 @@ export interface SessionProjection {
   /** 发送出口的最近实测，独立于 token 占用；不持久化。 */
   requestBody?: RequestBodyUsage;
   generation?: string;
+  /** 本代 spawn 的真实拒绝原因：其后同代的 STALE 拒绝不得覆盖它、也不触发自愈 */
+  spawnRejection?: { generation: string; reason: string };
   status: NodeStatus;
   error?: string;
   messages: TimelineMessage[];
@@ -438,6 +441,8 @@ export function applyAgentEvent(
     identity?.sessionId === sessionId
   ) {
     if (state.generation !== undefined && state.generation !== identity.generation) return state;
+    const stale = event.reason.startsWith(STALE_SESSION_ERROR);
+    if (stale && state.spawnRejection?.generation === identity.generation) return state;
     return {
       ...settleTiming(state, now),
       generation: undefined,
@@ -449,6 +454,9 @@ export function applyAgentEvent(
       pendingAsks: [],
       // 拒绝对该代是终态：child 标 ended，重启后不再重试恢复（历史仍可读）
       ...(event.type === 'child-rejected' ? { ended: true } : {}),
+      ...(event.type === 'parent-rejected' && !stale
+        ? { spawnRejection: { generation: identity.generation, reason: event.reason } }
+        : {}),
     };
   }
 
@@ -473,6 +481,7 @@ export function applyAgentEvent(
         error: undefined,
         // 新代 ready = 成功复活，清掉上一代的终态标记
         ended: undefined,
+        spawnRejection: undefined,
         lastSeq: event.seq,
       };
     case 'parent-ended':
@@ -704,13 +713,19 @@ export function applyAgentEvent(
     case 'messages-truncated': {
       const base = current.historyBaseIndex ?? 0;
       const localKeep = event.length - base;
-      if (localKeep >= current.messages.length) {
+      // worker 的 length 只计权威消息：裁剪只作用于权威区，乐观尾巴（如 willRetry 期间的 steer
+      // 气泡）照旧浮在后面，否则之后的 delivery-settled / delivery-rejected 按 id 找不到它
+      const authoritativeLen = authoritativeLength(current.messages);
+      if (localKeep >= authoritativeLen) {
         return { ...current, lastSeq: event.seq };
       }
       if (localKeep > 0) {
         return {
           ...current,
-          messages: current.messages.slice(0, localKeep),
+          messages: [
+            ...current.messages.slice(0, localKeep),
+            ...current.messages.slice(authoritativeLen),
+          ],
           lastSeq: event.seq,
         };
       }

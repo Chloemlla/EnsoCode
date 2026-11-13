@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { electronApp, optimizer } from '@electron-toolkit/utils';
 import { app, type BrowserWindow, crashReporter } from 'electron';
+import { syncDropShelf } from './desktop/dropShelf';
 import {
   registerLocalImageProtocolHandler,
   registerLocalImageSchemePrivileges,
@@ -36,7 +37,9 @@ import {
   shouldQuitOnWindowAllClosed,
 } from './services/appServerMode';
 import { browserHost } from './services/browserHost';
+import { getCaCertConfig } from './services/caCert';
 import { computerHost } from './services/computerHost';
+import { startDesktopConfigCli, stopDesktopConfigCli } from './services/configCli';
 import { installDesktopHooks } from './services/desktopHooks';
 import { releaseLocalChatSlot } from './services/llama/chat';
 import { disposeLlamaRuntime, llamaRuntimeActive } from './services/llama/runtime';
@@ -162,7 +165,7 @@ if (!gotTheLock) {
     }
     installAppMenu(readLocale());
 
-    // Default open/close DevTools by F12 in development
+    // 开发环境下默认用 F12 打开/关闭 DevTools
     app.on('browser-window-created', (_, window) => {
       optimizer.watchWindowShortcuts(window);
     });
@@ -202,11 +205,13 @@ if (!gotTheLock) {
         },
         syncTrayToggleShortcut,
         syncAppLanguage: () => installAppMenu(readLocale()),
+        syncDropShelf,
       },
     });
     await secureStores;
     registerIpcHandlers();
     registerDesktopIpcHandlers();
+    void startDesktopConfigCli();
     void import('./services/modelsDevCatalog').then(({ startModelsDevRefreshSchedule }) => {
       startModelsDevRefreshSchedule();
     });
@@ -219,13 +224,22 @@ if (!gotTheLock) {
     registerLocalImageProtocolHandler();
     registerNodeSettingsProtocolHandler();
     const persisted = readSettings()?.['enso-settings'] as
-      | { state?: { proxyMode?: unknown; customProxyUrl?: unknown; autoUpdate?: boolean } }
+      | {
+          state?: {
+            proxyMode?: unknown;
+            customProxyUrl?: unknown;
+            customCaCertPath?: unknown;
+            autoUpdate?: boolean;
+          };
+        }
       | undefined;
     getProxyConfig().initFromConfig(persisted?.state?.proxyMode, persisted?.state?.customProxyUrl);
+    getCaCertConfig().initFromConfig(persisted?.state?.customCaCertPath);
     const persistedState = (
       persisted?.state && typeof persisted.state === 'object' ? persisted.state : {}
     ) as Record<string, unknown>;
     syncTrayToggleShortcut(persistedState.keybindings);
+    syncDropShelf(persistedState.dropShelfEnabled === true);
     syncMemoryEmbeddingFromSettings(persistedState);
     syncMemoryDistillFromSettings(persistedState);
     syncMemoryKgFromSettings(persistedState);
@@ -241,7 +255,11 @@ if (!gotTheLock) {
       // 打包版再等登录 shell 探测出真实 PATH。
       const ready = getProxyConfig().whenReady();
       if (app.isPackaged && process.platform !== 'win32') {
-        void ready.finally(() => hydrateShellPath().finally(() => startAgentWorker()));
+        void ready.finally(() =>
+          hydrateShellPath()
+            .then(({ extraCaCerts }) => getCaCertConfig().applyShellValue(extraCaCerts))
+            .finally(() => startAgentWorker())
+        );
       } else {
         void ready.finally(() => startAgentWorker());
       }
@@ -264,6 +282,7 @@ if (!gotTheLock) {
 
   // Electron 退出即断开中继，手机侧收到 host-offline
   app.on('before-quit', () => {
+    stopDesktopConfigCli();
     stopTrayToggleShortcut();
     stopPairHost();
     stopPairGuest();
