@@ -50,6 +50,7 @@ type Minimal = {
   pendingApprovals?: unknown[];
   coworkerIds?: string[];
   worktree?: { path: string };
+  muted?: boolean;
 };
 
 /** 造会话:lastActive 为最后一条消息时间;省略则无消息(回落 createdAt) */
@@ -533,6 +534,16 @@ describe('headerSessionTabIds', () => {
       )
     ).toEqual(['act', 'recentNew']);
   });
+
+  it('移出顶栏的会话隐藏，移出后有新消息再回来', () => {
+    expect(
+      headerSessionTabIds(['act'], headerOrder, header, [], { now, ms: 30 * min }, undefined, {
+        act: 50,
+        recentOld: now,
+        recentNew: now - 10 * min,
+      })
+    ).toEqual(['recentNew']);
+  });
 });
 
 describe('activeConversationIds', () => {
@@ -785,5 +796,13 @@ describe('等你处理优先', () => {
     const live = withWaiting({ d: approval, a: approval });
     expect(projectConversationIds(order, live, 'p1')).toEqual(['a', 'd', 'e', 'b']);
     expect(waitingConversationCount(order, live)).toBe(2);
+  });
+
+  it('静音不改变等你处理的排序，但不再计入 Dock 角标', () => {
+    const approval = { pendingApprovals: [{ requestId: 'x' }] };
+    const live = withWaiting({ d: approval, a: { ...approval, muted: true, unread: true } });
+    expect(projectConversationIds(order, live, 'p1')).toEqual(['a', 'd', 'e', 'b']);
+    expect(live.a?.unread).toBe(true);
+    expect(waitingConversationCount(order, live)).toBe(1);
   });
 });

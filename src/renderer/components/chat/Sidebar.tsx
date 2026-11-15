@@ -23,6 +23,8 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   Archive,
   ArchiveRestore,
+  Bell,
+  BellOff,
   ChevronRight,
   CircleAlert,
   Ellipsis,
@@ -208,6 +210,7 @@ export function Sidebar({
   const keybindings = useSettingsStore((state) => state.keybindings);
   const activeRetentionMinutes = useSettingsStore((state) => state.activeRetentionMinutes);
   const headerRecentMinutes = useSettingsStore((state) => state.headerRecentMinutes);
+  const headerDismissed = useSessionSwitchState((state) => state.dismissed);
   const searchBinding = effectiveKeybindings(keybindings)['search-workspace'];
   const searchShortcut = searchBinding ? formatBinding(searchBinding) : '';
   const addProject = useSettingsStore((state) => state.addProject);
@@ -648,7 +651,8 @@ export function Sidebar({
     conversations,
     archivedProjectIds,
     { now: nowTick, ms: headerRecentMinutes * 60_000 },
-    inActiveGroup
+    inActiveGroup,
+    headerDismissed
   );
   if (activeId && conversations[activeId] && !conversations[activeId].parentId) {
     if (!headerTabIds.includes(activeId)) headerTabIds.push(activeId);
@@ -2454,7 +2458,9 @@ function ConversationRow({
   };
   const pinned = conversation.pinned === true;
   const archived = conversation.archived === true;
+  const muted = useSessionsStore((state) => state.conversations[id]?.muted === true);
   const PinIcon = pinned ? PinOff : Pin;
+  const MuteIcon = muted ? Bell : BellOff;
   const displayTitle = conversation.title || t('New conversation');
   const sourceTitle = conversation.forkedFromConversationId
     ? useSessionsStore.getState().conversations[conversation.forkedFromConversationId]?.title
@@ -2467,6 +2473,7 @@ function ConversationRow({
       data-active={active || undefined}
       data-status={conversationThemeState(conversation)}
       data-unread={conversation.unread || undefined}
+      data-muted={muted || undefined}
       className={cn(
         'group flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[0.9286rem] transition-colors',
         active
@@ -2512,6 +2519,13 @@ function ConversationRow({
                 <span className="ml-1.5 text-[0.7857rem] text-subtle-foreground">{subtitle}</span>
               )}
             </span>
+          )}
+          {muted && !renaming && (
+            <BellOff
+              className="h-3 w-3 shrink-0 text-subtle-foreground"
+              aria-label={t('Muted')}
+              data-enso="session-muted"
+            />
           )}
         </div>
         {isolated && worktree && <WorktreeBadge worktree={worktree} status={worktreeStatus} />}
@@ -2635,6 +2649,13 @@ function ConversationRow({
           <ContextMenuItem onClick={() => onToggleArchive(id)}>
             {archived ? <ArchiveRestore /> : <Archive />}
             {archived ? t('Unarchive') : t('Archive')}
+          </ContextMenuItem>
+          <ContextMenuItem
+            data-enso="session-mute"
+            onClick={() => useSessionsStore.getState().toggleMuteConversation(id)}
+          >
+            <MuteIcon />
+            {muted ? t('Unmute') : t('Mute')}
           </ContextMenuItem>
           {worktree && (
             <>

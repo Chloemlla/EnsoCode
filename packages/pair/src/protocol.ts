@@ -74,7 +74,8 @@ export type PhoneToHost =
   | { type: 'abort'; sessionId: string }
   | { type: 'approval-respond'; sessionId: string; requestId: string; decision: ApprovalDecision }
   | { type: 'ask-respond'; sessionId: string; requestId: string; answer: string }
-  | { type: 'snapshot' }
+  /** desk：完整模式，宿主只回 host-info/推送配置，不推目录与会话事件 */
+  | { type: 'snapshot'; desk?: true }
   | {
       type: 'subscribe';
       sessionId: string | null;
@@ -263,6 +264,8 @@ export interface CatalogEntry {
   /** 置顶/归档（与桌面侧栏同语义：归档与置顶互斥，归档只进单独栏目） */
   pinned?: boolean;
   archived?: boolean;
+  /** 静音：手机/PWA 不再为这个会话发推送，主屏幕角标也不计入 */
+  muted?: boolean;
   /** 会话当前选用的 provider/model 与推理档位，手机模型切换器回显用 */
   providerId?: string;
   modelId?: string;

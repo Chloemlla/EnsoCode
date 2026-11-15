@@ -171,6 +171,7 @@ import {
   listExternalSessions,
   readExternalSession,
 } from '../services/sessionImport';
+import { setSessionMuteOverride } from '../services/sessionMuteGate';
 import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
 import { setSpeechCorrector } from '../services/speech/service';
 import { buildCorrectionRequest } from '../services/speech/text';
@@ -1537,6 +1538,7 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'privacy-mask-ledger' ||
       workerEvent.type === 'mcp-oauth-refresh' ||
       workerEvent.type === 'plugin-mcp-result' ||
+      workerEvent.type === 'plugin-agent-event' ||
       workerEvent.type === 'workspace-unlock-result'
     )
       return;
@@ -2684,6 +2686,11 @@ export function registerAgentHandlers(): void {
     notifyDesktop().setViewedSession(isNonEmptyString(sessionId) ? sessionId : null);
     // 正在查看的会话不参与 worker 侧闲置回收，否则 release 后 ChatView 会立刻 resume 形成拉锯
     setPinnedSessions('viewed', isNonEmptyString(sessionId) ? [sessionId] : []);
+  });
+
+  ipcMain.on(IPC_CHANNELS.AGENT_SESSION_MUTED, (_event, sessionId: unknown, muted: unknown) => {
+    if (!isNonEmptyString(sessionId) || typeof muted !== 'boolean') return;
+    setSessionMuteOverride(sessionId, muted);
   });
 
   ipcMain.handle(
