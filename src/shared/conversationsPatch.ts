@@ -14,6 +14,11 @@ export interface ConversationsPatch {
   order?: string[];
 }
 
+/** Main 推送的补丁带单调序号；renderer 写回时把它作为确认号，Main 据此只回放未确认的部分 */
+export interface SequencedConversationsPatch extends ConversationsPatch {
+  seq: number;
+}
+
 type Row = Record<string, unknown>;
 interface Slice {
   conversations: Record<string, Row>;
@@ -43,6 +48,29 @@ const isOrderRoot = (row: unknown): boolean => isRecord(row) && !row.parentId &&
 
 export function isEmptyConversationsPatch(patch: ConversationsPatch): boolean {
   return Object.keys(patch.upserts).length === 0 && patch.removes.length === 0 && !patch.order;
+}
+
+/** persist blob 的 conversations 与 order 同时为空（含缺 key / 非对象） */
+export function isEmptyConversationsStore(value: unknown): boolean {
+  const { conversations, order } = sliceOf(value);
+  return Object.keys(conversations).length === 0 && order.length === 0;
+}
+
+/** persist blob 形状完整：state.conversations 是对象、state.order 是数组 */
+export function isConversationsStore(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isRecord(value.state) &&
+    isRecord(value.state.conversations) &&
+    Array.isArray(value.state.order)
+  );
+}
+
+/** 补丁会删掉 target 上现有的全部会话（target 本身为空不算） */
+export function removesAllConversations(target: unknown, patch: ConversationsPatch): boolean {
+  const ids = Object.keys(sliceOf(target).conversations);
+  const removes = new Set(patch.removes);
+  return ids.length > 0 && ids.every((id) => removes.has(id));
 }
 
 export function diffConversations(previous: unknown, next: unknown): ConversationsPatch {
@@ -112,7 +140,7 @@ export function applyConversationsPatch(target: unknown, patch: ConversationsPat
   };
 }
 
-export function parseConversationsPatch(value: unknown): ConversationsPatch | null {
+export function parseConversationsPatch(value: unknown): SequencedConversationsPatch | null {
   if (!isRecord(value) || !isRecord(value.upserts) || !Array.isArray(value.removes)) return null;
   const upserts: Record<string, ConversationRowPatch> = {};
   for (const [id, row] of Object.entries(value.upserts)) {
@@ -126,5 +154,7 @@ export function parseConversationsPatch(value: unknown): ConversationsPatch | nu
   const order = Array.isArray(value.order)
     ? value.order.filter((id): id is string => typeof id === 'string')
     : undefined;
-  return { upserts, removes, ...(order ? { order } : {}) };
+  const seq =
+    typeof value.seq === 'number' && Number.isInteger(value.seq) && value.seq >= 0 ? value.seq : 0;
+  return { upserts, removes, ...(order ? { order } : {}), seq };
 }

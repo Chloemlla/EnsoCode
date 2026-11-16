@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { BackgroundLayer } from '@/components/app/BackgroundLayer';
+import { ChatAreaFrame } from '@/components/app/ChatAreaFrame';
 import { HeaderSessionTabs } from '@/components/app/HeaderSessionTabs';
 import { ProjectDropOverlay } from '@/components/app/ProjectDropOverlay';
 import { TitleBar } from '@/components/app/TitleBar';
@@ -41,6 +42,7 @@ import { RemoteNodeView } from '@/components/nodes/RemoteNodeView';
 import { OauthCredentialBootstrap } from '@/components/oauth/OauthCredentialBootstrap';
 import { Onboarding } from '@/components/onboarding/Onboarding';
 import { WorkspaceSearchDialog } from '@/components/search/WorkspaceSearchDialog';
+import { SecretaryWelcome } from '@/components/secretary/SecretaryWelcome';
 import { SidePanel } from '@/components/sidepanel/SidePanel';
 import {
   AlertDialog,
@@ -57,13 +59,17 @@ import { useAutoArchiveScan } from '@/hooks/useAutoArchiveScan';
 import { useBackgroundImage } from '@/hooks/useBackgroundImage';
 import { useDockBadge } from '@/hooks/useDockBadge';
 import { useGenerationStallTimeout } from '@/hooks/useGenerationStallTimeout';
+import {
+  useRecoverInterruptedTurns,
+  useResumeInterruptedByUpdate,
+} from '@/hooks/useInterruptedSessionRecovery';
 import { useOpenFolderRequests } from '@/hooks/useOpenFolderRequests';
-import { useResumeInterruptedByUpdate } from '@/hooks/useResumeInterruptedByUpdate';
 import { isMobileWidth, useIsMobile, useViewportWidth } from '@/hooks/useViewport';
 import { useWindowsWindowChrome } from '@/hooks/useWindowsWindowChrome';
 import { useI18n } from '@/i18n';
 import { effectiveKeybindings, eventToBinding, isEventInSidePanel } from '@/lib/keybindings';
 import { easeOutLayout, springStandard } from '@/lib/motion';
+import { openSecretary } from '@/lib/openSecretary';
 import {
   addSidePanelBtw,
   addSidePanelTerminal,
@@ -85,6 +91,7 @@ import {
 } from '@/stores/bots/mode';
 import { bindPairCatalogSync } from '@/stores/pairCatalog';
 import { useRemoteNodesStore } from '@/stores/remoteNodes';
+import { useSecretaryStore } from '@/stores/secretary';
 import { useSessionsStore } from '@/stores/sessions';
 import { runSessionClean } from '@/stores/sessions/storageClean';
 import { useSettingsStore } from '@/stores/settings';
@@ -124,6 +131,7 @@ export default function App() {
   useGenerationStallTimeout();
   useAutoArchiveScan();
   useResumeInterruptedByUpdate();
+  useRecoverInterruptedTurns();
   useOpenFolderRequests();
   useDockBadge();
   const [searchOpen, setSearchOpen] = useState(false);
@@ -247,6 +255,14 @@ export default function App() {
     };
   }, [botModeEnabled]);
 
+  // 秘书开关打开即常驻订阅：聊天里的确认卡片与工作台读同一份 Main 状态
+  const secretaryEnabled = useSettingsStore((s) => s.secretaryEnabled);
+  const secretaryWelcomeOpen = useSecretaryStore((s) => s.welcomeOpen);
+  useEffect(
+    () => (secretaryEnabled ? useSecretaryStore.getState().bind() : undefined),
+    [secretaryEnabled]
+  );
+
   // Code 会话通知点击：当前在远程节点或 Bot 模式时先切回本机 Code，会话由 sessions store 选中
   useEffect(
     () =>
@@ -312,6 +328,7 @@ export default function App() {
           'close-side-tab',
           'find-in-chat',
           'search-workspace',
+          'open-secretary',
         ].some((key) => pressed === bindings[key as keyof typeof bindings])
       ) {
         return;
@@ -323,6 +340,11 @@ export default function App() {
       } else if (pressed === bindings['open-settings']) {
         e.preventDefault();
         void window.electronAPI.window.openSettings();
+      } else if (pressed === bindings['open-secretary']) {
+        if (useSettingsStore.getState().secretaryEnabled) {
+          e.preventDefault();
+          openSecretary();
+        }
       } else if (pressed === bindings['new-conversation']) {
         e.preventDefault();
         startNewConversation();
@@ -645,7 +667,7 @@ export default function App() {
               <div
                 data-enso="main"
                 className={cn(
-                  'flex min-h-0 min-w-0 flex-1 flex-col bg-background',
+                  'relative flex min-h-0 min-w-0 flex-1 flex-col bg-background',
                   desktopShell && 'overflow-hidden rounded-[10px] shadow-surface',
                   // 与右侧面板合成一张卡：接缝处直角，分割靠 1px 手柄线
                   sideInTitleRow && 'rounded-r-none'
@@ -661,11 +683,16 @@ export default function App() {
                 }
               >
                 <PluginUiHost />
-                <ShellChromeContext.Provider value={shellChrome}>
-                  <ChatView />
-                </ShellChromeContext.Provider>
+                {/* 秘书引导是独占页：透明背景下面板色 alpha 为 0，背后的空会话必须停止绘制 */}
+                <ChatAreaFrame hidden={secretaryEnabled && secretaryWelcomeOpen}>
+                  <ShellChromeContext.Provider value={shellChrome}>
+                    <ChatView />
+                  </ShellChromeContext.Provider>
+                </ChatAreaFrame>
                 {desktopShell && <UpdateBanner />}
                 {desktopShell && <ZoomBanner />}
+                {/* 初次设置只盖聊天区；远端浏览器（PWA 完整模式）同样走这条路径 */}
+                {secretaryEnabled && secretaryWelcomeOpen && <SecretaryWelcome />}
               </div>
               {sideOpen && !sideFullscreen && !isMobile && (
                 <ResizeHandle

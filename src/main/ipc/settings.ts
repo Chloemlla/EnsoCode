@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { app, ipcMain, type RendererContents } from '@platform';
+import { diffConversations, isEmptyConversationsStore } from '@shared/conversationsPatch';
 import {
   type ContextMenuOpen,
   type FileOpenRule,
@@ -31,9 +32,11 @@ import {
   type TraySleepPolicy,
 } from '../services/pairPowerKeepAlive';
 import {
+  applyMainConversationsPatch,
   CONVERSATIONS_KEY,
   mergeConversationsWrite,
   noteConversationsRead,
+  readConversationsFor,
 } from '../services/remoteRenderer/conversationSync';
 import { sendToRemoteRenderers } from '../services/remoteRenderer/senders';
 import { broadcastToRenderers } from '../services/renderers';
@@ -173,6 +176,7 @@ export const SETTINGS_STATE_FIELDS = [
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',
+  'secretaryEnabled',
   'botMaxRunningTurns',
   'botDiscussModeEnabled',
   'botRouteClassifier',
@@ -187,6 +191,12 @@ export const SETTINGS_STATE_FIELDS = [
   'voiceVocabulary',
   'voiceGeminiApiKey',
   'memoryKgEnabled',
+  'memoryDecayEnabled',
+  'memoryDecayArchiveCandidates',
+  'memoryDecayAutoArchive',
+  'memoryDecayStaleDays',
+  'memoryDecayMaxImportance',
+  'memoryDecayIntervalDays',
   'onboarded',
   'keybindings',
   'projects',
@@ -233,10 +243,18 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'memoryEmbeddingAutoDownload',
   'memoryModelIdleMinutes',
   'memoryEmbeddingRemoteProviderId',
+  // 记忆库每台机器一份（userData/memory/memory.db），遗忘策略作用于本机库，不跨机同步
+  'memoryDecayEnabled',
+  'memoryDecayArchiveCandidates',
+  'memoryDecayAutoArchive',
+  'memoryDecayStaleDays',
+  'memoryDecayMaxImportance',
+  'memoryDecayIntervalDays',
   'voiceInputEnabled',
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',
+  'secretaryEnabled',
   'botMaxRunningTurns',
   'botDiscussModeEnabled',
   'botRouteClassifier',
@@ -272,12 +290,14 @@ function notifyMemoryEmbeddingSettings(settings: Record<string, unknown>): void 
       ({
         syncMemoryEmbeddingFromSettings,
         syncMemoryDistillFromSettings,
+        syncMemoryForgettingFromSettings,
         syncMemoryKgFromSettings,
       }) => {
         const state = settingsStateOf(settings);
         syncMemoryEmbeddingFromSettings(state);
         syncMemoryDistillFromSettings(state);
         syncMemoryKgFromSettings(state);
+        syncMemoryForgettingFromSettings(state);
       }
     )
     .catch(() => {});
@@ -414,11 +434,18 @@ function settingsState(data: Record<string, unknown> | null): Record<string, unk
 function destructiveFields(prev: Record<string, unknown> | null, next: Record<string, unknown>) {
   const before = settingsState(prev);
   const after = settingsState(next);
-  return PROTECTED_FIELDS.filter((field) => {
+  const fields: string[] = PROTECTED_FIELDS.filter((field) => {
     const was = before[field];
     const now = after[field];
     return Array.isArray(was) && was.length > 0 && (!Array.isArray(now) || now.length === 0);
   });
+  if (
+    !isEmptyConversationsStore(prev?.[CONVERSATIONS_KEY]) &&
+    isEmptyConversationsStore(next[CONVERSATIONS_KEY])
+  ) {
+    fields.push(CONVERSATIONS_KEY);
+  }
+  return fields;
 }
 
 /** 快照当前磁盘文件为 settings.backup-<ts>.json，只留最近 MAX_BACKUPS 份。失败不影响写入。 */
@@ -863,13 +890,27 @@ export function patchConversationsState(
     : [];
   const nextState = { conversations, order, activeId: state.activeId };
   mutate(nextState);
+  const patch = diffConversations(current[CONVERSATIONS_KEY], {
+    ...store,
+    state: { ...state, ...nextState },
+  });
   return scheduleWrite({
     ...current,
-    'enso-conversations': {
-      ...store,
-      state: { ...state, ...nextState },
-    },
+    [CONVERSATIONS_KEY]: applyMainConversationsPatch(current[CONVERSATIONS_KEY], patch),
   });
+}
+
+/** 磁盘上的会话行；Main 侧派活、巡检都从这份权威值读 */
+export function readPersistedConversations(): Record<string, Record<string, unknown>> {
+  const conversations = objectRecord(
+    objectRecord(objectRecord(readSettings()?.[CONVERSATIONS_KEY])?.state)?.conversations
+  );
+  const rows: Record<string, Record<string, unknown>> = {};
+  for (const [id, value] of Object.entries(conversations ?? {})) {
+    const row = objectRecord(value);
+    if (row) rows[id] = row;
+  }
+  return rows;
 }
 
 export function readPersistedConversation(sessionId: string): Record<string, unknown> | null {
@@ -953,6 +994,11 @@ export function removeProjectAndConversations(
     : { ok: false, error: `Failed to remove project: ${projectId}` };
 }
 
+/** renderer 上报的确认号：非负整数以外一律按 0（等于没确认任何补丁） */
+function normalizeAckSeq(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
 export function registerSettingsHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SETTINGS_READ, async (event) => {
     const data = readSettings();
@@ -960,24 +1006,43 @@ export function registerSettingsHandlers(): void {
     return data;
   });
 
-  // 按键合并写：只更新单个顶层键,避免多 store 并发 read-modify-write 互相覆盖
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_WRITE_KEY, async (event, name: unknown, value: unknown) => {
-    if (typeof name !== 'string') return false;
-    const current = readSettings() ?? {};
-    const next = { ...current };
-    const merged =
-      name === CONVERSATIONS_KEY
-        ? mergeConversationsWrite(event.sender, current[name], value)
-        : value;
-    if (merged === undefined) delete next[name];
-    else next[name] = merged;
-    return scheduleWrite(
-      next,
-      event.sender,
-      'exclude-sender',
-      name === CONVERSATIONS_KEY && value !== undefined
-    );
+  ipcMain.handle(IPC_CHANNELS.CONVERSATIONS_READ, async (event) => {
+    const data = readSettings() ?? {};
+    return readConversationsFor(event.sender, data[CONVERSATIONS_KEY]);
   });
+
+  // 用户明确删除：先在 Main 删行并推补丁，随后该窗口的空表写回已无可删，不触发整表守卫
+  ipcMain.handle(IPC_CHANNELS.CONVERSATIONS_REMOVE, async (_event, ids: unknown) => {
+    if (!Array.isArray(ids)) return false;
+    const targets = new Set(ids.filter((id): id is string => typeof id === 'string'));
+    if (targets.size === 0) return true;
+    return patchConversationsState((state) => {
+      for (const id of targets) delete state.conversations[id];
+      state.order = state.order.filter((id) => !targets.has(id));
+    });
+  });
+
+  // 按键合并写：只更新单个顶层键,避免多 store 并发 read-modify-write 互相覆盖
+  ipcMain.handle(
+    IPC_CHANNELS.SETTINGS_WRITE_KEY,
+    async (event, name: unknown, value: unknown, ackSeq: unknown) => {
+      if (typeof name !== 'string') return false;
+      const current = readSettings() ?? {};
+      const next = { ...current };
+      const merged =
+        name === CONVERSATIONS_KEY
+          ? mergeConversationsWrite(event.sender, current[name], value, normalizeAckSeq(ackSeq))
+          : value;
+      if (merged === undefined) delete next[name];
+      else next[name] = merged;
+      return scheduleWrite(
+        next,
+        event.sender,
+        'exclude-sender',
+        name === CONVERSATIONS_KEY && value !== undefined
+      );
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.SETTINGS_WRITE, async (event, data: unknown) => {
     const record = objectRecord(data);

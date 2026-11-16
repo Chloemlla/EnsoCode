@@ -1,6 +1,7 @@
 import type { AgentTypeKey } from '@shared/builtinAgents';
 import { parseCompactCommand } from '@shared/compactCommand';
 import { conversationCwd } from '@shared/conversationCwd';
+import { diffConversations } from '@shared/conversationsPatch';
 import {
   type DefaultModelRef,
   defaultApprovalMode,
@@ -69,11 +70,10 @@ export interface QueuedMessage {
   images?: AttachedImage[];
 }
 
-import { parseConversationsPatch } from '@shared/conversationsPatch';
 import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, type StorageValue } from 'zustand/middleware';
 import { isLeaderRenderer } from '@/lib/rendererRole';
 import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
@@ -108,7 +108,7 @@ import {
   viewedConversationId,
 } from './messageCache';
 import { migrateSessions, SESSIONS_VERSION } from './migrate';
-import { cachedPartializeSessions } from './persistSnapshot';
+import { cachedPartializeSessions, type SessionsPersistSlice } from './persistSnapshot';
 import {
   activeConversationIds,
   SIDEBAR_TICK_MS,
@@ -137,7 +137,15 @@ import {
   mergeWithRememberedActive,
   readCurrentRememberedActive,
 } from './remoteActive';
-import { applyConversationsPatchToState } from './remotePatch';
+import {
+  applyConversationsPatchToState,
+  applySequencedConversationsPatch,
+  conversationsAppliedSeq,
+  flushBufferedConversationsPatches,
+  queueConversationsPatch,
+  resetConversationsAppliedSeq,
+} from './remotePatch';
+import { isSecretaryOwned } from './secretaryOwned';
 import { isPairViewed, nextUnread } from './unread';
 import {
   DIRTY_MAIN_TREE,
@@ -348,6 +356,10 @@ export interface Conversation extends SessionProjection {
   queuedMessages?: QueuedMessage[];
   /** 会话目标(设定后空闲自动续跑) */
   goal?: SessionGoal;
+  /** Main 驱动的派出会话：续跑与队列泵由 Main 负责，本窗口只显示与转发指令 */
+  driver?: 'main';
+  /** 由秘书派出；只用于显示，任何权限判断都不读它 */
+  secretaryOrigin?: { secretaryConversationId: string };
   /** 回退后待预填输入框的内容(rewind-done 回流,Composer 消费一次) */
   draftText?: string;
   draftImages?: AttachedImage[];
@@ -539,6 +551,8 @@ interface SessionsState {
   forkFromEntry(conversationId: string, entryId: string): Promise<string | null>;
   /** 终态失败后不新增 user 消息，从当前上下文续跑 */
   retry(conversationId: string): void;
+  /** 被应用退出打断的一轮：冷会话先唤醒，再从断点续跑（只续未完成的回合） */
+  retryInterrupted(conversationId: string): Promise<void>;
   /** ChatInput 消费预填文本后清除 */
   clearDraft(conversationId: string): void;
   /** 设定会话目标并立即开跑 */
@@ -1848,6 +1862,7 @@ export const useSessionsStore = create<SessionsState>()(
               nextStatus: (next as Conversation).status,
               prevUnread: conversation.unread,
               viewed: state.activeId === id || isPairViewed(id),
+              secretaryOwned: isSecretaryOwned(conversation),
             }),
             title,
             spawning: false,
@@ -2098,10 +2113,22 @@ export const useSessionsStore = create<SessionsState>()(
         };
       }
 
+      /** 派出会话的目标与队列归 Main:本窗口只发指令,不写状态也不投递 */
+      function mainGoalAction(
+        conversationId: string,
+        action: 'set' | 'pause' | 'resume' | 'clear',
+        text?: string
+      ): void {
+        void window.electronAPI.secretary
+          .goalAction({ conversationId, action, ...(text ? { text } : {}) })
+          .catch(() => undefined);
+      }
+
       /** goal 续跑:轮次收束且空闲、无排队消息/挂起项时,自动注入一条继续指令(带安全限制) */
       function continueGoal(id: string): void {
         const conversation = get().conversations[id];
         const goal = conversation?.goal;
+        if (conversation?.driver === 'main') return;
         if (
           !conversation?.started ||
           conversation.workspaceMigrating ||
@@ -2181,6 +2208,7 @@ export const useSessionsStore = create<SessionsState>()(
       /** 逐条投递排队消息:每次轮次收束只发队首一条(每条获得完整一轮),下轮结束再发下一条 */
       function flushQueue(id: string): void {
         const conversation = get().conversations[id];
+        if (conversation?.driver === 'main') return;
         if (
           !conversation?.started ||
           conversation.workspaceMigrating ||
@@ -3025,6 +3053,11 @@ export const useSessionsStore = create<SessionsState>()(
               crypto.randomUUID()
             );
           }
+          // 先让 Main 删行：删掉最后一个会话时，随后的空表写回才不会被整表删除守卫拒收
+          void window.electronAPI.settings.removeConversations?.([
+            id,
+            ...(conversation.coworkerIds ?? []),
+          ]);
           set((state) => {
             const conversations = { ...state.conversations };
             for (const coworkerId of conversation.coworkerIds ?? []) {
@@ -3271,7 +3304,8 @@ export const useSessionsStore = create<SessionsState>()(
             }
             get().setGoal(id, arg);
             // 已 spawn:空闲由 setGoal kickoff,忙碌等本轮收束 continueGoal
-            if (conversation.started) return null;
+            // 派出会话的目标由 Main 落盘并投递 kickoff,本地不再 spawn
+            if (conversation.started || conversation.driver === 'main') return null;
             // 未 spawn:把 kickoff 当首条消息走下面的 spawn+prompt,否则 GoalBar 会一直停在「推进中」
             spawnTitle = arg.slice(0, 40);
             text = startGoalPrompt(arg);
@@ -3846,6 +3880,10 @@ export const useSessionsStore = create<SessionsState>()(
         setGoal(conversationId, text) {
           const conversation = get().conversations[conversationId];
           if (!conversation || conversation.workspaceMigrating || !text.trim()) return;
+          if (conversation.driver === 'main') {
+            mainGoalAction(conversationId, 'set', text.trim());
+            return;
+          }
           set((state) =>
             patch(state, conversationId, {
               goal: {
@@ -3876,8 +3914,13 @@ export const useSessionsStore = create<SessionsState>()(
         },
 
         pauseGoal(conversationId) {
-          const goal = get().conversations[conversationId]?.goal;
+          const conversation = get().conversations[conversationId];
+          const goal = conversation?.goal;
           if (!goal) return;
+          if (conversation.driver === 'main') {
+            mainGoalAction(conversationId, 'pause');
+            return;
+          }
           set((state) =>
             patch(state, conversationId, { goal: { ...goal, status: 'paused', note: undefined } })
           );
@@ -3885,8 +3928,13 @@ export const useSessionsStore = create<SessionsState>()(
 
         resumeGoal(conversationId) {
           if (get().conversations[conversationId]?.workspaceMigrating) return;
-          const goal = get().conversations[conversationId]?.goal;
+          const conversation = get().conversations[conversationId];
+          const goal = conversation?.goal;
           if (!goal) return;
+          if (conversation.driver === 'main') {
+            mainGoalAction(conversationId, 'resume');
+            return;
+          }
           // 恢复即重置安全计数(与 pi-goal 的 guided review 语义一致:人已过目)
           set((state) =>
             patch(state, conversationId, {
@@ -3899,7 +3947,6 @@ export const useSessionsStore = create<SessionsState>()(
               },
             })
           );
-          const conversation = get().conversations[conversationId];
           if (conversation?.started && conversation.status === 'idle') {
             const text =
               `<goal-continuation>\nSession goal resumed: ${goal.text}\n` +
@@ -3921,7 +3968,12 @@ export const useSessionsStore = create<SessionsState>()(
         },
 
         clearGoal(conversationId) {
-          if (!get().conversations[conversationId]) return;
+          const conversation = get().conversations[conversationId];
+          if (!conversation) return;
+          if (conversation.driver === 'main') {
+            mainGoalAction(conversationId, 'clear');
+            return;
+          }
           set((state) => patch(state, conversationId, { goal: undefined }));
         },
 
@@ -4091,6 +4143,21 @@ export const useSessionsStore = create<SessionsState>()(
             return;
           }
           void window.electronAPI.agent.retry(conversationId);
+        },
+
+        async retryInterrupted(conversationId) {
+          const conversation = get().conversations[conversationId];
+          if (!conversation || conversation.spawning || conversation.status === 'running') return;
+          try {
+            // 重启后会话是冷的：先按 jsonl 唤醒，等 worker ready 再续跑，否则 Main 会拒
+            if (!conversation.started) await get().resumeConversation(conversationId);
+            const phase = await waitForWorkerReady(conversationId, conversation.sessionFile);
+            if (phase !== 'ready') return;
+            if (get().conversations[conversationId]?.status === 'running') return;
+            await window.electronAPI.agent.retry(conversationId, { unfinishedOnly: true });
+          } catch {
+            // 唤醒失败就保持中断提示，用户还能再点一次
+          }
         },
 
         clearDraft(conversationId) {
@@ -4274,7 +4341,15 @@ export const useSessionsStore = create<SessionsState>()(
       version: SESSIONS_VERSION,
       migrate: (persisted, version) => migrateSessions(persisted, version) as SessionsState,
       // 存 settings.json（localStorage 按 origin 隔离，dev 与打包版会分家）
-      storage: createElectronPersistStorage(),
+      // 读回带补丁序号，写回带确认号：Main 才能只合并本端的差量
+      storage: createElectronPersistStorage<SessionsPersistSlice>({
+        read: async () => {
+          const { value, seq } = await window.electronAPI.settings.readConversations();
+          resetConversationsAppliedSeq(seq);
+          return (value as StorageValue<SessionsPersistSlice> | undefined) ?? null;
+        },
+        ackSeq: conversationsAppliedSeq,
+      }),
       // 只存元数据：messages 由 worker snapshot 补回（刷新场景）；app 重启后拿不回则标结束
       partialize: (state) => cachedPartializeSessions(state),
       // 远程界面的当前会话不在共享补丁里，水合时用本机记住的值盖过磁盘
@@ -4284,6 +4359,10 @@ export const useSessionsStore = create<SessionsState>()(
         if (!error) {
           openPersistWriteGate('enso-conversations');
           armRemoteActiveMemory(useSessionsStore);
+        }
+        // 水合会用磁盘值盖掉内存，期间到达的补丁在这里补用，否则 Main 的插入永久丢失
+        for (const patch of flushBufferedConversationsPatches()) {
+          useSessionsStore.setState((state) => applySequencedConversationsPatch(state, patch));
         }
         // 刷新时 worker 仍活着：只补当前正在看的会话正文。其它会话点开再 snapshot。
         const state = useSessionsStore.getState();
@@ -4532,7 +4611,20 @@ async function forkConversation(
 }
 
 window.electronAPI.settings?.onConversationsPatch?.((value) => {
-  const remotePatch = parseConversationsPatch(value);
-  if (!remotePatch || !useSessionsStore.persist.hasHydrated()) return;
-  useSessionsStore.setState((state) => applyConversationsPatchToState(state, remotePatch));
+  const remotePatch = queueConversationsPatch(value);
+  if (!remotePatch) return;
+  useSessionsStore.setState((state) => applySequencedConversationsPatch(state, remotePatch));
+});
+
+// 写回被 Main 拒收：重读磁盘并把磁盘行补回内存，之后的写回以这份磁盘值为基线
+window.electronAPI.settings?.onConversationsResync?.(() => {
+  void window.electronAPI.settings
+    .readConversations()
+    .then(({ value, seq }) => {
+      resetConversationsAppliedSeq(seq);
+      useSessionsStore.setState((state) =>
+        applyConversationsPatchToState(state, diffConversations(undefined, value))
+      );
+    })
+    .catch(() => {});
 });

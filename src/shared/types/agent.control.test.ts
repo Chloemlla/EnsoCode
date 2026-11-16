@@ -194,6 +194,22 @@ describe('agent control tool protocol', () => {
       expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
   });
 
+  it('set-system-prompt 只接受父会话 identity 与非空正文', () => {
+    const command = {
+      type: 'set-system-prompt',
+      identity: parent,
+      systemPrompt: 'Address the user as "哥哥".',
+    };
+    expect(parseAgentCommand(command)).toEqual(command);
+    for (const patch of [
+      { systemPrompt: '' },
+      { systemPrompt: 1 },
+      { identity: child },
+      { extra: true },
+    ])
+      expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
+  });
+
   it.each(['delivery-settled', 'delivery-rejected', 'delivery-deferred'])(
     '%s 只接受精确 identity、seq 与 deliveryId',
     (type) => {
@@ -392,6 +408,30 @@ describe('Main-owned source authority contracts', () => {
     ).not.toBeNull();
     expect(
       parseCreateProjectAuthorityRequest({ requestId: 'p', path: '/x', kind: 'scratch' })
+    ).toBeNull();
+
+    // 秘书项目同样只由 Main 登记，renderer 创建请求不得携带，也不许带 ssh 字段
+    expect(
+      parseProjectAuthority({
+        projectId,
+        canonicalPath: '/u/secretary/workspace',
+        kind: 'secretary',
+        state: 'active',
+        version: 1,
+      })
+    ).not.toBeNull();
+    expect(
+      parseProjectAuthority({
+        projectId,
+        canonicalPath: '/u/secretary/workspace',
+        kind: 'secretary',
+        sshHost: 'h',
+        state: 'active',
+        version: 1,
+      })
+    ).toBeNull();
+    expect(
+      parseCreateProjectAuthorityRequest({ requestId: 'p', path: '/x', kind: 'secretary' })
     ).toBeNull();
 
     const base = { conversationId, projectId, kind: 'root', lifecycle: 'draft', version: 1 };

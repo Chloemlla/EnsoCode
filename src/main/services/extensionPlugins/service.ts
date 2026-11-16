@@ -35,6 +35,7 @@ import {
   isNewerPluginVersion,
   isPluginRelativePath,
   type PluginConfigContrib,
+  type PluginContactChannelContrib,
   type PluginModelChoice,
   type PluginPresetContrib,
   parseExtensionPluginManifest,
@@ -714,6 +715,31 @@ export class ExtensionPluginService {
     });
   }
 
+  /** 已启用且获准作为秘书联系方式的插件渠道；停用、卸载后就不在里面 */
+  contactChannels(): { pluginId: string; channels: PluginContactChannelContrib[] }[] {
+    return this.records.flatMap((record) => {
+      const manifest = this.enabledManifest(record.id);
+      const channels = manifest?.contributes.contactChannels ?? [];
+      if (!manifest?.permissions.includes('secretary.contact') || channels.length === 0) return [];
+      return [{ pluginId: record.id, channels }];
+    });
+  }
+
+  /** 秘书联系方式往插件渠道发东西：不属于任何会话，按后台事件调用 */
+  async callContact(
+    pluginId: string,
+    channelId: string,
+    request: { op: 'sendText'; peerId: string; text: string } | { op: 'typing'; peerId: string }
+  ): Promise<unknown> {
+    if (!this.enabledManifest(pluginId)) throw pluginError('PLUGIN_DISABLED', '插件未启用');
+    return this.invoke(
+      pluginId,
+      'contact.call',
+      { channelId, ...request },
+      { sessionId: null, projectRoot: null, gesture: false, timeoutMs: 30_000, kind: 'event' }
+    );
+  }
+
   /** 允许或禁止插件向非发起会话注入消息；只对申请了 agent.inject 的插件有效 */
   setCrossSessionInject(id: string, allowed: boolean): { ok: boolean; error?: string } {
     const record = this.records.find((r) => r.id === id);
@@ -1024,19 +1050,20 @@ export class ExtensionPluginService {
     });
   }
 
-  toolsForSpawn(): PluginToolDescriptor[] {
-    return this.enabled().flatMap(({ id, manifest }) => [
+  /** ids 只给秘书这类按勾选圈定的会话用；不传就是全部已启用插件 */
+  toolsForSpawn(ids?: readonly string[]): PluginToolDescriptor[] {
+    return this.enabled(ids).flatMap(({ id, manifest }) => [
       ...manifest.contributes.agentTools.map((tool) => this.describeTool(id, tool)),
       ...this.dynamic.toolsFor(id).map((tool) => this.describeTool(id, tool)),
     ]);
   }
 
   /** 无订阅且没有 agent.inject 时不给会话下发事件计划 */
-  eventPlanForSpawn(): PluginEventPlan | null {
+  eventPlanForSpawn(ids?: readonly string[]): PluginEventPlan | null {
     const observe = new Set<string>();
     const intercept: { event: string; tools?: string[] }[] = [];
     let inject = false;
-    for (const { manifest } of this.enabled()) {
+    for (const { manifest } of this.enabled(ids)) {
       if (manifest.permissions.includes('agent.inject')) inject = true;
       for (const sub of manifest.contributes.events) {
         if (isHostPluginEvent(sub.event)) continue;
@@ -1107,8 +1134,8 @@ export class ExtensionPluginService {
     );
   }
 
-  skillPathsForSpawn(activePresetId?: string): string[] {
-    return this.enabled().flatMap(({ id, dir, manifest }) => {
+  skillPathsForSpawn(activePresetId?: string, ids?: readonly string[]): string[] {
+    return this.enabled(ids).flatMap(({ id, dir, manifest }) => {
       const root = pluginPackagePath(this.options.root, id, dir);
       return this.contributedSkills(id, manifest, activePresetId).map((rel) => resolve(root, rel));
     });
@@ -2342,9 +2369,11 @@ export class ExtensionPluginService {
     }
   }
 
-  private enabled(): (Loaded & { id: string })[] {
+  private enabled(ids?: readonly string[]): (Loaded & { id: string })[] {
+    const allowed = ids ? new Set(ids) : null;
     return this.records.flatMap((r) => {
       if (r.state !== 'enabled') return [];
+      if (allowed && !allowed.has(r.id)) return [];
       const manifest = this.load(r.id, r.dir);
       return manifest ? [{ id: r.id, dir: r.dir, manifest }] : [];
     });

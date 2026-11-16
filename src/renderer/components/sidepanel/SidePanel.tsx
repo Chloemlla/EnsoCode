@@ -14,6 +14,7 @@ import {
   FolderOpen,
   GitCompare,
   Globe,
+  LayoutGrid,
   Maximize2,
   MessageCircle,
   Minimize2,
@@ -34,6 +35,7 @@ import {
   useState,
 } from 'react';
 import { useWindowChromeKind } from '@/components/app/WindowChrome';
+import { useSecretaryName } from '@/components/secretary/useSecretaryFace';
 import {
   ContextMenu,
   ContextMenuItem,
@@ -50,10 +52,12 @@ import {
   bindSidePanelDock,
   closeSidePanelBrowser,
   disposeConversationResources,
+  selectIsSecretaryProject,
   selectWorkflowAvailable,
 } from '@/lib/sidePanelDock';
 import { releaseTerminal } from '@/lib/terminalRegistry';
 import { cn } from '@/lib/utils';
+import { useSecretaryStore } from '@/stores/secretary';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useSidePanelStore } from '@/stores/sidePanel';
@@ -68,12 +72,14 @@ import { useWorkflowRunsStore } from '@/stores/workflowRuns';
 import { PluginIcon } from '../../plugins/PluginIcon';
 import { PluginView } from '../../plugins/PluginView';
 import { type PluginViewRef, usePluginViews } from '../../plugins/viewBridge';
+import { SecretaryPanel } from '../secretary/SecretaryPanel';
 import { BrowserView } from './BrowserView';
 import { BtwView } from './BtwView';
 import { ChangesView } from './ChangesView';
 import { FilesView } from './FilesView';
 import { overflowTabList, removeOverflowRows, snapshotOverflowRows } from './overflowTabClose';
 import { type PanelActivitySource, PanelVisibilityProvider } from './panelVisibility';
+import { secretaryPluginPanelsToClose, secretaryPluginViews } from './secretaryPluginViews';
 import { shouldSkipSidePanelWidthAnim, sidePanelWidthTransition } from './sidePanelWidthAnim';
 import { TerminalView } from './TerminalView';
 import { idsToClose, type TabCloseKind } from './tabCloseActions';
@@ -280,8 +286,52 @@ function addWorkflowPanel(
   });
 }
 
+/** 秘书会话的原生面板：工作台、记忆与定时都在这一块，需要就地审批与跳转会话 */
+function addSecretaryPanel(
+  api: DockviewApi,
+  conversationId: string | undefined,
+  projectId: string | undefined,
+  label: string
+): void {
+  const existing = api.getPanel('secretary');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({
+    id: 'secretary',
+    component: 'secretary',
+    title: label,
+    params: { conversationId, projectId },
+  });
+}
+
+function Secretary(props: IDockviewPanelProps<{ conversationId?: string }>) {
+  return (
+    <VisiblePanel api={props.api}>
+      <SecretaryPanel />
+    </VisiblePanel>
+  );
+}
+
 function useWorkflowAvailable(projectId: string | undefined): boolean {
   return useSettingsStore((state) => selectWorkflowAvailable(state, projectId));
+}
+
+/** 秘书会话只留浏览器、秘书面板与勾选插件的页面；开关关掉时与普通会话一样 */
+function useSecretaryConversation(projectId: string | undefined): boolean {
+  return useSettingsStore(
+    (state) => state.secretaryEnabled && selectIsSecretaryProject(state.projects, projectId)
+  );
+}
+
+const NO_PLUGINS: readonly string[] = [];
+
+/** 秘书设置里勾选的插件 id；档案还没到时为 null */
+function useSecretaryPluginIds(): readonly string[] | null {
+  return useSecretaryStore((state) =>
+    state.secretary.profile ? (state.secretary.profile.pluginIds ?? NO_PLUGINS) : null
+  );
 }
 
 function addPluginViewPanel(
@@ -402,6 +452,8 @@ function SidePanelTab(props: IDockviewPanelHeaderProps<{ favicon?: string | null
         <MessageCircle className="h-3 w-3 shrink-0" />
       ) : props.api.id === 'workflow' ? (
         <Workflow className="h-3 w-3 shrink-0" />
+      ) : props.api.id === 'secretary' ? (
+        <LayoutGrid className="h-3 w-3 shrink-0" />
       ) : props.api.id.startsWith('plugin:') ? (
         <PluginIcon pluginId={props.api.id.split(':')[1] ?? ''} className="h-3 w-3 shrink-0" />
       ) : isBrowser && favicon && !faviconBroken ? (
@@ -456,21 +508,32 @@ function NewTabMenu({
   onNewBrowser,
   onNewBtw,
   onNewWorkflow,
+  onNewSecretary,
+  secretaryLabel,
   onNewPluginView,
+  secretaryPluginIds,
   compact,
 }: {
-  onNewTerminal: () => void;
-  onNewChanges: () => void;
-  onNewFiles: () => void;
+  /** 缺省 = 该会话不提供这个入口（秘书会话没有终端、文件、改动） */
+  onNewTerminal?: () => void;
+  onNewChanges?: () => void;
+  onNewFiles?: () => void;
   onNewBrowser: () => void;
-  onNewBtw: () => void;
-  /** 缺省 = 该项目没开 workflow 工具，不给入口 */
+  onNewBtw?: () => void;
   onNewWorkflow?: () => void;
+  onNewSecretary?: () => void;
+  secretaryLabel?: string;
   onNewPluginView?: (view: PluginViewRef) => void;
+  /** 秘书会话传入：只列勾选了的插件页面 */
+  secretaryPluginIds?: readonly string[] | null;
   compact?: boolean;
 }) {
   const { t } = useI18n();
-  const pluginViews = usePluginViews();
+  const allPluginViews = usePluginViews();
+  const pluginViews =
+    secretaryPluginIds === undefined
+      ? allPluginViews
+      : secretaryPluginViews(allPluginViews, secretaryPluginIds ?? undefined);
   return (
     <Menu>
       <MenuTrigger
@@ -486,30 +549,44 @@ function NewTabMenu({
         {!compact && <span>{t('New tab')}</span>}
       </MenuTrigger>
       <MenuPopup align={compact ? 'end' : 'center'} className="min-w-36">
-        <MenuItem onClick={onNewTerminal}>
-          <SquareTerminal className="h-4 w-4" />
-          {t('Terminal')}
-        </MenuItem>
-        <MenuItem onClick={onNewChanges}>
-          <GitCompare className="h-4 w-4" />
-          {t('Changes')}
-        </MenuItem>
-        <MenuItem onClick={onNewFiles}>
-          <FolderOpen className="h-4 w-4" />
-          {t('Files')}
-        </MenuItem>
+        {onNewTerminal ? (
+          <MenuItem onClick={onNewTerminal}>
+            <SquareTerminal className="h-4 w-4" />
+            {t('Terminal')}
+          </MenuItem>
+        ) : null}
+        {onNewChanges ? (
+          <MenuItem onClick={onNewChanges}>
+            <GitCompare className="h-4 w-4" />
+            {t('Changes')}
+          </MenuItem>
+        ) : null}
+        {onNewFiles ? (
+          <MenuItem onClick={onNewFiles}>
+            <FolderOpen className="h-4 w-4" />
+            {t('Files')}
+          </MenuItem>
+        ) : null}
         <MenuItem onClick={onNewBrowser}>
           <Globe className="h-4 w-4" />
           {t('Browser')}
         </MenuItem>
-        <MenuItem onClick={onNewBtw}>
-          <MessageCircle className="h-4 w-4" />
-          {t('Btw')}
-        </MenuItem>
+        {onNewBtw ? (
+          <MenuItem onClick={onNewBtw}>
+            <MessageCircle className="h-4 w-4" />
+            {t('Btw')}
+          </MenuItem>
+        ) : null}
         {onNewWorkflow ? (
           <MenuItem onClick={onNewWorkflow}>
             <Workflow className="h-4 w-4" />
             {t('Workflow')}
+          </MenuItem>
+        ) : null}
+        {onNewSecretary ? (
+          <MenuItem data-enso="secretary-panel-open" onClick={onNewSecretary}>
+            <LayoutGrid className="h-4 w-4" />
+            {secretaryLabel ?? t('Secretary')}
           </MenuItem>
         ) : null}
         {onNewPluginView
@@ -537,53 +614,89 @@ function SidePanelHeaderActions({
   const fullscreen = useSidePanelStore((s) => s.fullscreen);
   const toggleFullscreen = useSidePanelStore((s) => s.toggleFullscreen);
   const workflowAvailable = useWorkflowAvailable(projectId);
+  const secretary = useSecretaryConversation(projectId);
+  const secretaryPluginIds = useSecretaryPluginIds();
+  const secretaryName = useSecretaryName();
   const isMobile = useIsMobile();
   const titleRow = useContext(TitleRowContext);
   const topRight = useIsTopRightGroup(containerApi, group);
   const toggleOpen = useSidePanelStore((s) => s.toggleOpen);
   const windows = useWindowChromeKind() === 'windows';
+  // 深链或手机按钮要求定位某张卡时把秘书面板叫出来；同一个请求只处理一次
+  const focusProposal = useSecretaryStore((s) => s.focusProposal);
+  const handledFocus = useRef(0);
+  useEffect(() => {
+    if (!focusProposal || !secretary || focusProposal.at === handledFocus.current) return;
+    handledFocus.current = focusProposal.at;
+    addSecretaryPanel(containerApi, conversationId, projectId, secretaryName);
+  }, [focusProposal, secretary, containerApi, conversationId, projectId, secretaryName]);
   return (
     <div className="flex h-full items-center gap-0.5">
       <NewTabMenu
         compact
-        onNewTerminal={() => {
-          if (group) {
-            containerApi.addPanel({
-              id: crypto.randomUUID(),
-              component: 'terminal',
-              title: nextTerminalTitle(containerApi, t('Terminal')),
-              params: { conversationId, projectId },
-              position: { referenceGroup: group },
-            });
-            return;
-          }
-          addTerminalPanel(containerApi, conversationId, projectId, t('Terminal'));
-        }}
-        onNewChanges={() => addChangesPanel(containerApi, conversationId, projectId, t('Changes'))}
-        onNewFiles={() => addFilesPanel(containerApi, conversationId, projectId, t('Files'))}
+        onNewTerminal={
+          secretary
+            ? undefined
+            : () => {
+                if (group) {
+                  containerApi.addPanel({
+                    id: crypto.randomUUID(),
+                    component: 'terminal',
+                    title: nextTerminalTitle(containerApi, t('Terminal')),
+                    params: { conversationId, projectId },
+                    position: { referenceGroup: group },
+                  });
+                  return;
+                }
+                addTerminalPanel(containerApi, conversationId, projectId, t('Terminal'));
+              }
+        }
+        onNewChanges={
+          secretary
+            ? undefined
+            : () => addChangesPanel(containerApi, conversationId, projectId, t('Changes'))
+        }
+        onNewFiles={
+          secretary
+            ? undefined
+            : () => addFilesPanel(containerApi, conversationId, projectId, t('Files'))
+        }
         onNewBrowser={() => addBrowserPanel(containerApi, conversationId, projectId, t('Browser'))}
-        onNewBtw={() => {
-          if (group) {
-            const count = containerApi.panels.filter((panel) => panel.id.startsWith('btw:')).length;
-            containerApi.addPanel({
-              id: `btw:${crypto.randomUUID()}`,
-              component: 'btw',
-              title: count === 0 ? t('Btw') : `${t('Btw')} ${count + 1}`,
-              params: { conversationId, projectId },
-              position: { referenceGroup: group },
-            });
-            return;
-          }
-          addBtwPanel(containerApi, conversationId, projectId, t('Btw'));
-        }}
+        onNewBtw={
+          secretary
+            ? undefined
+            : () => {
+                if (group) {
+                  const count = containerApi.panels.filter((panel) =>
+                    panel.id.startsWith('btw:')
+                  ).length;
+                  containerApi.addPanel({
+                    id: `btw:${crypto.randomUUID()}`,
+                    component: 'btw',
+                    title: count === 0 ? t('Btw') : `${t('Btw')} ${count + 1}`,
+                    params: { conversationId, projectId },
+                    position: { referenceGroup: group },
+                  });
+                  return;
+                }
+                addBtwPanel(containerApi, conversationId, projectId, t('Btw'));
+              }
+        }
         onNewWorkflow={
-          workflowAvailable
+          workflowAvailable && !secretary
             ? () => addWorkflowPanel(containerApi, conversationId, projectId, t('Workflow'))
             : undefined
         }
+        onNewSecretary={
+          secretary
+            ? () => addSecretaryPanel(containerApi, conversationId, projectId, secretaryName)
+            : undefined
+        }
+        secretaryLabel={secretaryName}
         onNewPluginView={(view) =>
           addPluginViewPanel(containerApi, conversationId, projectId, view, group)
         }
+        secretaryPluginIds={secretary ? secretaryPluginIds : undefined}
       />
       <button
         type="button"
@@ -627,6 +740,9 @@ function Watermark(props: IWatermarkPanelProps) {
   const { t } = useI18n();
   const { conversationId, projectId } = useContext(PanelContext);
   const workflowAvailable = useWorkflowAvailable(projectId);
+  const secretary = useSecretaryConversation(projectId);
+  const secretaryPluginIds = useSecretaryPluginIds();
+  const secretaryName = useSecretaryName();
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="enso-side-dock-header flex shrink-0 items-center justify-end border-b bg-background px-2 py-1">
@@ -637,27 +753,45 @@ function Watermark(props: IWatermarkPanelProps) {
           {t('No tabs yet. Create one to get started.')}
         </p>
         <NewTabMenu
-          onNewTerminal={() =>
-            addTerminalPanel(props.containerApi, conversationId, projectId, t('Terminal'))
+          onNewTerminal={
+            secretary
+              ? undefined
+              : () => addTerminalPanel(props.containerApi, conversationId, projectId, t('Terminal'))
           }
-          onNewChanges={() =>
-            addChangesPanel(props.containerApi, conversationId, projectId, t('Changes'))
+          onNewChanges={
+            secretary
+              ? undefined
+              : () => addChangesPanel(props.containerApi, conversationId, projectId, t('Changes'))
           }
-          onNewFiles={() =>
-            addFilesPanel(props.containerApi, conversationId, projectId, t('Files'))
+          onNewFiles={
+            secretary
+              ? undefined
+              : () => addFilesPanel(props.containerApi, conversationId, projectId, t('Files'))
           }
           onNewBrowser={() =>
             addBrowserPanel(props.containerApi, conversationId, projectId, t('Browser'))
           }
-          onNewBtw={() => addBtwPanel(props.containerApi, conversationId, projectId, t('Btw'))}
+          onNewBtw={
+            secretary
+              ? undefined
+              : () => addBtwPanel(props.containerApi, conversationId, projectId, t('Btw'))
+          }
           onNewWorkflow={
-            workflowAvailable
+            workflowAvailable && !secretary
               ? () => addWorkflowPanel(props.containerApi, conversationId, projectId, t('Workflow'))
               : undefined
           }
+          onNewSecretary={
+            secretary
+              ? () =>
+                  addSecretaryPanel(props.containerApi, conversationId, projectId, secretaryName)
+              : undefined
+          }
+          secretaryLabel={secretaryName}
           onNewPluginView={(view) =>
             addPluginViewPanel(props.containerApi, conversationId, projectId, view)
           }
+          secretaryPluginIds={secretary ? secretaryPluginIds : undefined}
         />
       </div>
     </div>
@@ -676,6 +810,7 @@ const DOCK_COMPONENTS = {
   browser: BrowserPanel,
   btw: BtwPanel,
   workflow: WorkflowPanel,
+  secretary: Secretary,
   plugin: PluginViewPanel,
 };
 
@@ -717,11 +852,21 @@ function ConversationDock({
 }) {
   const isDark = useIsDark();
   const workflowAvailable = useWorkflowAvailable(projectId);
+  const secretary = useSecretaryConversation(projectId);
+  const secretaryPluginIds = useSecretaryPluginIds();
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
   // 关掉工具时收起已开的工作流 tab；恢复布局带回来的也一并收掉
   useEffect(() => {
     if (!workflowAvailable) dockApi?.getPanel('workflow')?.api.close();
   }, [dockApi, workflowAvailable]);
+  // 秘书设置里取消勾选插件：收起该插件已开的页面；恢复布局带回来的也一并收掉
+  useEffect(() => {
+    if (!dockApi || !secretary) return;
+    const ids = dockApi.panels.map((panel) => panel.id);
+    for (const id of secretaryPluginPanelsToClose(ids, secretaryPluginIds)) {
+      dockApi.getPanel(id)?.api.close();
+    }
+  }, [dockApi, secretary, secretaryPluginIds]);
 
   const onReady = (event: DockviewReadyEvent) => {
     bindSidePanelDock(conversationId, event.api);
@@ -747,7 +892,13 @@ function ConversationDock({
     });
     // 只有用户关 tab 才回收;dock 本身不随切会话卸载
     event.api.onDidRemovePanel((panel) => {
-      if (panel.id === 'changes' || panel.id === 'files' || panel.id.startsWith('plugin:')) return;
+      if (
+        panel.id === 'changes' ||
+        panel.id === 'files' ||
+        panel.id === 'secretary' ||
+        panel.id.startsWith('plugin:')
+      )
+        return;
       if (panel.id === 'browser' || panel.id.startsWith('browser:')) {
         void window.electronAPI.browser.closeTab(panel.id);
         return;
