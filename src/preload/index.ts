@@ -336,6 +336,12 @@ const electronAPI = {
     /** 用户明确删除会话：Main 先删行，空表写回不会被整表删除守卫拦下 */
     removeConversations: (ids: string[]): Promise<boolean> =>
       ipcRenderer.invoke(IPC_CHANNELS.CONVERSATIONS_REMOVE, ids),
+    moveConversation: (input: {
+      conversationId: string;
+      targetProjectId: string;
+    }): Promise<
+      { ok: true; value: ConversationAuthorityProjection } | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.CONVERSATIONS_MOVE, input),
     /** Main 拒收本窗口的会话写回，要求重新读会话 */
     onConversationsResync: (callback: () => void): (() => void) => {
       const listener = () => callback();
@@ -409,7 +415,7 @@ const electronAPI = {
     /** 用户手动把一条派发记录标记完成，或撤销这个标记放回进行中 */
     markResult: (
       conversationId: string,
-      action: 'done' | 'undo'
+      action: 'done' | 'undo' | 'dismiss'
     ): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_MARK_RESULT, { conversationId, action }),
     /** 看板「停止遗留任务」：停掉这条派发记录里还在跑的后台任务 */
@@ -520,6 +526,7 @@ const electronAPI = {
       patch:
         | { enabled?: boolean; allowCardConfirm?: boolean; allowMemory?: boolean }
         | { channelId: string; prefs: Partial<SecretaryContactChannelPrefs> }
+        | { telegramGroup: { action: 'add' | 'remove'; chatId: string } }
     ): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_CONTACT_SETTINGS, patch),
     /** 手机关注的任务：取消一项或全清 */

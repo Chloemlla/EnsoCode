@@ -1373,6 +1373,12 @@ export const zhTranslations: Record<string, string> = {
   'Run this session on its own git worktree': '让这个会话在独立的 git worktree 里运行',
   'Move to worktree': '切到隔离 worktree',
   'Failed to move to worktree': '切到隔离 worktree 失败',
+  'Move to project…': '移动到项目…',
+  'Add to project…': '添加到项目…',
+  'Failed to move conversation': '移动会话失败',
+  'Cannot move a running conversation': '运行中的会话不能移动',
+  'Cannot move while its worktree is in use': '会话的 worktree 正在使用，暂不能移动',
+  'Secretary conversations cannot be moved': '秘书会话不能移出秘书',
   'Main working tree has uncommitted changes': '主工作树有未提交改动',
   'The new worktree branches off HEAD, so those changes stay in the main working tree and will not follow this session.':
     '新 worktree 从 HEAD 切出，这些改动会留在主工作树，不会跟随本会话。',
@@ -1692,6 +1698,10 @@ export const zhTranslations: Record<string, string> = {
     '服务商「{{provider}}」下没有向量模型（「{{model}}」是对话模型）：请在该服务商里添加支持 /embeddings 的模型（如 text-embedding-3-small），或改用本地向量模型。',
   'No model can be used for embeddings: it needs a provider with an API key and an embedding model (e.g. text-embedding-3-small). Subscription sign-in cannot be used for embeddings.':
     '没有可用于向量化的模型：需要填了 API Key 的服务商，且其中有向量模型（如 text-embedding-3-small）。订阅登录不能用于向量化。',
+  '{{name}}: missing API key': '{{name}}：没有 API Key',
+  '{{name}}: missing Base URL': '{{name}}：没有 Base URL',
+  '{{name}}: no matching embedding model (model names must contain keywords like embed/voyage/bge)':
+    '{{name}}：没有匹配的向量模型（模型名需包含 embed/voyage/bge 等关键词）',
   'Database size': '库体积',
   Spaces: '空间数',
   'Never retrieved': '从未命中',
@@ -3069,6 +3079,14 @@ export const zhTranslations: Record<string, string> = {
   'Mirror every reply here; /sync off stops it': '把所有回复同步到手机；/sync off 关掉',
   'List every command': '列出所有命令',
   'Commands you can send': '可以发的命令',
+  'Allowed groups': '允许的群',
+  'Only groups on this list reach the secretary, and only messages from the bound account count. Messages from anyone else in the group are not received.':
+    '只有名单里的群会进秘书，而且只认绑定的那个账号。群里其他人的话不会收。',
+  'No groups yet: group messages are not received.': '名单为空：群消息一律不收。',
+  'Group chat ID, e.g. -1001234567890': '群 chatId，例如 -1001234567890',
+  'Add group': '添加',
+  'Remove {{name}}': '删除 {{name}}',
+  'Group chat IDs are numbers, e.g. -1001234567890': '群 chatId 是数字，例如 -1001234567890',
   'Allow viewing memory titles on Telegram': '允许在 Telegram 查看记忆标题',
   'Off by default. /memory lists titles only, never the memory text.':
     '默认关闭。/memory 只列标题，不显示记忆正文。',
@@ -3457,6 +3475,7 @@ export const zhTranslations: Record<string, string> = {
   'Send reply': '发送回复',
   'Reply not sent': '回复未发送',
   'Mark done': '标记完成',
+  'Move off the board': '移出',
   'Model: {{model}}': '模型：{{model}}',
   'Undo mark done': '撤销标记',
   'Cancel task': '取消任务',

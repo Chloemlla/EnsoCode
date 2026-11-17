@@ -20,6 +20,7 @@ import { connectPluginChannels } from '../services/secretary/contact/plugins';
 import { ContactService, type ContactServicePorts } from '../services/secretary/contact/service';
 import { ContactStore } from '../services/secretary/contact/store';
 import { deliverToSecretary } from '../services/secretary/contact/wake';
+import { setContactMediaSender } from '../services/secretary/contactSend';
 import { buildDaily, secretaryDailyPorts } from '../services/secretary/daily';
 import { type DeliveryPorts, resolveTarget } from '../services/secretary/deliveries';
 import {
@@ -115,6 +116,16 @@ function readChannelPrefs(
     if (typeof value === 'boolean') prefs[key] = value;
   }
   return Object.keys(prefs).length > 0 ? { channelId, prefs } : null;
+}
+
+/** Telegram 群白名单：{ telegramGroup: { action: 'add' | 'remove', chatId } } */
+function readTelegramGroup(request: unknown): { action: 'add' | 'remove'; chatId: string } | null {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return null;
+  const raw = (request as Record<string, unknown>).telegramGroup;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const { action, chatId } = raw as Record<string, unknown>;
+  if ((action !== 'add' && action !== 'remove') || typeof chatId !== 'string') return null;
+  return { action, chatId };
 }
 
 /** 关注列表的操作：取消一项要带 id，全清不带 */
@@ -234,6 +245,8 @@ export function createSecretaryContact(deps: SecretaryContactDeps): SecretaryCon
   service = new ContactService(store, ports);
   // 派发与定时不认识联系方式：只通过这个探针问一句「这一轮是手机发起的吗」
   setPhoneTurnChatProbe((conversationId) => service?.phoneTurnChat(conversationId) ?? null);
+  // 秘书的 contact_send_file 只认这个出口，不认识具体渠道
+  setContactMediaSender((conversationId, media) => service.sendMedia(conversationId, media));
 
   let unplug: (() => void) | null = null;
 
@@ -306,6 +319,8 @@ export function createSecretaryContact(deps: SecretaryContactDeps): SecretaryCon
         if (!isEditor(event.sender.id)) return { ok: false, error: 'invalid sender' };
         const channel = readChannelPrefs(request);
         if (channel) return service.setChannelPrefs(channel.channelId, channel.prefs);
+        const group = readTelegramGroup(request);
+        if (group) return service.setTelegramGroup(group.action, group.chatId);
         const enabled = readFlag(request, 'enabled');
         const cards = readFlag(request, 'allowCardConfirm');
         const memory = readFlag(request, 'allowMemory');

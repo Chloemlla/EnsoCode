@@ -7,13 +7,20 @@ import { parseInboundMessage } from '@shared/secretary/inbound';
 import type { SecretaryAuditEntry, SecretaryProfile } from '@shared/types/secretary';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FollowingStore } from '../following';
-import type { ChannelCaps, ChannelMessage, ContactChannel } from './channel';
+import type {
+  ChannelCaps,
+  ChannelFile,
+  ChannelImage,
+  ChannelMessage,
+  ContactChannel,
+} from './channel';
 import type {
   TelegramApi,
   TelegramCommandOptions,
   TelegramInlineKeyboard,
   TelegramMenuButton,
   TelegramUpdate,
+  TelegramUpload,
   TelegramUser,
 } from './client';
 import { TelegramApiError } from './client';
@@ -30,6 +37,7 @@ class FakeApi implements TelegramApi {
     text: string;
     replyMarkup?: TelegramInlineKeyboard;
     parseMode?: 'HTML';
+    messageThreadId?: number;
   }[] = [];
   edited: {
     chatId: number;
@@ -53,7 +61,13 @@ class FakeApi implements TelegramApi {
   menuButtons: TelegramMenuButton[] = [];
   callbacks: { callbackQueryId: string; text?: string }[] = [];
   /** 「正在输入…」：只记 chat 与 action */
-  chatActions: { chatId: number; action: 'typing' }[] = [];
+  chatActions: { chatId: number; action: 'typing'; messageThreadId?: number }[] = [];
+  /** sendPhoto / sendDocument 的上传参数 */
+  uploads: { method: 'sendPhoto' | 'sendDocument'; params: TelegramUpload }[] = [];
+  /** sendPhoto 失败时用 */
+  photoError: Error | null = null;
+  /** sendDocument 失败时用 */
+  documentError: Error | null = null;
   polls = 0;
   /** 菜单接口失败时用 */
   menuError: Error | null = null;
@@ -99,6 +113,7 @@ class FakeApi implements TelegramApi {
     text: string;
     replyMarkup?: TelegramInlineKeyboard;
     parseMode?: 'HTML';
+    messageThreadId?: number;
   }): Promise<number> {
     if (this.rejectHtml && params.parseMode) {
       throw new TelegramApiError('api', "Bad Request: can't parse entities");
@@ -153,7 +168,11 @@ class FakeApi implements TelegramApi {
     }
   }
 
-  async sendChatAction(params: { chatId: number; action: 'typing' }): Promise<void> {
+  async sendChatAction(params: {
+    chatId: number;
+    action: 'typing';
+    messageThreadId?: number;
+  }): Promise<void> {
     if (this.typingError) throw this.typingError;
     this.chatActions.push(params);
   }
@@ -184,6 +203,18 @@ class FakeApi implements TelegramApi {
 
   async answerCallbackQuery(params: { callbackQueryId: string; text?: string }): Promise<void> {
     this.callbacks.push(params);
+  }
+
+  async sendPhoto(params: TelegramUpload): Promise<number> {
+    if (this.photoError) throw this.photoError;
+    this.uploads.push({ method: 'sendPhoto', params });
+    return 900 + this.uploads.length;
+  }
+
+  async sendDocument(params: TelegramUpload): Promise<number> {
+    if (this.documentError) throw this.documentError;
+    this.uploads.push({ method: 'sendDocument', params });
+    return 900 + this.uploads.length;
   }
 }
 
@@ -305,6 +336,31 @@ function privateMessage(text: string, chatId = 777): TelegramUpdate {
       chat: { id: chatId, type: 'private' },
       from: { id: chatId, username: 'j3n5en', first_name: 'J' },
       text,
+    },
+  };
+}
+
+/** 超级群里的一句话；带 topic 就是论坛话题里发的 */
+function groupMessage(
+  text: string,
+  options: { fromId?: number; chatId?: number; topic?: number } = {}
+): TelegramUpdate {
+  const fromId = options.fromId ?? 777;
+  return {
+    update_id: 1,
+    message: {
+      message_id: 1,
+      chat: {
+        id: options.chatId ?? -1001234567890,
+        type: 'supergroup',
+        title: 'Dev 群',
+        ...(options.topic === undefined ? {} : { is_forum: true }),
+      },
+      from: { id: fromId, username: fromId === 777 ? 'j3n5en' : 'stranger', first_name: 'J' },
+      text,
+      ...(options.topic === undefined
+        ? {}
+        : { message_thread_id: options.topic, is_topic_message: true }),
     },
   };
 }
@@ -444,9 +500,9 @@ describe('入站只认绑定的 chat', () => {
     h.api.push(privateMessage('把登录修一下'));
     await waitFor(() => h.world.delivered.length > 0, 'delivered');
     const body = h.world.delivered[0];
-    expect(body).toContain('[来自 Telegram @j3n5en]');
+    expect(body).toContain('[来自 Telegram 私聊 chatId=777 senderId=777 @j3n5en]');
     expect(body).toContain(
-      '<untrusted-content source="telegram:@j3n5en">把登录修一下</untrusted-content>'
+      '<untrusted-content source="telegram chatId=777 senderId=777">把登录修一下</untrusted-content>'
     );
     // 审计只记长度与 hash，不记正文
     const inbound = h.audits.find((entry) => entry.op === 'contact_inbound');
@@ -488,6 +544,219 @@ describe('入站只认绑定的 chat', () => {
     h.service.onTurnReply('sec-1', '巡检正常');
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(h.api.sent.at(-1)?.text).toBe('在，刚把登录修完');
+  });
+});
+
+describe('Telegram 群与论坛话题', () => {
+  async function bound() {
+    const h = harness();
+    await h.service.bind(TOKEN);
+    h.api.push(privateMessage('/start 123456'));
+    await waitFor(() => h.service.state().telegram.status === 'bound', 'bound');
+    expect(h.service.setTelegramGroup('add', '-1001234567890')).toEqual({ ok: true });
+    return h;
+  }
+
+  it('绑定的人在群里说话：带群 chatId、chatType=group 与发送者 id 进秘书，回复回这个群', async () => {
+    const h = await bound();
+    h.api.push(groupMessage('看下构建'));
+    await waitFor(() => h.world.delivered.length > 0, 'delivered');
+    const body = h.world.delivered[0] ?? '';
+    expect(body.split('\n')[0]).toBe(
+      '[来自 Telegram 群「Dev 群」 chatId=-1001234567890 senderId=777 @j3n5en]'
+    );
+    expect(parseInboundMessage(body)).toMatchObject({
+      chatId: '-1001234567890',
+      chatType: 'group',
+      senderId: '777',
+    });
+    expect(body).toContain('source="telegram chatId=-1001234567890 senderId=777"');
+    const before = h.api.sent.length;
+    h.service.onTurnReply('sec-1', '构建是绿的');
+    await waitFor(() => h.api.sent.length > before, 'reply');
+    expect(h.api.sent.at(-1)).toMatchObject({ chatId: -1001234567890, text: '构建是绿的' });
+    expect(h.api.sent.at(-1)?.messageThreadId).toBeUndefined();
+  });
+
+  it('群里别人说话不进秘书', async () => {
+    const h = await bound();
+    h.api.push(groupMessage('帮我删库', { fromId: 31337 }));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === 'foreign-chat'),
+      'stranger rejected'
+    );
+    expect(h.world.delivered).toHaveLength(0);
+  });
+
+  it('同一个群不同话题：前缀里的 topicId 与回复目标都分开', async () => {
+    const h = await bound();
+    h.api.push(groupMessage('话题三', { topic: 3 }));
+    await waitFor(() => h.world.delivered.length === 1, 'topic 3');
+    expect(h.world.delivered[0]?.split('\n')[0]).toContain(
+      'chatId=-1001234567890 topicId=3 senderId=777'
+    );
+    expect(h.world.delivered[0]).toContain(
+      'source="telegram chatId=-1001234567890 topicId=3 senderId=777"'
+    );
+    let before = h.api.sent.length;
+    h.service.onTurnReply('sec-1', '回话题三');
+    await waitFor(() => h.api.sent.length > before, 'reply 3');
+    expect(h.api.sent.slice(before)).toEqual([
+      expect.objectContaining({ chatId: -1001234567890, messageThreadId: 3, text: '回话题三' }),
+    ]);
+
+    h.api.push(groupMessage('话题九', { topic: 9 }));
+    await waitFor(() => h.world.delivered.length === 2, 'topic 9');
+    expect(parseInboundMessage(h.world.delivered[1] ?? '')?.topicId).toBe('9');
+    before = h.api.sent.length;
+    h.service.onTurnReply('sec-1', '回话题九');
+    await waitFor(() => h.api.sent.length > before, 'reply 9');
+    expect(h.api.sent.slice(before)).toEqual([
+      expect.objectContaining({ chatId: -1001234567890, messageThreadId: 9, text: '回话题九' }),
+    ]);
+  });
+
+  it('普通超级群的回复串不是话题：不带 topicId，回复进群本身', async () => {
+    const h = await bound();
+    const update = groupMessage('回个串');
+    if (update.message) update.message.message_thread_id = 55;
+    h.api.push(update);
+    await waitFor(() => h.world.delivered.length > 0, 'delivered');
+    expect(h.world.delivered[0]).not.toContain('topicId=');
+  });
+
+  it('群里的按钮只认绑定的人点', async () => {
+    const h = await bound();
+    h.api.push({
+      update_id: 9,
+      callback_query: {
+        id: 'cb-x',
+        from: { id: 31337 },
+        data: 'ask:1:0',
+        message: { message_id: 5, chat: { id: -1001234567890, type: 'supergroup' } },
+      },
+    });
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === 'foreign-sender'),
+      'foreign click rejected'
+    );
+    expect(h.api.callbacks).toHaveLength(0);
+  });
+});
+
+describe('Telegram 群白名单', () => {
+  const GROUP = -1001234567890;
+
+  async function bound() {
+    const h = harness();
+    await h.service.bind(TOKEN);
+    h.api.push(privateMessage('/start 123456'));
+    await waitFor(() => h.service.state().telegram.status === 'bound', 'bound');
+    return h;
+  }
+
+  it('默认空名单：群消息不进，私聊照常进', async () => {
+    const h = await bound();
+    expect(h.service.state().telegram.groups).toEqual([]);
+    h.api.push(groupMessage('群里说一句'));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === `group-not-allowed chat=${GROUP}`),
+      'group dropped'
+    );
+    h.api.push(privateMessage('私聊说一句'));
+    await waitFor(() => h.world.delivered.length > 0, 'private delivered');
+    expect(h.world.delivered).toHaveLength(1);
+    expect(h.world.delivered[0]).toContain('私聊说一句');
+  });
+
+  it('名单里的群：绑定的人进，群里别人不进也不回话', async () => {
+    const h = await bound();
+    h.service.setTelegramGroup('add', String(GROUP));
+    const before = h.api.sent.length;
+    h.api.push(groupMessage('别人的话', { fromId: 31337 }));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === 'foreign-chat'),
+      'stranger dropped'
+    );
+    h.api.push(groupMessage('我的话'));
+    await waitFor(() => h.world.delivered.length > 0, 'delivered');
+    expect(h.world.delivered).toHaveLength(1);
+    expect(h.world.delivered[0]).toContain('我的话');
+    expect(h.api.sent.length).toBe(before);
+  });
+
+  it('不在名单里的群：绑定的人发的也丢', async () => {
+    const h = await bound();
+    h.service.setTelegramGroup('add', '-1009999');
+    h.api.push(groupMessage('我的话'));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === `group-not-allowed chat=${GROUP}`),
+      'dropped'
+    );
+    expect(h.world.delivered).toHaveLength(0);
+  });
+
+  it('按钮：名单外的群连绑定的人点也丢，名单内只认绑定的人', async () => {
+    const h = await bound();
+    const tap = (fromId: number, id: string): TelegramUpdate => ({
+      update_id: 9,
+      callback_query: {
+        id,
+        from: { id: fromId },
+        data: 'ask:1:0',
+        message: { message_id: 5, chat: { id: GROUP, type: 'supergroup' } },
+      },
+    });
+    h.api.push(tap(777, 'cb-1'));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === `group-not-allowed chat=${GROUP}`),
+      'outside group click dropped'
+    );
+    h.service.setTelegramGroup('add', String(GROUP));
+    h.api.push(tap(31337, 'cb-2'));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === 'foreign-sender'),
+      'stranger click dropped'
+    );
+    expect(h.api.callbacks).toHaveLength(0);
+  });
+
+  it('增删名单落在 contact.json，重启后还在；不写别处', async () => {
+    const h = await bound();
+    expect(h.service.setTelegramGroup('add', ' -1001 ')).toEqual({ ok: true });
+    expect(h.service.setTelegramGroup('add', '-1001')).toEqual({ ok: true });
+    expect(h.service.setTelegramGroup('add', '-1002')).toEqual({ ok: true });
+    expect(h.service.setTelegramGroup('add', '')).toEqual({ ok: false, error: 'invalid-chat-id' });
+    expect(h.service.setTelegramGroup('remove', '-1001')).toEqual({ ok: true });
+    const saved = JSON.parse(readFileSync(join(h.dir, 'contact.json'), 'utf8')) as {
+      telegramGroups: string[];
+    };
+    expect(saved.telegramGroups).toEqual(['-1002']);
+    expect(h.restart().state().telegram.groups).toEqual([{ id: '-1002' }]);
+    // 解绑不清名单
+    await h.service.unbind();
+    expect(h.restart().state().telegram.groups).toEqual([{ id: '-1002' }]);
+  });
+
+  it('见过的群显示标题，没见过只给 id', async () => {
+    const h = await bound();
+    h.api.push(groupMessage('名单外先说一句'));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === `group-not-allowed chat=${GROUP}`),
+      'dropped'
+    );
+    // 陌生人拉进的群不记标题
+    h.api.push(groupMessage('陌生群', { fromId: 31337, chatId: -100777 }));
+    await waitFor(
+      () => h.audits.some((entry) => entry.detail === 'group-not-allowed chat=-100777'),
+      'stranger group dropped'
+    );
+    h.service.setTelegramGroup('add', String(GROUP));
+    h.service.setTelegramGroup('add', '-100777');
+    expect(h.restart().state().telegram.groups).toEqual([
+      { id: String(GROUP), title: 'Dev 群' },
+      { id: '-100777' },
+    ]);
   });
 });
 
@@ -2102,6 +2371,8 @@ class FakePlainChannel implements ContactChannel {
       format: 'plain',
       maxChars: 2000,
       commandMenu: false,
+      images: false,
+      files: false,
       ...this.extra,
     };
   }
@@ -2129,6 +2400,25 @@ class FakePlainChannel implements ContactChannel {
   }
   typing(peerId: string) {
     this.typings.push(peerId);
+    return Promise.resolve({ ok: true as const });
+  }
+  media: { peerId: string; kind: string; fileName?: string; size: number }[] = [];
+  sendImage(peerId: string, image: ChannelImage) {
+    this.media.push({
+      peerId,
+      kind: 'image',
+      fileName: image.fileName,
+      size: image.buffer?.length ?? 0,
+    });
+    return Promise.resolve({ ok: true as const });
+  }
+  sendFile(peerId: string, file: ChannelFile) {
+    this.media.push({
+      peerId,
+      kind: 'file',
+      fileName: file.fileName,
+      size: file.buffer?.length ?? 0,
+    });
     return Promise.resolve({ ok: true as const });
   }
 }
@@ -2197,13 +2487,14 @@ describe('多渠道联系方式', () => {
     expect(wechat.sent).toHaveLength(1);
   });
 
-  it('插件渠道发来的话带渠道名进秘书会话，回复只回原来的联系人', async () => {
+  it('插件渠道发来的话带渠道名进秘书会话，回复只回原来的联系人；没给 senderId 不编', async () => {
     const h = await boundTelegram();
     const wechat = addWechat(h);
     await h.service.inbound({ kind: 'text', peer: wxPeer, text: '把登录修一下', name: '小明' });
-    expect(h.world.delivered.at(-1)).toMatch(
-      /^\[来自 微信 @小明\]\n<untrusted-content source="enso\.clawbot:wechat:@小明">把登录修一下<\/untrusted-content>$/u
+    expect(h.world.delivered.at(-1)).toBe(
+      `[来自 微信 chatId=${wxPeer.peerId} 发送者未知 @小明]\n<untrusted-content source="enso.clawbot:wechat chatId=${wxPeer.peerId} sender=unknown">把登录修一下</untrusted-content>`
     );
+    expect(h.world.delivered.at(-1)).not.toContain('senderId=');
     expect(h.service.phoneTurnChat('sec-1')).toEqual(wxPeer);
     h.service.onTurnStart('sec-1');
     await waitFor(() => wechat.typings.length > 0, 'typing');
@@ -2371,5 +2662,177 @@ describe('多渠道联系方式', () => {
     h.service.onTurnReply('sec-1', '回你');
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(wechat.sent).toEqual([]);
+  });
+});
+
+describe('出站图片与文件', () => {
+  const WECHAT = 'enso.clawbot:wechat';
+  const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+
+  async function boundTelegram() {
+    const h = harness();
+    await h.service.bind(TOKEN);
+    h.api.push(privateMessage('/start 123456'));
+    await waitFor(() => h.service.state().telegram.status === 'bound', 'bound');
+    return h;
+  }
+
+  function image(caption?: string) {
+    return {
+      kind: 'image' as const,
+      path: '/tmp/shot_1.png',
+      buffer: PNG,
+      fileName: 'shot_1.png',
+      mimeType: 'image/png',
+      ...(caption ? { caption } : {}),
+    };
+  }
+
+  function file(caption?: string) {
+    return {
+      kind: 'file' as const,
+      path: '/tmp/report.pdf',
+      buffer: Buffer.from('%PDF-1.4'),
+      fileName: 'report.pdf',
+      mimeType: 'application/pdf',
+      ...(caption ? { caption } : {}),
+    };
+  }
+
+  function addWechat(h: ReturnType<typeof harness>, caps: Partial<ChannelCaps> = {}) {
+    const channel = new FakePlainChannel(caps);
+    h.service.declareChannel({
+      id: WECHAT,
+      title: '微信',
+      builtin: false,
+      pluginId: 'enso.clawbot',
+    });
+    h.service.attachChannel(WECHAT, channel);
+    h.service.setChannelStatus(WECHAT, { status: 'connected', peers: ['wx-me'] });
+    h.service.setChannelPrefs(WECHAT, { enabled: true, push: true });
+    return channel;
+  }
+
+  it('Telegram 图片走 sendPhoto：chat、文件名、字节与 caption 都带上', async () => {
+    const h = await boundTelegram();
+    const result = await h.service.sendMedia(null, image('今天的截图'));
+    expect(result).toEqual({ ok: true, outcomes: [{ channelId: 'telegram', status: 'sent' }] });
+    expect(h.api.uploads).toHaveLength(1);
+    const upload = h.api.uploads[0]!;
+    expect(upload.method).toBe('sendPhoto');
+    expect(upload.params).toMatchObject({
+      chatId: 777,
+      fileName: 'shot_1.png',
+      mimeType: 'image/png',
+      caption: '今天的截图',
+    });
+    expect(upload.params.threadId).toBeUndefined();
+    expect(Buffer.compare(upload.params.data, PNG)).toBe(0);
+  });
+
+  it('Telegram 文件走 sendDocument', async () => {
+    const h = await boundTelegram();
+    const result = await h.service.sendMedia(null, file());
+    expect(result.ok && result.outcomes[0]?.status).toBe('sent');
+    expect(h.api.uploads.map((item) => item.method)).toEqual(['sendDocument']);
+    expect(h.api.uploads[0]?.params).toMatchObject({
+      chatId: 777,
+      fileName: 'report.pdf',
+      mimeType: 'application/pdf',
+    });
+    expect(h.api.uploads[0]?.params.caption).toBeUndefined();
+  });
+
+  it('话题里说的话：图片与文件都带 message_thread_id 回到原话题；回到 General 后不再带', async () => {
+    const h = await boundTelegram();
+    const topic = privateMessage('发我截图');
+    topic.message = { ...topic.message!, message_thread_id: 42, is_topic_message: true };
+    h.api.push(topic);
+    await waitFor(() => h.world.delivered.length === 1, 'delivered');
+    await h.service.sendMedia('sec-1', image());
+    await h.service.sendMedia('sec-1', file());
+    expect(h.api.uploads.map((item) => [item.method, item.params.threadId])).toEqual([
+      ['sendPhoto', 42],
+      ['sendDocument', 42],
+    ]);
+    h.api.push(privateMessage('再发一次'));
+    await waitFor(() => h.world.delivered.length === 2, 'delivered again');
+    await h.service.sendMedia('sec-1', image());
+    expect(h.api.uploads.at(-1)?.params.threadId).toBeUndefined();
+  });
+
+  it('caption 超过 1024：媒体不带 caption，随后另发一条文字', async () => {
+    const h = await boundTelegram();
+    const before = h.api.sent.length;
+    const long = '说'.repeat(1500);
+    await h.service.sendMedia(null, image(long));
+    expect(h.api.uploads[0]?.params.caption).toBeUndefined();
+    expect(
+      h.api.sent
+        .slice(before)
+        .map((item) => item.text)
+        .join('')
+    ).toContain(long);
+  });
+
+  it('sendPhoto 被拒（尺寸不合）时改用 sendDocument 发出', async () => {
+    const h = await boundTelegram();
+    h.api.photoError = new TelegramApiError('api', 'Bad Request: PHOTO_INVALID_DIMENSIONS');
+    const result = await h.service.sendMedia(null, image());
+    expect(result.ok && result.outcomes[0]?.status).toBe('sent');
+    expect(h.api.uploads.map((item) => item.method)).toEqual(['sendDocument']);
+  });
+
+  it('发送失败：回一句说明带路径，不静默', async () => {
+    const h = await boundTelegram();
+    h.api.documentError = new TelegramApiError('network', 'fetch failed');
+    const before = h.api.sent.length;
+    const result = await h.service.sendMedia(null, file());
+    expect(result).toEqual({
+      ok: true,
+      outcomes: [{ channelId: 'telegram', status: 'failed', error: 'network' }],
+    });
+    const note = h.api.sent
+      .slice(before)
+      .map((item) => item.text)
+      .join('\n');
+    expect(note).toContain('文件发送失败');
+    expect(note).toContain('/tmp/report.pdf');
+    expect(h.audits.some((entry) => entry.op === 'contact_media' && !entry.ok)).toBe(true);
+  });
+
+  it('不支持图片与文件的渠道：降级成一句文字，写明发不了并附路径', async () => {
+    const h = await boundTelegram();
+    const wechat = addWechat(h);
+    const result = await h.service.sendMedia(null, image('看这里'));
+    expect(result.ok && result.outcomes).toEqual([
+      { channelId: 'telegram', status: 'sent' },
+      { channelId: WECHAT, status: 'fallback' },
+    ]);
+    expect(wechat.media).toEqual([]);
+    expect(wechat.sent).toHaveLength(1);
+    expect(wechat.sent[0]?.text).toContain('这个渠道发不了图片');
+    expect(wechat.sent[0]?.text).toContain('/tmp/shot_1.png');
+    expect(wechat.sent[0]?.text).toContain('看这里');
+    await h.service.sendMedia(null, file());
+    expect(wechat.sent[1]?.text).toContain('这个渠道发不了文件');
+    expect(wechat.sent[1]?.text).toContain('report.pdf');
+  });
+
+  it('插件渠道声明 images/files 才调 sendImage/sendFile', async () => {
+    const h = harness();
+    const wechat = addWechat(h, { images: true, files: true });
+    await h.service.sendMedia(null, image());
+    await h.service.sendMedia(null, file());
+    expect(wechat.media).toEqual([
+      { peerId: 'wx-me', kind: 'image', fileName: 'shot_1.png', size: PNG.length },
+      { peerId: 'wx-me', kind: 'file', fileName: 'report.pdf', size: 8 },
+    ]);
+    expect(wechat.sent).toEqual([]);
+  });
+
+  it('没有已连接的渠道：返回 not-bound', async () => {
+    const h = harness();
+    expect(await h.service.sendMedia('sec-1', image())).toEqual({ ok: false, error: 'not-bound' });
   });
 });

@@ -85,7 +85,14 @@ import {
 } from './channel';
 import type { TelegramApi } from './client';
 import type { ContactCommands } from './commands';
-import { type ContactStore, channelPrefs, TELEGRAM_CHANNEL_ID, withChannelPrefs } from './store';
+import {
+  type ContactStore,
+  channelPrefs,
+  TELEGRAM_CHANNEL_ID,
+  withChannelPrefs,
+  withTelegramGroupAdded,
+  withTelegramGroupRemoved,
+} from './store';
 import { TELEGRAM_CAPS, TelegramChannel } from './telegram';
 
 /** 界面按码翻译成自己的文案；这里只回稳定的错误码 */
@@ -98,9 +105,31 @@ export type ContactError =
   | 'not-bound'
   | 'not-found'
   | 'no-secretary'
-  | 'deliver-failed';
+  | 'deliver-failed'
+  | 'invalid-chat-id';
 
 export type ContactResult = { ok: true } | { ok: false; error: ContactError };
+
+/** 秘书要发到手机的一张图或一个文件：路径已由调用方 realpath 并校验过边界与大小 */
+export interface ContactMediaInput {
+  kind: 'image' | 'file';
+  path: string;
+  buffer: Buffer;
+  fileName: string;
+  mimeType?: string;
+  caption?: string;
+}
+
+/** sent 真的发出了；fallback 渠道不支持，改发了一句文字；failed 发送失败（已回一句说明） */
+export interface ContactMediaOutcome {
+  channelId: string;
+  status: 'sent' | 'fallback' | 'failed';
+  error?: ContactError;
+}
+
+export type ContactMediaResult =
+  | { ok: true; outcomes: ContactMediaOutcome[] }
+  | { ok: false; error: 'not-bound' };
 
 export interface ContactMilestoneInput {
   kind: SecretaryResultKind;
@@ -382,7 +411,13 @@ export class ContactService implements SecretaryContactPort {
       ...(meta.settingsView ? { settingsView: meta.settingsView } : {}),
       status,
       ...(detail ? { detail } : {}),
-      caps: this.capsOf(meta.id) ?? { ...TELEGRAM_CAPS, buttons: false, edit: false },
+      caps: this.capsOf(meta.id) ?? {
+        ...TELEGRAM_CAPS,
+        buttons: false,
+        edit: false,
+        images: false,
+        files: false,
+      },
       prefs: channelPrefs(this.store.file(), meta.id),
     };
   }
@@ -568,6 +603,23 @@ export class ContactService implements SecretaryContactPort {
   /** 记忆标题的开关：关掉时命令菜单里也不出现 /memory */
   setAllowMemory(value: boolean): void {
     this.setChannelPrefs(TELEGRAM_CHANNEL_ID, { memory: value === true });
+  }
+
+  /** Telegram 群白名单的增删：存在 contact.json，重复添加不算错 */
+  setTelegramGroup(action: 'add' | 'remove', chatId: unknown): ContactResult {
+    const file = this.store.file();
+    let next = file;
+    if (action === 'add') {
+      const added = withTelegramGroupAdded(file, chatId);
+      if (!added.ok) return { ok: false, error: 'invalid-chat-id' };
+      next = added.file;
+    } else {
+      next = withTelegramGroupRemoved(file, chatId);
+    }
+    this.store.save(next);
+    this.audit('contact_settings', true, `telegramGroups=${next.telegramGroups.length}`);
+    this.ports.publish();
+    return { ok: true };
   }
 
   /** 总开关：关掉后 Telegram 停止轮询，插件渠道不再路由 */
@@ -759,14 +811,14 @@ export class ContactService implements SecretaryContactPort {
     const caps = channel.caps();
     let sent: ChannelSend;
     if (caps.buttons) {
-      sent = await channel[kind](peer.peerId, message);
+      sent = await channel[kind](peer.peerId, message, peer.topicId);
     } else {
       const base = message.format === 'html' ? htmlToPlain(message.text) : message.text;
       const extra = plainButtonsText(message.buttons);
       const text = extra ? `${base}\n${extra}` : base;
       sent = { ok: true };
       for (const chunk of splitPlain(text, caps.maxChars)) {
-        sent = await channel[kind](peer.peerId, { text: chunk });
+        sent = await channel[kind](peer.peerId, { text: chunk }, peer.topicId);
         if (!sent.ok) break;
       }
     }
@@ -776,6 +828,78 @@ export class ContactService implements SecretaryContactPort {
       this.ports.onError?.(sent.error);
     }
     return sent;
+  }
+
+  /**
+   * 秘书发图片或文件：发给这一轮要回复的联系人（发起人、任务链、镜像），
+   * 应用里直接发起的就发给主动推送目标。渠道不支持就降级成一句带路径的文字，
+   * 发送失败也回一句说明，绝不静默。
+   */
+  async sendMedia(
+    conversationId: string | null,
+    media: ContactMediaInput
+  ): Promise<ContactMediaResult> {
+    const turn = conversationId
+      ? uniquePeers([
+          ...(this.awaitingReply.get(conversationId)?.values() ?? []),
+          ...(this.phoneChain.get(conversationId)?.values() ?? []),
+          ...this.mirrorTargets(),
+        ])
+      : [];
+    const peers = (turn.length > 0 ? turn : uniquePeers(this.pushTargets())).filter((peer) =>
+      this.active(peer.channelId)
+    );
+    if (peers.length === 0) return { ok: false, error: 'not-bound' };
+    const outcomes: ContactMediaOutcome[] = [];
+    for (const peer of peers) outcomes.push(await this.sendMediaTo(peer, media, conversationId));
+    return { ok: true, outcomes };
+  }
+
+  private async sendMediaTo(
+    peer: Peer,
+    media: ContactMediaInput,
+    conversationId: string | null
+  ): Promise<ContactMediaOutcome> {
+    const lang = this.ports.lang();
+    const channelId = peer.channelId;
+    const channel = this.active(channelId);
+    if (!channel) return { channelId, status: 'failed', error: 'token-required' };
+    const caps = channel.caps();
+    const supported = media.kind === 'image' ? caps.images : caps.files;
+    const payload = {
+      path: media.path,
+      buffer: media.buffer,
+      fileName: media.fileName,
+      ...(media.mimeType ? { mimeType: media.mimeType } : {}),
+      ...(media.caption ? { caption: media.caption } : {}),
+    };
+    const method =
+      media.kind === 'image' ? channel.sendImage?.bind(channel) : channel.sendFile?.bind(channel);
+    const detail = `${media.kind} ${media.buffer.length}B`;
+    const cid = conversationId ?? undefined;
+    if (supported && method) {
+      let sent: ChannelSend;
+      try {
+        sent = await method(peer.peerId, payload);
+      } catch {
+        sent = { ok: false, error: 'api' };
+      }
+      if (sent.ok) {
+        this.audit('contact_media', true, detail, cid);
+        return { channelId, status: 'sent' };
+      }
+      this.audit('contact_media', false, `${detail} ${sent.error}`, cid);
+      this.ports.onError?.(sent.error);
+      await this.post(peer, 'sendText', {
+        text: mediaFailedText(lang, media, sent.error),
+      });
+      return { channelId, status: 'failed', error: sent.error };
+    }
+    const note = await this.post(peer, 'sendText', { text: mediaUnsupportedText(lang, media) });
+    this.audit('contact_media', note.ok, `${detail} fallback`, cid);
+    return note.ok
+      ? { channelId, status: 'fallback' }
+      : { channelId, status: 'failed', error: note.error };
   }
 
   private urlButtonFor(peer: Peer, link: string | undefined): boolean {
@@ -1324,7 +1448,12 @@ export class ContactService implements SecretaryContactPort {
         : { id: peer.channelId, title: meta?.title ?? peer.channelId },
       this.ports.lang(),
       {
-        ...(message.name ? { username: message.name } : {}),
+        chatId: peer.peerId,
+        ...(peer.topicId ? { topicId: peer.topicId } : {}),
+        ...(message.chatType ? { chatType: message.chatType } : {}),
+        ...(message.chatTitle ? { chatTitle: message.chatTitle } : {}),
+        ...(message.senderId ? { senderId: message.senderId } : {}),
+        ...(message.name ? { senderName: message.name } : {}),
         ...(message.at ? { at: message.at } : {}),
         text,
       }
@@ -1823,7 +1952,7 @@ export class ContactService implements SecretaryContactPort {
         this.stopTyping();
         return;
       }
-      const result = await channel.typing(peer.peerId);
+      const result = await channel.typing(peer.peerId, peer.topicId);
       if (result.ok) continue;
       // 解绑后立刻停：没有 token 或 chat 不算出错
       if (result.error !== 'token-required') this.audit('contact_typing', false, result.error);
@@ -1848,6 +1977,52 @@ export class ContactService implements SecretaryContactPort {
       ...(detail ? { detail } : {}),
     });
   }
+}
+
+function mediaKindLabel(lang: ContactLang, kind: ContactMediaInput['kind']): string {
+  if (lang === 'zh') return kind === 'image' ? '图片' : '文件';
+  return kind === 'image' ? 'image' : 'file';
+}
+
+function mediaErrorReason(lang: ContactLang, error: ContactError): string {
+  const zh: Partial<Record<ContactError, string>> = {
+    network: '网络不通',
+    unauthorized: '渠道授权失效',
+    'token-required': '渠道未连接',
+  };
+  const en: Partial<Record<ContactError, string>> = {
+    network: 'network unreachable',
+    unauthorized: 'channel authorization expired',
+    'token-required': 'channel not connected',
+  };
+  return (lang === 'zh' ? zh : en)[error] ?? (lang === 'zh' ? '渠道拒收' : 'rejected by channel');
+}
+
+/** 路径放进行内代码：下划线、星号不会被当成 markdown */
+function mediaLines(lang: ContactLang, media: ContactMediaInput, head: string): string {
+  const lines = [head, `\`${media.path}\``];
+  if (media.caption)
+    lines.push(lang === 'zh' ? `说明：${media.caption}` : `Note: ${media.caption}`);
+  return lines.join('\n');
+}
+
+function mediaUnsupportedText(lang: ContactLang, media: ContactMediaInput): string {
+  const kind = mediaKindLabel(lang, media.kind);
+  const head =
+    lang === 'zh'
+      ? `📎 这个渠道发不了${kind}：${media.fileName}，文件在电脑上：`
+      : `📎 This channel cannot send ${kind}s: ${media.fileName}. It is on the computer at:`;
+  return mediaLines(lang, media, head);
+}
+
+function mediaFailedText(lang: ContactLang, media: ContactMediaInput, error: ContactError): string {
+  const kind = mediaKindLabel(lang, media.kind);
+  const reason = mediaErrorReason(lang, error);
+  const head =
+    lang === 'zh'
+      ? `⚠️ ${kind}发送失败（${reason}）：${media.fileName}，文件在电脑上：`
+      : `⚠️ Failed to send ${kind} (${reason}): ${media.fileName}. It is on the computer at:`;
+  return mediaLines(lang, media, head);
 }
 
 /** 审计沿用老字段名：Telegram 的三个开关仍叫 allowCardConfirm / syncMirror / allowMemory */

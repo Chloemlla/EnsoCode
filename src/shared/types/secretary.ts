@@ -390,6 +390,11 @@ export interface DispatchRecord {
   model?: DispatchModelRef;
   /** 秘书停止的时间：after 依赖据此判定「被停止」 */
   stoppedAt?: number;
+  /**
+   * 用户从看板上移出：记录与会话都还在，只是不再上看板。
+   * 新结果、重新派出或手动标记完成都会清掉它。
+   */
+  dismissedFromBoard?: true;
   /** 已经报过的巡检异常：同一会话同一原因只推一次，恢复后清除 */
   patrol?: { reason: PatrolReason; turn: number; at: number };
 }
@@ -631,6 +636,7 @@ export type SecretaryDailyGroupKey =
   | 'failed'
   | 'needsYou'
   | 'running'
+  | 'stopped'
   | 'todos'
   | 'changes';
 
@@ -755,6 +761,8 @@ export interface SecretaryContactTelegram {
    * 静默回合只发一行摘要；解绑或换 bot 时自动关掉。
    */
   syncMirror: boolean;
+  /** 群白名单：空名单不收任何群；名单里的群只认绑定的那个人。见过的群带标题 */
+  groups: { id: string; title?: string }[];
   /**
    * 手机关注的任务：手机发起的回合里派生的会话与定时，结果会一直推到手机上，
    * 与 /sync 无关。完成或失败推过一次就从列表里移除。
@@ -784,6 +792,10 @@ export interface SecretaryContactCaps {
   format: 'html' | 'markdown' | 'plain';
   maxChars: number;
   commandMenu: boolean;
+  /** 能发图片；false 时核心降级成一句文字说明 */
+  images: boolean;
+  /** 能发文件；false 时同上 */
+  files: boolean;
 }
 
 /** 每个渠道的通用开关：宿主统一画，存在 contact.json */

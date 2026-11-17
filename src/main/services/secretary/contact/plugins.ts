@@ -1,4 +1,5 @@
 import type { PluginContactChannelContrib } from '@shared/extensionPlugins/manifest';
+import type { PluginContactRequest } from '@shared/extensionPlugins/protocol';
 import type { ChannelCaps, ChannelMeta } from './channel';
 import { PluginContactChannel } from './pluginChannel';
 import type { ChannelStatusInput, ContactService } from './service';
@@ -6,11 +7,7 @@ import type { ChannelStatusInput, ContactService } from './service';
 /** 插件服务里联系方式要用的那几样：已启用的渠道声明、往插件发、变化通知 */
 export interface PluginContactSource {
   contactChannels(): { pluginId: string; channels: PluginContactChannelContrib[] }[];
-  callContact(
-    pluginId: string,
-    channelId: string,
-    request: { op: 'sendText'; peerId: string; text: string } | { op: 'typing'; peerId: string }
-  ): Promise<unknown>;
+  callContact(pluginId: string, channelId: string, request: PluginContactRequest): Promise<unknown>;
   onChange(listener: () => void): () => void;
 }
 
@@ -20,7 +17,16 @@ export interface PluginContactBridgeHandlers {
   inbound(
     pluginId: string,
     channelId: string,
-    input: { peerId: string; text: string; name?: string; at?: number }
+    input: {
+      /** 会话 id（私聊或群），也是回复目标 */
+      peerId: string;
+      text: string;
+      senderId?: string;
+      chatType?: 'private' | 'group';
+      chatTitle?: string;
+      name?: string;
+      at?: number;
+    }
   ): void;
   setStatus(pluginId: string, channelId: string, input: ChannelStatusInput): void;
 }
@@ -86,6 +92,9 @@ export function connectPluginChannels(
         kind: 'text',
         peer: { channelId, peerId: input.peerId },
         text: input.text,
+        ...(input.senderId ? { senderId: input.senderId } : {}),
+        ...(input.chatType ? { chatType: input.chatType } : {}),
+        ...(input.chatTitle ? { chatTitle: input.chatTitle } : {}),
         ...(input.name ? { name: input.name } : {}),
         ...(input.at ? { at: input.at } : {}),
       });
