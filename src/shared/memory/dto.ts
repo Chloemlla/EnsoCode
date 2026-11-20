@@ -111,6 +111,8 @@ export interface MemoryListResult {
 export interface DistillJobDto {
   id: number;
   sessionId: string;
+  /** 多会话聚合任务的成员会话；普通任务没有 */
+  sessionIds?: string[];
   /** 会话标题；取不到时为 null，UI 回退到短 id */
   sessionTitle?: string | null;
   projectId: string | null;
@@ -202,6 +204,17 @@ export interface MemoryDecayRunDto {
   durationMs: number;
 }
 
+/** 一轮矛盾复核的摘要；没有可用模型时 IPC 返回 null */
+export interface MemoryReconcileRunDto {
+  sources: number;
+  pairs: number;
+  judged: number;
+  challenges: number;
+  failed: number;
+  capped: boolean;
+  durationMs: number;
+}
+
 export interface MemoryForgettingStateDto {
   lastRunAt: string | null;
   lastRun: MemoryDecayRunDto | null;
@@ -256,8 +269,6 @@ export interface ChatModelDto {
   downloadedBytes: number;
   state: EmbeddingModelState;
   downloadable: boolean;
-  /** 专用模型（如语音纠错），记忆设置不列出 */
-  purpose?: 'voice-correction';
 }
 
 export interface EmbeddingDownloadProgressDto {

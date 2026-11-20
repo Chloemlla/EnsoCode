@@ -156,7 +156,6 @@ export const SETTINGS_STATE_FIELDS = [
   'subagentModels',
   'virtualModels',
   'skills',
-  'plugins',
   'mcpServers',
   'instructions',
   'presets',
@@ -172,7 +171,7 @@ export const SETTINGS_STATE_FIELDS = [
   'memoryModelIdleMinutes',
   'memoryEmbeddingRemoteProviderId',
   'memoryDistillEnabled',
-  'voiceInputEnabled',
+  'memoryDistillWindowMinutes',
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',
@@ -183,14 +182,8 @@ export const SETTINGS_STATE_FIELDS = [
   'botAssistantModel',
   'protectedActionsInCode',
   'dcgEnabled',
-  'voiceInputDevice',
-  'voiceModel',
-  'voiceCorrectionEnabled',
-  'voiceCorrectionModel',
-  'voiceCorrectionRemoteModel',
-  'voiceVocabulary',
-  'voiceGeminiApiKey',
   'memoryKgEnabled',
+  'memoryReconcileEnabled',
   'memoryDecayEnabled',
   'memoryDecayArchiveCandidates',
   'memoryDecayAutoArchive',
@@ -243,14 +236,16 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'memoryEmbeddingAutoDownload',
   'memoryModelIdleMinutes',
   'memoryEmbeddingRemoteProviderId',
-  // 记忆库每台机器一份（userData/memory/memory.db），遗忘策略作用于本机库，不跨机同步
+  // 记忆库每台机器一份（userData/memory/memory.db），遗忘 / 矛盾复核策略作用于本机库，不跨机同步
+  'memoryReconcileEnabled',
   'memoryDecayEnabled',
   'memoryDecayArchiveCandidates',
   'memoryDecayAutoArchive',
   'memoryDecayStaleDays',
   'memoryDecayMaxImportance',
   'memoryDecayIntervalDays',
-  'voiceInputEnabled',
+  // 聚合待办排在本机库的队列里，窗口只影响本机的提炼时机
+  'memoryDistillWindowMinutes',
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',
@@ -261,17 +256,9 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'botAssistantModel',
   'protectedActionsInCode',
   'dcgEnabled',
-  'voiceInputDevice',
-  'voiceModel',
-  'voiceCorrectionEnabled',
-  'voiceCorrectionModel',
-  'voiceCorrectionRemoteModel',
-  'voiceVocabulary',
-  'voiceGeminiApiKey',
   'onboarded',
   'headerSessionTabs',
   'headerRecentMinutes',
-  'plugins',
   'projects',
   'projectGroups',
   'disabledWorkflowPresets',
@@ -292,11 +279,13 @@ function notifyMemoryEmbeddingSettings(settings: Record<string, unknown>): void 
         syncMemoryDistillFromSettings,
         syncMemoryForgettingFromSettings,
         syncMemoryKgFromSettings,
+        syncMemoryReconcileFromSettings,
       }) => {
         const state = settingsStateOf(settings);
         syncMemoryEmbeddingFromSettings(state);
         syncMemoryDistillFromSettings(state);
         syncMemoryKgFromSettings(state);
+        syncMemoryReconcileFromSettings(state);
         syncMemoryForgettingFromSettings(state);
       }
     )
@@ -319,13 +308,6 @@ function notifyAppLanguage(
   if (settingsStateOf(previous).language !== settingsStateOf(next).language) {
     appDesktop().syncAppLanguage();
   }
-}
-
-function notifySpeechSettings(settings: Record<string, unknown>): void {
-  const state = settingsStateOf(settings);
-  void import('../services/speech/service')
-    .then(({ syncSpeechFromSettings }) => syncSpeechFromSettings(state))
-    .catch(() => {});
 }
 
 function settingsStateOf(settings: Record<string, unknown> | null): Record<string, unknown> {
@@ -507,7 +489,6 @@ function scheduleWrite(
     notifyMemoryEmbeddingSettings(data);
     notifyTrayToggleShortcut(data);
     notifyDropShelf(data);
-    notifySpeechSettings(data);
     notifyAppLanguage(previous, data);
     if (
       settingsStateOf(previous).botModeEnabled !== settingsStateOf(data).botModeEnabled ||
@@ -691,7 +672,6 @@ export function commitSettingsTransaction(
   notifyMemoryEmbeddingSettings(next);
   notifyTrayToggleShortcut(next);
   notifyDropShelf(next);
-  notifySpeechSettings(next);
   notifyAppLanguage(latest, next);
   try {
     broadcastToRenderers(IPC_CHANNELS.SETTINGS_CHANGED);

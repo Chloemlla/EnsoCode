@@ -35,7 +35,6 @@ import type {
   PluginEventName,
   PluginInterceptEvent,
 } from '../extensionPlugins/events';
-
 import {
   AGENT_END_TEXT_MAX,
   BEFORE_AGENT_START_PROMPT_MAX,
@@ -114,6 +113,7 @@ import {
   type ProjectedApplyPatchOutcome,
   type ProjectedFileChange,
 } from './fileChanges';
+import type { RestartCheckpoint, RestartDeferReason } from './gracefulRestart';
 import {
   MODEL_API_KINDS,
   MODEL_REASONING_OVERRIDES,
@@ -125,12 +125,6 @@ import {
   type ModelThinkingLevelOverride,
 } from './llm';
 import { type AgentDispatchTask, parseAgentDispatchTask } from './mentions';
-import {
-  type PluginCommandSpawn,
-  type PluginHookSpawn,
-  parsePluginCommands,
-  parsePluginHooks,
-} from './plugins';
 import type { SecretaryToolDescriptor } from './secretary';
 import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot } from './workflow';
 
@@ -162,6 +156,16 @@ export interface TurnDigest {
   userText: string;
   /** 本轮最后一条含 text 的 assistant 文本（截尾） */
   assistantText: string;
+}
+
+/** 本轮汇报的硬上限：装得下一份正常汇报，又挡住异常长输出 */
+export const TURN_REPORT_MAX_CHARS = 8000;
+
+/** 本轮最后一条 assistant 结论原文，worker 侧截尾到 TURN_REPORT_MAX_CHARS；秘书终态回传用 */
+export interface TurnReport {
+  text: string;
+  /** 截尾时丢掉的开头字数 */
+  omitted?: number;
 }
 
 /** 标题总结输入：initial = 首条消息即时总结；rolling = 每轮结束后的滚动刷新 */
@@ -900,7 +904,7 @@ export interface McpServerSpawnConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
-  /** http/sse 请求头（Claude 插件 .mcp.json 用它传 key） */
+  /** http/sse 请求头 */
   headers?: Record<string, string>;
   /** 已授权的 OAuth 凭据（http/sse 远程 server） */
   oauth?: McpOAuthAccess;
@@ -1278,10 +1282,6 @@ export type AgentCommand =
       memoryLanguage?: string;
       skillPaths?: string[];
       mcpServers?: McpServerSpawnConfig[];
-      /** 已启用 Claude 插件的命令（作为 `/plugin:command` 提示词模板） */
-      pluginCommands?: PluginCommandSpawn[];
-      /** 已启用 Claude 插件的 command hooks；远程会话不下发 */
-      pluginHooks?: PluginHookSpawn[];
       /** 已启用 Enso 插件的 agent 工具；执行经 plugin-tool-invoke 回到 Main */
       pluginTools?: PluginToolDescriptor[];
       /** 秘书自造工具；名字、描述与参数结构由 Main 下发，执行经 secretary-invoke 回到 Main */
@@ -1675,7 +1675,14 @@ export type AgentCommand =
     }
   | { type: 'plugin-agent-cancel'; requestId: string }
   /** 运行中同步代理 env；null 表示删除该键 */
-  | { type: 'set-proxy-env'; env: Record<string, string | null> };
+  | { type: 'set-proxy-env'; env: Record<string, string | null> }
+  /**
+   * 优雅重启：等所有会话到安全点后落断点，回 graceful-restart-ready，由 Main 换新进程。
+   * keepBackgroundTasks：应用会重新打开，能脱离 worker 的转后台命令交给下一代，安全点不等它们
+   */
+  | { type: 'graceful-restart'; keepBackgroundTasks?: true }
+  /** 终止 worker 前：把能脱离的后台命令交出去、写恢复清单，回 background-tasks-detached */
+  | { type: 'detach-background-tasks' };
 
 /** 随消息附带的图片（base64）。id 只活在编辑器，发给 agent 前剥掉。 */
 export interface AttachedImage {
@@ -1950,6 +1957,10 @@ export type RendererAgentEvent =
       | { type: 'oauth-pool-select' }
       | { type: 'privacy-mask-ledger' }
       | { type: 'tool-batch-completed' }
+      | { type: 'graceful-restart-deferred' }
+      | { type: 'graceful-restart-ready' }
+      | { type: 'background-tasks-detached' }
+      | { type: 'session-wake-requested' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -2049,6 +2060,8 @@ export type AgentWorkerEvent =
       turnId: string;
       /** worker 切出的本轮压缩摘要，供 renderer 决定是否滚动刷新标题；纯工具轮可缺省 */
       digest?: TurnDigest;
+      /** 本轮结论原文（截尾）：提交号、测试数字通常在末尾，摘要的 1500 字装不下 */
+      report?: TurnReport;
       /** 本轮被 abort 命令中断：不自动泵队列、不续跑目标（发起中断的未必是本窗口） */
       aborted?: true;
       /** 子代理因请求预算被强制停止：已有部分输出随本次收口交回，不当作失败 */
@@ -2300,6 +2313,35 @@ export type AgentWorkerEvent =
       type: 'tool-batch-completed';
       identity: SessionIdentity;
       digest: ToolBatchDigest;
+    }
+  | {
+      /** 优雅重启被推迟：列出还没到安全点的会话。Main 旁路消费，不进渲染层 */
+      type: 'graceful-restart-deferred';
+      sessions: {
+        identity: SessionIdentity;
+        reason: RestartDeferReason;
+        toolsInFlight: string[];
+        /** 要求保留后台命令时仍要等的转后台命令（没法脱离 worker，如走管道的远程命令） */
+        undetachableTasks?: string[];
+      }[];
+    }
+  | {
+      /** 断点已落盘，worker 不再推进任何会话，等 Main 换新进程。Main 旁路消费 */
+      type: 'graceful-restart-ready';
+      checkpoint: RestartCheckpoint;
+    }
+  | {
+      /** 能脱离的后台命令已交出（恢复清单已写）：Main 收到后才终止 worker。旁路消费 */
+      type: 'background-tasks-detached';
+      detached: number;
+    }
+  | {
+      /**
+       * 重启认回的后台命令在没打开的空闲根会话里结束（或重启收尾期间结束、只存了盘）：
+       * 请 Main 按恢复清单打开它，worker 打开后把完成通知交给新一轮。旁路消费
+       */
+      type: 'session-wake-requested';
+      sessionId: string;
     }
   | {
       /** 标题总结全部候选均失败：同为旁路事件；error 为人可读的最后一次失败原因（含模型标识） */
@@ -2799,6 +2841,17 @@ export function parseTurnDigest(value: unknown): TurnDigest | null {
     return null;
   }
   return value as unknown as TurnDigest;
+}
+
+export function parseTurnReport(value: unknown): TurnReport | null {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['text', 'omitted'])) return null;
+  if (!isNonEmptyString(value.text) || value.text.length > TURN_REPORT_MAX_CHARS) return null;
+  if (
+    value.omitted !== undefined &&
+    !(typeof value.omitted === 'number' && Number.isSafeInteger(value.omitted) && value.omitted > 0)
+  )
+    return null;
+  return value as unknown as TurnReport;
 }
 
 /** 标题总结输入校验：initial 要求 text 非空；rolling 要求 currentTitle 非空、firstUserText 为字符串（可空）且本轮两段至少一段非空 */
@@ -3718,12 +3771,10 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           'memoryLanguage',
           'skillPaths',
           'mcpServers',
-          'pluginCommands',
           'pluginTools',
           'secretaryTools',
           'workflowPresetFiles',
           'pluginEvents',
-          'pluginHooks',
           'instruction',
           'approvalMode',
           'autoRejectApprovals',
@@ -3768,8 +3819,6 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
               (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
             )
           )) ||
-        (value.pluginCommands !== undefined &&
-          parsePluginCommands(value.pluginCommands) === null) ||
         (value.pluginTools !== undefined && !isPluginToolList(value.pluginTools)) ||
         (value.secretaryTools !== undefined &&
           parseSecretaryToolDescriptors(value.secretaryTools) === null) ||
@@ -3782,7 +3831,6 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
             )
           )) ||
         (value.pluginEvents !== undefined && !isPluginEventPlan(value.pluginEvents)) ||
-        (value.pluginHooks !== undefined && parsePluginHooks(value.pluginHooks) === null) ||
         (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
         (value.dcgPath !== undefined && !isNonEmptyString(value.dcgPath)) ||
         (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
@@ -4346,6 +4394,14 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         value.sessionIds.every((id) => typeof id === 'string')
         ? { type: 'pin-sessions', sessionIds: value.sessionIds }
         : null;
+    case 'graceful-restart':
+      if (hasExactKeys(value, ['type'])) return { type: 'graceful-restart' };
+      return hasExactKeys(value, ['type', 'keepBackgroundTasks']) &&
+        value.keepBackgroundTasks === true
+        ? { type: 'graceful-restart', keepBackgroundTasks: true }
+        : null;
+    case 'detach-background-tasks':
+      return hasExactKeys(value, ['type']) ? { type: 'detach-background-tasks' } : null;
     case 'warm-mcp':
       return hasExactKeys(value, ['type', 'servers']) && Array.isArray(value.servers)
         ? (value as unknown as AgentCommand)
@@ -4604,6 +4660,45 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       ? (value as unknown as AgentWorkerEvent)
       : null;
   }
+  if (value.type === 'graceful-restart-deferred') {
+    return hasExactKeys(value, ['type', 'sessions']) &&
+      Array.isArray(value.sessions) &&
+      value.sessions.every(
+        (entry) =>
+          isRecord(entry) &&
+          (hasExactKeys(entry, ['identity', 'reason', 'toolsInFlight']) ||
+            (hasExactKeys(entry, ['identity', 'reason', 'toolsInFlight', 'undetachableTasks']) &&
+              Array.isArray(entry.undetachableTasks) &&
+              entry.undetachableTasks.every(isNonEmptyString))) &&
+          parseSessionIdentity(entry.identity) &&
+          (entry.reason === 'tool-in-flight' || entry.reason === 'turn-in-progress') &&
+          Array.isArray(entry.toolsInFlight) &&
+          entry.toolsInFlight.every(isNonEmptyString)
+      )
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+  // 断点内容由 Main 用 parseRestartCheckpoint 细验（该函数带 node:fs，渲染层不能引）
+  if (value.type === 'graceful-restart-ready') {
+    return hasExactKeys(value, ['type', 'checkpoint']) &&
+      isRecord(value.checkpoint) &&
+      Array.isArray(value.checkpoint.sessions)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+  if (value.type === 'background-tasks-detached') {
+    return hasExactKeys(value, ['type', 'detached']) &&
+      typeof value.detached === 'number' &&
+      Number.isInteger(value.detached) &&
+      value.detached >= 0
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+  if (value.type === 'session-wake-requested') {
+    return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
   if (value.type === 'text-delta') {
     return hasOnlyKeys(value, ['type', 'requestId', 'text', 'thinking']) &&
       isNonEmptyString(value.requestId) &&
@@ -4781,6 +4876,7 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
     case 'turn-completed':
       return isNonEmptyString(value.turnId) &&
         (value.digest === undefined || parseTurnDigest(value.digest)) &&
+        (value.report === undefined || parseTurnReport(value.report)) &&
         (value.aborted === undefined || value.aborted === true) &&
         (value.silent === undefined || value.silent === true) &&
         (value.requestBudgetStop === undefined || value.requestBudgetStop === true) &&

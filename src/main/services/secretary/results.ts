@@ -1,6 +1,6 @@
 import { projectNameFromPath } from '@shared/projectName';
 import { wrapUntrusted } from '@shared/secretary/transcript';
-import type { ProjectAuthority } from '@shared/types/agent';
+import { type ProjectAuthority, TURN_REPORT_MAX_CHARS, type TurnReport } from '@shared/types/agent';
 import {
   type DispatchRecord,
   NEEDS_YOU_RESULTS,
@@ -23,8 +23,10 @@ import { todoSessionView, todoStatus } from './todoLifecycle';
 export const STALL_MS = 10 * 60 * 1000;
 export const BATCH_MAX_ITEMS = 20;
 export const BATCH_MAX_CHARS = 12_000;
-/** 单条"最后说了什么"的上限：工作台与回传都只需要一句 */
+/** 单条"最后说了什么"的上限：工作台、手机与停滞回传只需要一句；终态与一轮结束回传见 reportLastText */
 export const LAST_TEXT_MAX_CHARS = 500;
+/** 一轮结束回传给秘书的正文上限：比工作台那一句长，比终态汇报短 */
+export const TURN_ENDED_TEXT_MAX_CHARS = 2000;
 /** 同一会话的普通回传先攒着，到点只投最新一条。档案里的 updateWindowMs 可改成 1–60 秒 */
 export const UPDATE_WINDOW_MS = 45_000;
 export { ACTIVITY_LIMIT } from '@shared/secretary/feed';
@@ -123,6 +125,19 @@ export function enqueueUpdate(
 
 export function isUrgentUpdate(update: { kind: string }): boolean {
   return update.kind === 'needs-user' || update.kind === 'failed' || update.kind === 'ask-relay';
+}
+
+/** 会话收口或要人处理的结果：产生即投，不等合并窗口。只放行自己，不像 urgent 那样带走整批 */
+const IMMEDIATE_RESULTS: ReadonlySet<string> = new Set<SecretaryResultKind>([
+  'goal-complete',
+  'goal-blocked',
+  'interrupted',
+  'failed',
+  'needs-user',
+]);
+
+export function skipsUpdateWindow(kind: SecretaryResultKind): boolean {
+  return IMMEDIATE_RESULTS.has(kind);
 }
 
 /** 有需要你处理或失败时整批立刻走；否则只投已经到点的 */
@@ -259,6 +274,34 @@ export function capLastText(text: string | undefined): string | undefined {
   return trimmed.length > LAST_TEXT_MAX_CHARS
     ? `${trimmed.slice(0, LAST_TEXT_MAX_CHARS)}…`
     : trimmed;
+}
+
+/**
+ * 终态回传带上这一轮的完整汇报，秘书不用再读一遍会话就能报出提交号与测试数字。
+ * 一轮结束带 TURN_ENDED_TEXT_MAX_CHARS，没有汇报时用摘要正文。超过上限只留结尾：结论通常在末尾。
+ * 停滞返回 undefined，仍走 capLastText。
+ */
+export function reportLastText(
+  kind: SecretaryResultKind,
+  report: TurnReport | undefined,
+  digestText?: string
+): string | undefined {
+  if (kind === 'turn-ended') {
+    const full = report?.text.trim();
+    const text = full || digestText?.trim();
+    if (!text) return undefined;
+    return keepTail(text, TURN_ENDED_TEXT_MAX_CHARS, full ? (report?.omitted ?? 0) : 0);
+  }
+  if (!IMMEDIATE_RESULTS.has(kind)) return undefined;
+  const text = report?.text.trim();
+  if (!text) return undefined;
+  return keepTail(text, TURN_REPORT_MAX_CHARS, report?.omitted ?? 0);
+}
+
+function keepTail(text: string, max: number, omittedBefore: number): string {
+  const kept = text.slice(-max);
+  const omitted = omittedBefore + text.length - kept.length;
+  return omitted > 0 ? `[已截断：前面省略 ${omitted} 字，以下是结尾]\n${kept}` : kept;
 }
 
 export function goalStatusOf(row: Record<string, unknown> | undefined): string | undefined {

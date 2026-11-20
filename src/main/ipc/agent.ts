@@ -36,7 +36,6 @@ import type {
   ChildRunListResult,
   ConversationReloadResult,
   McpStatusPush,
-  ModelRef,
   ParentHistoryTailResult,
   ProjectedMessage,
   RendererAgentEvent,
@@ -89,6 +88,7 @@ import {
   registerPluginSessionBridge,
   releaseParentSession,
   reloadSession,
+  rememberRestorableSpawn,
   requestSnapshot,
   resolveAgentTypeSpawnConfig,
   resolveModelSelection,
@@ -126,7 +126,7 @@ import {
 } from '../services/agentHost';
 import { validateAgentRun } from '../services/agentRunValidation';
 import { AgentService } from '../services/agentService';
-import { BackgroundTaskTracker, type ObservedTask } from '../services/backgroundTaskTracker';
+import { backgroundTaskStates, type ObservedTask } from '../services/backgroundTaskTracker';
 import { HumanRequestTimeouts } from '../services/bots/humanRequestTimeouts';
 import { readBotSessionMessages } from '../services/bots/sessionMessages';
 import {
@@ -137,6 +137,7 @@ import {
 import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
 import { listChildRuns, resolveChildRunFile } from '../services/childRunCatalog';
+import { settleColdResume, wakeColdRestartSession } from '../services/coldRestart';
 import { reloadConversation } from '../services/conversationReload';
 import { spawnCwdFromAuthority } from '../services/conversationSpawnCwd';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
@@ -152,13 +153,7 @@ import { listAllSessions, listProjectSessions } from '../services/extensionPlugi
 import { resolveExternalRevealTarget, sessionWrittenPaths } from '../services/externalFileReveal';
 import { searchFiles } from '../services/fileSearch';
 import { resolveLocalUnderCwd } from '../services/filesWorkspace';
-import { createLocalComplete, memoryCompleteFromSettings } from '../services/llama/chat';
-import {
-  localChatModelPathIfReady,
-  REMOTE_CHAT_MODEL_ID,
-  resolveChatModelSpec,
-  voiceCorrectionModelIdFromSettings,
-} from '../services/llama/chatModels';
+import { memoryCompleteFromSettings } from '../services/llama/chat';
 import { clearMcpStatuses, recordMcpStatus } from '../services/mcpStatusCache';
 import { type Complete, redactSecrets } from '../services/memory/distill';
 import { memorySpaceContext, secretaryReadProjectIds } from '../services/memory/space';
@@ -177,6 +172,7 @@ import {
 import { remoteCandidates } from '../services/remoteModels';
 import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
+import type { RestartManifestEntry } from '../services/restartManifest';
 import { ContactStore } from '../services/secretary/contact/store';
 import { secretaryToolDescriptors, secretaryToolsDir } from '../services/secretary/customTools';
 import { secretaryEnabled } from '../services/secretary/enabled';
@@ -206,8 +202,6 @@ import {
 } from '../services/sessionImport';
 import { setSessionMuteOverride } from '../services/sessionMuteGate';
 import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
-import { setSpeechCorrector } from '../services/speech/service';
-import { buildCorrectionRequest } from '../services/speech/text';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { SubagentProgressPush } from '../services/subagentProgressPush';
 import { titleModelCandidates } from '../services/titleSummary';
@@ -276,7 +270,6 @@ let secretaryDriverObserver:
   | ((event: RendererAgentEvent, changes: readonly SessionStatusPayload[]) => void)
   | null = null;
 const pluginSessionStates = new SessionStateTracker();
-const backgroundTaskStates = new BackgroundTaskTracker();
 const selectionClockOwners = new WeakSet<RendererContents>();
 
 function watchSelectionClock(sender: RendererContents): void {
@@ -314,6 +307,11 @@ export function observedSessionStatus(sessionId: string): PluginSessionStatus {
 /** 秘书 session_tasks 的数据源：worker 后台任务在 Main 的最近一次投影 */
 export function observedBackgroundTasks(sessionId: string): ObservedTask[] {
   return backgroundTaskStates.tasks(sessionId);
+}
+
+/** 主会话名下还有没结束的子代理 Run：结束时 AgentService 会通知并叫醒主会话 */
+export function observedSubagentsRunning(sessionId: string): boolean {
+  return (agentService?.progress(sessionId).length ?? 0) > 0;
 }
 
 /** Bot 会话宿主订阅 worker 事件（turn 结果、运行态） */
@@ -546,6 +544,16 @@ function spawnBoundSession(
   request: AgentSpawnRequest,
   credentialKeys: ReadonlySet<string>
 ) {
+  const result = spawnBoundSessionOnce(identity, request, credentialKeys);
+  if (result.ok) rememberRestorableSpawn(identity, request);
+  return result;
+}
+
+function spawnBoundSessionOnce(
+  identity: SessionIdentity,
+  request: AgentSpawnRequest,
+  credentialKeys: ReadonlySet<string>
+) {
   const conversation = sourceAuthority?.conversation(request.sessionId);
   // bot 会话的人设 / 工作区只能由 Main 的 BotSessionHost 组装，通用 spawn 路径一律拒绝
   if (conversation?.bot) {
@@ -563,13 +571,24 @@ function spawnBoundSession(
       { secretary: secretarySpawnOptions() }
     );
   }
+  // 派发/跟踪记录是权威：任何入口恢复 worker 都按它补上提问转交，不看渲染层传参
+  const askRelay = request.askRelay ?? secretaryAskRelay(request.sessionId);
   return spawnSession(
     identity,
-    request,
+    askRelay ? { ...request, askRelay } : request,
     credentialKeys,
     remoteConfigFor(request.sessionId),
     projectIdFor(request.sessionId)
   );
+}
+
+/** 秘书派出/跟踪中的会话：ask_user 先转给秘书；秘书关闭或记录已撤销时不转 */
+function secretaryAskRelay(sessionId: string): { name: string } | undefined {
+  if (!secretaryEnabled()) return undefined;
+  const store = secretaryStore();
+  if (!store.dispatch().dispatched[sessionId]) return undefined;
+  const name = store.profile()?.name.trim();
+  return name ? { name } : undefined;
 }
 
 /** 秘书档案、人设与派发状态只在 Main 读盘 */
@@ -645,6 +664,41 @@ export async function spawnRootFromMain(
   return spawnBoundSession(identity, request, credentialKeys);
 }
 
+/**
+ * 冷启动：按恢复清单把上次退出前停在安全点的根会话重新 spawn。沿用清单里的 generation，
+ * worker 才认得出断点；cwd / 会话文件只认权威记录，模型凭据此刻从现有来源重新取。
+ */
+export async function resumeRootFromRestartManifest(
+  entry: RestartManifestEntry
+): Promise<AgentActionResult> {
+  const conversation = sourceAuthority?.conversation(entry.sessionId);
+  if (!conversation || conversation.bot || conversation.lifecycle === 'ended')
+    return { ok: false, error: 'conversation unavailable' };
+  if (exactIdentity(entry.sessionId)) return { ok: false, error: 'session already spawned' };
+  const cwd = authoritativeSpawnCwd(entry.sessionId);
+  const parsed =
+    cwd === null
+      ? null
+      : parseSpawnRequest({
+          ...entry.settings,
+          sessionId: entry.sessionId,
+          cwd,
+          resumeFile: entry.sessionFile,
+        });
+  const resume = parsed ? authoritativeResumeFile(entry.sessionId, entry.sessionFile) : null;
+  if (!parsed || !resume?.file) return { ok: false, error: 'invalid restart manifest entry' };
+  const identity = { sessionId: entry.sessionId, generation: entry.generation };
+  agentSessionIndex.prepareParent(identity);
+  let credentialKeys: ReadonlySet<string>;
+  try {
+    credentialKeys = await readStoredOauthCredentialKeys();
+    await preparePluginsForSpawn();
+  } catch {
+    return { ok: false, error: 'model credentials unavailable' };
+  }
+  return spawnBoundSession(identity, { ...parsed, resumeFile: resume.file }, credentialKeys);
+}
+
 /** Main 侧给根会话发消息：deliveryId 由 Main 生成，供回执去重 */
 export function promptRootFromMain(
   sessionId: string,
@@ -712,24 +766,6 @@ export function setAskRelayFromMain(
   return setSessionAskRelay(identity, relay);
 }
 
-/** 档案改了模型：活着的根会话当场换，下次 spawn 读会话行 */
-export async function setRootSessionModelFromMain(
-  sessionId: string,
-  model: ModelRef & { thinkingLevel?: ThinkingLevel }
-): Promise<AgentActionResult> {
-  const identity = rootIdentity(sessionId);
-  if (!identity) return { ok: false, error: STALE_SESSION_ERROR };
-  let credentialKeys: ReadonlySet<string>;
-  try {
-    credentialKeys = await readStoredOauthCredentialKeys();
-  } catch {
-    return { ok: false, error: 'model credentials unavailable' };
-  }
-  const changed = setSessionModel(identity, model.providerId, model.modelId, credentialKeys);
-  if (!changed.ok || !model.thinkingLevel) return changed;
-  return setSessionThinking(identity, model.thinkingLevel);
-}
-
 export function abortRootFromMain(sessionId: string): void {
   const identity = exactIdentity(sessionId);
   if (identity) abortSession(identity);
@@ -761,17 +797,7 @@ export async function resumeRootFromMain(sessionId: string): Promise<AgentAction
   });
   if (plan.type === 'snapshot') return { ok: true };
   if (plan.type === 'skip') return { ok: false, error: plan.reason };
-  // 秘书跟踪中的会话恢复后仍要把 ask_user 转给秘书，否则悄悄变回直接问用户
-  const relay = await secretaryRelayFor(sessionId);
-  return spawnRootFromMain({ ...plan.request, ...(relay ? { askRelay: relay } : {}) });
-}
-
-/** 秘书派出/跟踪的会话：恢复 worker 时一起带上转交开关 */
-async function secretaryRelayFor(sessionId: string): Promise<{ name: string } | undefined> {
-  const { secretaryDispatchPorts } = await import('../services/secretary/dispatch');
-  if (!secretaryDispatchPorts.dispatchFile().dispatched[sessionId]) return undefined;
-  const name = (await secretaryDispatchPorts.profile())?.name.trim();
-  return name ? { name } : undefined;
+  return spawnRootFromMain(plan.request);
 }
 
 function persistedConversationForResume(
@@ -1145,29 +1171,6 @@ async function remoteDistillCompletion(
       ...(options?.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
       ...(options?.signal ? { signal: options.signal } : {}),
     });
-}
-
-const VOICE_CORRECTION_TIMEOUT_MS = 15_000;
-
-/** 语音纠错：本地 GGUF 走 llama.cpp；远程用单独选的模型，未选跟随标题模型。不可用返 null，保留原文 */
-async function voiceCorrection(text: string): Promise<string | null> {
-  const state = readSettingsState();
-  if (!state) return null;
-  const modelId = voiceCorrectionModelIdFromSettings(state);
-  const request = buildCorrectionRequest(modelId, text);
-  if (modelId === REMOTE_CHAT_MODEL_ID) {
-    if (!isAgentWorkerReady()) return null;
-    const candidates = await remoteCandidates(state, state.voiceCorrectionRemoteModel);
-    if (candidates.length === 0) return null;
-    return completeText({ ...request, candidates, timeoutMs: VOICE_CORRECTION_TIMEOUT_MS });
-  }
-  const gguf = localChatModelPathIfReady(chatModelsRoot(), modelId);
-  if (!gguf) return null;
-  const complete = createLocalComplete(gguf, {
-    contextSize: resolveChatModelSpec(modelId)?.contextSize,
-    timeoutMs: VOICE_CORRECTION_TIMEOUT_MS,
-  });
-  return complete(request.systemPrompt, request.userText, { maxTokens: request.maxTokens });
 }
 
 async function readParentHistoryTail(
@@ -1666,7 +1669,6 @@ export function registerAgentHandlers(): void {
   wirePairAgentBridge();
   wirePairSessionHost();
   configureMemoryDistill({ complete: distillCompletion });
-  setSpeechCorrector(voiceCorrection);
   const agentDataDir = path.join(app.getPath('userData'), 'agent');
   sourceAuthority = new SourceAuthorityRegistry({
     registryFile: path.join(agentDataDir, 'source-registry.json'),
@@ -1866,6 +1868,16 @@ export function registerAgentHandlers(): void {
       void labelToolBatch(workerEvent.identity, workerEvent.digest);
       return;
     }
+    // 重启认回的后台命令在空闲会话里结束：按恢复清单打开它，worker 打开后开一轮交付结果
+    if (workerEvent.type === 'session-wake-requested') {
+      void wakeColdRestartSession(workerEvent.sessionId, resumeRootFromRestartManifest).then(
+        (result) =>
+          console.log(
+            `[graceful-restart] wake ${workerEvent.sessionId.slice(0, 8)} ${result.ok ? 'ok' : `skipped: ${result.error}`}`
+          )
+      );
+      return;
+    }
     if (
       workerEvent.type === 'session-reloaded' ||
       workerEvent.type === 'workspace-lock-result' ||
@@ -1874,7 +1886,10 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'mcp-oauth-refresh' ||
       workerEvent.type === 'plugin-mcp-result' ||
       workerEvent.type === 'plugin-agent-event' ||
-      workerEvent.type === 'workspace-unlock-result'
+      workerEvent.type === 'workspace-unlock-result' ||
+      workerEvent.type === 'graceful-restart-deferred' ||
+      workerEvent.type === 'graceful-restart-ready' ||
+      workerEvent.type === 'background-tasks-detached'
     )
       return;
     dispatchService?.observe(workerEvent);
@@ -1891,6 +1906,7 @@ export function registerAgentHandlers(): void {
       }
     }
     if (workerEvent.type === 'parent-ready') {
+      settleColdResume(workerEvent.identity.sessionId);
       sourceAuthority?.markReady(
         workerEvent.identity.sessionId,
         workerEvent.sessionFile,
@@ -1903,6 +1919,7 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'parent-rejected' &&
       !workerEvent.reason.startsWith(STALE_SESSION_ERROR)
     ) {
+      settleColdResume(workerEvent.identity.sessionId);
       const selection = sourceAuthority?.conversation(workerEvent.identity.sessionId)?.selection;
       console.warn('[agent] spawn rejected', {
         sessionId: workerEvent.identity.sessionId,

@@ -68,6 +68,8 @@ interface Harness {
     audit: SecretaryAuditEntry[];
     /** 会话的后台任务投影 */
     tasks: Record<string, ObservedTask[]>;
+    /** 主会话名下还没回来的子代理 Run */
+    subagents: Record<string, boolean>;
     /** 上次应用退出打断这一轮的原因（启动恢复用） */
     interruptDetails: Record<string, string>;
     contact: {
@@ -94,8 +96,6 @@ function harness(
     tasks?: Record<string, ObservedTask[]>;
     /** 这些会话 id 算秘书自己的会话：它们的提问与回复要发到手机 */
     secretaryIds?: string[];
-    /** goal 会话空闲多久算停住，分钟 */
-    patrolIdleGoalMinutes?: number;
   } = {}
 ): Harness {
   const state: Harness['state'] = {
@@ -113,6 +113,7 @@ function harness(
     prompts: [],
     audit: [],
     tasks: options.tasks ?? {},
+    subagents: {},
     interruptDetails: {},
     contact: {
       milestones: [],
@@ -151,9 +152,6 @@ function harness(
         ...base,
         patrolEnabled: state.patrolEnabled,
         notify: state.notify,
-        ...(options.patrolIdleGoalMinutes !== undefined
-          ? { patrolIdleGoalMinutes: options.patrolIdleGoalMinutes }
-          : {}),
         ...(state.briefAt ? { dailyBriefAt: state.briefAt } : {}),
       };
     },
@@ -173,6 +171,7 @@ function harness(
     },
     now: () => state.now,
     tasks: (conversationId) => state.tasks[conversationId] ?? [],
+    subagentsRunning: (conversationId) => state.subagents[conversationId] === true,
     interruptDetail: (conversationId) => state.interruptDetails[conversationId],
     newId: () => `id-${++seq}`,
     audit: (entry) => {
@@ -321,6 +320,26 @@ describe('转交给秘书的提问', () => {
     expect(h.state.file.outbox[0]?.text).toContain('已按默认值「A」处理');
   });
 
+  it('提问、用户直接答与超时收尾都带上派发记录里的发起秘书会话', () => {
+    const h = harness({});
+    h.state.statuses.c1 = waiting;
+    h.host.onAgentEvent(event('ask-request', relayAsk()), change('waiting', 'running'));
+    h.host.onAgentEvent(
+      event('ask-request', relayAsk({ requestId: 'ask-2' })),
+      change('waiting', 'waiting')
+    );
+    h.host.onAgentEvent(event('ask-resolved', { requestId: 'ask-1', by: 'user', answer: 'B' }), []);
+    h.state.now = 30 * MINUTE;
+    h.host.tick();
+    const relays = h.state.file.outbox.filter((update) => update.kind === 'ask-relay');
+    expect(relays.map((update) => [update.key, update.secretaryConversationId])).toEqual([
+      ['relay:c1:ask-1:pending', 'sec1'],
+      ['relay:c1:ask-2:pending', 'sec1'],
+      ['relay:c1:ask-1:user-answered', 'sec1'],
+      ['relay:c1:ask-2:timed-out', 'sec1'],
+    ]);
+  });
+
   it('普通会话的 ask_user 不受影响：照旧记 needs-user，不建转交记录', () => {
     const h = harness({});
     h.state.statuses.c1 = waiting;
@@ -398,20 +417,275 @@ describe('派出会话的结果记录', () => {
     ]);
   });
 
-  it('普通会话的 turn-ended 先攒着，needs-user 和 failed 不推迟', () => {
+  it('终态回传带 8000 字以内的完整汇报，一轮结束带 2000 字，工作台与手机仍用短正文', () => {
+    const report = `${'过程'.repeat(1500)}\n测试 812 passed，提交 1a2b3c4`;
+    const done = harness({ notify: 'with-done' });
+    done.state.statuses.c1 = idle;
+    done.host.onAgentEvent(event('goal-signal', { kind: 'complete', note: 'ok' }), []);
+    done.host.onAgentEvent(
+      event('turn-completed', {
+        digest: { assistantText: report.slice(-1500) },
+        report: { text: report },
+      }),
+      change('idle', 'running')
+    );
+    expect(done.state.file.outbox[0]).toMatchObject({ kind: 'goal-complete', lastText: report });
+    // 工作台卡片与手机里程碑仍用短正文
+    expect(done.state.file.dispatched.c1.lastText?.length).toBeLessThanOrEqual(501);
+    expect(done.state.contact.milestones).toHaveLength(1);
+    expect(done.state.contact.milestones[0]?.lastText?.length).toBeLessThanOrEqual(501);
+
+    const progress = harness({});
+    progress.state.statuses.c1 = idle;
+    progress.host.onAgentEvent(
+      event('turn-completed', {
+        digest: { assistantText: report.slice(-1500) },
+        report: { text: report },
+      }),
+      change('idle', 'running')
+    );
+    expect(progress.state.file.outbox[0]?.kind).toBe('turn-ended');
+    expect(progress.state.file.outbox[0]?.lastText).toBe(
+      `[已截断：前面省略 ${report.length - 2000} 字，以下是结尾]\n${report.slice(-2000)}`
+    );
+    expect(progress.state.file.dispatched.c1.lastText?.length).toBeLessThanOrEqual(501);
+    expect(progress.state.contact.milestones).toEqual([]);
+  });
+
+  it('一轮结束 1500 字的正文完整送到秘书', async () => {
+    const h = withSecretary(harness({}));
+    const text = `${'过程'.repeat(745)}提交 1a2b3c4`;
+    h.host.onAgentEvent(
+      event('turn-completed', { digest: { assistantText: text }, report: { text } }),
+      []
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toHaveLength(1);
+    expect(h.state.prompts[0]).toContain(text);
+    expect(h.state.prompts[0]).not.toContain('已截断');
+  });
+
+  it('普通会话的 turn-ended 和 needs-user、failed 一样不推迟', () => {
     const held = harness({});
     held.state.statuses.c1 = idle;
     held.host.onAgentEvent(
       event('turn-completed', { digest: { assistantText: '先这样' } }),
       change('idle', 'running')
     );
-    expect(held.state.file.outbox[0]).toMatchObject({ kind: 'turn-ended', deliverAt: 45_000 });
-    expect(held.state.prompts).toEqual([]);
+    expect(held.state.file.outbox[0]).toMatchObject({ kind: 'turn-ended' });
+    expect(held.state.file.outbox[0]?.deliverAt).toBeUndefined();
 
     const urgent = harness({});
     urgent.host.onAgentEvent(event('ask-request'), change('waiting', 'running'));
     expect(urgent.state.file.outbox[0]).toMatchObject({ kind: 'needs-user' });
     expect(urgent.state.file.outbox[0]?.deliverAt).toBeUndefined();
+  });
+
+  /** 秘书会话 sec1 在线、派出会话 c1 已空闲：结果一入队就能投 */
+  function withSecretary(h: Harness): Harness {
+    h.ports.projects = () => [
+      { projectId: 'sp', canonicalPath: '/s', kind: 'secretary', state: 'active', version: 1 },
+    ];
+    h.ports.conversations = () => [
+      { conversationId: 'sec1', projectId: 'sp', kind: 'root', lifecycle: 'ready', version: 1 },
+    ];
+    h.state.rows.sec1 = { id: 'sec1', title: '秘书' };
+    h.state.statuses.c1 = idle;
+    return h;
+  }
+
+  it.each([
+    [
+      'goal-complete',
+      [
+        event('goal-signal', { kind: 'complete', note: 'ok' }),
+        event('turn-completed', { digest: { assistantText: '修好了' } }),
+      ],
+    ],
+    ['goal-blocked', [event('goal-signal', { kind: 'blocked', note: '缺密钥' })]],
+    ['interrupted', [event('turn-failed', { interrupted: { at: 1, kind: 'quit' } })]],
+    ['failed', [event('turn-failed', { error: 'boom' })]],
+    ['needs-user', [event('approval-request')]],
+  ])('终态 %s 产生即投进秘书会话，不等合并窗口', async (kind, events) => {
+    const h = withSecretary(harness({}));
+    for (const item of events) {
+      h.host.onAgentEvent(item, []);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(h.state.prompts).toHaveLength(1);
+    expect(h.state.prompts[0]).toContain(`[${kind} session:c1]`);
+    expect(h.state.file.outbox[0]?.deliverAt).toBeUndefined();
+  });
+
+  it('秘书空闲、没在等后台命令或子代理：一轮结束马上注入，不等 45 秒', async () => {
+    const h = withSecretary(harness({}));
+    h.state.now = 5_000;
+    h.host.onAgentEvent(event('turn-completed', { digest: { assistantText: '这轮停下了' } }), []);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toHaveLength(1);
+    expect(h.state.prompts[0]).toContain('[turn-ended session:c1]');
+    expect(h.state.prompts[0]).toContain('这轮停下了');
+    expect(h.state.file.outbox.every((entry) => entry.deliverAt !== 50_000)).toBe(true);
+  });
+
+  it('停滞等中间进度仍按窗口合并；别的会话终态立即投时不把它带走', async () => {
+    const h = withSecretary(harness({}));
+    h.state.file.dispatched.c2 = {
+      ...h.state.file.dispatched.c1,
+      conversationId: 'c2',
+    } as DispatchRecord;
+    h.state.rows.c2 = { id: 'c2', title: '另一个会话', projectId: 'p1' };
+    h.state.statuses.c2 = idle;
+    h.ports.backgroundStalls = () => [
+      { conversationId: 'c2', taskId: 't1', reason: 'undelivered' },
+    ];
+    h.host.tick(0);
+    h.ports.backgroundStalls = () => [];
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toEqual([]);
+    expect(h.state.file.outbox).toHaveLength(1);
+    expect(h.state.file.outbox[0]).toMatchObject({
+      kind: 'stalled',
+      conversationId: 'c2',
+      deliverAt: 45_000,
+    });
+
+    h.state.now = 10_000;
+    h.host.onAgentEvent(event('goal-signal', { kind: 'blocked', note: '缺密钥' }), []);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toHaveLength(1);
+    expect(h.state.prompts[0]).toContain('[goal-blocked session:c1]');
+    expect(h.state.prompts[0]).not.toContain('session:c2');
+    expect(h.state.file.outbox.find((entry) => entry.key.startsWith('c2|'))?.deliverAt).toBe(
+      45_000
+    );
+  });
+
+  it('停滞不马上叫醒秘书，满 45 秒才投', async () => {
+    const h = withSecretary(harness({}));
+    h.ports.backgroundStalls = () => [
+      { conversationId: 'c1', taskId: 't1', reason: 'undelivered' },
+    ];
+    h.host.tick(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toEqual([]);
+    h.state.now = 44_999;
+    h.host.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toEqual([]);
+    h.state.now = 45_000;
+    h.host.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.state.prompts).toHaveLength(1);
+    expect(h.state.prompts[0]).toContain('[stalled session:c1]');
+  });
+
+  describe('一轮停下来是在等后台命令或子代理', () => {
+    const build = (extra: Partial<ObservedTask> = {}): ObservedTask => ({
+      taskId: 'b1',
+      command: 'pnpm build',
+      status: 'running',
+      startedAt: 0,
+      ...extra,
+    });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it.each([
+      ['后台命令', (h: Harness) => (h.state.tasks.c1 = [build()])],
+      ['子代理', (h: Harness) => (h.state.subagents.c1 = true)],
+    ])('还有%s没回来：这一轮结束不送给秘书，过了合并窗口也不补', async (_, arm) => {
+      const h = withSecretary(harness({}));
+      arm(h);
+      h.host.onAgentEvent(event('turn-completed', { digest: { assistantText: '等它跑完' } }), []);
+      await settle();
+      h.state.now = 60_000;
+      h.host.tick();
+      await settle();
+      expect(h.state.prompts).toEqual([]);
+      expect(h.state.file.outbox).toEqual([]);
+      expect(h.state.file.dispatched.c1.lastResult).toBeUndefined();
+    });
+
+    it('后台命令回来后又只等子代理：继续不送；子代理回来后目标完成马上送到', async () => {
+      const h = withSecretary(harness({}));
+      h.state.tasks.c1 = [build()];
+      h.host.onAgentEvent(event('turn-completed'), []);
+      // 命令跑完叫醒会话，这一轮又派了子代理
+      h.state.tasks.c1 = [build({ status: 'done' })];
+      h.state.subagents.c1 = true;
+      h.state.now = 10_000;
+      h.host.onAgentEvent(event('turn-completed'), []);
+      await settle();
+      expect(h.state.prompts).toEqual([]);
+      expect(h.state.file.outbox).toEqual([]);
+
+      h.state.subagents.c1 = false;
+      h.state.now = 20_000;
+      h.host.onAgentEvent(event('goal-signal', { kind: 'complete', note: 'ok' }), []);
+      await settle();
+      h.host.onAgentEvent(event('turn-completed', { digest: { assistantText: '修好了' } }), []);
+      await settle();
+      expect(h.state.prompts).toHaveLength(1);
+      expect(h.state.prompts[0]).toContain('[goal-complete session:c1]');
+    });
+
+    it('等待前排着的上一轮「结束」撤掉，不再按窗口补送', async () => {
+      // 没有秘书会话可投：上一轮「结束」还排在队里
+      const h = harness({});
+      h.state.statuses.c1 = idle;
+      h.host.onAgentEvent(event('turn-completed'), []);
+      expect(h.state.file.outbox[0]).toMatchObject({ kind: 'turn-ended' });
+      h.state.tasks.c1 = [build()];
+      h.state.now = 10_000;
+      h.host.onAgentEvent(event('turn-completed'), []);
+      h.state.now = 60_000;
+      h.host.tick();
+      await settle();
+      expect(h.state.prompts).toEqual([]);
+      expect(h.state.file.outbox).toEqual([]);
+    });
+
+    it('终态不因还有后台命令被吞：goal-complete 照样马上送，带上还在跑的任务', async () => {
+      const h = withSecretary(harness({}));
+      h.state.tasks.c1 = [build({ command: 'pnpm test' })];
+      h.state.subagents.c1 = true;
+      h.host.onAgentEvent(event('goal-signal', { kind: 'complete', note: 'ok' }), []);
+      await settle();
+      h.host.onAgentEvent(event('turn-completed'), []);
+      await settle();
+      expect(h.state.prompts).toHaveLength(1);
+      expect(h.state.prompts[0]).toContain('[goal-complete session:c1]');
+      expect(h.state.prompts[0]).toContain('还有 1 个后台任务在跑');
+    });
+
+    it('没有后台命令也没有子代理（常驻服务不算）：马上送，不等 45 秒', async () => {
+      const h = withSecretary(harness({}));
+      h.state.tasks.c1 = [
+        build({ status: 'done' }),
+        build({ taskId: 'srv', command: 'python3 -m http.server 8931' }),
+      ];
+      h.host.onAgentEvent(event('turn-completed'), []);
+      await settle();
+      expect(h.state.prompts).toHaveLength(1);
+      expect(h.state.prompts[0]).toContain('[turn-ended session:c1]');
+    });
+
+    it('子代理自己的回合结束不算主会话结束', async () => {
+      const h = withSecretary(harness({}));
+      h.state.subagents.c1 = true;
+      const child = {
+        sessionId: 'c1::child',
+        generation: 'gc',
+        parent: { sessionId: 'c1', generation: 'g1' },
+      };
+      h.host.onAgentEvent(event('turn-completed', { identity: child }), []);
+      h.state.now = 60_000;
+      h.host.tick();
+      await settle();
+      expect(h.state.prompts).toEqual([]);
+      expect(h.state.file.outbox).toEqual([]);
+      expect(h.state.file.dispatched.c1.turn).toBe(0);
+    });
   });
 
   it('同一会话短时间内的更新合并成最新一条，并记下被合并的那条', () => {
@@ -855,13 +1129,12 @@ describe('自动巡检', () => {
     expect(h.state.file.outbox.map((update) => update.key)).toEqual(['c1|stalled|1']);
   });
 
-  it('停住阈值可配：调到 5 分钟就按 5 分钟报', () => {
-    const h = harness({ patrolIdleGoalMinutes: 5 });
+  it('旧档案里的停住阈值不再生效：固定按 3 分钟报', () => {
+    const h = harness({});
+    const legacy = h.ports.profile;
+    h.ports.profile = () => ({ ...legacy(), patrolIdleGoalMinutes: 10 }) as never;
     idleWithGoal(h);
     h.host.tick(3 * MINUTE + 1);
-    expect(h.state.file.outbox).toEqual([]);
-    // 巡检节奏跟着阈值走：下一次在 5 分钟后的检查点
-    h.host.tick(8 * MINUTE + 1);
     expect(h.state.file.outbox.filter((update) => update.kind === 'stalled')).toHaveLength(1);
   });
 
@@ -1440,10 +1713,11 @@ describe('联系方式转发', () => {
     followed.host.onAgentEvent(event('status', { status: 'idle' }), []);
     expect(followed.state.prompts).toHaveLength(1);
 
-    // 没人在手机上等的结果照旧攒一个窗口再给秘书
+    // 没人在手机上等的完成结果也是终态，同样马上给秘书，只是不推手机
     const quiet = await desktop(false);
-    expect(quiet.state.prompts).toEqual([]);
-    expect(quiet.state.file.outbox[0]).toMatchObject({ kind: 'goal-complete', deliverAt: 45_000 });
+    expect(quiet.state.contact.milestones).toEqual([]);
+    expect(quiet.state.prompts).toHaveLength(1);
+    expect(quiet.state.prompts[0]).toContain('[goal-complete session:c1]');
   });
 
   it('系统回传注入的回合带上 delivery 与 turnId，应用里自己聊的不带', () => {
@@ -1683,6 +1957,24 @@ describe('遗留后台任务', () => {
     h.state.now = 70 * MINUTE;
     h.host.tick();
     expect(h.state.file.outbox.map((update) => update.kind)).toEqual(['leftover', 'leftover']);
+  });
+
+  it('遗留任务巡检跟着巡检开关走：关掉巡检后不再推', () => {
+    const h = harness({ file: settledFile(), tasks: { c1: [task()] }, patrolEnabled: false });
+    h.state.statuses.c1 = idle;
+    h.state.now = 11 * MINUTE;
+    h.host.tick();
+    expect(h.state.file.outbox).toEqual([]);
+  });
+
+  it('旧档案里单独关掉的遗留任务巡检不再生效，巡检开着就推', () => {
+    const h = harness({ file: settledFile(), tasks: { c1: [task()] } });
+    const legacy = h.ports.profile;
+    h.ports.profile = () => ({ ...legacy(), orphanTaskPatrol: false }) as never;
+    h.state.statuses.c1 = idle;
+    h.state.now = 11 * MINUTE;
+    h.host.tick();
+    expect(h.state.file.outbox.map((update) => update.kind)).toEqual(['leftover']);
   });
 
   it('会话还在跑时不标遗留，后台任务照常算在跑', () => {

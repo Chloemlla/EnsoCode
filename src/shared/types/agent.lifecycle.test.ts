@@ -4,6 +4,7 @@ import {
   parseAgentWorkerEvent,
   parseResolvedChildProfileProof,
   parseTitleSummaryInput,
+  TURN_REPORT_MAX_CHARS,
 } from './agent';
 import { child, model, parent, proof, RECEIPT_ID } from './agent.testUtils';
 
@@ -387,6 +388,24 @@ describe('标题总结命令与事件', () => {
     expect(parseAgentWorkerEvent(event)).toEqual(event);
   });
 
+  it('turn-completed 的 report 校验：正文非空且不超过硬上限，省略字数为正整数', () => {
+    const base = { type: 'turn-completed', identity: parent, seq: 1, turnId: 'turn-1' };
+    const ok = { ...base, report: { text: '提交 1a2b3c4', omitted: 3 } };
+    expect(parseAgentWorkerEvent(ok)).toEqual(ok);
+    const full = { ...base, report: { text: 'x'.repeat(TURN_REPORT_MAX_CHARS) } };
+    expect(parseAgentWorkerEvent(full)).toEqual(full);
+    for (const report of [
+      { text: '' },
+      { text: 'x'.repeat(TURN_REPORT_MAX_CHARS + 1) },
+      { text: 'a', omitted: 0 },
+      { text: 'a', omitted: 1.5 },
+      { text: 'a', extra: 1 },
+      'a',
+    ]) {
+      expect(parseAgentWorkerEvent({ ...base, report })).toBeNull();
+    }
+  });
+
   it('turn-completed 预算停止标记只接受 true，补报告错误必须随标记出现', () => {
     const event = { type: 'turn-completed', identity: parent, seq: 1, turnId: 'turn-1' };
     const stopped = { ...event, requestBudgetStop: true, requestBudgetError: '529 overloaded' };
@@ -644,6 +663,51 @@ describe('generation lifecycle/events', () => {
         capabilityId: 'appearance.theme',
         params: { value: 'dark' },
       })
+    ).toBeNull();
+  });
+});
+
+describe('重启保留后台命令的协议', () => {
+  it('graceful-restart 只多认 keepBackgroundTasks: true；交出命令不带参数', () => {
+    expect(parseAgentCommand({ type: 'graceful-restart' })).toEqual({ type: 'graceful-restart' });
+    expect(parseAgentCommand({ type: 'graceful-restart', keepBackgroundTasks: true })).toEqual({
+      type: 'graceful-restart',
+      keepBackgroundTasks: true,
+    });
+    expect(parseAgentCommand({ type: 'graceful-restart', keepBackgroundTasks: false })).toBeNull();
+    expect(parseAgentCommand({ type: 'graceful-restart', extra: 1 })).toBeNull();
+    expect(parseAgentCommand({ type: 'detach-background-tasks' })).toEqual({
+      type: 'detach-background-tasks',
+    });
+    expect(parseAgentCommand({ type: 'detach-background-tasks', pid: 1 })).toBeNull();
+  });
+
+  it('推迟事件可带 undetachableTasks；交出回执只认非负整数', () => {
+    const entry = { identity: parent, reason: 'tool-in-flight', toolsInFlight: ['task-1'] };
+    expect(
+      parseAgentWorkerEvent({
+        type: 'graceful-restart-deferred',
+        sessions: [{ ...entry, undetachableTasks: ['task-1'] }],
+      })
+    ).not.toBeNull();
+    expect(
+      parseAgentWorkerEvent({
+        type: 'graceful-restart-deferred',
+        sessions: [{ ...entry, undetachableTasks: [1] }],
+      })
+    ).toBeNull();
+    expect(parseAgentWorkerEvent({ type: 'background-tasks-detached', detached: 2 })).toEqual({
+      type: 'background-tasks-detached',
+      detached: 2,
+    });
+    expect(parseAgentWorkerEvent({ type: 'background-tasks-detached', detached: -1 })).toBeNull();
+    expect(parseAgentWorkerEvent({ type: 'session-wake-requested', sessionId: 'conv-1' })).toEqual({
+      type: 'session-wake-requested',
+      sessionId: 'conv-1',
+    });
+    expect(parseAgentWorkerEvent({ type: 'session-wake-requested', sessionId: '' })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ type: 'session-wake-requested', sessionId: 'a', extra: 1 })
     ).toBeNull();
   });
 });

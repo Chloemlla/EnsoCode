@@ -29,6 +29,10 @@ import {
   normalizeMaxActiveCoworkers,
 } from '@shared/maxActiveCoworkers';
 import {
+  DEFAULT_MEMORY_DISTILL_WINDOW_MINUTES,
+  normalizeMemoryDistillWindowMinutes,
+} from '@shared/memory/distillWindow';
+import {
   DEFAULT_FORGETTING_SETTINGS,
   normalizeForgettingSettings,
 } from '@shared/memory/forgetting';
@@ -57,7 +61,6 @@ import { DEFAULT_THEME_KEY } from '@shared/theme/builtinThemes';
 import type { ThemeKey } from '@shared/theme/types';
 import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types';
 import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
-import { DEFAULT_SPEECH_MODEL_ID, SYSTEM_MICROPHONE } from '@shared/types/speech';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
 import {
   findVirtualModel,
@@ -208,12 +211,14 @@ const initialState = {
   smartCompactEnabled: false,
   smartCompactModel: null as import('@shared/defaultModel').DefaultModelRef | null,
   smartCompactMode: 'auto' as import('@shared/smartCompactMode').SmartCompactMode,
-  memoryEmbeddingModel: 'local:potion-multilingual-128M',
+  memoryEmbeddingModel: 'local:qwen3-0.6b-gguf',
   memoryEmbeddingAutoDownload: false,
   memoryModelIdleMinutes: DEFAULT_MEMORY_MODEL_IDLE_MINUTES,
   memoryEmbeddingRemoteProviderId: null as string | null,
   memoryDistillEnabled: false,
+  memoryDistillWindowMinutes: DEFAULT_MEMORY_DISTILL_WINDOW_MINUTES,
   memoryKgEnabled: false,
+  memoryReconcileEnabled: false,
   // 遗忘：默认只开「降权」。标记候选与自动归档都要用户显式打开，升级后不会突然归档任何东西。
   memoryDecayEnabled: DEFAULT_FORGETTING_SETTINGS.enabled,
   memoryDecayArchiveCandidates: DEFAULT_FORGETTING_SETTINGS.archiveCandidates,
@@ -221,7 +226,6 @@ const initialState = {
   memoryDecayStaleDays: DEFAULT_FORGETTING_SETTINGS.staleDays,
   memoryDecayMaxImportance: DEFAULT_FORGETTING_SETTINGS.maxImportance,
   memoryDecayIntervalDays: DEFAULT_FORGETTING_SETTINGS.intervalDays,
-  voiceInputEnabled: false,
   botModeEnabled: false,
   scratchSessionsEnabled: false,
   dropShelfEnabled: false,
@@ -230,13 +234,6 @@ const initialState = {
   botAssistantModel: null as import('@shared/defaultModel').DefaultModelRef | null,
   botMaxRunningTurns: DEFAULT_BOT_MAX_RUNNING_TURNS,
   botDiscussModeEnabled: false,
-  voiceInputDevice: SYSTEM_MICROPHONE,
-  voiceModel: DEFAULT_SPEECH_MODEL_ID,
-  voiceCorrectionEnabled: false,
-  voiceCorrectionModel: 'remote',
-  voiceCorrectionRemoteModel: null as import('@shared/defaultModel').DefaultModelRef | null,
-  voiceVocabulary: '',
-  voiceGeminiApiKey: '',
   autoUpdate: true,
   autoRestartWhenIdle: false,
   pluginAutoUpdate: true,
@@ -301,7 +298,6 @@ const initialState = {
   defaultReasoningEnabled: true,
   defaultThinkingLevel: 'medium' as import('@shared/types/agent').ThinkingLevel,
   skills: [] as import('@shared/types').SkillEntry[],
-  plugins: [] as import('@shared/types').PluginEntry[],
   mcpServers: [] as import('@shared/types').McpServerEntry[],
   instructions: [] as import('@shared/types').InstructionEntry[],
   presets: [] as import('@shared/types').Preset[],
@@ -426,7 +422,10 @@ export const useSettingsStore = create<SettingsState>()(
       setMemoryEmbeddingRemoteProviderId: (memoryEmbeddingRemoteProviderId) =>
         set({ memoryEmbeddingRemoteProviderId }),
       setMemoryDistillEnabled: (memoryDistillEnabled) => set({ memoryDistillEnabled }),
+      setMemoryDistillWindowMinutes: (value) =>
+        set({ memoryDistillWindowMinutes: normalizeMemoryDistillWindowMinutes(value) }),
       setMemoryKgEnabled: (memoryKgEnabled) => set({ memoryKgEnabled }),
+      setMemoryReconcileEnabled: (memoryReconcileEnabled) => set({ memoryReconcileEnabled }),
       setMemoryDecayEnabled: (memoryDecayEnabled) => set({ memoryDecayEnabled }),
       setMemoryDecayArchiveCandidates: (memoryDecayArchiveCandidates) =>
         set({ memoryDecayArchiveCandidates }),
@@ -434,7 +433,6 @@ export const useSettingsStore = create<SettingsState>()(
       setMemoryDecayStaleDays: (memoryDecayStaleDays) => set({ memoryDecayStaleDays }),
       setMemoryDecayMaxImportance: (memoryDecayMaxImportance) => set({ memoryDecayMaxImportance }),
       setMemoryDecayIntervalDays: (memoryDecayIntervalDays) => set({ memoryDecayIntervalDays }),
-      setVoiceInputEnabled: (voiceInputEnabled) => set({ voiceInputEnabled }),
       setBotModeEnabled: (botModeEnabled) => set({ botModeEnabled }),
       setScratchSessionsEnabled: (scratchSessionsEnabled) => set({ scratchSessionsEnabled }),
       setDropShelfEnabled: (dropShelfEnabled) => set({ dropShelfEnabled }),
@@ -445,14 +443,6 @@ export const useSettingsStore = create<SettingsState>()(
         set({ botMaxRunningTurns: normalizeBotMaxRunningTurns(value) }),
       setBotDiscussModeEnabled: (botDiscussModeEnabled) =>
         set({ botDiscussModeEnabled: botDiscussModeEnabled === true }),
-      setVoiceInputDevice: (voiceInputDevice) => set({ voiceInputDevice }),
-      setVoiceModel: (voiceModel) => set({ voiceModel }),
-      setVoiceCorrectionEnabled: (voiceCorrectionEnabled) => set({ voiceCorrectionEnabled }),
-      setVoiceCorrectionModel: (voiceCorrectionModel) => set({ voiceCorrectionModel }),
-      setVoiceCorrectionRemoteModel: (voiceCorrectionRemoteModel) =>
-        set({ voiceCorrectionRemoteModel }),
-      setVoiceVocabulary: (voiceVocabulary) => set({ voiceVocabulary }),
-      setVoiceGeminiApiKey: (voiceGeminiApiKey) => set({ voiceGeminiApiKey }),
       setEditMode: (editMode) => set({ editMode }),
       setCompactStrategy: (compactStrategy) =>
         set({ compactStrategy, smartCompactEnabled: compactStrategy === 'smart' }),
@@ -743,27 +733,6 @@ export const useSettingsStore = create<SettingsState>()(
       },
 
       removeSkill: (id) => set((state) => ({ skills: state.skills.filter((s) => s.id !== id) })),
-
-      addPlugins: (plugins) => {
-        const known = new Set(get().plugins.map((plugin) => plugin.key));
-        const fresh = plugins.filter((plugin) => {
-          if (known.has(plugin.key)) return false;
-          known.add(plugin.key);
-          return true;
-        });
-        if (fresh.length > 0) set((state) => ({ plugins: [...state.plugins, ...fresh] }));
-        return fresh.length;
-      },
-
-      setPluginEnabled: (id, enabled) =>
-        set((state) => ({
-          plugins: state.plugins.map((plugin) =>
-            plugin.id === id ? { ...plugin, enabled } : plugin
-          ),
-        })),
-
-      removePlugin: (id) =>
-        set((state) => ({ plugins: state.plugins.filter((plugin) => plugin.id !== id) })),
 
       // 按启动命令或 URL 去重
       addMcpServers: (servers) => {
@@ -1267,6 +1236,12 @@ export const useSettingsStore = create<SettingsState>()(
         const memoryModelIdleMinutes = normalizeMemoryModelIdleMinutes(s.memoryModelIdleMinutes);
         if (memoryModelIdleMinutes !== s.memoryModelIdleMinutes) {
           useSettingsStore.setState({ memoryModelIdleMinutes });
+        }
+        const memoryDistillWindowMinutes = normalizeMemoryDistillWindowMinutes(
+          s.memoryDistillWindowMinutes
+        );
+        if (memoryDistillWindowMinutes !== s.memoryDistillWindowMinutes) {
+          useSettingsStore.setState({ memoryDistillWindowMinutes });
         }
         // 遗忘阈值来自 settings.json，手改坏了要夹回范围，否则巡检按脏值跑
         const forgetting = normalizeForgettingSettings(s);
