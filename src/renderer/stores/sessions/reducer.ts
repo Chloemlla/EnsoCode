@@ -1,5 +1,6 @@
 import { type PlanState, splitPlanPrefix } from '@shared/planMode';
 import { truncatedProjectionHead } from '@shared/projectedText';
+import { stripInboundImageLines } from '@shared/secretary/inboundImages';
 import { parseSkillCommands, splitSkillBlocks } from '@shared/skillCommands';
 import { splitTurnNotes } from '@shared/turnNotes';
 import {
@@ -82,7 +83,10 @@ const IMAGE_HINTS = /(?:^|\n\n)\[Image[^\n]*\](?:\n\[Image[^\n]*\])*$/;
 function sameUserText(optimistic: string, delivered: string): boolean {
   const plain = stripRolePrefix(delivered);
   if (optimistic === delivered || optimistic === plain) return true;
-  if (optimistic === plain.replace(IMAGE_HINTS, '')) return true;
+  const withoutHints = plain.replace(IMAGE_HINTS, '');
+  if (optimistic === withoutHints) return true;
+  // 秘书会话贴的图由 Main 落盘，路径行追加在正文后
+  if (optimistic === stripInboundImageLines(withoutHints)) return true;
   const head = truncatedProjectionHead(delivered);
   if (head !== null && optimistic.startsWith(stripRolePrefix(head))) return true;
   const slash = parseSkillCommands(optimistic);
@@ -315,6 +319,7 @@ export const emptyProjection: SessionProjection = {
 
 const eventIdentity = (event: RendererAgentEvent): SessionIdentity | null => {
   if (event.type === 'worker-exited' || event.type === 'snapshot') return null;
+  if (event.type === 'unopened-background-tasks') return null;
   // 标题总结不属于任何 worker 会话（无 identity/seq），在 store 层处理，不进投影
   if (event.type === 'title-generated' || event.type === 'title-failed') return null;
   // 通用补全结果在 Main agentHost 就已结算，不会到达渲染层；这里只为收窄联合类型
@@ -427,6 +432,9 @@ export function applyAgentEvent(
 
   const identity = eventIdentity(event);
   if (event.type === 'title-generated' || event.type === 'title-failed') return state;
+  // worker 没打开该会话（重启认回的命令）：只换任务条，不碰 generation / seq，不当会话已打开
+  if (event.type === 'unopened-background-tasks')
+    return event.sessionId === sessionId ? { ...state, backgroundTasks: event.tasks } : state;
   if (
     event.type === 'text-completed' ||
     event.type === 'text-failed' ||
@@ -692,7 +700,14 @@ export function applyAgentEvent(
       return {
         ...current,
         backgroundTasks: current.backgroundTasks.map((task) =>
-          task.taskId === event.taskId ? { ...task, tail: event.tail, status: event.status } : task
+          task.taskId === event.taskId
+            ? {
+                ...task,
+                tail: event.tail,
+                status: event.status,
+                ...(event.outputBytes !== undefined ? { outputBytes: event.outputBytes } : {}),
+              }
+            : task
         ),
         lastOutputAt: now,
         lastSeq: event.seq,

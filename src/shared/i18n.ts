@@ -242,19 +242,20 @@ export const zhTranslations: Record<string, string> = {
   'New version {{version}} found': '发现新版本 {{version}}',
   'You are on the latest version': '已是最新版本',
   'Downloading update… {{percent}}%': '正在下载更新… {{percent}}%',
-  'New version {{version}} is ready — restart to update.':
-    '新版本 {{version}} 已就绪 —— 重启以更新。',
+  'New version {{version}} is downloaded. Restarting waits for the current tool to finish; background commands keep running.':
+    '新版本 {{version}} 已下载。重启会在当前工具结束后进行，转到后台的命令会接着跑。',
   'Update check failed': '检查更新失败',
   'Restart to update': '重启更新',
-  'Restart now': '立即重启',
-  'Will restart to update {{version}} when the running turns finish.':
-    '当前回合结束后将自动重启并更新到 {{version}}。',
-  'Continued {{count}} conversation(s) interrupted by the update':
-    '已从断点继续 {{count}} 个因更新中断的会话',
   '{{count}} conversation(s) interrupted by app exit':
     '{{count}} 个会话因应用退出被中断，已在会话里说明原因',
   'Update failed: {{error}}': '更新失败：{{error}}',
   'Download update': '下载更新',
+  "New version {{version}} found. This local build can't install it automatically.":
+    '发现新版本 {{version}}，本地构建无法自动安装，请手动下载。',
+  "This local build is signed differently from the release and can't install updates automatically. Download it manually.":
+    '本地构建与正式版签名不一致，无法自动安装更新，请手动下载。',
+  'Open release page': '打开 Release 页面',
+  'Download DMG': '下载 DMG',
   'Release notes': '更新日志',
   "What's new in {{version}}": '{{version}} 更新内容',
   'No release notes provided.': '此版本未提供更新日志。',
@@ -271,6 +272,9 @@ export const zhTranslations: Record<string, string> = {
   'A command moved to the background cannot keep running without EnsoCode (for example a remote or Windows command), so EnsoCode waits for it.':
     '有转到后台的命令没法脱离 EnsoCode 继续跑（如远程会话或 Windows 上的命令），所以要等它结束。',
   'Force quit': '强制退出',
+  'Restarting once the current command finishes': '等当前命令结束后重启',
+  'Installing the update once the current command finishes': '等当前命令结束后安装更新',
+  'Quitting once the current command finishes': '等当前命令结束后退出',
   'Restart failed: {{error}}': '重启失败：{{error}}',
   'Restart server': '重启服务端',
   'Restart server?': '重启服务端？',
@@ -282,7 +286,21 @@ export const zhTranslations: Record<string, string> = {
     '这台服务端无法远程更新，请在服务器上执行 npm i -g @ensocode/server。',
   'Automatic updates': '自动更新',
   'Download and install updates automatically': '自动下载并安装更新',
-  'Restart and apply when idle': '空闲时重启并应用更新',
+  'Restart automatically to apply updates': '自动重启以应用更新',
+  'When idle': '空闲时',
+  "Don't wait for idle": '不等空闲',
+  'Only notify when an update is ready; never restart automatically.':
+    '更新下载完成后只提示，不自动重启。',
+  "Restart as soon as the update is downloaded, even while agents are running or messages are queued. The restart happens after the current tool finishes, and running sessions keep going afterwards. It still waits while you're using the window (input in the last 2 minutes), while an input box has an unsent draft, or while a question or approval is pending.":
+    '更新下载完成后就重启，有 agent 在跑、有排队消息也不等。重启会在当前工具结束后进行，在跑的会话重启后接着跑。你正在用窗口（2 分钟内有键盘或鼠标输入）、输入框里有未发送的草稿、或者有待回答/待审批时先等。',
+  'Update channel': '更新渠道',
+  Stable: '稳定版',
+  Beta: '内测版',
+  'Only stable releases.': '只接收正式发布的稳定版。',
+  'Beta builds come from the latest main branch and may be unstable. You get whichever of beta and stable is newer.':
+    '内测版由 main 分支最新代码自动构建，可能不稳定；内测版和稳定版里哪个更新就更新到哪个。',
+  "You're on a beta build. Switching to stable doesn't downgrade; you'll move to the next stable release once it's out.":
+    '当前装的是内测版。切回稳定版不会降级，等下一个稳定版发布后自动更新过去。',
   'After the update is downloaded, restart automatically if no agent is running, nothing is queued, and there are no pending questions or approvals. The idle state must last 5 minutes, and a focused window also blocks it.':
     '更新下载完成后，没有 agent 在跑、没有排队消息、也没有待回答/待审批时自动重启。该状态需连续保持 5 分钟；窗口在前台时也会拦住。',
   'Network proxy': '网络代理',
@@ -673,6 +691,9 @@ export const zhTranslations: Record<string, string> = {
     '遇到 429、5xx 或网络错误时退避重试（间隔最长 60 秒）。额度与计费错误不重试。选「无限」会一直重试，直到手动取消。',
   'Retry count after 429, 5xx or network errors; off, fixed count or unlimited':
     '429、5xx 或网络错误后的重试次数：关闭、固定次数或无限',
+  'Long prompt cache (1 hour)': '长缓存（1 小时）',
+  'Keep the prompt cache for 1 hour instead of 5 minutes. Saves a lot when turns are more than 5 minutes apart, since the cache no longer expires and gets rewritten every turn, but cache writes cost 2× instead of 1.25×, so rapid follow-ups tens of seconds apart cost more. Anthropic models only. Applies from the next request.':
+    '把 prompt 缓存有效期从 5 分钟延长到 1 小时。轮次间隔超过 5 分钟时能省很多（缓存不再每轮过期重写），但缓存写入单价从 1.25× 涨到 2×，间隔几十秒的快速连续追问反而更贵。仅对 Anthropic 系模型生效，从下一次请求起生效。',
   Unlimited: '无限',
   '{{count}} times': '{{count}} 次',
   '{{count}} day': '{{count}} 天',
@@ -760,6 +781,14 @@ export const zhTranslations: Record<string, string> = {
     '为子代理配置专属模型、技能与 MCP 服务（可选）',
   '{{count}} presets': '已有 {{count}} 个预设',
   'Model Providers': '模型中心',
+  'Automatically fetch models': '自动拉取模型',
+  'Model fetch interval': '拉取间隔',
+  'This interval applies when automatic fetching is enabled for this provider.':
+    '开启此供应商的自动拉取后，按此间隔拉取模型。',
+  'Enter a whole number from {{min}} to {{max}} hours.': '请输入 {{min}}–{{max}} 小时之间的整数。',
+  hours: '小时',
+  'Last fetched {{time}}': '上次拉取成功：{{time}}',
+  'Last fetch failed {{time}}': '上次拉取失败：{{time}}',
   'Manage model API providers for this app': '管理应用的模型 API 服务',
   'Import from local apps': '从本地应用导入',
   'Scan providers configured in local AI apps and import them.':
@@ -2020,8 +2049,6 @@ export const zhTranslations: Record<string, string> = {
   'Loading…': '加载中…',
   '(no log available)': '(暂无日志)',
   'Context compacted': '上下文已压缩',
-  'Waiting for first token': '等首字',
-  'Think time': '思考',
   '{{kind}} · {{before}} → {{after}} · freed {{percent}}%':
     '{{kind}} · {{before}} → {{after}} · 释放 {{percent}}%',
   'Context compacted ({{tokens}} tokens before)': '上下文已压缩（压缩前 {{tokens}} tokens）',
@@ -2205,6 +2232,9 @@ export const zhTranslations: Record<string, string> = {
   'Earlier activity details were cleared; the final report is still available.':
     '较早的过程详情已清理，最终报告仍然保留。',
   '(no output yet)': '(暂无输出)',
+  'Output written ({{size}}), not loaded yet': '已输出 {{size}}，面板尚未加载',
+  'The process has not written anything. Without a terminal, some programs buffer output and only write it in blocks or on exit.':
+    '进程还没有写出任何内容。不在终端里运行时，有些程序会把输出攒成一块或等退出时才写出。',
   Deny: '拒绝',
   Allow: '允许',
   'Run as administrator': '以管理员权限运行',
@@ -2588,6 +2618,11 @@ export const zhTranslations: Record<string, string> = {
   Copied: '已复制',
   'Copy image': '复制图片',
   'Image copied': '图片已复制',
+  'Image {{n}}': '图片 {{n}}',
+  'Image {{n}} not accepted: {{reason}}': '图片 {{n}} 未收下：{{reason}}',
+  'over 10 MB, not saved': '超过 10MB，没有保存',
+  'not a png / jpeg / webp / gif image, not saved': '不是 png / jpeg / webp / gif 图片，没有保存',
+  'could not be saved': '没能保存',
   'Could not copy image': '复制图片失败',
   'Copy failed': '复制失败',
   'Browse and drive conversations on another EnsoCode desktop. Its agent, keys and history stay there.':
@@ -2750,6 +2785,9 @@ export const zhTranslations: Record<string, string> = {
   'Conversation history': '对话记录',
   'Conversation transcripts and usage ledger.': '对话记录文件与用量账本。',
   'Coworker transcripts': 'Coworker 记录',
+  'Secretary images': '秘书图片',
+  'Images sent to the secretary. Cleaning removes only images no message references any more and older than 7 days; referenced images are kept.':
+    '发给秘书的图片。清理只删已不被任何消息引用、且超过 7 天的图片，仍被引用的保留。',
   'Coworker journals; only those of deleted conversations are cleaned.':
     'Coworker 的对话记录；只清理已删除会话留下的。',
   'Tool outputs': '工具输出',
@@ -3018,7 +3056,6 @@ export const zhTranslations: Record<string, string> = {
   'Mirror every reply here; /sync off stops it': '把所有回复同步到手机；/sync off 关掉',
   'List every command': '列出所有命令',
   'Commands you can send': '可以发的命令',
-  'Allowed groups': '允许的群',
   'Only groups on this list reach the secretary, and only messages from the bound account count. Messages from anyone else in the group are not received.':
     '只有名单里的群会进秘书，而且只认绑定的那个账号。群里其他人的话不会收。',
   'No groups yet: group messages are not received.': '名单为空：群消息一律不收。',
@@ -3026,6 +3063,41 @@ export const zhTranslations: Record<string, string> = {
   'Add group': '添加',
   'Remove {{name}}': '删除 {{name}}',
   'Group chat IDs are numbers, e.g. -1001234567890': '群 chatId 是数字，例如 -1001234567890',
+  'General (default topic)': 'General（默认话题）',
+  'Topic #{{id}}': '话题 #{{id}}',
+  'Make sure the bot is in this group.': '确认 bot 已经在这个群里。',
+  'This chat is not a group': '这不是群聊',
+  'Pick at least one topic': '至少勾选一个话题',
+  'Another secretary already has this group or one of these topics':
+    '这个群或其中某个话题已经交给别的秘书了',
+  'Whole group': '整群',
+  'Groups and topics': '群和话题',
+  'Pick topics': '选话题',
+  'Bind another group or topic': '再绑一个群或话题',
+  'Change topics': '改话题',
+  'What {{name}} hands to this secretary': '{{name}} 交给这个秘书的范围',
+  'Add the bot to the group: tap the button, or add @{{bot}} as a member in Telegram. For a forum group, turn on Topics first.':
+    '把 bot 拉进群：点下面的按钮，或在 Telegram 里把 @{{bot}} 加为群成员。论坛群要先开启话题。',
+  'Send this in the group to hand the whole group to this secretary, or inside a forum topic to hand over only that topic:':
+    '在群里发下面这条，整个群归这个秘书；在论坛话题里发，只把这个话题交给它：',
+  '<code>': '<绑定码>',
+  'Verify a bot above first; the binding code shows up here.':
+    '先在上面验证 bot，绑定码会显示在这里。',
+  'Binding code of this secretary: {{code}}': '这个秘书的绑定码：{{code}}',
+  'Get a binding code': '生成绑定码',
+  'Bound groups show up in the list of this section, where you can switch between the whole group and picked topics.':
+    '绑好的群会出现在这一块的群列表里，可以切换「整群」或「选话题」。',
+  'Claimed by other secretaries on this bot (read only):': '同一个 bot 上其他秘书认领的（只读）：',
+  'belongs to {{owner}}': '归「{{owner}}」',
+  'Groups and topics: {{count}}': '群和话题：{{count}} 个',
+  'Or add a group by its chat ID:': '也可以直接填群的 chat ID 添加：',
+  'Topics: {{names}}': '话题：{{names}}',
+  'Loading topics…': '正在拉取话题…',
+  'Could not load topics: {{reason}}': '拉取话题失败：{{reason}}',
+  'Only topics the bot has seen are listed. If one is missing, send a message in that topic, then refresh. Topics you leave unchecked are ignored.':
+    '列表里只有 bot 见过的话题。缺哪个，就在那个话题里发一句话再点刷新。没勾的话题一律忽略。',
+  'This group has no topics, so it can only be bound as a whole.':
+    '这个群没开话题，只能整群交给秘书。',
   'Allow viewing memory titles on Telegram': '允许在 Telegram 查看记忆标题',
   'Off by default. /memory lists titles only, never the memory text.':
     '默认关闭。/memory 只列标题，不显示记忆正文。',
@@ -3142,6 +3214,7 @@ export const zhTranslations: Record<string, string> = {
     '名字最多 24 个字符，只能包含文字、数字、_ 或 -，不能有空格。',
   'This name is reserved. Choose another one.': '这个名字是保留名，请换一个。',
   'Another member already uses this name.': '已有成员使用这个名字。',
+  'Another secretary already uses this name.': '已有别的秘书叫这个名字。',
   'This member was changed elsewhere. Refresh and try again.':
     '该成员已在别处被修改，请刷新后重试。',
   'This member no longer exists.': '该成员已不存在。',
@@ -3509,6 +3582,57 @@ export const zhTranslations: Record<string, string> = {
   // 秘书界面：侧栏伪项目、工作台、记忆面板
   'Secretary settings': '秘书设置',
   'Re-run setup': '重新设置秘书',
+  // 多秘书
+  Secretaries: '秘书',
+  'New secretary': '新建秘书',
+  'Delete secretary': '删除秘书',
+  'Delete this secretary?': '删除这个秘书？',
+  'This cannot be undone. The sessions it manages stay, but nobody manages them afterwards; its contact bindings are released and its private memory is deleted.':
+    '删除后无法恢复。它管的会话会保留，但之后无人管理；它的联系方式绑定会释放，私有记忆会删除。',
+  'Sessions it manages ({{n}})': '它在管的会话（{{n}}）',
+  'Open todos ({{n}})': '未完成的待办（{{n}}）',
+  'Schedules ({{n}})': '定时（{{n}}）',
+  'Contact bindings ({{n}})': '联系方式绑定（{{n}}）',
+  'Private memories: {{n}}': '私有记忆：{{n}} 条',
+  'Nothing is managed by this secretary.': '这个秘书没有在管的东西。',
+  'Next: confirm again': '下一步：再确认一次',
+  'Transfer to…': '转交给…',
+  'Transferred to {{name}}': '已转交给 {{name}}',
+  'Transfer to {{name}}': '转交给 {{name}}',
+  'Transfer failed': '转交失败',
+  'The other secretary cannot see this project.': '对方秘书看不到这个项目。',
+  'The other secretary has no conversation yet: open it once first.':
+    '对方秘书还没有会话，先打开它一次。',
+  'No secretary manages this session.': '这个会话没有秘书在管。',
+  'This secretary': '本秘书',
+  'All secretaries': '全部秘书',
+  'Filter by secretary': '按秘书筛选',
+  'Bound to groups and topics': '已绑定群与话题',
+  'Groups and topics bound to this secretary': '绑定到这个秘书的群与话题',
+  'Messages there go to this secretary only, and its updates are posted there. One bot can serve several secretaries: each chat or forum topic belongs to one of them.':
+    '那里的消息只交给这个秘书，它的提醒也发到那里。一个 bot 可以给多个秘书用：每个 chat 或 forum 话题只归其中一个。',
+  'Topic {{id}}': '话题 {{id}}',
+  'Add the bot to a group': '把 bot 拉进群',
+  'The code works once. Press Start in a private chat with the bot, or send it in a group or forum topic to bind that place to this secretary instead.':
+    '绑定码只能用一次。在与 bot 的私聊里点 Start，或在群、forum 话题里发送它，把那里绑定到这个秘书。',
+  'Your private chat with this bot already belongs to secretary "{{owner}}". One person has only one private chat with a bot, so bind this secretary to a group or forum topic below, or give it a different bot.':
+    '你和这个 bot 的私聊已经归秘书「{{owner}}」。同一个人和同一个 bot 只有一个私聊，所以请把这个秘书绑到下面的群或论坛话题，或者给它换一个 bot。',
+  'That group or topic already belongs to secretary "{{owner}}". Send the code in another group or topic.':
+    '那个群或话题已经归秘书「{{owner}}」。换一个群或话题发送绑定码。',
+  'The code expired. Generate a new one.': '绑定码已过期，请重新生成。',
+  'The bot got /start without the code. Open the bot with the button or QR code (the link carries the code), or send /start {{code}} yourself.':
+    'bot 收到了不带绑定码的 /start。请用按钮或二维码打开 bot（链接里带着码），或者手动发送 /start {{code}}。',
+  'Your private chat with this bot already belongs to secretary "{{owner}}". Bind this secretary to a group or forum topic instead.':
+    '你和这个 bot 的私聊已经归秘书「{{owner}}」：这个秘书请绑到群或论坛话题。',
+  'This code has expired': '绑定码已过期',
+  '@{{bot}} is shared by {{count}} secretaries': '@{{bot}} 由 {{count}} 个秘书共用',
+  'Each private chat, group or forum topic belongs to one secretary. A topic bound on its own wins over the whole group. Places nobody bound get no reply.':
+    '每个私聊、群或论坛话题只归一个秘书；单独绑定的话题优先于整群；没人绑定的地方不回话。',
+  'Private chat with @{{name}}': '与 @{{name}} 的私聊',
+  'this secretary': '本秘书',
+  'Telegram off': 'Telegram 已关',
+  'Nothing bound yet': '还没有绑定任何地方',
+  'taken by {{owner}}': '已归 {{owner}}',
   'Waiting for you': '等你回答',
   'Waiting on you': '需要你处理',
   'Open session': '打开会话',
@@ -3524,6 +3648,8 @@ export const zhTranslations: Record<string, string> = {
   'The session was deleted': '会话已删除',
   '{{n}} waiting': '{{n}} 件等你',
   '{{n}} running': '{{n}} 件在跑',
+  '{{n}} dispatched tasks running': '派出的 {{n}} 件活在跑',
+  'Unknown source': '未知来源',
   'Nothing running': '没有在跑的活',
   'Waiting for dependencies': '等依赖',
   'After {{ids}}': '等这些会话结束：{{ids}}',
@@ -3690,6 +3816,7 @@ export const zhTranslations: Record<string, string> = {
   'Look at {{name}}': '查看 {{name}}',
   Dimensions: '尺寸',
   'File size': '文件大小',
+  'Image unavailable': '图片无法显示',
   'Cleanup candidates · {{count}}': '可清理项 · {{count}}',
   'Clean up {{count}} items': '清理 {{count}} 项',
   '{{count}} items': '{{count}} 项',
@@ -3848,6 +3975,54 @@ export const zhTranslations: Record<string, string> = {
   Answered: '已回答',
   'Answering…': '回答中…',
   'Answered {{count}} questions': '回答了 {{count}} 个提问',
+  'Background task wrap-up': '后台任务收尾',
+  'Stop {{stopped}} · Keep {{kept}}': '停 {{stopped}} · 留 {{kept}}',
+  'Settling…': '收尾中…',
+  'Not running': '未在运行',
+  Kept: '已保留',
+  Keep: '保留',
+  Unkeep: '取消保留',
+  'Idle {{duration}}': '疑似闲置 {{duration}}',
+  '{{n}} h': '{{n}} 小时',
+  '{{h}} h {{m}} min': '{{h}} 小时 {{m}} 分钟',
+  'Kept by you · {{detail}}': '你手动保留 · {{detail}}',
+  'Kept: {{reason}}': '保留：{{reason}}',
+  'No new output': '无新输出',
+  'Port {{ports}}': '端口 {{ports}}',
+  Ports: '端口',
+  'No connections': '无连接',
+  'Not listening': '未监听',
+  'Running for {{duration}} · Suspected idle tasks are never stopped automatically':
+    '已跑 {{duration}} · 疑似闲置不会自动停止',
+  'Running for {{duration}}': '已跑 {{duration}}',
+  'Add a reason (optional)': '补一句保留理由（可选）',
+  'Kept by the agent at {{time}} when wrapping up': 'agent 在 {{time}} 回合收尾时保留',
+  'Kept by you at {{time}}': '你在 {{time}} 手动保留',
+  'Recent output': '最近输出',
+  '{{count}} background tasks are still undeclared; the next message asks the agent to stop each one or state why it keeps running':
+    '还有 {{count}} 个后台任务没表态，下一条消息会要求 agent 逐个停止或写明保留理由',
+  '{{count}} suspected idle': '{{count}} 个疑似闲置',
+  'from {{count}} sessions': '来自 {{count}} 个会话',
+  'Stop selected': '停止所选',
+  'No background tasks are running': '没有在跑的后台任务',
+  'Running for': '已运行',
+  'Rule: no new output for 30 minutes, no active connections on listening ports, CPU near 0, all at once. Kept tasks are excluded for an hour.':
+    '判定：30 分钟无新输出、监听端口无活跃连接、CPU 近 0，三条同时满足。已保留的任务 1 小时内不计入。',
+  'Suspected idle only': '只看疑似闲置',
+  'Select all tasks of this session': '选中这个会话的全部任务',
+  'Session not open': '会话未打开',
+  'Select task': '选中任务',
+  'Stop {{count}} background tasks?': '停止 {{count}} 个后台任务？',
+  '{{title}} (not open)': '{{title}}（未打开）',
+  'Stop {{count}}': '停止 {{count}} 个',
+  '{{n}} background tasks running': '{{n}} 个后台任务在跑',
+  '{{n}} suspected idle': '{{n}} 个疑似闲置',
+  'Background tasks of {{title}}': '{{title}} 的后台任务',
+  'Port {{ports}} has no connections · CPU 0%': '端口 {{ports}} 无连接 · CPU 0%',
+  'All tasks': '全部任务',
+  'Stop suspected idle leftover tasks': '停止疑似闲置的遗留任务',
+  Status: '状态',
+  'Done ({{count}} kept tasks)': '已完成（保留 {{count}} 个任务）',
 };
 
 export function normalizeLocale(input?: string): Locale {

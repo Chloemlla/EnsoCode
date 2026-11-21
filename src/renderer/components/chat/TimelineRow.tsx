@@ -8,6 +8,7 @@ import { toLocalImageUrl } from '@shared/localImage';
 import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
 import type { MaskReport } from '@shared/privacyMask/report';
 import { parseInboundMessage } from '@shared/secretary/inbound';
+import { splitInboundImageBlock } from '@shared/secretary/inboundImages';
 import {
   goalHeadline,
   type InjectedSegment,
@@ -49,6 +50,7 @@ import {
   GitCompare,
   History,
   Hourglass,
+  Info,
   ListTodo,
   LoaderCircle,
   MessageCircleQuestion,
@@ -81,6 +83,7 @@ import {
   secretaryProposalId,
 } from '@/components/secretary/SecretaryProposalRow';
 import { TelegramInboundCard } from '@/components/secretary/TelegramInboundCard';
+import type { SecretaryFaceModel } from '@/components/secretary/useSecretaryFace';
 import { useSecretaryFace } from '@/components/secretary/useSecretaryFace';
 import {
   Dialog,
@@ -134,6 +137,7 @@ import { useChatHost } from './chatHost';
 import { compactionFreedPercent } from './contextBreakdown';
 import { EditDiff } from './EditDiff';
 import { renderHighlighted, useChatSearchHighlight } from './highlightQuery';
+import { InboundImageList } from './InboundImageList';
 import { GOAL_FRAME, GoalIcon, NOTICE_BOX, NOTICE_FRAME, NOTICE_ICON } from './injectedVisual';
 import { LocalFileTrigger, Markdown } from './Markdown';
 import { MemoryCaptureResult, MemorySearchResults } from './MemorySearchResults';
@@ -151,7 +155,7 @@ import { parseSubagentReceipt } from './subagentReceipt';
 import { TerminalOutput } from './TerminalOutput';
 import { TodoList, TodoProgress } from './TodoBar';
 import { ToolCallCards } from './ToolCallCard';
-import { TurnWaterfallPanel, useTurnHasTiming } from './TurnWaterfallPanel';
+import { ImageViewResult } from './ToolImagePreview';
 import { useToolHold } from './toolHold';
 import { ZoomableImage } from './ZoomableImage';
 
@@ -163,6 +167,28 @@ const perfEqual = (a?: TurnPerf, b?: TurnPerf): boolean =>
     a.turnMs === b.turnMs &&
     a.ttftMs === b.ttftMs &&
     a.tps === b.tps);
+
+type CardPeers = Extract<TimelineItem, { kind: 'tool' }>['cardPeers'];
+
+/** 卡片后续调用逐条比较；图片按 base64 判等，不进 JSON.stringify */
+function cardPeersEqual(a: CardPeers, b: CardPeers): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  return (
+    left.length === right.length &&
+    left.every((peer, index) => {
+      const other = right[index];
+      return (
+        other !== undefined &&
+        peer.key === other.key &&
+        peer.state === other.state &&
+        peer.output === other.output &&
+        peer.image?.data === other.image?.data &&
+        JSON.stringify(peer.args ?? null) === JSON.stringify(other.args ?? null)
+      );
+    })
+  );
+}
 
 interface TimelineRowProps {
   item: TimelineItem;
@@ -227,6 +253,8 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.writeContent === b.writeContent &&
         a.fileChanges === b.fileChanges &&
         a.imagePath === b.imagePath &&
+        a.image?.data === b.image?.data &&
+        a.image?.mimeType === b.image?.mimeType &&
         a.generatedImages === b.generatedImages &&
         a.todos === b.todos &&
         a.durationMs === b.durationMs &&
@@ -251,7 +279,7 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.pluginArtifacts === b.pluginArtifacts &&
         a.shellFailure === b.shellFailure &&
         JSON.stringify(a.args ?? null) === JSON.stringify(b.args ?? null) &&
-        JSON.stringify(a.cardPeers ?? null) === JSON.stringify(b.cardPeers ?? null)
+        cardPeersEqual(a.cardPeers, b.cardPeers)
       );
     case 'tool-group':
       return (
@@ -936,14 +964,31 @@ function UserText({
   text,
   searchQuery = '',
   activeNth = -1,
+  thumbnails = 0,
+  align = 'end',
 }: {
   text: string;
   searchQuery?: string;
   activeNth?: number;
+  /** 气泡上方已显示的缩略图张数 */
+  thumbnails?: number;
+  align?: 'start' | 'end';
 }) {
   const { t } = useI18n();
   const host = useChatHost();
   const botHost = Boolean(host?.speaker || host?.botSession);
+  // 秘书贴图时 Main 在正文末尾追加的路径行：不露原文，换成标签 / 提示
+  const attached = splitInboundImageBlock(text);
+  if (attached) {
+    return (
+      <>
+        {attached.text && (
+          <UserText text={attached.text} searchQuery={searchQuery} activeNth={activeNth} />
+        )}
+        <InboundImageList entries={attached.entries} thumbnails={thumbnails} align={align} />
+      </>
+    );
+  }
   // 手机发来的话：卡片展示，正文按 markdown 渲染，不露包裹层
   const inbound = parseInboundMessage(text);
   if (inbound) return <TelegramInboundCard message={inbound} />;
@@ -1129,16 +1174,19 @@ export function ReplyHeader({
   at,
   privacyMask,
   secretarySession = false,
+  face: faceOverride,
 }: {
   model?: string;
   at?: number;
   privacyMask?: MaskReport;
   /** 这条时间线自己的会话属于秘书项目，与全局当前会话无关 */
   secretarySession?: boolean;
+  /** 上层按会话所属秘书算好的脸；不传就用当前聚焦的秘书 */
+  face?: SecretaryFaceModel | null;
 }) {
   const host = useChatHost();
   const face = useSecretaryFace();
-  const secretarySpeaker = secretarySession ? face : null;
+  const secretarySpeaker = secretarySession ? (faceOverride ?? face) : null;
   const speaker = host?.speaker ?? (host ? null : secretarySpeaker);
   const secretaryMark = !host && secretarySpeaker ? true : undefined;
   const meta = [model, typeof at === 'number' ? formatClock(at) : null].filter(Boolean).join(' · ');
@@ -1210,7 +1258,13 @@ export const TimelineRow = memo(function TimelineRow({
             />
           ))}
           {item.text && (
-            <UserText text={item.text} searchQuery={searchQuery} activeNth={activeNth} />
+            <UserText
+              text={item.text}
+              searchQuery={searchQuery}
+              activeNth={activeNth}
+              thumbnails={item.images.length}
+              align={fromMain ? 'start' : 'end'}
+            />
           )}
           {isCollapsed ? (
             <CollapsedTurnBar
@@ -1458,6 +1512,20 @@ function SessionCustomRow({ entry }: { entry: AgentSessionCustomEntry }) {
   }
 
   if (entry.kind === 'tool-batch-label') return null;
+  if (entry.kind === 'task-wrap-up-nudge') {
+    return (
+      <div
+        data-enso="task-wrap-up-nudge"
+        className="my-1 flex items-center gap-1.5 text-[12px] text-subtle-foreground"
+      >
+        <Info className="size-3.5 shrink-0" />
+        {t(
+          '{{count}} background tasks are still undeclared; the next message asks the agent to stop each one or state why it keeps running',
+          { count: entry.count }
+        )}
+      </div>
+    );
+  }
   const receipt = entry.receipt;
   const succeeded = receipt.outcome === 'succeeded';
   return (
@@ -1926,12 +1994,6 @@ function TextRow({
     messageIndex,
     sessionId: host ? host.sessionId : localSessionId,
   };
-  // 瀑布只看本机会话：远端 / bot 视图的消息不在本地 store
-  const timed = useTurnHasTiming(
-    !host && item.turnEnd && item.turnDurationMs !== undefined ? localSessionId : null,
-    messageIndex
-  );
-  const [waterfallOpen, setWaterfallOpen] = useState(false);
   return (
     <div data-enso="message-assistant" className="group text-(length:--chat-body-size)">
       <Markdown
@@ -1946,41 +2008,20 @@ function TextRow({
       />
       {item.turnEnd && !item.streaming && host?.turnFooter?.(Number(item.key.split('-')[0]))}
       {!item.streaming && (
-        <div
-          className={cn(
-            'mt-1 flex items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100',
-            waterfallOpen && 'opacity-100'
-          )}
-        >
+        <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
           <PluginMessageActions position="left" {...pluginActionProps} />
           <CopyButton text={item.text} />
           <PluginMessageActions position="right" {...pluginActionProps} />
           {item.turnEnd && <ForkButton messageIndex={Number(item.key.split('-')[0])} />}
           {item.timestamp && !item.turnEnd && <span>{formatClock(item.timestamp)}</span>}
-          {item.turnDurationMs !== undefined &&
-            (timed ? (
-              <button
-                type="button"
-                aria-expanded={waterfallOpen}
-                onClick={() => setWaterfallOpen((open) => !open)}
-                className="flex items-center gap-0.5 transition-colors hover:text-foreground"
-              >
-                {t('took {{duration}}', { duration: formatDuration(item.turnDurationMs) })}
-                <ChevronRight
-                  className={cn('h-3 w-3 transition-transform', waterfallOpen && 'rotate-90')}
-                />
-              </button>
-            ) : (
-              <span>
-                {item.timestamp && !item.turnEnd && '· '}
-                {t('took {{duration}}', { duration: formatDuration(item.turnDurationMs) })}
-              </span>
-            ))}
+          {item.turnDurationMs !== undefined && (
+            <span>
+              {item.timestamp && !item.turnEnd && '· '}
+              {t('took {{duration}}', { duration: formatDuration(item.turnDurationMs) })}
+            </span>
+          )}
           {perfStr && <span>· {perfStr}</span>}
         </div>
-      )}
-      {waterfallOpen && timed && localSessionId && (
-        <TurnWaterfallPanel conversationId={localSessionId} messageIndex={messageIndex} />
       )}
     </div>
   );
@@ -2816,6 +2857,8 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
                   path={item.imagePath}
                   fallback={<ReadFileView path={item.summary} contents={item.output ?? ''} />}
                 />
+              ) : item.name === 'image_view' && item.state === 'ok' ? (
+                <ImageViewResult image={item.image} output={item.output} />
               ) : item.name === 'read' ? (
                 <ReadFileView path={item.summary} contents={item.output ?? ''} />
               ) : item.name === 'subagent' &&

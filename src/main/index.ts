@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { electronApp, optimizer } from '@electron-toolkit/utils';
 import type { AppExitReason } from '@shared/types/ipc';
+import { DEFAULT_UPDATE_CHANNEL, isUpdateChannel } from '@shared/updater/channel';
+import { resolveAutoRestartMode } from '@shared/updater/idleRestart';
 import { app, BrowserWindow, crashReporter, dialog } from 'electron';
 import { syncDropShelf } from './desktop/dropShelf';
 import {
@@ -20,7 +22,12 @@ import {
 } from './ipc/appRestart';
 import { registerDesktopIpcHandlers } from './ipc/desktop';
 import { needsQuitCheckpoint } from './ipc/sessionIndex';
-import { consumeTrayReenterAfterUpdate, readLocale, readSettings } from './ipc/settings';
+import {
+  consumeTrayReenterAfterUpdate,
+  readLocale,
+  readSettings,
+  startProviderModelRefresh,
+} from './ipc/settings';
 import {
   noteOpenFolder,
   noteOpenFolderArgv,
@@ -39,18 +46,19 @@ import {
   startAgentWorker,
   stopAgentWorkerForQuit,
 } from './services/agentHost';
+import { appendAgentWorkerExitLog } from './services/agentWorkerExit';
 import { allowAppQuit, setBeforeConfirmedQuit } from './services/appCloseConfirm';
 import { installAppMenu, setAppMenuActions } from './services/appMenu';
 import { attachAppQuitDrain } from './services/appQuitDrain';
+import { configureQuitWatchdog, quitWatchdog } from './services/appQuitWatchdog';
 import { createAppRestart, restartOverlayFor } from './services/appRestart';
 import {
   ensureTray,
-  enterServerMode,
-  isServerMode,
   leaveServerMode,
   restoreFromSecondInstance,
   scheduleReenterServerMode,
   shouldQuitOnWindowAllClosed,
+  toggleTrayMode,
 } from './services/appServerMode';
 import { browserHost } from './services/browserHost';
 import { getCaCertConfig } from './services/caCert';
@@ -100,6 +108,7 @@ import {
   syncTrayToggleShortcut,
 } from './services/trayToggleShortcut';
 import { createMainWindow, getMainWindow } from './windows/MainWindow';
+import { isVerifyLaunch } from './windows/verifyLaunch';
 import { applyWindowsChromiumSwitches } from './windows/win32Restore';
 import { resolveWindowsAppUserModelId } from './windows/windowIcon';
 
@@ -113,6 +122,9 @@ if (!app.isPackaged) {
   );
 }
 applyWindowsChromiumSwitches(app.commandLine);
+
+// 验收实例 app ready 前就降为 accessory：不进 Dock、不会被激活成前台应用
+if (isVerifyLaunch() && process.platform === 'darwin') app.setActivationPolicy('accessory');
 
 // 自动化可在开发环境显式指定 userData；打包版永不接受环境覆盖。
 // dev 缺省隔离到 appData/enso-code-dev：与打包版彻底分离，避免单实例锁 /
@@ -155,9 +167,15 @@ function showMenuError(message: string): void {
 // 菜单「重启」：点下去主窗口立刻弹「正在重启」；先等 agent 安全点（有命令在跑弹层改成等命令、可强制退出），
 // 再退出；will-quit 收尾拿同一个结果，新实例冷启动按清单续跑
 const appRestart = createAppRestart({
-  relaunch: () => app.relaunch(),
+  relaunch: () => {
+    app.relaunch();
+    quitWatchdog.begin('restart', '等 agent 安全点', { relaunched: true });
+  },
   allowQuit: allowAppQuit,
-  quit: () => app.quit(),
+  quit: () => {
+    quitWatchdog.step('关窗退出', { finishing: true });
+    app.quit();
+  },
   prepareQuit: (onWaitingForTools) =>
     prepareAgentWorkerForQuit({
       reason: 'quit',
@@ -178,13 +196,18 @@ const appRestart = createAppRestart({
 // Cmd+Q / 关窗 / 菜单退出：确认退出后、窗口还在时先等安全点，有命令在跑主窗口弹等待层；
 // will-quit 收尾拿同一个结果
 setBeforeConfirmedQuit(async () => {
-  await waitWithExitDialog('quit', (onWaitingForTools) =>
-    prepareAgentWorkerForQuit({
-      reason: 'quit',
-      hasRunningSessions: needsQuitCheckpoint,
-      onWaitingForTools,
-    })
-  );
+  quitWatchdog.begin('quit', '等 agent 安全点');
+  try {
+    await waitWithExitDialog('quit', (onWaitingForTools) =>
+      prepareAgentWorkerForQuit({
+        reason: 'quit',
+        hasRunningSessions: needsQuitCheckpoint,
+        onWaitingForTools,
+      })
+    );
+  } finally {
+    quitWatchdog.step('关窗退出', { finishing: true });
+  }
 });
 
 /** 等待弹层上点「强制退出」：重启走重启自己的强制路径；安装更新与退出结束等待，各自照常往下走 */
@@ -198,6 +221,8 @@ function forceExitWait(exit: AppExitReason): void {
 }
 
 function registerEnsoProtocol(): void {
+  // 验收实例不改系统的 URL 处理程序，免得把用户正式版的 enso:// 深链抢走
+  if (isVerifyLaunch()) return;
   if (process.defaultApp && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient('enso', process.execPath, [path.resolve(process.argv[1])]);
     return;
@@ -218,6 +243,11 @@ if (!gotTheLock) {
     });
   }
   startRunningSessionsHeartbeat();
+  configureQuitWatchdog({
+    relaunch: () => app.relaunch(),
+    exit: () => app.exit(0),
+    log: (message) => appendAgentWorkerExitLog(agentDataDir(), message),
+  });
   startExitInterruptRecovery();
   pluginInstallInbox.noteArgv(process.argv);
   secretaryLinkInbox.noteArgv(process.argv);
@@ -257,7 +287,7 @@ if (!gotTheLock) {
     );
 
     // dev 下 dock 显示 Electron 默认图标；手动设为 app 图标（打包由 electron-builder 处理）
-    if (!app.isPackaged && process.platform === 'darwin') {
+    if (!app.isPackaged && process.platform === 'darwin' && !isVerifyLaunch()) {
       app.dock?.setIcon(path.join(app.getAppPath(), 'build', 'icon.png'));
     }
     setAppMenuActions({
@@ -328,10 +358,7 @@ if (!gotTheLock) {
     // 手机上的「在应用里打开」与深链走同一个入口
     setSecretaryOpenTarget((target) => openSecretaryConversationFromProtocol(target));
     secretaryLinkInbox.start((target) => openSecretaryConversationFromProtocol(target));
-    setTrayToggleHandler(() => {
-      if (isServerMode()) leaveServerMode();
-      else void enterServerMode();
-    });
+    setTrayToggleHandler(toggleTrayMode);
     // 协议处理器要赶在窗口加载内容之前注册（local-image:// 资源依赖它）。
     registerLocalImageProtocolHandler();
     registerNodeSettingsProtocolHandler();
@@ -347,6 +374,7 @@ if (!gotTheLock) {
       | undefined;
     getProxyConfig().initFromConfig(persisted?.state?.proxyMode, persisted?.state?.customProxyUrl);
     getCaCertConfig().initFromConfig(persisted?.state?.customCaCertPath);
+    startProviderModelRefresh();
     const persistedState = (
       persisted?.state && typeof persisted.state === 'object' ? persisted.state : {}
     ) as Record<string, unknown>;
@@ -413,32 +441,43 @@ if (!gotTheLock) {
   });
   // node-pty TSFN / llama AsyncWorker 在 FreeEnvironment 期间回调会 SIGABRT；
   // 两步必须共用一次 preventDefault，谁先 app.quit 都会拆掉另一边的环境。
-  attachAppQuitDrain(app, [
-    {
-      begin: disposeAllTerminals,
-      shouldWait: hasPendingPtys,
-      wait: waitPtyQuitIdle,
-    },
-    {
-      shouldWait: llamaRuntimeActive,
-      wait: async () => {
-        await awaitMemoryEmbeddingClose();
-        await releaseLocalChatSlot();
-        await disposeLlamaRuntime();
+  attachAppQuitDrain(
+    app,
+    [
+      {
+        name: '终端',
+        begin: disposeAllTerminals,
+        shouldWait: hasPendingPtys,
+        wait: waitPtyQuitIdle,
       },
-    },
-    {
-      shouldWait: agentWorkerAlive,
-      // 先等 worker 到安全点、断点与恢复清单落盘（有超时兜底），再照常收尾
-      wait: async () => {
-        await prepareAgentWorkerForQuit({
-          reason: 'quit',
-          hasRunningSessions: needsQuitCheckpoint,
-        });
-        await stopAgentWorkerForQuit(3_000);
+      {
+        name: 'llama',
+        shouldWait: llamaRuntimeActive,
+        wait: async () => {
+          await awaitMemoryEmbeddingClose();
+          await releaseLocalChatSlot();
+          await disposeLlamaRuntime();
+        },
       },
-    },
-  ]);
+      {
+        name: 'agent worker',
+        shouldWait: agentWorkerAlive,
+        // 先等 worker 到安全点、断点与恢复清单落盘（有超时兜底），再照常收尾
+        wait: async () => {
+          await prepareAgentWorkerForQuit({
+            reason: 'quit',
+            hasRunningSessions: needsQuitCheckpoint,
+          });
+          await stopAgentWorkerForQuit(3_000);
+        },
+      },
+    ],
+    // 窗口已关、退出不可撤回：之后卡住由看门狗限时强退
+    (pending) =>
+      quitWatchdog.step(pending.length ? `will-quit 收尾：${pending.join('、')}` : 'will-quit', {
+        finishing: true,
+      })
+  );
 }
 
 /** 打包环境下启动自动更新(dev 无 app-update.yml,electron-updater 会报错;Linux deb 由 IPC 层守卫) */
@@ -447,9 +486,18 @@ async function initAutoUpdater(window: BrowserWindow): Promise<void> {
   if (process.platform === 'linux' && !process.env.APPIMAGE) return;
   // 读持久化设置里的 autoUpdate(zustand persist 形状:{ state: {...} });缺省 true
   const persisted = readSettings()?.['enso-settings'] as
-    | { state?: { autoUpdate?: boolean; autoRestartWhenIdle?: boolean } }
+    | { state?: { autoUpdate?: boolean; updateChannel?: unknown } }
     | undefined;
   const autoUpdate = persisted?.state?.autoUpdate ?? true;
+  const channel = isUpdateChannel(persisted?.state?.updateChannel)
+    ? persisted.state.updateChannel
+    : DEFAULT_UPDATE_CHANNEL;
   const { autoUpdaterService } = await import('./services/updater/AutoUpdater');
-  autoUpdaterService.init(window, autoUpdate, persisted?.state?.autoRestartWhenIdle === true);
+  autoUpdaterService.init(
+    window,
+    autoUpdate,
+    // 旧版布尔开关：开着按「空闲时」，关着按「关」
+    resolveAutoRestartMode(persisted?.state),
+    channel
+  );
 }

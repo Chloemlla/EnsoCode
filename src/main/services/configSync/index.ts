@@ -47,7 +47,7 @@ import {
   validateBundle,
 } from './codec';
 import { planImport } from './merge';
-import type { ConfigSyncBundle } from './types';
+import { type ConfigSyncBundle, PROVIDER_DEVICE_FIELDS } from './types';
 
 type SenderKey = number;
 const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
@@ -74,6 +74,10 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   windowsLocalShell: { mode: 'excluded', reason: 'platform-specific shell selection' },
   exploreFoldEnabled: { mode: 'portable' },
   rtkEnabled: { mode: 'portable' },
+  longCacheRetention: {
+    mode: 'excluded',
+    reason: 'device-local prompt cache cost policy',
+  },
   computerPreview: { mode: 'excluded', reason: 'macOS-only desktop display preference' },
   computerAllowAllApps: { mode: 'excluded', reason: 'device-local computer control trust' },
   openLinksInBuiltinBrowser: { mode: 'excluded', reason: 'desktop link-opening preference' },
@@ -122,7 +126,8 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   protectedActionsInCode: { mode: 'excluded', reason: 'device-local safety preference' },
   dcgEnabled: { mode: 'excluded', reason: 'dcg binary is installed on this device' },
   autoUpdate: { mode: 'excluded', reason: 'device update policy' },
-  autoRestartWhenIdle: { mode: 'excluded', reason: 'device update policy' },
+  autoRestartForUpdate: { mode: 'excluded', reason: 'device update policy' },
+  updateChannel: { mode: 'excluded', reason: 'device update policy' },
   pluginAutoUpdate: { mode: 'excluded', reason: 'device update policy' },
   proxyMode: { mode: 'excluded', reason: 'device network configuration' },
   customProxyUrl: { mode: 'excluded', reason: 'device network configuration may contain secrets' },
@@ -317,6 +322,7 @@ function portableState(state: Record<string, unknown>): Record<string, unknown> 
   for (const provider of Array.isArray(result.providers) ? result.providers : []) {
     if (provider && typeof provider === 'object') {
       const entry = provider as Record<string, unknown>;
+      for (const field of PROVIDER_DEVICE_FIELDS) delete entry[field];
       if (entry.oauthAccountKey !== undefined) {
         delete entry.oauthAccountKey;
         const omitted = Array.isArray(entry.omittedFields)

@@ -40,9 +40,18 @@ vi.mock('@/components/ui/context-menu', async () => {
     ContextMenuSeparator: () => null,
   };
 });
+vi.mock('@/components/ui/preview-card', () => ({
+  PreviewCard: ({ children }: { children: ReactNode }) => <>{children}</>,
+  PreviewCardTrigger: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  PreviewCardPopup: ({ children }: { children: ReactNode }) => (
+    <div data-enso="popup">{children}</div>
+  ),
+}));
 
+import { runningBySecretary, SecretaryDispatchBadge } from './SecretaryRunningOrigins';
 import {
   SecretaryCollapsedButton,
+  SecretaryGroupHeader,
   SecretarySidebarSection,
   sidebarProjects,
 } from './SecretarySidebarSection';
@@ -185,6 +194,19 @@ describe('secretarySectionView', () => {
       delete (globalThis as Record<string, unknown>)[REMOTE_LOCAL_IMAGE_PREFIX_KEY];
     }
   });
+
+  it('图片地址带上这份状态所属的秘书 id；显式传入的 id 优先', () => {
+    const owned = state({
+      secretaryId: 's-248c5247',
+      profile: { ...profile, avatar: { color: '#ff00aa', imageVersion: 2 } },
+    });
+    expect(secretarySectionView(owned, t)?.image).toBe(
+      'local-image://secretary-avatar/avatar.png?v=2&s=s-248c5247'
+    );
+    expect(secretarySectionView(owned, t, 'other')?.image).toBe(
+      'local-image://secretary-avatar/avatar.png?v=2&s=other'
+    );
+  });
 });
 
 describe('sidebarProjects', () => {
@@ -302,6 +324,116 @@ describe('SecretarySidebarSection', () => {
     expect(handlers.onToggleFold).toHaveBeenCalledTimes(1);
   });
 
+  it('只有一个秘书时，折叠后箭头顶掉头像', async () => {
+    await render(
+      <SecretarySidebarSection view={view()} folded {...actions()}>
+        {null}
+      </SecretarySidebarSection>
+    );
+    const avatar = container.querySelector('[data-enso="secretary-avatar"]');
+    expect(avatar?.parentElement?.className).toContain('hidden');
+    const icon = container.querySelector('[data-enso="secretary-fold-icon"]');
+    expect(icon?.className).toContain('flex');
+    expect(icon?.className).not.toContain('absolute');
+  });
+
+  it('多个秘书折叠后头像仍在，箭头叠在头像上、平时不显示', async () => {
+    await render(
+      <SecretarySidebarSection view={view()} folded keepAvatar {...actions()}>
+        {null}
+      </SecretarySidebarSection>
+    );
+    const avatar = container.querySelector('[data-enso="secretary-avatar"]');
+    expect(avatar).not.toBeNull();
+    expect(avatar?.parentElement?.className ?? '').not.toContain('hidden');
+    const icon = container.querySelector('[data-enso="secretary-fold-icon"]');
+    expect(icon?.className).toContain('absolute');
+    expect(icon?.className).toContain('inset-0');
+    expect(icon?.className).toContain('hidden');
+    expect(icon?.className).toContain('group-hover:flex');
+    expect(icon?.className).toContain('group-has-[:focus-visible]:flex');
+    expect(icon?.querySelector('svg')?.getAttribute('class')).toContain('-rotate-90');
+  });
+
+  it('多个秘书展开时箭头同样只在悬停或键盘聚焦时出现', async () => {
+    await render(
+      <SecretarySidebarSection view={view()} folded={false} keepAvatar {...actions()}>
+        {null}
+      </SecretarySidebarSection>
+    );
+    const icon = container.querySelector('[data-enso="secretary-fold-icon"]');
+    expect(icon?.className).toContain('hidden');
+    expect(icon?.className).toContain('group-hover:flex');
+    expect(icon?.className).not.toContain('group-hover:hidden');
+    expect(container.querySelector('[data-enso="secretary-avatar"]')).not.toBeNull();
+  });
+
+  it('触屏上箭头不叠在头像上：头像始终露出，行尾另给折叠按钮', async () => {
+    for (const keepAvatar of [true, false]) {
+      for (const folded of [true, false]) {
+        const handlers = actions();
+        await render(
+          <SecretarySidebarSection
+            view={view()}
+            folded={folded}
+            keepAvatar={keepAvatar}
+            {...handlers}
+          >
+            {null}
+          </SecretarySidebarSection>
+        );
+        const icon = container.querySelector('[data-enso="secretary-fold-icon"]');
+        expect(icon?.className).toContain('[@media(hover:none)]:hidden!');
+        expect(icon?.className).not.toContain('[@media(hover:none)]:flex');
+        const avatarBox = container.querySelector('[data-enso="secretary-avatar"]')?.parentElement;
+        if (avatarBox?.className.split(' ').includes('hidden')) {
+          expect(avatarBox.className).toContain('[@media(hover:none)]:block');
+        }
+        const trailing = container.querySelector<HTMLElement>(
+          '[data-enso="secretary-fold-trailing"]'
+        );
+        expect(trailing?.className.split(' ')).toContain('hidden');
+        expect(trailing?.className).toContain('[@media(hover:none)]:flex');
+        expect(trailing?.getAttribute('aria-expanded')).toBe(String(!folded));
+        expect(trailing?.querySelector('svg')?.getAttribute('class')?.includes('-rotate-90')).toBe(
+          folded
+        );
+        act(() => trailing?.click());
+        expect(handlers.onToggleFold).toHaveBeenCalledTimes(1);
+      }
+    }
+  });
+
+  it('配对页面里头像走隧道地址，不带本机路径；加载失败退回生成头像', async () => {
+    (globalThis as Record<string, unknown>)[REMOTE_LOCAL_IMAGE_PREFIX_KEY] = '/desk/li/pair/';
+    try {
+      const remote = view({
+        secretaryId: 's-ken',
+        profile: { ...profile, avatar: { color: '#ff00aa', imageVersion: 3, imageHash: 'abcd' } },
+      });
+      await render(
+        <SecretarySidebarSection view={remote} folded keepAvatar {...actions()}>
+          {null}
+        </SecretarySidebarSection>
+      );
+      const img = container.querySelector('img[data-enso="secretary-avatar-face"]');
+      const src = img?.getAttribute('src') ?? '';
+      expect(src.startsWith('/desk/li/pair/')).toBe(true);
+      expect(decodeURIComponent(src)).toBe(
+        '/desk/li/pair/local-image://secretary-avatar/avatar.png?v=3&h=abcd&s=s-ken'
+      );
+      await act(async () => {
+        img?.dispatchEvent(new window.Event('error'));
+      });
+      const face = container.querySelector('[data-enso="secretary-avatar-face"]');
+      expect(face?.tagName).toBe('SPAN');
+      expect(face?.getAttribute('data-generated')).toBe('true');
+      expect(face?.querySelector('svg')).not.toBeNull();
+    } finally {
+      delete (globalThis as Record<string, unknown>)[REMOTE_LOCAL_IMAGE_PREFIX_KEY];
+    }
+  });
+
   it('右键只有新会话、设置、重新设置秘书', async () => {
     const handlers = actions();
     await render(
@@ -320,6 +452,110 @@ describe('SecretarySidebarSection', () => {
     ]);
     act(() => menuItem('[Re-run setup]')?.click());
     expect(handlers.onReset).toHaveBeenCalledTimes(1);
+  });
+
+  it('两个秘书各派一件：计数与悬停列表只落在各自的分区和会话行', async () => {
+    const secretaries = [
+      {
+        id: 'a',
+        conversations: ['sa', 'sa2'],
+        board: [{ ...sessionCard('ca'), secretaryConversationId: 'sa' }],
+      },
+      {
+        id: 'b',
+        conversations: ['sb'],
+        board: [{ ...sessionCard('cb'), secretaryConversationId: 'sb' }],
+      },
+    ];
+    const states = Object.fromEntries(
+      secretaries.map((entry) => [
+        entry.id,
+        state({ profile, board: { needsYou: [], running: entry.board, done: [], todos: [] } }),
+      ])
+    );
+    const running = runningBySecretary(secretaries, states, () => true);
+    await render(
+      <div>
+        {secretaries.map((entry) => {
+          const origins = running[entry.id];
+          return (
+            <SecretarySidebarSection
+              key={entry.id}
+              view={view({ profile, board: states[entry.id]?.board })}
+              folded={false}
+              secretaryId={entry.id}
+              runningOrigins={
+                origins && { groups: origins.groups, titleOf: (id) => id, onSelect: vi.fn() }
+              }
+              {...actions()}
+            >
+              {entry.conversations.map((id) => (
+                <div key={id} data-row={id}>
+                  <SecretaryDispatchBadge count={origins?.counts[id]} />
+                </div>
+              ))}
+            </SecretarySidebarSection>
+          );
+        })}
+      </div>
+    );
+    const section = (id: string) =>
+      container.querySelector(`[data-enso="secretary-section"][data-secretary-id="${id}"]`);
+    const badge = (id: string) =>
+      container.querySelector(`[data-row="${id}"] [data-enso="secretary-dispatch-running"]`)
+        ?.textContent ?? null;
+    const origins = (id: string) =>
+      [...(section(id)?.querySelectorAll('[data-enso="secretary-running-origin"]') ?? [])].map(
+        (node) => node.textContent
+      );
+    expect([badge('sa'), badge('sa2'), badge('sb')]).toEqual(['1', null, '1']);
+    expect(section('a')?.querySelector('[data-row="sb"]')).toBeNull();
+    expect(origins('a')).toEqual(['sa1跑测试']);
+    expect(origins('b')).toEqual(['sb1跑测试']);
+  });
+});
+
+describe('SecretaryGroupHeader', () => {
+  it('整块标题的箭头常显，样式与临时会话分组一致，折叠只旋转不挪字', async () => {
+    const onToggleFold = vi.fn();
+    await render(
+      <SecretaryGroupHeader
+        count={2}
+        folded
+        needsYou={0}
+        onToggleFold={onToggleFold}
+        onCreate={vi.fn()}
+      />
+    );
+    const chevron = container.querySelector('[data-enso="secretary-group-chevron"]');
+    const cls = chevron?.getAttribute('class') ?? '';
+    expect(cls).not.toContain('opacity-0');
+    expect(cls).toContain('opacity-100');
+    expect(cls).toContain('text-subtle-foreground');
+    expect(cls).toContain('-rotate-90');
+    expect(cls).toContain('shrink-0');
+    act(() =>
+      (container.querySelector('[data-enso="secretary-group-fold"]') as HTMLElement).click()
+    );
+    expect(onToggleFold).toHaveBeenCalledTimes(1);
+  });
+
+  it('展开时箭头仍可见，悬停加深', async () => {
+    await render(
+      <SecretaryGroupHeader
+        count={2}
+        folded={false}
+        needsYou={0}
+        onToggleFold={vi.fn()}
+        onCreate={vi.fn()}
+      />
+    );
+    const cls =
+      container.querySelector('[data-enso="secretary-group-chevron"]')?.getAttribute('class') ?? '';
+    expect(cls).not.toContain('opacity-0');
+    expect(cls).toContain('opacity-70');
+    expect(cls).toContain('group-hover:opacity-100');
+    expect(cls).not.toContain('-rotate-90');
   });
 });
 

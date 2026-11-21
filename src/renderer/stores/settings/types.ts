@@ -25,6 +25,8 @@ import type {
   SubagentModelEntry,
 } from '@shared/types';
 import type { AgentMode, ApprovalMode, ThinkingLevel } from '@shared/types/agent';
+import type { UpdateChannel } from '@shared/updater/channel';
+import type { AutoRestartMode } from '@shared/updater/idleRestart';
 import type { ModelPricing, PricingTable } from '@shared/usage/pricing';
 import type { VirtualClassifierConfig, VirtualModelEntry } from '@shared/virtualModels';
 import type { WebSearchChainEntry } from '@shared/webSearchChain';
@@ -136,6 +138,8 @@ export interface SettingsState {
 
   /** RTK 命令压缩；缺省开，新建或冷恢复会话生效。 */
   rtkEnabled: boolean;
+  /** 会话请求对 Anthropic Messages 模型用 1h prompt cache；缺省关，下一次请求生效。 */
+  longCacheRetention: boolean;
   /** 后台操作电脑时显示被操作窗口的画中画（macOS） */
   computerPreview: boolean;
   /** computer 操作任何 app 都不再询问（macOS），缺省关 */
@@ -208,8 +212,10 @@ export interface SettingsState {
 
   /** 是否自动检查并下载应用更新；缺省 true */
   autoUpdate: boolean;
-  /** 包已下好且空闲连续 5 分钟后自动重启安装；缺省关 */
-  autoRestartWhenIdle: boolean;
+  /** 更新下载完成后的自动重启：关 / 空闲时 / 不等空闲；缺省关 */
+  autoRestartForUpdate: AutoRestartMode;
+  /** 更新渠道：稳定版 / 内测版；缺省稳定版，只在本机 */
+  updateChannel: UpdateChannel;
   /** 权限不变的插件市场更新自动安装；缺省开，只在本机 */
   pluginAutoUpdate: boolean;
 
@@ -399,6 +405,7 @@ export interface SettingsState {
   setWindowsLocalShell: (value: WindowsLocalShell) => void;
   setExploreFoldEnabled: (value: boolean) => void;
   setRtkEnabled: (value: boolean) => void;
+  setLongCacheRetention: (value: boolean) => void;
   setComputerPreview: (value: boolean) => void;
   setComputerAllowAllApps: (value: boolean) => void;
   setOpenLinksInBuiltinBrowser: (value: boolean) => void;
@@ -432,7 +439,8 @@ export interface SettingsState {
   setSmartCompactModel: (value: DefaultModelRef | null) => void;
   setSmartCompactMode: (value: import('@shared/smartCompactMode').SmartCompactMode) => void;
   setAutoUpdate: (value: boolean) => void;
-  setAutoRestartWhenIdle: (value: boolean) => void;
+  setAutoRestartForUpdate: (value: AutoRestartMode) => void;
+  setUpdateChannel: (value: UpdateChannel) => void;
   setPluginAutoUpdate: (value: boolean) => void;
   setProxyMode: (mode: ProxyMode) => void;
   setCustomProxyUrl: (url: string) => void;

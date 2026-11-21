@@ -37,11 +37,41 @@ export interface TelegramMessage {
   chat: TelegramChat;
   from?: TelegramUser;
   text?: string;
+  /** 图片、文件附带的说明文字 */
+  caption?: string;
+  /** 压缩过的图片：同一张的多个尺寸，最后一个最大 */
+  photo?: TelegramPhotoSize[];
+  /** 原图或别的文件 */
+  document?: TelegramDocument;
+  video?: unknown;
+  voice?: unknown;
+  audio?: unknown;
+  animation?: unknown;
+  video_note?: unknown;
+  sticker?: unknown;
   /** 秒级时间戳 */
   date?: number;
   /** 论坛话题 id；普通超级群里回复串也会带，要配合 is_topic_message 看 */
   message_thread_id?: number;
   is_topic_message?: boolean;
+  /** 话题里的消息回复的是建话题那条服务消息：从这里读话题名 */
+  reply_to_message?: TelegramMessage;
+  forum_topic_created?: { name?: string };
+  forum_topic_edited?: { name?: string };
+}
+
+export interface TelegramPhotoSize {
+  file_id: string;
+  file_size?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface TelegramDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
 }
 
 export interface TelegramCallbackQuery {
@@ -101,6 +131,8 @@ export interface TelegramUpload {
 
 export interface TelegramApi {
   getMe(): Promise<TelegramUser>;
+  /** 绑群前确认 bot 在群里、群是否开了论坛话题 */
+  getChat(chatId: number): Promise<TelegramChat>;
   getUpdates(params: {
     offset?: number;
     timeout?: number;
@@ -151,6 +183,8 @@ export interface TelegramApi {
   sendPhoto(params: TelegramUpload): Promise<number>;
   /** 文件：multipart 上传，≤50MB，caption ≤1024 */
   sendDocument(params: TelegramUpload): Promise<number>;
+  /** 下载对方发来的文件；超过 maxBytes 返回 'too-large'，不读进内存 */
+  downloadFile(fileId: string, maxBytes: number): Promise<Buffer | 'too-large'>;
 }
 
 /** 测试与真机验收用假服务替换；生产不设这个变量 */
@@ -175,6 +209,34 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const LONG_POLL_TIMEOUT_MS = 40_000;
 /** 上传 10MB 走代理可能很慢 */
 const UPLOAD_TIMEOUT_MS = 120_000;
+
+async function download(
+  base: string,
+  token: string,
+  filePath: string,
+  maxBytes: number
+): Promise<Buffer | 'too-large'> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}/file/bot${token}/${filePath}`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new TelegramApiError('api', `http ${response.status}`);
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await response.body?.cancel();
+      return 'too-large';
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    return data.length > maxBytes ? 'too-large' : data;
+  } catch (error) {
+    if (error instanceof TelegramApiError) throw error;
+    throw new TelegramApiError('network', error instanceof Error ? error.message : 'network');
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function request<T>(
   base: string,
@@ -250,6 +312,7 @@ export function createTelegramApi(token: string, base = telegramApiBase()): Tele
   };
   return {
     getMe: () => request<TelegramUser>(base, token, 'getMe', undefined),
+    getChat: (chatId) => request<TelegramChat>(base, token, 'getChat', { chat_id: chatId }),
     getUpdates: ({ offset, timeout, signal }) =>
       request<TelegramUpdate[]>(
         base,
@@ -312,5 +375,16 @@ export function createTelegramApi(token: string, base = telegramApiBase()): Tele
     },
     sendPhoto: (params) => upload('sendPhoto', 'photo', params),
     sendDocument: (params) => upload('sendDocument', 'document', params),
+    downloadFile: async (fileId, maxBytes) => {
+      const file = await request<{ file_path?: string; file_size?: number }>(
+        base,
+        token,
+        'getFile',
+        { file_id: fileId }
+      );
+      if (file.file_size !== undefined && file.file_size > maxBytes) return 'too-large';
+      if (!file.file_path) throw new TelegramApiError('api', 'no file_path');
+      return download(base, token, file.file_path, maxBytes);
+    },
   };
 }

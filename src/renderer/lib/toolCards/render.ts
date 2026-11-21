@@ -1,7 +1,7 @@
-import { toLocalImageUrl } from '@shared/localImage';
 import { SECRETARY_OPS } from '@shared/secretary/tools';
 import { parseMemoryCapture, parseMemorySearchHits } from '@/components/chat/memorySearchHits';
 import { parseMcpToolName } from '@/lib/mcpToolName';
+import { parseImageViewFacts } from '@/lib/toolImage';
 import { TOOL_LABEL_KEYS } from '@/lib/toolLabels';
 import { cronPhrase, displayLabel, formatStamp, shortId } from './phrase';
 import type {
@@ -29,6 +29,8 @@ const CARD_TOOLS = new Set<string>([
  * 会话类型由调用方显式传入，不看工具名前缀。
  */
 export function usesToolCard(name: string, secretarySession = false): boolean {
+  // 后台任务收尾表态在任何会话里都是一张可读卡片：逐条列出停了什么、留了什么
+  if (name === 'task_settle') return true;
   if (!secretarySession) return false;
   return CARD_TOOLS.has(name) || name.startsWith('my_') || parseMcpToolName(name) !== null;
 }
@@ -353,6 +355,58 @@ register('session_answer', (call, ctx) => {
         ? { tone: 'ok', label: ctx.t('Answered') }
         : call.state === 'running'
           ? { tone: 'neutral', label: ctx.t('Answering…') }
+          : undefined
+  );
+});
+
+register('task_settle', (call, ctx) => {
+  const output = rec(parseJson(call.output));
+  const listed = Array.isArray(output?.settled)
+    ? output.settled
+    : Array.isArray(rec(call.args)?.tasks)
+      ? (rec(call.args)?.tasks as unknown[])
+      : [];
+  const entries = listed.flatMap((value) => {
+    const item = rec(value);
+    const action = item?.action;
+    if (!item || (action !== 'stop' && action !== 'keep')) return [];
+    return [{ item, action, done: output ? item.ok !== false : undefined }];
+  });
+  const stopped = entries.filter((entry) => entry.action === 'stop' && entry.done).length;
+  const kept = entries.filter((entry) => entry.action === 'keep' && entry.done).length;
+  const error = errorText(call, ctx);
+  return view(
+    call,
+    ctx.t('Background task wrap-up'),
+    [
+      ...(entries.length > 0
+        ? [
+            {
+              kind: 'list' as const,
+              items: entries.map(({ item, action, done }) => ({
+                title: str(item.command) ?? str(item.taskId) ?? '',
+                badge:
+                  done === false
+                    ? ctx.t('Not running')
+                    : action === 'stop'
+                      ? ctx.t('Stopped')
+                      : ctx.t('Kept'),
+                badgeTone: (action === 'keep' && done !== false
+                  ? 'pending'
+                  : 'neutral') as ToolCardStatus['tone'],
+                ...(str(item.reason) ? { detail: str(item.reason) } : {}),
+              })),
+            },
+          ]
+        : []),
+      ...(error ? [{ kind: 'error' as const, text: error }] : []),
+    ],
+    error
+      ? { tone: 'error', label: ctx.t('Failed') }
+      : output
+        ? { tone: 'neutral', label: ctx.t('Stop {{stopped}} · Keep {{kept}}', { stopped, kept }) }
+        : call.state === 'running'
+          ? { tone: 'neutral', label: ctx.t('Settling…') }
           : undefined
   );
 });
@@ -1082,7 +1136,7 @@ register('session_takeover_propose', (call, ctx) => {
   );
 });
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${bytes} B`;
@@ -1130,23 +1184,23 @@ function cleanupRow(item: Record<string, unknown>, ctx: ToolCardContext) {
 
 register('image_view', (call, ctx) => {
   const args = rec(call.args);
-  const output = rec(parseJsonLine(call.output));
-  const target = str(output?.path) ?? str(args?.path) ?? '';
-  const width = typeof output?.width === 'number' ? output.width : null;
-  const height = typeof output?.height === 'number' ? output.height : null;
-  const size = typeof output?.size === 'number' ? output.size : null;
   const error = errorText(call, ctx);
+  const facts = error ? null : parseImageViewFacts(call.output);
+  // 标题可以用参数里的路径；取图只认工具校验后回报的路径
+  const target = facts?.path ?? str(args?.path) ?? '';
+  const { width, height, size } = facts ?? { width: null, height: null, size: null };
   const name = target ? fileName(target) : ctx.t('Not set');
   const blocks: ToolCardBlock[] = [];
   if (error) blocks.push({ kind: 'error', text: error });
-  else if (target)
+  else if (call.image || facts?.path)
     blocks.push({
       kind: 'image',
-      src: toLocalImageUrl(target),
+      ...(call.image ? { image: call.image } : {}),
+      ...(facts?.path ? { path: facts.path } : {}),
       alt: name,
-      ...(width && height ? { width, height } : {}),
     });
   const rows: { label: string; value: string }[] = [];
+  if (facts?.path) rows.push({ label: ctx.t('Path'), value: facts.path });
   if (width && height) rows.push({ label: ctx.t('Dimensions'), value: `${width} × ${height}` });
   if (size !== null) rows.push({ label: ctx.t('File size'), value: formatBytes(size) });
   if (rows.length > 0) blocks.push({ kind: 'kv', rows });

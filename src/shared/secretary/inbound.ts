@@ -1,4 +1,12 @@
 import type { ContactLang } from './contact';
+import {
+  appendInboundImageLines,
+  INBOUND_IMAGE_LINE,
+  type InboundImageEntry,
+  type InboundImageLine,
+  parseInboundImageEntries,
+  parseInboundImagePaths,
+} from './inboundImages';
 import { wrapUntrusted } from './transcript';
 
 /**
@@ -33,6 +41,8 @@ export interface InboundInput {
   /** 手机上发消息的时间 */
   at?: number;
   text: string;
+  /** 已落盘的图片路径与收不下的图片：写在不可信内容之外，是宿主自己生成的 */
+  images?: readonly InboundImageLine[];
 }
 
 export interface InboundMessage {
@@ -51,6 +61,10 @@ export interface InboundMessage {
   /** 手机上发消息的时间，HH:MM */
   time?: string;
   body: string;
+  /** 随消息落盘的图片路径 */
+  images?: string[];
+  /** 路径行按固定格式解析的结果，界面据此显示图片标签与未收下提示 */
+  imageLines?: InboundImageEntry[];
 }
 
 const MAX_TITLE = 40;
@@ -167,7 +181,10 @@ export function wrapInboundMessage(
   input: InboundInput
 ): string {
   const body = unwrapOnce(input.text);
-  return `${head(channel, lang, input)}\n${wrapUntrusted(source(channel, input), body)}`;
+  const wrapped = `${head(channel, lang, input)}\n${wrapUntrusted(source(channel, input), body)}`;
+  return input.images?.length
+    ? `${wrapped}\n${appendInboundImageLines('', input.images)}`
+    : wrapped;
 }
 
 const ID = '([A-Za-z0-9._@:+/=%-]+)';
@@ -179,7 +196,7 @@ const INBOUND = new RegExp(
     `(?: chatId=${ID})?(?: topicId=${ID})?(?: senderId=${ID}| (发送者未知|sender unknown))?` +
     String.raw`(?: @([^\]\n@·]{1,32}?))?(?: · (\d{2}):(\d{2}))?\]\n` +
     String.raw`<untrusted-content source="([a-z0-9._:-]+?)(?::@[^"\n]{1,32})?(?: [^"\n]*)?">` +
-    String.raw`([\s\S]*)<\/untrusted-content>$`,
+    String.raw`([\s\S]*)<\/untrusted-content>((?:\n${INBOUND_IMAGE_LINE})*)$`,
   'u'
 );
 
@@ -201,10 +218,13 @@ export function parseInboundMessage(text: string): InboundMessage | null {
     minutes,
     channel = '',
     body = '',
+    imageLines = '',
   ] = match;
   const chatType: InboundChatType | undefined =
     kind === '私聊' || kind === 'private' ? 'private' : kind ? 'group' : undefined;
   const ids = { chat: idValue(chatId), topic: idValue(topicId), sender: idValue(senderId) };
+  const images = parseInboundImagePaths(imageLines);
+  const entries = imageLines ? parseInboundImageEntries(imageLines.slice(1)) : null;
   return {
     channel,
     title,
@@ -218,5 +238,7 @@ export function parseInboundMessage(text: string): InboundMessage | null {
     ...(hours && minutes ? { time: `${hours}:${minutes}` } : {}),
     // 包裹时把闭合标签转义过，展示时还原成用户真正打的字
     body: body.split('<\\/untrusted-content').join('</untrusted-content'),
+    ...(images.length ? { images } : {}),
+    ...(entries?.length ? { imageLines: entries } : {}),
   };
 }

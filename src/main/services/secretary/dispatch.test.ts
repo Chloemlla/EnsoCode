@@ -484,6 +484,25 @@ describe('session_create', () => {
     ]);
   });
 
+  it('全部秘书合计到上限时拒绝，本秘书自己的名额还有也不行', async () => {
+    const h = harness({ profile: profile() });
+    h.ports.runningTotal = () => ({ running: 10, max: 10 });
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    const result = await call(h.handlers.session_create, { projectId: 'p1', prompt: '修构建' });
+    expect(result).toEqual({ ok: false, error: 'dispatch-limit-total' });
+    expect(h.created).toEqual([]);
+  });
+
+  it('派出的会话带上秘书 id：之后靠它认归属', async () => {
+    const h = harness({ profile: profile() });
+    h.ports.secretaryId = 's-two';
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    await call(h.handlers.session_create, { projectId: 'p1', prompt: '修构建' });
+    expect(h.created[0]).toMatchObject({
+      secretaryOrigin: { secretaryConversationId: 'sec-1', secretaryId: 's-two' },
+    });
+  });
+
   it('空闲但还在等后台或自动续跑的会话也占派出名额，做完的不占', async () => {
     const waiting = emptyFile();
     waiting.dispatched.a = {
@@ -1281,6 +1300,21 @@ describe('接管', () => {
         error,
       });
     }
+  });
+
+  it('别的秘书在管的会话：接管、授权、发消息都拒绝，原因与本秘书已管区分开', async () => {
+    const h = takeoverHarness({ profile: profile({ takeoverScope: { mode: 'all' } }) });
+    h.ports.managedElsewhere = (conversationId) => (conversationId === 'c1' ? '阿财' : null);
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    expect(await propose(h)).toEqual({ ok: false, error: 'managed-by-other' });
+    expect(await grantTakeover(h.ports, 'c1', 'user', null)).toEqual({
+      ok: false,
+      error: 'managed-by-other',
+    });
+    // 接管范围覆盖这个项目也不行：一个会话只归一个秘书
+    const sent = await call(h.handlers.session_send, { conversationId: 'c1', message: '继续' });
+    expect(sent.ok ? '' : sent.error).toMatch(/^permission denied \(managed-by-other\)/u);
+    expect(h.file.dispatched.c1).toBeUndefined();
   });
 
   it('授权后把 ask_user 转给秘书，撤销后恢复成直接问用户', async () => {
@@ -3307,7 +3341,41 @@ describe('result_mark_done / result_mark_undo', () => {
 });
 
 describe('看板停止遗留任务', () => {
-  it('停掉记录里所有还在跑的任务并清掉遗留标记', async () => {
+  it('只停疑似闲置的任务，已保留的不动，遗留标记留着', async () => {
+    const h = harness({
+      file: {
+        ...dispatchedFile('c1'),
+        dispatched: {
+          c1: {
+            ...dispatchedFile('c1').dispatched.c1,
+            leftoverTasks: {
+              count: 2,
+              commands: ['pnpm dev', 'iproxy'],
+              taskIds: ['t1', 't2'],
+              at: 1,
+            },
+          },
+        },
+      },
+      tasks: {
+        c1: [
+          {
+            taskId: 't1',
+            command: 'pnpm dev',
+            status: 'running',
+            startedAt: 0,
+            suspectedIdle: true,
+          },
+          { taskId: 't2', command: 'iproxy', status: 'running', startedAt: 0, kept: true },
+        ],
+      },
+    });
+    expect(await stopLeftoverTasks(h.ports, 'c1')).toEqual({ ok: true, stopped: ['t1'] });
+    expect(h.stoppedTasks.map((entry) => entry.taskId)).toEqual(['t1']);
+    expect(h.file.dispatched.c1.leftoverTasks?.count).toBe(2);
+  });
+
+  it('疑似闲置的全部停完后清掉遗留标记', async () => {
     const h = harness({
       file: {
         ...dispatchedFile('c1'),
@@ -3326,8 +3394,20 @@ describe('看板停止遗留任务', () => {
       },
       tasks: {
         c1: [
-          { taskId: 't1', command: 'pnpm dev', status: 'running', startedAt: 0 },
-          { taskId: 't2', command: 'pnpm test', status: 'running', startedAt: 0 },
+          {
+            taskId: 't1',
+            command: 'pnpm dev',
+            status: 'running',
+            startedAt: 0,
+            suspectedIdle: true,
+          },
+          {
+            taskId: 't2',
+            command: 'pnpm test',
+            status: 'running',
+            startedAt: 0,
+            suspectedIdle: true,
+          },
           { taskId: 't3', command: 'git status', status: 'done', startedAt: 0 },
         ],
       },

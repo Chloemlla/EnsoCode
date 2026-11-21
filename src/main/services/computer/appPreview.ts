@@ -1,8 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, nativeImage, screen, session, type WebContents } from 'electron';
+import { isAppQuitting } from '../appQuitWatchdog';
 import { PreviewController, type PreviewView } from './appPreviewController';
 import { placePreview, previewSize } from './appPreviewLayout';
+import { showOnAllSpaces } from './floatingWindow';
 
 const PARTITION = 'computer-preview';
 
@@ -140,7 +142,7 @@ function createView(onUserClose: (windowId: string) => void): PreviewView {
       },
     });
     created.setAlwaysOnTop(true, 'floating');
-    created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    showOnAllSpaces(created);
     // 不出现在截图里：模型看到的应是目标 app 本身
     created.setContentProtection(true);
     created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -157,7 +159,8 @@ function createView(onUserClose: (windowId: string) => void): PreviewView {
       if (title.startsWith('close:')) userClose();
     });
     created.on('close', (event) => {
-      if (disposing) return;
+      // 安装更新先关窗、后发 before-quit：退出中还拦 close 的话窗口永远关不完，进程挂在 Dock
+      if (disposing || isAppQuitting()) return;
       event.preventDefault();
       userClose();
     });

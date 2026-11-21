@@ -9,7 +9,7 @@ import {
   trayIconCandidates,
 } from '@shared/appServerMode';
 import { IPC_CHANNELS } from '@shared/types';
-import { app, ipcMain, Menu, nativeImage, Tray } from 'electron';
+import { app, type BrowserWindow, ipcMain, Menu, nativeImage, Tray } from 'electron';
 import {
   flushSettings,
   readSettings,
@@ -25,6 +25,7 @@ import {
 } from '../windows/createAppWindow';
 import { createMainWindow, getMainWindow, isMainWindowAlive } from '../windows/MainWindow';
 import { getSettingsWindow } from '../windows/SettingsWindow';
+import { isVerifyLaunch, presentWindow } from '../windows/verifyLaunch';
 import { allowAppQuit, destroyWithoutCloseConfirm } from './appCloseConfirm';
 import { browserHost } from './browserHost';
 import { closeNodeSettingsWindows } from './nodeRemote';
@@ -38,6 +39,7 @@ let active = false;
 /** 进/出托盘的切换代次：enter 中途有 await，期间被唤回或重入时旧的 enter 必须作废 */
 let transition = 0;
 let tray: Tray | null = null;
+const watchedWindows = new WeakSet<BrowserWindow>();
 
 export function isServerMode(): boolean {
   return active;
@@ -76,13 +78,25 @@ function trayIcon() {
   return image;
 }
 
+/** 以窗口实际状态为准：被 computer、⌘H、最小化或 Dock 策略变化藏起都算不在前台 */
+function mainWindowShown(): boolean {
+  if (active) return false;
+  const win = getMainWindow();
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return false;
+  return app.dock ? app.dock.isVisible() : true;
+}
+
+function currentTrayAction() {
+  return trayClickAction({ serverMode: active, windowShown: mainWindowShown() });
+}
+
 function trayToggleLabel(zh: boolean): string {
-  if (trayClickAction(active) === 'show') return zh ? '打开 EnsoCode' : 'Show EnsoCode';
+  if (currentTrayAction() === 'show') return zh ? '打开 EnsoCode' : 'Show EnsoCode';
   return zh ? '最小化到托盘' : 'Minimize to tray';
 }
 
 function rebuildTrayMenu(): void {
-  if (!tray) return;
+  if (!tray || tray.isDestroyed()) return;
   const zh = languageIsZh();
   const sleepPolicy = readTraySleepPolicy();
   const preventDisplaySleep = readTrayPreventDisplaySleep();
@@ -90,7 +104,7 @@ function rebuildTrayMenu(): void {
     Menu.buildFromTemplate([
       {
         label: trayToggleLabel(zh),
-        click: () => handleTrayActivate(),
+        click: () => toggleTrayMode(),
       },
       { type: 'separator' },
       {
@@ -134,18 +148,34 @@ function rebuildTrayMenu(): void {
   tray.setToolTip('EnsoCode');
 }
 
-function handleTrayActivate(): void {
-  if (trayClickAction(active) === 'show') leaveServerMode();
+/** 托盘点击、菜单项与全局快捷键共用：按实际可见性切换 */
+export function toggleTrayMode(): void {
+  if (currentTrayAction() === 'show') leaveServerMode();
   else void enterServerMode();
 }
 
+/** 菜单是静态快照：窗口显隐变化时重建，保证切换项文案跟随实际状态 */
+function watchMainWindow(): void {
+  const win = getMainWindow();
+  if (!win || win.isDestroyed() || watchedWindows.has(win)) return;
+  watchedWindows.add(win);
+  const refresh = () => rebuildTrayMenu();
+  win.on('show', refresh);
+  win.on('hide', refresh);
+  win.on('minimize', refresh);
+  win.on('restore', refresh);
+}
+
 export function ensureTray(): void {
+  watchMainWindow();
   if (tray && !tray.isDestroyed()) {
     rebuildTrayMenu();
     return;
   }
   tray = new Tray(trayIcon());
-  tray.on('click', () => handleTrayActivate());
+  tray.on('click', () => toggleTrayMode());
+  // Dock 策略被改（不派发窗口事件）时，鼠标移到图标上就按当前状态重建菜单
+  tray.on('mouse-enter', () => rebuildTrayMenu());
   rebuildTrayMenu();
 }
 
@@ -213,14 +243,10 @@ export function leaveServerMode(): void {
   active = false;
   setPairHeadless(false);
   flushSettings();
-  app.dock?.show();
+  if (!isVerifyLaunch()) app.dock?.show();
   if (!isMainWindowAlive()) createMainWindow();
   const win = getMainWindow();
-  if (win && !win.isDestroyed()) {
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  }
+  if (win && !win.isDestroyed()) presentWindow(win);
   ensureTray();
 }
 

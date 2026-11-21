@@ -1,7 +1,10 @@
+import type { InboundImageRejection } from '@shared/secretary/inboundImages';
 import type { SecretaryContactCaps, SecretaryContactChannelStatus } from '@shared/types/secretary';
 
 /** 渠道能力：核心按它决定画按钮、改旧消息还是降级成编号文本 */
 export type ChannelCaps = SecretaryContactCaps;
+
+export type ChannelInboundImage = { data: Buffer } | { rejected: InboundImageRejection };
 
 /** 一个联系人：渠道 id 加渠道内的会话 id（私聊或群，一律字符串）；群里的论坛话题另算一个 */
 export interface Peer {
@@ -85,9 +88,9 @@ export interface ContactChannel {
   /** 「正在输入…」；只在 caps.typing 时调用 */
   typing(peerId: string, topicId?: string): Promise<ChannelResult>;
   /** 发图片；只在 caps.images 时调用 */
-  sendImage?(peerId: string, image: ChannelImage): Promise<ChannelSend>;
+  sendImage?(peerId: string, image: ChannelImage, topicId?: string): Promise<ChannelSend>;
   /** 发文件；只在 caps.files 时调用 */
-  sendFile?(peerId: string, file: ChannelFile): Promise<ChannelSend>;
+  sendFile?(peerId: string, file: ChannelFile, topicId?: string): Promise<ChannelSend>;
   /** 命令菜单；null 表示清掉 */
   setCommands?(
     peerId: string,
@@ -111,6 +114,8 @@ export type ChannelInbound =
       /** 发送者名字 */
       name?: string;
       at?: number;
+      /** 随消息来的图片：字节交给宿主落盘；渠道侧就判定收不下的带原因 */
+      images?: readonly ChannelInboundImage[];
     }
   | {
       kind: 'action';

@@ -2,6 +2,8 @@ import type { UpdateStatus } from '@shared/types/updater';
 import { Download, RotateCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useI18n } from '@/i18n';
+import { BannerBar } from './BannerBar';
+import { ManualInstallActions } from './ManualInstallActions';
 import { ReleaseNotesDialog } from './ReleaseNotesDialog';
 
 /** 主窗口顶部更新横幅:发现新版(桌面)可看日志再下载,下载完成后提示重启(可关闭) */
@@ -37,25 +39,31 @@ export function UpdateBanner() {
 
   const version = status.info?.version;
   const isDownloaded = status.status === 'downloaded';
-  const isPending = isDownloaded && status.restartPending === true;
+  const manualInstall = isAvailable ? status.manualInstall : undefined;
 
   return (
-    <div className="border-b border-blue-500/20 bg-background">
-      <div className="flex items-center gap-2 bg-blue-500/8 px-4 py-1.5 text-xs">
+    <>
+      <BannerBar>
         {isDownloaded ? (
           <RotateCw className="h-3.5 w-3.5 shrink-0 text-blue-500" />
         ) : (
           <Download className="h-3.5 w-3.5 shrink-0 animate-pulse text-blue-500" />
         )}
         <span className="min-w-0 flex-1">
-          {isPending
-            ? t('Will restart to update {{version}} when the running turns finish.', {
-                version: version ?? '',
-              })
-            : isDownloaded
-              ? t('New version {{version}} is ready — restart to update.', {
+          {isDownloaded
+            ? t(
+                'New version {{version}} is downloaded. Restarting waits for the current tool to finish; background commands keep running.',
+                {
                   version: version ?? '',
-                })
+                }
+              )
+            : manualInstall
+              ? t(
+                  "New version {{version}} found. This local build can't install it automatically.",
+                  {
+                    version: version ?? '',
+                  }
+                )
               : isAvailable
                 ? t('New version {{version}} found', { version: version ?? '' })
                 : t('Downloading update… {{percent}}%', {
@@ -71,7 +79,8 @@ export function UpdateBanner() {
             {t('Release notes')}
           </button>
         )}
-        {isAvailable && (
+        {manualInstall && <ManualInstallActions manualInstall={manualInstall} size="xs" />}
+        {isAvailable && !manualInstall && (
           <button
             type="button"
             onClick={() => void window.electronAPI.updater.downloadUpdate()}
@@ -80,22 +89,13 @@ export function UpdateBanner() {
             {t('Download update')}
           </button>
         )}
-        {isPending && (
-          <button
-            type="button"
-            onClick={() => void window.electronAPI.updater.cancelRestart()}
-            className="shrink-0 rounded-md px-2 py-1 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
-          >
-            {t('Cancel')}
-          </button>
-        )}
         {isDownloaded && (
           <button
             type="button"
-            onClick={() => void window.electronAPI.updater.quitAndInstall({ now: isPending })}
+            onClick={() => void window.electronAPI.updater.quitAndInstall()}
             className="shrink-0 rounded-md bg-primary px-2.5 py-1 text-primary-foreground transition-colors hover:bg-primary/90"
           >
-            {isPending ? t('Restart now') : t('Restart to update')}
+            {t('Restart to update')}
           </button>
         )}
         <button
@@ -106,8 +106,8 @@ export function UpdateBanner() {
         >
           <X className="h-3.5 w-3.5" />
         </button>
-      </div>
+      </BannerBar>
       <ReleaseNotesDialog open={notesOpen} onOpenChange={setNotesOpen} status={status} />
-    </div>
+    </>
   );
 }

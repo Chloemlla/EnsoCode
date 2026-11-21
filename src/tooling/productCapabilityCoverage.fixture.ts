@@ -43,6 +43,7 @@ export const SETTINGS_DATA_COVERAGE = {
     'Explore-fold is a desktop session preference, not an Enso capability.'
   ),
   rtkEnabled: excluded('RTK command compression is a desktop session preference.'),
+  longCacheRetention: excluded('Prompt cache TTL is a device-local request cost preference.'),
   computerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   computerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   openLinksInBuiltinBrowser: excluded(
@@ -96,7 +97,8 @@ export const SETTINGS_DATA_COVERAGE = {
     'Verified smart compaction mode is a desktop session preference, not an Enso capability.'
   ),
   autoUpdate: surfaces('general.automatic-updates'),
-  autoRestartWhenIdle: excluded('Device idle-restart update policy; not an Enso capability.'),
+  autoRestartForUpdate: excluded('Device auto-restart update policy; not an Enso capability.'),
+  updateChannel: excluded('Device update channel policy; not an Enso capability.'),
   pluginAutoUpdate: excluded(
     'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
   ),
@@ -225,6 +227,7 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Explore-fold is a desktop session preference, not an Enso capability.'
   ),
   setRtkEnabled: excluded('RTK command compression is a desktop session preference.'),
+  setLongCacheRetention: excluded('Prompt cache TTL is a device-local request cost preference.'),
   setComputerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   setComputerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   setOpenLinksInBuiltinBrowser: excluded(
@@ -286,7 +289,8 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Verified smart compaction mode is a desktop session preference, not an Enso capability.'
   ),
   setAutoUpdate: surfaces('general.automatic-updates'),
-  setAutoRestartWhenIdle: excluded('Device idle-restart update policy; not an Enso capability.'),
+  setAutoRestartForUpdate: excluded('Device auto-restart update policy; not an Enso capability.'),
+  setUpdateChannel: excluded('Device update channel policy; not an Enso capability.'),
   setPluginAutoUpdate: excluded(
     'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
   ),
@@ -527,6 +531,16 @@ export const IPC_PRODUCT_COVERAGE = {
   SECRETARY_CONTACT_TEST: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_SETTINGS: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_FOLLOWING: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_CONTACT_TELEGRAM_TOPICS: excluded(
+    'Experimental secretary agent; not an Enso capability.'
+  ),
+  SECRETARY_LIST: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_LIST_CHANGED: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_CREATE: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_DELETE_PREVIEW: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_DELETE: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRANSFER: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_OVERVIEW: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_OPEN_CONVERSATION: excluded('Experimental secretary agent; not an Enso capability.'),
   REMOTE_LEADER_CHANGED: excluded('Remote desktop renderer coordination transport.'),
   REMOTE_UPLOAD: excluded('Remote desktop browser upload transport.'),
@@ -693,6 +707,9 @@ export const IPC_PRODUCT_COVERAGE = {
     'Renderer reports a conversation mute toggle so Main stops system notifications and paired-device pushes immediately; no execution rights.'
   ),
   AGENT_TASK_STOP: surfaces('conversations.background-task.stop'),
+  AGENT_TASK_KEEP: excluded(
+    'Desktop task-bar control that marks a running background task as kept (or unkept) so idle hints are suppressed for an hour; no execution rights.'
+  ),
   AGENT_TOOL_BACKGROUND: excluded(
     'Desktop tool-row control that moves a running foreground shell command into a background task; renderer-only, not an Enso capability.'
   ),
@@ -788,13 +805,13 @@ export const IPC_PRODUCT_COVERAGE = {
   UPDATER_DOWNLOAD_UPDATE: surfaces('updates.download'),
   UPDATER_QUIT_AND_INSTALL: surfaces('updates.install'),
   UPDATER_SET_AUTO_UPDATE_ENABLED: surfaces('general.automatic-updates'),
-  UPDATER_SET_AUTO_RESTART_WHEN_IDLE: excluded(
-    'Device idle-restart update policy; not an Enso capability.'
+  UPDATER_SET_AUTO_RESTART_MODE: excluded(
+    'Device auto-restart update policy; not an Enso capability.'
   ),
-  UPDATER_CANCEL_RESTART: surfaces('updates.install'),
-  UPDATER_TAKE_INTERRUPTED_SESSIONS: excluded(
-    'Startup handoff that resumes turns interrupted by an update restart.'
+  COMPOSER_UNSENT_DRAFT: excluded(
+    'Renderer reports unsent composer drafts so auto-restart for updates can wait.'
   ),
+  UPDATER_SET_CHANNEL: excluded('Device update channel policy; not an Enso capability.'),
   PROXY_APPLY: surfaces('general.proxy-mode', 'general.custom-proxy-url'),
   CA_CERT_STATUS: excluded('Device-local CA certificate status for TLS trust.'),
   CA_CERT_APPLY: excluded('Device-local CA certificate file path for TLS trust.'),

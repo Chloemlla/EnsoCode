@@ -1,3 +1,4 @@
+import { checkAvatarImage } from '@shared/bots/cardPng';
 import { parseProfile } from '@shared/secretary/parse';
 import type { ConversationAuthority, ProjectAuthority } from '@shared/types/agent';
 import type {
@@ -25,6 +26,15 @@ function nonEmpty(value: unknown): string | undefined {
 
 function time(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** 秘书头像：null 是移除；GIF 原字节放行以保住动画（只在这条路径上放行） */
+export function parseAvatarRequest(value: unknown): { image: Uint8Array | null } | null {
+  if (!isRecord(value)) return null;
+  const image = value.image;
+  if (image === null) return { image: null };
+  if (image instanceof Uint8Array && checkAvatarImage(image, { allowGif: true })) return { image };
+  return null;
 }
 
 export interface ResolveProposalRequest {
@@ -167,6 +177,8 @@ export interface ReferencePorts {
   saveDispatch(file: SecretaryDispatchFile): void;
   audit(entry: SecretaryAuditEntry): void;
   now(): number;
+  /** 别的秘书在管这个会话时返回它的名字；缺省表示只有这一个秘书 */
+  managedElsewhere?(conversationId: string): MaybePromise<string | null>;
 }
 
 export type ReferenceResult = { ok: true; named: string[] } | { ok: false; error: string };
@@ -201,6 +213,8 @@ export async function referenceConversations(
     const project = projects.find((candidate) => candidate.projectId === conversation.projectId);
     if (!project || project.kind === 'secretary') continue;
     if (!visible.has(conversation.projectId)) continue;
+    // 别的秘书在管的会话：点名不能把它抢过来，只有转交可以
+    if (await ports.managedElsewhere?.(conversationId)) continue;
     if (!file.named.includes(conversationId)) file.named.push(conversationId);
     accepted.push(conversationId);
   }

@@ -406,6 +406,15 @@ export type SecretaryUpdate = {
       status: PendingDispatch['status'];
       problem?: PendingProblem;
     }
+  /** 另一个秘书发来的话：chain/hop 由 Main 判定，origins 是链上全部发起方（降权回合取交集用） */
+  | {
+      kind: 'peer-message';
+      fromSecretaryId: string;
+      fromName: string;
+      chain: string;
+      hop: number;
+      origins: string[];
+    }
 );
 
 /** 右侧动态的一条历史：压掉、合并和静默处理的更新都留在这里 */
@@ -457,6 +466,10 @@ export interface SecretaryTodo {
   doneAt?: number;
   /** 关联会话失败、被停止或已删除；用户放回待办或重新派发后清掉 */
   problem?: TodoProblemCode;
+  /** 另一个秘书经 secretary_message 托付的：完成或出问题时自动回告它 */
+  from?: { secretaryId: string; name: string };
+  /** 已经回告过发起秘书的终态：同一个终态只回告一次 */
+  reportedAs?: 'done' | TodoProblemCode;
 }
 
 export const TODO_PROBLEM_CODES = ['failed', 'stopped', 'deleted'] as const;
@@ -503,6 +516,26 @@ export interface SecretaryScheduleView {
   nextRunAt?: number;
   lastFiredAt?: number;
   system?: 'daily-brief' | { todoId: string };
+}
+
+/** 侧栏、设置页与新建流程用的秘书清单：只带认人的字段，完整状态另取 */
+export interface SecretarySummary {
+  id: string;
+  projectId: string | null;
+  name: string | null;
+  avatar: SecretaryProfile['avatar'] | null;
+  order: number;
+}
+
+/** 删除秘书前的提醒：列出它正在管的东西，二次确认后才删 */
+export interface SecretaryDeletePreview {
+  secretaryId: string;
+  name: string | null;
+  sessions: { conversationId: string; title: string; projectName: string; takeover: boolean }[];
+  todos: { id: string; text: string }[];
+  schedules: { id: string; name: string }[];
+  contacts: string[];
+  memories: number;
 }
 
 export interface SecretaryAuditEntry {
@@ -584,6 +617,8 @@ export interface SecretaryUntrackedView {
 }
 
 export interface SecretaryState {
+  /** 这份状态属于哪个秘书；关闭开关时的空状态与旧数据缺省 */
+  secretaryId?: string | null;
   enabled: boolean;
   projectId: string | null;
   /** null = 未完成初次设置 */
@@ -592,6 +627,8 @@ export interface SecretaryState {
   board: SecretaryBoard;
   proposals: Record<string, SecretaryProposal>;
   takeovers: SecretaryTakeoverView[];
+  /** 定时清单的指纹：定时增删、触发都会变，状态推送按内容去重时面板才收得到 */
+  schedulesRev?: string;
 }
 
 /**
@@ -721,7 +758,35 @@ export interface SecretaryContactBind {
   code: string;
   /** 手机上点一下就完成的深链 */
   link: string;
+  /** 把 bot 拉进群并绑整个群的深链（?startgroup=） */
+  groupLink?: string;
+  /** 在 forum 话题里发的绑定命令（/bind@bot <code>） */
+  topicCommand?: string;
   expiresAt: number;
+  /** 最近一次发码没绑上的原因：界面据此给出下一步，而不是一直等 */
+  rejected?: SecretaryContactBindRejection;
+}
+
+export interface SecretaryContactBindRejection {
+  /**
+   * private-owned：这个私聊已归同一个 bot 上的别的秘书；route-conflict：群或话题已归别的秘书；
+   * expired：码过期；missing-code：私聊里只发了不带码的 /start
+   */
+  reason: 'private-owned' | 'route-conflict' | 'expired' | 'missing-code';
+  /** 占着这条路由的秘书名 */
+  owner?: string;
+}
+
+/** 共用同一个 bot 的一个秘书，以及它认领的私聊、群和话题 */
+export interface SecretaryContactBotUser {
+  secretaryId: string;
+  name: string;
+  /** 就是当前这个秘书 */
+  self: boolean;
+  /** Telegram 渠道开着；关着时认领的路由仍然占着，但不收发 */
+  enabled: boolean;
+  privateChat?: SecretaryContactChat;
+  groups: SecretaryContactGroupBinding[];
 }
 
 export interface SecretaryContactTelegram {
@@ -745,8 +810,15 @@ export interface SecretaryContactTelegram {
    * 静默回合只发一行摘要；解绑或换 bot 时自动关掉。
    */
   syncMirror: boolean;
-  /** 群白名单：空名单不收任何群；名单里的群只认绑定的那个人。见过的群带标题 */
-  groups: { id: string; title?: string }[];
+  /**
+   * 交给这个秘书的群：白名单与路由表按群合并，只认绑定的那个人。见过的群带标题。
+   * all 是整群（General 与所有话题）；否则只收 topics 里这几个论坛话题。
+   */
+  groups: SecretaryContactGroupBinding[];
+  /** 用绑定码绑的群与话题：这个秘书从这里收，也往这里推 */
+  routes?: { chatId: string; topicId?: string; title?: string }[];
+  /** 同一个 bot 还被别的秘书用着时才有：每个秘书（含自己）认领了什么 */
+  shared?: SecretaryContactBotUser[];
   /**
    * 手机关注的任务：手机发起的回合里派生的会话与定时，结果会一直推到手机上，
    * 与 /sync 无关。完成或失败推过一次就从列表里移除。
@@ -757,7 +829,30 @@ export interface SecretaryContactTelegram {
   secure: boolean;
 }
 
+export interface SecretaryContactTopic {
+  /** 论坛话题 id；General 约定为 '1' */
+  id: string;
+  /** bot 见过的话题名；没见过建话题或改名消息就没有 */
+  title?: string;
+  /** 同一个 bot 上已经单独认领这个话题的别的秘书 */
+  owner?: string;
+}
+
+export interface SecretaryContactGroupBinding {
+  id: string;
+  title?: string;
+  all: boolean;
+  topics: SecretaryContactTopic[];
+}
+
+/** 设置页拉一个群的话题：forum=false 表示没开话题，只能整群绑定 */
+export type SecretaryContactTopicsResult =
+  | { ok: true; forum: boolean; title?: string; topics: SecretaryContactTopic[] }
+  | { ok: false; error: string; detail?: string };
+
 export interface SecretaryContactState {
+  /** 这份联系方式属于哪个秘书：每个秘书只用自己绑定的渠道 */
+  secretaryId?: string;
   /** 总开关：关掉后不收不发，界面也不画渠道列表 */
   enabled: boolean;
   /** 渠道卡片：Telegram 内置固定第一位，插件渠道跟在后面 */

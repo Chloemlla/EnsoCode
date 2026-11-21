@@ -10,6 +10,7 @@ import type { PluginSessionStatus, SessionStatusPayload } from '@shared/extensio
 import { normalizeLocale } from '@shared/i18n';
 import { type PersistedPairConversation, planPairResume } from '@shared/pair/headlessResume';
 import { projectSafeJournal } from '@shared/safeJournalProjection';
+import { appendInboundImageLines } from '@shared/secretary/inboundImages';
 import { wrapUntrusted } from '@shared/secretary/transcript';
 import { resolveSshTarget } from '@shared/ssh';
 import {
@@ -54,6 +55,7 @@ import {
   parseTitleSummaryInput,
   parseUpdateConversationSelectionRequest,
   STALE_SESSION_ERROR,
+  TASK_KEEP_REASON_MAX,
   THINKING_LEVELS,
 } from '@shared/types/agent';
 import { DELEGATION_NOTE_MAX, parseTaskCheck } from '@shared/types/bot';
@@ -63,7 +65,7 @@ import {
   parseParentModelSelectionRequest,
   parseParentSourceBindingRequest,
 } from '@shared/types/mentions';
-import type { SecretaryToolDescriptor } from '@shared/types/secretary';
+import type { SecretaryProfile, SecretaryToolDescriptor } from '@shared/types/secretary';
 import { EnsoSafeJournal } from '../../agent/ensoSafeJournal';
 import { isSecretFilePath, isUnderSecretDirectory } from '../../agent/protectedActions';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
@@ -82,6 +84,7 @@ import {
   forgetParentToolProfile,
   forkSession,
   isAgentWorkerReady,
+  keepBackgroundTask,
   promptChildSession,
   promptSession,
   readSettingsState,
@@ -96,6 +99,7 @@ import {
   respondApproval,
   respondAsk,
   resumeCoworkerSession,
+  resumesAfterQuit,
   retrySession,
   rewindSession,
   sendAgentCommand,
@@ -137,7 +141,7 @@ import {
 import type { BrowserActor } from '../services/browserTabClaims';
 import { chatModelsRoot } from '../services/chatModels';
 import { listChildRuns, resolveChildRunFile } from '../services/childRunCatalog';
-import { settleColdResume, wakeColdRestartSession } from '../services/coldRestart';
+import { coldResumeReady, failColdResume, wakeColdRestartSession } from '../services/coldRestart';
 import { reloadConversation } from '../services/conversationReload';
 import { spawnCwdFromAuthority } from '../services/conversationSpawnCwd';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
@@ -173,12 +177,28 @@ import { remoteCandidates } from '../services/remoteModels';
 import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import type { RestartManifestEntry } from '../services/restartManifest';
-import { ContactStore } from '../services/secretary/contact/store';
+import { ContactStore, hasContactRoutes } from '../services/secretary/contact/store';
 import { secretaryToolDescriptors, secretaryToolsDir } from '../services/secretary/customTools';
 import { secretaryEnabled } from '../services/secretary/enabled';
-import { unfollowTarget } from '../services/secretary/following';
+import { unfollowTargetEverywhere } from '../services/secretary/following';
 import { isSecretaryConversation, isSecretaryProject } from '../services/secretary/identity';
+import {
+  getSecretaryImageStore,
+  SecretaryImageStore,
+  secretaryImagesRoot,
+  sessionFileReferences,
+  setSecretaryImageStore,
+} from '../services/secretary/inboundImages';
+import { turnRestriction } from '../services/secretary/peers';
 import { buildSecretarySystemPrompt } from '../services/secretary/prompt';
+import {
+  ensureSecretaryProjects,
+  type SecretaryContext,
+  secretaryContext,
+  secretaryContexts,
+  secretaryIdOfConversation,
+  secretaryIdOfProject,
+} from '../services/secretary/secretaries';
 import { secretarySkillDirs, secretarySkillsDir } from '../services/secretary/skills';
 import { SecretaryStore } from '../services/secretary/store';
 import { invokeSecretaryOp } from '../services/secretary/tools';
@@ -269,7 +289,8 @@ let botWorkerObserver: ((event: AgentWorkerEvent | { type: 'worker-exited' }) =>
 let secretaryDriverObserver:
   | ((event: RendererAgentEvent, changes: readonly SessionStatusPayload[]) => void)
   | null = null;
-const pluginSessionStates = new SessionStateTracker();
+// 写进恢复清单的会话新实例接着跑：退出时 worker 没了也不算失败
+const pluginSessionStates = new SessionStateTracker((rootId) => resumesAfterQuit(rootId));
 const selectionClockOwners = new WeakSet<RendererContents>();
 
 function watchSelectionClock(sender: RendererContents): void {
@@ -480,12 +501,37 @@ function removeConversationFiles(conversation: {
 }): void {
   const project = sourceAuthority?.project(conversation.projectId);
   peekExtensionPlugins()?.forgetSession(conversation.conversationId);
+  getSecretaryImageStore()?.remove(conversation.conversationId);
   removeConversationSessionFiles({
     sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
     conversationId: conversation.conversationId,
     ...(conversation.sessionFile ? { sessionFile: conversation.sessionFile } : {}),
     ...(project?.kind === 'scratch' ? { scratchRoot: project.canonicalPath } : {}),
   });
+}
+
+/**
+ * 秘书会话里贴的图：图照旧随消息给模型看，另外落盘到白名单目录，
+ * 路径行追加在正文后，秘书才能用 session_send 的 attachments 原图转发。
+ */
+function withSecretaryImagePaths(
+  sessionId: string,
+  text: string,
+  images: readonly { data: string }[] | undefined
+): string {
+  if (!images?.length || !isSecretaryConversation(sessionId)) return text;
+  const store = getSecretaryImageStore();
+  const saved = store?.saveAll(
+    sessionId,
+    images.map((image) => Buffer.from(image.data, 'base64'))
+  );
+  return appendInboundImageLines(
+    text,
+    images.map((_, index) => {
+      const item = saved?.[index];
+      return item?.ok ? { path: item.path } : { rejected: item?.reason ?? 'unavailable' };
+    })
+  );
 }
 
 /** ssh 项目→远程执行配置。只认 main 侧项目权威,渲染层请求里不存在也不采信此字段 */
@@ -562,13 +608,15 @@ function spawnBoundSessionOnce(
   const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
   if (isSecretaryProject(project)) {
     if (!secretaryEnabled()) return { ok: false, error: 'disabled' };
+    const secretary = secretaryContext(secretaryIdOfProject(project?.projectId) ?? '');
+    if (!secretary) return { ok: false, error: 'secretary not found' };
     return spawnSession(
       identity,
       request,
       credentialKeys,
       remoteConfigFor(request.sessionId),
       projectIdFor(request.sessionId),
-      { secretary: secretarySpawnOptions() }
+      { secretary: secretarySpawnOptions(secretary) }
     );
   }
   // 派发/跟踪记录是权威：任何入口恢复 worker 都按它补上提问转交，不看渲染层传参
@@ -585,28 +633,43 @@ function spawnBoundSessionOnce(
 /** 秘书派出/跟踪中的会话：ask_user 先转给秘书；秘书关闭或记录已撤销时不转 */
 function secretaryAskRelay(sessionId: string): { name: string } | undefined {
   if (!secretaryEnabled()) return undefined;
-  const store = secretaryStore();
-  if (!store.dispatch().dispatched[sessionId]) return undefined;
-  const name = store.profile()?.name.trim();
-  return name ? { name } : undefined;
+  // 一个会话只归一个秘书：转交提问交给管着它的那一个
+  for (const ctx of secretaryContexts()) {
+    const store = new SecretaryStore(ctx.dir);
+    if (!store.dispatch().dispatched[sessionId]) continue;
+    const name = store.profile()?.name.trim();
+    return name ? { name } : undefined;
+  }
+  return undefined;
 }
 
-/** 秘书档案、人设与派发状态只在 Main 读盘 */
-function secretaryStore(): SecretaryStore {
-  return new SecretaryStore(path.join(app.getPath('userData'), 'secretary'));
+/** 联系方式绑过没有：只读 contact.json 的路由，不碰 token */
+function contactBoundFor(ctx: SecretaryContext): boolean {
+  return hasContactRoutes(new ContactStore(ctx.dir).file());
 }
 
-/** 联系方式绑过没有：只读 contact.json 的 chat，不碰 token */
-function contactBoundFor(): boolean {
-  return (
-    new ContactStore(path.join(app.getPath('userData'), 'secretary')).file().chat !== undefined
-  );
+/**
+ * 秘书这一回合的档案：同事消息触发的回合（降权回合）可见项目收窄到交集，
+ * 记忆检索与工具调用看到的是同一份。
+ */
+function secretaryProfileForTurn(sessionId: string): SecretaryProfile | null {
+  const ctx = secretaryOfSession(sessionId);
+  if (!ctx) return null;
+  const profile = new SecretaryStore(ctx.dir).profile();
+  const narrow = turnRestriction(ctx.id, sessionId);
+  return profile && narrow ? narrow(profile) : profile;
+}
+
+/** 秘书会话所属的秘书：只认 Main 的会话权威 */
+function secretaryOfSession(sessionId: string): SecretaryContext | null {
+  const id = secretaryIdOfConversation(sessionId);
+  return id ? secretaryContext(id) : null;
 }
 
 /**
  * 模型每轮看到的都是最新配置；插件与技能勾选在 spawn 时定死，改了要释放会话。
  */
-function secretarySpawnOptions(): {
+function secretarySpawnOptions(ctx: SecretaryContext): {
   systemPrompt: string;
   pluginIds: string[];
   skillIds: string[];
@@ -614,28 +677,36 @@ function secretarySpawnOptions(): {
   skillDirs: string[];
   tools: SecretaryToolDescriptor[];
 } {
-  const store = secretaryStore();
+  const store = new SecretaryStore(ctx.dir);
   const profile = store.profile();
   return {
-    systemPrompt: secretarySystemPrompt(store, profile),
+    systemPrompt: secretarySystemPrompt(ctx, store, profile),
     pluginIds: profile?.pluginIds ?? [],
     skillIds: profile?.skillIds ?? [],
-    skillDirs: secretarySkillDirs(secretarySkillsDir(), profile?.disabledSkillNames ?? []),
-    tools: secretaryToolDescriptors(secretaryToolsDir()),
+    skillDirs: secretarySkillDirs(secretarySkillsDir(ctx), profile?.disabledSkillNames ?? []),
+    tools: secretaryToolDescriptors(secretaryToolsDir(ctx)),
   };
 }
 
 /** 每次现读档案与人设：spawn 与档案保存后的就地刷新共用 */
 function secretarySystemPrompt(
-  store: SecretaryStore = secretaryStore(),
+  ctx: SecretaryContext,
+  store: SecretaryStore = new SecretaryStore(ctx.dir),
   profile = store.profile()
 ): string {
   const language = readSettingsState()?.language;
+  const colleagues = secretaryContexts()
+    .filter((other) => other.id !== ctx.id)
+    .map((other) => ({
+      id: other.id,
+      name: new SecretaryStore(other.dir).profile()?.name ?? other.id,
+    }));
   return buildSecretarySystemPrompt({
     profile,
     persona: store.readPersona(),
     uiLanguage: normalizeLocale(typeof language === 'string' ? language : undefined),
-    contactBound: contactBoundFor(),
+    contactBound: contactBoundFor(ctx),
+    ...(colleagues.length > 0 ? { colleagues } : {}),
   });
 }
 
@@ -643,7 +714,9 @@ function secretarySystemPrompt(
 export function refreshSecretaryPromptFromMain(sessionId: string): AgentActionResult {
   const identity = exactIdentity(sessionId);
   if (!identity) return { ok: false, error: STALE_SESSION_ERROR };
-  return setSessionSystemPrompt(identity, secretarySystemPrompt());
+  const ctx = secretaryOfSession(sessionId);
+  if (!ctx) return { ok: false, error: 'secretary not found' };
+  return setSessionSystemPrompt(identity, secretarySystemPrompt(ctx));
 }
 
 /** Main 侧根会话 spawn：pair 与秘书共用，renderer 走 AGENT_SPAWN 自己的校验 */
@@ -776,9 +849,7 @@ export function stopTaskFromMain(
   sessionId: string,
   taskId: string
 ): { ok: boolean; error?: string } {
-  const identity = exactIdentity(sessionId);
-  if (!identity) return { ok: false, error: 'stale generation' };
-  return stopBackgroundTask(identity, taskId);
+  return stopBackgroundTask(sessionId, taskId);
 }
 
 /** 秘书给已释放的派出会话续发消息：按持久化元数据恢复 worker，之后走普通 prompt 路径 */
@@ -1499,8 +1570,7 @@ function wirePairSessionHost(): void {
       if (identity) retrySession(identity);
     },
     stopTask: (sessionId, taskId) => {
-      const identity = exactIdentity(sessionId);
-      if (identity) stopBackgroundTask(identity, taskId);
+      stopBackgroundTask(sessionId, taskId);
     },
     stopSubagent: (sessionId, agentId) => {
       const identity = exactIdentity(sessionId);
@@ -1683,9 +1753,16 @@ export function registerAgentHandlers(): void {
     },
   });
   sourceAuthority.ensureScratchProject(path.join(app.getPath('userData'), 'scratch'));
-  sourceAuthority.ensureSecretaryProject(
-    path.join(app.getPath('userData'), 'secretary', 'workspace')
-  );
+  // 每个秘书一个隐藏项目：按路径幂等，default 仍是 userData/secretary/workspace
+  ensureSecretaryProjects();
+  const secretaryImages = new SecretaryImageStore({
+    root: secretaryImagesRoot(app.getPath('userData')),
+    references: (conversationId) =>
+      sessionFileReferences(sourceAuthority?.conversation(conversationId)?.sessionFile),
+  });
+  setSecretaryImageStore(secretaryImages);
+  // 启动后扫一次，不和启动抢 IO
+  setTimeout(() => void secretaryImages.sweep(), 15_000).unref();
   setBrowserFileRootResolver((conversationId) => {
     const conversation = sourceAuthority?.conversation(conversationId);
     const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
@@ -1906,7 +1983,7 @@ export function registerAgentHandlers(): void {
       }
     }
     if (workerEvent.type === 'parent-ready') {
-      settleColdResume(workerEvent.identity.sessionId);
+      coldResumeReady(workerEvent.identity.sessionId);
       sourceAuthority?.markReady(
         workerEvent.identity.sessionId,
         workerEvent.sessionFile,
@@ -1919,7 +1996,7 @@ export function registerAgentHandlers(): void {
       workerEvent.type === 'parent-rejected' &&
       !workerEvent.reason.startsWith(STALE_SESSION_ERROR)
     ) {
-      settleColdResume(workerEvent.identity.sessionId);
+      failColdResume(workerEvent.identity.sessionId, workerEvent.reason);
       const selection = sourceAuthority?.conversation(workerEvent.identity.sessionId)?.selection;
       console.warn('[agent] spawn rejected', {
         sessionId: workerEvent.identity.sessionId,
@@ -2056,7 +2133,7 @@ export function registerAgentHandlers(): void {
                   ...memorySpaceContext({ projectId }),
                   secretary: {
                     readProjectIds: secretaryReadProjectIds(
-                      secretaryStore().profile(),
+                      secretaryProfileForTurn(rootSessionId(identity)),
                       sourceAuthority?.projection().projects ?? []
                     ),
                   },
@@ -2198,7 +2275,15 @@ export function registerAgentHandlers(): void {
         sendSecretaryResultToSession(identity, requestId, { ok: false, error: 'disabled' });
         return;
       }
-      void invokeSecretaryOp(op, params, { secretaryConversationId: identity.sessionId }).then(
+      const secretaryId = secretaryIdOfConversation(identity.sessionId);
+      if (!secretaryId) {
+        sendSecretaryResultToSession(identity, requestId, { ok: false, error: 'disabled' });
+        return;
+      }
+      void invokeSecretaryOp(op, params, {
+        secretaryConversationId: identity.sessionId,
+        secretaryId,
+      }).then(
         (result) =>
           sendSecretaryResultToSession(
             identity,
@@ -2447,7 +2532,7 @@ export function registerAgentHandlers(): void {
       sourceBindings!.invalidateConversation(parsed.conversationId);
       removeConversationFiles(result.value);
       // 会话删了就不会再有结果：手机关注里的这一条一并移除
-      unfollowTarget(parsed.conversationId);
+      void unfollowTargetEverywhere(parsed.conversationId);
     }
     return result;
   });
@@ -2688,10 +2773,11 @@ export function registerAgentHandlers(): void {
       }
       if (agentSessionIndex.isDetached(identity))
         return { ok: false, error: DETACHED_SESSION_ERROR };
+      const typedImages = images as { data: string; mimeType: string }[] | undefined;
       return promptSession(
         identity,
-        text as string,
-        images as { data: string; mimeType: string }[] | undefined,
+        withSecretaryImagePaths(identity.sessionId, text as string, typedImages),
+        typedImages,
         deliveryId
       );
     }
@@ -2718,10 +2804,11 @@ export function registerAgentHandlers(): void {
       }
       if (agentSessionIndex.isDetached(identity))
         return { ok: false, error: DETACHED_SESSION_ERROR };
+      const typedImages = images as { data: string; mimeType: string }[] | undefined;
       return steerSession(
         identity,
-        text as string,
-        images as { data: string; mimeType: string }[] | undefined,
+        withSecretaryImagePaths(identity.sessionId, text as string, typedImages),
+        typedImages,
         deliveryId
       );
     }
@@ -3099,11 +3186,25 @@ export function registerAgentHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.AGENT_TASK_STOP,
     (_event, sessionId: unknown, taskId: unknown): AgentActionResult => {
-      const identity = exactIdentity(sessionId);
-      if (!identity || !isNonEmptyString(taskId)) {
-        return { ok: false, error: 'invalid task stop or stale generation' };
+      // 不要求会话已打开：未打开会话里的任务（重启认回）也要停得掉
+      if (!isNonEmptyString(sessionId) || !isNonEmptyString(taskId)) {
+        return { ok: false, error: 'invalid task stop' };
       }
-      return stopBackgroundTask(identity, taskId);
+      return stopBackgroundTask(sessionId, taskId);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_TASK_KEEP,
+    (_event, sessionId: unknown, taskId: unknown, reason: unknown): AgentActionResult => {
+      if (
+        !isNonEmptyString(sessionId) ||
+        !isNonEmptyString(taskId) ||
+        !(reason === null || (typeof reason === 'string' && reason.length <= TASK_KEEP_REASON_MAX))
+      ) {
+        return { ok: false, error: 'invalid task keep' };
+      }
+      return keepBackgroundTask(sessionId, taskId, reason);
     }
   );
 

@@ -1,4 +1,5 @@
 import type { AgentTypeKey } from '@shared/builtinAgents';
+import { coalesceRuns, mapLimited } from '@shared/coalesceRuns';
 import { parseCompactCommand } from '@shared/compactCommand';
 import { conversationCwd } from '@shared/conversationCwd';
 import { diffConversations } from '@shared/conversationsPatch';
@@ -166,6 +167,7 @@ function planToolEnabled(projectId: string): boolean {
 
 /** 离开时盖章；正在看的会话由 viewedId 保热，TTL 从离开起算 */
 const lastViewedAt: Record<string, number> = {};
+const WORKTREE_STATUS_CONCURRENCY = 6;
 const parentTailInFlight = new Set<string>();
 const olderHistoryInFlight = new Set<string>();
 /** 冷缓存清掉的 child 再被看到时补历史。实现在 store 创建后赋值。 */
@@ -359,7 +361,7 @@ export interface Conversation extends SessionProjection {
   /** Main 驱动的派出会话：续跑与队列泵由 Main 负责，本窗口只显示与转发指令 */
   driver?: 'main';
   /** 由秘书派出；只用于显示，任何权限判断都不读它 */
-  secretaryOrigin?: { secretaryConversationId: string };
+  secretaryOrigin?: { secretaryConversationId: string; secretaryId?: string };
   /** 回退后待预填输入框的内容(rewind-done 回流,Composer 消费一次) */
   draftText?: string;
   draftImages?: AttachedImage[];
@@ -1466,6 +1468,15 @@ export const useSessionsStore = create<SessionsState>()(
 
         if (event.type === 'title-failed') {
           failTitleSummary(event.conversationId, event.error);
+          return;
+        }
+        if (event.type === 'unopened-background-tasks') {
+          set((state) => {
+            const current = state.conversations[event.sessionId];
+            if (!current) return state;
+            const next = applyAgentEvent(current, event.sessionId, event);
+            return next === current ? state : patch(state, event.sessionId, next as Conversation);
+          });
           return;
         }
         // 一次性补全完成/失败在 Main 结算；text-delta 给 btw 面板，都不进会话投影
@@ -2587,16 +2598,17 @@ export const useSessionsStore = create<SessionsState>()(
           );
         },
 
-        async refreshWorktreeStatuses() {
+        // 启动、侧栏挂载、回焦会同时触发：合并成一次尾随刷新；每个状态要跑几次 git，限并发免得压垮宿主
+        refreshWorktreeStatuses: coalesceRuns(async () => {
           const targets = get().conversations;
           const records = await window.electronAPI.worktree.list();
-          const entries = await Promise.all(
-            records
-              .filter((record) => targets[record.conversationId])
-              .map(async (record) => {
-                const result = await window.electronAPI.worktree.status(record.conversationId);
-                return { record, status: result.ok ? result.value : undefined };
-              })
+          const entries = await mapLimited(
+            records.filter((record) => targets[record.conversationId]),
+            WORKTREE_STATUS_CONCURRENCY,
+            async (record) => {
+              const result = await window.electronAPI.worktree.status(record.conversationId);
+              return { record, status: result.ok ? result.value : undefined };
+            }
           );
           set((state) => {
             const conversations = { ...state.conversations };
@@ -2624,7 +2636,7 @@ export const useSessionsStore = create<SessionsState>()(
             }
             return { conversations, worktreeStatuses };
           });
-        },
+        }),
 
         async newConversation(projectId, options) {
           const sourceId = options?.worktreeFromConversationId;

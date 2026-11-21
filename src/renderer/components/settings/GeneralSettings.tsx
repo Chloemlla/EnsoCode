@@ -5,9 +5,12 @@ import type { ShellIntegration } from '@shared/shellIntegration';
 import { GENERATION_STALL_TIMEOUT_MINUTES } from '@shared/stallTimeout';
 import { type TerminalShell, terminalShellsForPlatform } from '@shared/terminalShell';
 import type { ServerUpdateMode, UpdaterState, UpdateStatus } from '@shared/types/updater';
+import { isPrereleaseVersion, type UpdateChannel } from '@shared/updater/channel';
+import { isAutoRestartMode } from '@shared/updater/idleRestart';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
 import { isAbsolutePathLike } from '@shared/worktreeRoot';
 import * as React from 'react';
+import { ManualInstallActions } from '@/components/app/ManualInstallActions';
 import { ReleaseNotesDialog } from '@/components/app/ReleaseNotesDialog';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
@@ -22,6 +25,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/i18n';
 import { isRemoteClient } from '@/lib/remoteClient';
+import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { ACTIVE_RETENTION_MINUTES } from '@/stores/settings/activeRetention';
 import {
@@ -83,6 +87,7 @@ export function GeneralSettings() {
         <h4 className="border-b pb-2 text-base font-semibold">{t('Agent runtime')}</h4>
         <GenerationStallTimeoutRow />
         <AutoRetryLimitRow />
+        <LongCacheRetentionRow />
         <SmartCompactPicker />
         <CompactReserveTokensSection />
       </section>
@@ -294,6 +299,23 @@ function AutoRetryLimitRow() {
         </SelectPopup>
       </Select>
     </div>
+  );
+}
+
+function LongCacheRetentionRow() {
+  const { t } = useI18n();
+  const longCacheRetention = useSettingsStore((s) => s.longCacheRetention);
+  const setLongCacheRetention = useSettingsStore((s) => s.setLongCacheRetention);
+  return (
+    <SwitchRow
+      rowId="general.longCacheRetention"
+      title={t('Long prompt cache (1 hour)')}
+      description={t(
+        'Keep the prompt cache for 1 hour instead of 5 minutes. Saves a lot when turns are more than 5 minutes apart, since the cache no longer expires and gets rewritten every turn, but cache writes cost 2× instead of 1.25×, so rapid follow-ups tens of seconds apart cost more. Anthropic models only. Applies from the next request.'
+      )}
+      checked={longCacheRetention}
+      onChange={setLongCacheRetention}
+    />
   );
 }
 
@@ -798,8 +820,12 @@ function UpdateSection() {
   const { t } = useI18n();
   const autoUpdate = useSettingsStore((s) => s.autoUpdate);
   const setAutoUpdate = useSettingsStore((s) => s.setAutoUpdate);
-  const autoRestartWhenIdle = useSettingsStore((s) => s.autoRestartWhenIdle);
-  const setAutoRestartWhenIdle = useSettingsStore((s) => s.setAutoRestartWhenIdle);
+  const autoRestartForUpdate = useSettingsStore((s) => s.autoRestartForUpdate);
+  const setAutoRestartForUpdate = useSettingsStore((s) => s.setAutoRestartForUpdate);
+  const updateChannel: UpdateChannel = useSettingsStore((s) =>
+    s.updateChannel === 'beta' ? 'beta' : 'stable'
+  );
+  const setUpdateChannel = useSettingsStore((s) => s.setUpdateChannel);
   const [status, setStatus] = React.useState<UpdateStatus | null>(null);
   const [host, setHost] = React.useState<UpdaterState | null>(null);
   const [confirmRestart, setConfirmRestart] = React.useState(false);
@@ -833,7 +859,11 @@ function UpdateSection() {
       case 'checking':
         return t('Checking for updates…');
       case 'available':
-        return t('New version {{version}} found', { version: status.info?.version ?? '' });
+        return status.manualInstall
+          ? t("New version {{version}} found. This local build can't install it automatically.", {
+              version: status.info?.version ?? '',
+            })
+          : t('New version {{version}} found', { version: status.info?.version ?? '' });
       case 'not-available':
         return t('You are on the latest version');
       case 'downloading':
@@ -841,10 +871,18 @@ function UpdateSection() {
           percent: Math.round(status.progress?.percent ?? 0),
         });
       case 'downloaded':
-        return t('New version {{version}} is ready — restart to update.', {
-          version: status.info?.version ?? '',
-        });
+        return t(
+          'New version {{version}} is downloaded. Restarting waits for the current tool to finish; background commands keep running.',
+          {
+            version: status.info?.version ?? '',
+          }
+        );
       case 'error':
+        if (status.manualInstall) {
+          return t(
+            "This local build is signed differently from the release and can't install updates automatically. Download it manually."
+          );
+        }
         return server && status.error
           ? t('Update failed: {{error}}', { error: status.error })
           : t('Update check failed');
@@ -868,7 +906,16 @@ function UpdateSection() {
           <p className="text-sm">
             {t('Current version')} · {APP_VERSION}
           </p>
-          {text && <p className="mt-0.5 truncate text-xs text-muted-foreground">{text}</p>}
+          {text && (
+            <p
+              className={cn(
+                'mt-0.5 text-xs text-muted-foreground',
+                !status?.manualInstall && 'truncate'
+              )}
+            >
+              {text}
+            </p>
+          )}
         </div>
         {hasNotes && (
           <Button
@@ -880,7 +927,9 @@ function UpdateSection() {
             {t('Release notes')}
           </Button>
         )}
-        {status?.status === 'downloaded' ? (
+        {status?.manualInstall ? (
+          <ManualInstallActions manualInstall={status.manualInstall} />
+        ) : status?.status === 'downloaded' ? (
           <Button
             size="sm"
             onClick={() => void window.electronAPI.updater.quitAndInstall()}
@@ -964,22 +1013,81 @@ function UpdateSection() {
         className={`flex items-center justify-between gap-3 rounded-md border px-3 py-2.5 ${autoUpdate ? '' : 'opacity-60'}`}
       >
         <div className="min-w-0">
-          <p className="text-sm">{t('Restart and apply when idle')}</p>
+          <p className="text-sm">{t('Restart automatically to apply updates')}</p>
           <p className="text-xs text-muted-foreground">
-            {t(
-              'After the update is downloaded, restart automatically if no agent is running, nothing is queued, and there are no pending questions or approvals. The idle state must last 5 minutes, and a focused window also blocks it.'
-            )}
+            {autoRestartForUpdate === 'immediate'
+              ? t(
+                  "Restart as soon as the update is downloaded, even while agents are running or messages are queued. The restart happens after the current tool finishes, and running sessions keep going afterwards. It still waits while you're using the window (input in the last 2 minutes), while an input box has an unsent draft, or while a question or approval is pending."
+                )
+              : autoRestartForUpdate === 'idle'
+                ? t(
+                    'After the update is downloaded, restart automatically if no agent is running, nothing is queued, and there are no pending questions or approvals. The idle state must last 5 minutes, and a focused window also blocks it.'
+                  )
+                : t('Only notify when an update is ready; never restart automatically.')}
           </p>
         </div>
-        <Switch
-          checked={autoUpdate && autoRestartWhenIdle}
-          disabled={!autoUpdate}
-          onCheckedChange={(checked) => {
-            setAutoRestartWhenIdle(checked);
-            void window.electronAPI.updater.setAutoRestartWhenIdle(checked);
+        <Select
+          items={{
+            off: t('Off'),
+            idle: t('When idle'),
+            immediate: t("Don't wait for idle"),
           }}
-        />
+          value={autoRestartForUpdate}
+          disabled={!autoUpdate}
+          onValueChange={(value) => {
+            if (!isAutoRestartMode(value)) return;
+            setAutoRestartForUpdate(value);
+            void window.electronAPI.updater.setAutoRestartMode(value);
+          }}
+        >
+          <SelectTrigger className="w-32 shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value="off">{t('Off')}</SelectItem>
+            <SelectItem value="idle">{t('When idle')}</SelectItem>
+            <SelectItem value="immediate">{t("Don't wait for idle")}</SelectItem>
+          </SelectPopup>
+        </Select>
       </div>
+      {host?.host === 'desktop' && (
+        <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm">{t('Update channel')}</p>
+            <p className="text-xs text-muted-foreground">
+              {updateChannel === 'beta'
+                ? t(
+                    'Beta builds come from the latest main branch and may be unstable. You get whichever of beta and stable is newer.'
+                  )
+                : t('Only stable releases.')}
+            </p>
+            {updateChannel === 'stable' && isPrereleaseVersion(APP_VERSION) && (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {t(
+                  "You're on a beta build. Switching to stable doesn't downgrade; you'll move to the next stable release once it's out."
+                )}
+              </p>
+            )}
+          </div>
+          <Select
+            items={{ stable: t('Stable'), beta: t('Beta') }}
+            value={updateChannel}
+            onValueChange={(value) => {
+              const channel: UpdateChannel = value === 'beta' ? 'beta' : 'stable';
+              setUpdateChannel(channel);
+              void window.electronAPI.updater.setChannel(channel);
+            }}
+          >
+            <SelectTrigger className="w-32 shrink-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="stable">{t('Stable')}</SelectItem>
+              <SelectItem value="beta">{t('Beta')}</SelectItem>
+            </SelectPopup>
+          </Select>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { secretaryAvatarUrl } from '@shared/localImage';
 import type { SecretaryState } from '@shared/types/secretary';
 import { useI18n } from '@/i18n';
+import { type RunningOriginsLink, SecretaryRunningOriginsCard } from './SecretaryRunningOrigins';
 
 export interface SecretarySectionView {
   name: string;
@@ -16,19 +17,24 @@ export interface SecretarySectionView {
 
 /** 秘书伪项目的展示状态；开关关掉时整块不出现 */
 export function secretarySectionView(
-  secretary: Pick<SecretaryState, 'enabled' | 'profile' | 'board'>,
-  t: (key: string) => string
+  secretary: Pick<SecretaryState, 'enabled' | 'profile' | 'board' | 'secretaryId'>,
+  t: (key: string) => string,
+  secretaryId?: string
 ): SecretarySectionView | null {
   if (!secretary.enabled) return null;
   const profile = secretary.profile;
   const imageVersion = profile?.avatar.imageVersion;
+  // 多秘书时头像地址要带所属秘书；没显式给就用这份状态自己的 id
+  const owner = secretaryId ?? secretary.secretaryId ?? undefined;
   return {
     name: profile?.name.trim() || t('Secretary'),
     needsYou: secretary.board.needsYou.length,
     running: secretary.board.running.length,
     configured: profile !== null,
     ...(profile ? { color: profile.avatar.color } : {}),
-    ...(imageVersion ? { image: secretaryAvatarUrl(imageVersion, profile?.avatar.imageHash) } : {}),
+    ...(imageVersion
+      ? { image: secretaryAvatarUrl(imageVersion, profile?.avatar.imageHash, owner) }
+      : {}),
   };
 }
 
@@ -40,10 +46,13 @@ export function SecretarySummary({
   view,
   runningExpanded,
   onToggleRunning,
+  origins,
 }: {
   view: SecretarySectionView;
   runningExpanded?: boolean;
   onToggleRunning?: () => void;
+  /** 侧栏传入：悬停「N 件在跑」看每件属于哪条会话 */
+  origins?: RunningOriginsLink;
 }) {
   const { t } = useI18n();
   if (!view.configured) return <>{t('Click to finish setup')}</>;
@@ -67,6 +76,11 @@ export function SecretarySummary({
           >
             {t('{{n}} running', { n: view.running })}
           </button>
+        ) : origins ? (
+          <SecretaryRunningOriginsCard
+            label={t('{{n}} running', { n: view.running })}
+            {...origins}
+          />
         ) : (
           <span className="shrink-0">{t('{{n}} running', { n: view.running })}</span>
         ))}

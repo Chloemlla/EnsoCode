@@ -95,6 +95,8 @@ beforeEach(() => {
   Object.assign(dom.window, {
     electronAPI: {
       secretary: {
+        list: async () => [],
+        onListChanged: () => () => {},
         ...api,
         listSchedules: async () => ({ ok: true, schedules: [] }),
         listSkills: async () => ({ ok: true, skills: [] }),
@@ -151,7 +153,7 @@ describe('设置 → 秘书：同时运行的派发会话上限', () => {
     await mount();
     await act(async () => options()[8]?.click());
     expect(api.saveProfile).toHaveBeenCalledTimes(1);
-    expect(api.saveProfile).toHaveBeenCalledWith({ maxRunningDispatches: 9 });
+    expect(api.saveProfile).toHaveBeenCalledWith({ maxRunningDispatches: 9 }, undefined);
     expect(selected()).toEqual(['9']);
   });
 
@@ -185,7 +187,7 @@ describe('设置 → 秘书：同时运行的派发会话上限', () => {
     expect(formProps.current?.hideMaxRunning).toBe(true);
     const submit = formProps.current?.onSubmit as (draft: object) => void;
     await act(async () => submit({ name: '小秘', maxRunningDispatches: 3 }));
-    expect(api.saveProfile).toHaveBeenCalledWith({ name: '小秘' });
+    expect(api.saveProfile).toHaveBeenCalledWith({ name: '小秘' }, undefined);
   });
 
   it('标题与说明有中文', () => {
@@ -239,9 +241,10 @@ describe('设置 → 秘书：可接管的会话', () => {
     ) as HTMLButtonElement;
     expect(project.textContent).toBe('enso');
     await act(async () => project.click());
-    expect(api.saveProfile).toHaveBeenCalledWith({
-      takeoverScope: { mode: 'projects', projectIds: ['p1'] },
-    });
+    expect(api.saveProfile).toHaveBeenCalledWith(
+      { takeoverScope: { mode: 'projects', projectIds: ['p1'] } },
+      undefined
+    );
     expect(scopeButtons().some((button) => button.textContent === '秘书')).toBe(false);
   });
 
@@ -250,9 +253,12 @@ describe('设置 → 秘书：可接管的会话', () => {
     api.saveProfile.mockResolvedValue({ ok: true, profile: profile(3, 2) });
     await mount();
     await act(async () => scopeButtons()[2]?.click());
-    expect(api.saveProfile).toHaveBeenLastCalledWith({ takeoverScope: { mode: 'all' } });
+    expect(api.saveProfile).toHaveBeenLastCalledWith({ takeoverScope: { mode: 'all' } }, undefined);
     await act(async () => scopeButtons()[0]?.click());
-    expect(api.saveProfile).toHaveBeenLastCalledWith({ takeoverScope: { mode: 'explicit' } });
+    expect(api.saveProfile).toHaveBeenLastCalledWith(
+      { takeoverScope: { mode: 'explicit' } },
+      undefined
+    );
   });
 
   it('标题与说明有中文', () => {
@@ -292,10 +298,13 @@ function cropSource(): string | null {
   return container.querySelector(CROP_CONFIRM)?.getAttribute('data-source') ?? null;
 }
 
-async function pick(name: string, type = 'image/png', size = 10) {
+async function pick(name: string, type = 'image/png', size = 10, content?: Uint8Array) {
   const input = container.querySelector(AVATAR_INPUT) as HTMLInputElement;
+  const file = content
+    ? { name, type, size, arrayBuffer: async () => content.slice().buffer }
+    : { name, type, size };
   Object.defineProperty(input, 'files', {
-    value: [{ name, type, size }],
+    value: [file],
     configurable: true,
   });
   await act(async () => {
@@ -370,5 +379,23 @@ describe('设置 → 秘书：头像上传', () => {
     await pick('second.png');
     expect(cropSource()).toBe('data:second.png');
     expect(container.querySelector(AVATAR_PROBLEM)).toBeNull();
+  });
+
+  it('GIF 跳过裁切、原字节保存；标成 GIF 但字节不是 GIF 时仍走裁切', async () => {
+    api.getProfile.mockResolvedValue({ ok: true, profile: avatarProfile(undefined), persona: '' });
+    api.setAvatar.mockResolvedValue({ ok: true, profile: avatarProfile(1, 'aaaaaaaa', 2) });
+    await mount();
+
+    const gif = Uint8Array.from('GIF89a\x01\x00\x01\x00', (char) => char.charCodeAt(0));
+    await pick('face.gif', 'image/gif', gif.byteLength, gif);
+    expect(container.querySelector(CROP_CONFIRM)).toBeNull();
+    expect(raster.readDataUrl).not.toHaveBeenCalled();
+    expect(api.setAvatar).toHaveBeenCalledTimes(1);
+    expect(Array.from(api.setAvatar.mock.calls[0]?.[0] as Uint8Array)).toEqual(Array.from(gif));
+    expect(avatarSrc()).toBe('local-image://secretary-avatar/avatar.png?v=1&h=aaaaaaaa');
+
+    await pick('fake.gif', 'image/gif', 4, Uint8Array.of(137, 80, 78, 71));
+    expect(cropSource()).toBe('data:fake.gif');
+    expect(api.setAvatar).toHaveBeenCalledTimes(1);
   });
 });

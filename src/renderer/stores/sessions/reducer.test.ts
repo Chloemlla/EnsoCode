@@ -740,6 +740,45 @@ describe('applyAgentEvent', () => {
     expect(delivered.messages[0]).not.toHaveProperty('optimistic', true);
   });
 
+  it.each([
+    ['带文字', '加个按钮', '加个按钮\n\n'],
+    ['纯图片', '', ''],
+  ])('秘书会话由 Main 追加了图片路径行的 user upsert 消费乐观回显（%s）', (_, typed, prefix) => {
+    const image = { type: 'image' as const, data: 'x', mimeType: 'image/png' };
+    const withEcho = {
+      ...base,
+      messages: [
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: typed }, image],
+          optimistic: true as const,
+        },
+      ],
+    };
+    const delivered = applyAgentEvent(withEcho, 's1', {
+      type: 'message-upsert',
+      identity: identity(),
+      seq: 1,
+      index: 0,
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `${prefix}[图片 1] /u/bot-chats/secretary-images/c/a.png\n[图片 2 未收下] 超过 10MB，没有保存\n\n[Image converted from image/webp to image/png.]`,
+          },
+          image,
+        ],
+      },
+    });
+    expect(delivered.messages).toHaveLength(1);
+    expect(delivered.messages[0]).not.toHaveProperty('optimistic', true);
+    // 存下的正文仍是 worker 原文，路径行只在界面上换形态
+    expect(JSON.stringify(delivered.messages[0]?.content)).toContain(
+      '[图片 1] /u/bot-chats/secretary-images/c/a.png'
+    );
+  });
+
   it('超长 user 正文投影被截断后仍消费乐观回显（upsert 与 snapshot）', () => {
     const typed = 'log line\n'.repeat(8000);
     const truncated = `${typed.slice(0, PROJECTED_FILE_TEXT_LIMIT)}\n…`;
@@ -1905,6 +1944,23 @@ describe('background-tasks-level', () => {
     expect(state.backgroundTasks).toEqual([task('t1', 'done')]);
   });
 
+  it('task-output 带上累计输出字节数，面板据此区分「没输出」和「有输出没加载」', () => {
+    const state = applyAgentEvent(
+      { ...base, lastSeq: 1, backgroundTasks: [task('t1', 'running')] },
+      's1',
+      {
+        type: 'task-output',
+        identity: identity(),
+        seq: 2,
+        taskId: 't1',
+        tail: 'x\n',
+        status: 'running',
+        outputBytes: 4096,
+      }
+    );
+    expect(state.backgroundTasks[0]).toMatchObject({ tail: 'x\n', outputBytes: 4096 });
+  });
+
   it('过期 seq 的 level 被丢弃', () => {
     const state = applyAgentEvent(
       { ...base, lastSeq: 5, backgroundTasks: [task('t1', 'running')] },
@@ -1912,6 +1968,31 @@ describe('background-tasks-level', () => {
       { type: 'background-tasks-level', identity: identity(), seq: 3, tasks: [] }
     );
     expect(state.backgroundTasks).toEqual([task('t1', 'running')]);
+  });
+
+  it('冷会话（worker 没打开）收到认回的任务：直接上任务条，不领养 generation、不动 seq', () => {
+    const cold = { ...base, generation: undefined, lastSeq: 0 };
+    const state = applyAgentEvent(cold, 's1', {
+      type: 'unopened-background-tasks',
+      sessionId: 's1',
+      tasks: [task('t1', 'running')],
+    });
+    expect(state.backgroundTasks).toEqual([task('t1', 'running')]);
+    expect(state.generation).toBeUndefined();
+    expect(state.lastSeq).toBe(0);
+    const done = applyAgentEvent(state, 's1', {
+      type: 'unopened-background-tasks',
+      sessionId: 's1',
+      tasks: [task('t1', 'done')],
+    });
+    expect(done.backgroundTasks).toEqual([task('t1', 'done')]);
+    expect(
+      applyAgentEvent(cold, 's2', {
+        type: 'unopened-background-tasks',
+        sessionId: 's1',
+        tasks: [task('t1', 'running')],
+      })
+    ).toBe(cold);
   });
 });
 
