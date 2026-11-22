@@ -51,6 +51,7 @@ describe('secretary tools', () => {
       items: { type: 'string' },
     });
     expect(send.required).toEqual(['conversationId', 'message']);
+    expect(send.properties.goal).toMatchObject({ type: 'string', maxLength: 4000 });
     const stop = schemaOf('session_stop');
     expect(stop.properties.clearQueue).toMatchObject({ type: 'boolean' });
     expect(stop.required).toEqual(['conversationId']);
@@ -71,7 +72,16 @@ describe('secretary tools', () => {
       expect(schema.properties.branch).toMatchObject({ type: 'string' });
       expect(schema.properties.after).toMatchObject({ type: 'array' });
       expect(schema.properties.after.items).toMatchObject({ type: 'string' });
+      expect(schema.properties.attachments).toMatchObject({
+        type: 'array',
+        maxItems: 5,
+        items: { type: 'string' },
+      });
     }
+    for (const name of ['session_create', 'todo_item_dispatch'] as const)
+      expect(
+        normalizeSecretaryParams(name, { projectId: 'p1', prompt: 'x', images: ' /tmp/a.png ' })
+      ).toMatchObject({ attachments: ['/tmp/a.png'] });
   });
 
   it('secretary_profile_propose 只暴露保留的设置项，派发工具不再提确认卡', () => {
@@ -184,6 +194,23 @@ describe('secretary tools', () => {
         offset: '30000',
       })
     ).toEqual({ conversationId: 'c1', index: 7, offset: 30_000 });
+    // entryId 是现名；旧名 messageId / message_id 仍被接受，已在跑的会话不出错
+    for (const legacy of [{ entry_id: ' e-1 ' }, { messageId: 'e-1' }, { message_id: ' e-1 ' }])
+      expect(
+        normalizeSecretaryParams('session_read', { conversation_id: 'c1', ...legacy })
+      ).toEqual({ conversationId: 'c1', entryId: 'e-1' });
+    expect(
+      normalizeSecretaryParams('session_read', {
+        conversationId: 'c1',
+        entryId: 'new',
+        messageId: 'old',
+      })
+    ).toEqual({ conversationId: 'c1', entryId: 'new' });
+    const readSchema = createSecretaryTools(invoker().port).find(
+      (tool) => tool.name === 'session_read'
+    )?.parameters as unknown as { properties: Record<string, unknown> };
+    expect(readSchema.properties).toHaveProperty('entryId');
+    expect(readSchema.properties).not.toHaveProperty('messageId');
     expect(
       normalizeSecretaryParams('session_activity', { conversation_id: 'c1', limit: '50' })
     ).toEqual({ conversationId: 'c1', limit: 50 });

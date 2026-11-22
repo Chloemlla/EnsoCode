@@ -7,7 +7,9 @@ import { type MaskReport, mergeMaskReports } from '@shared/privacyMask/report';
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
 import type { RtkToolStats } from '@shared/rtk';
 import { isPureSessionUpdate, isSilentMarker, SILENCE_TURN_TOOL } from '@shared/secretary/silence';
+import { splitSkillBlocks } from '@shared/skillCommands';
 import { nestedToolCallParent } from '@shared/toolCallId';
+import { leadingTaskWrapUp, TASK_WRAP_UP_TAG } from '@shared/turnNotes';
 import type {
   AgentSessionCustomEntry,
   ApprovalRequestInfo,
@@ -45,6 +47,8 @@ export type TimelineItem =
       replyAt?: number;
       /** 本轮各次请求的脱敏报告合计 */
       replyPrivacyMask?: MaskReport;
+      /** 正文前那段收尾清单是宿主在收尾提醒后搭上的，按系统卡片显示 */
+      hostTaskWrapUp?: true;
     }
   | {
       kind: 'text';
@@ -204,6 +208,15 @@ export type TimelineItem =
   | { kind: 'divider'; key: string; text: string }
   /** 插件经 session.inject 写入的消息；必须标明来源 */
   | { kind: 'plugin-message'; key: string; text: string; pluginId: string; pluginName: string }
+  /** 应用重启时写到一半被中止、新进程已在下方接着写的回复：收成一行，展开看原文 */
+  | {
+      kind: 'resumed-reply';
+      key: string;
+      thinking: string;
+      text: string;
+      tools: { name: string; summary: string }[];
+      expanded: boolean;
+    }
   /** 插件投递被 turn_discard 丢弃的一轮：收成一行，展开看投递原文 */
   | {
       kind: 'discarded-turn';
@@ -606,7 +619,7 @@ function stripDeliveryReceipt(output: string | null): string | null {
 }
 
 /** 回执顶层带 agentId / runId 的操作；report / wait 的大段结果不在建时间线时解析 */
-const RECEIPT_OPS = new Set<unknown>(['spawn', 'send', 'message']);
+const RECEIPT_OPS = new Set<unknown>(['spawn', 'send', 'message', 'resume']);
 
 /** spawn 回执里的 agentId → 派活时起的名字；回执里的 runId → agentId，供后续按 id 指代的行显示标题 */
 function recordSubagent(
@@ -626,8 +639,8 @@ function recordSubagent(
   if (typeof label === 'string') agents.set(agentId, label.trim());
 }
 
-export type SubagentOp = 'report' | 'wait' | 'stop' | 'dismiss' | 'list';
-const SUBAGENT_OPS = new Set<unknown>(['report', 'wait', 'stop', 'dismiss', 'list']);
+export type SubagentOp = 'report' | 'wait' | 'stop' | 'dismiss' | 'list' | 'resume';
+const SUBAGENT_OPS = new Set<unknown>(['report', 'wait', 'stop', 'dismiss', 'list', 'resume']);
 
 /** 会阻塞到对方结束的调用：子代理 wait、spawn / send 带 wait:true、task_output 带正时限 */
 function blockingWaitKind(name: string, args: unknown): 'subagent' | 'task' | null {
@@ -669,7 +682,7 @@ function extractSubagentHeader(
       : { op: 'list', title: '' };
   }
   const ids =
-    operation === 'dismiss'
+    operation === 'dismiss' || operation === 'resume'
       ? [agentId]
       : [runId, ...(Array.isArray(runIds) ? runIds : [])].map((id) =>
           typeof id === 'string' ? runs.get(id) : undefined
@@ -1135,6 +1148,10 @@ function buildMessageTimeline(
         currentTurnUserItem.turnDurationMs = turnDurationMs;
       }
     }
+    if (message.restartResumed) {
+      items.push(resumedReplyItem(message, absIndex, cwd));
+      return;
+    }
     // 「流式中」= 最后一个有内容的 part：pi 流式时 thinking/text 后面常已跟着
     // 空占位 part，按「最后一个 part」判会把正在生成的块误判为已完结
     const lastActiveIndex = findLastActivePartIndex(message.content);
@@ -1336,10 +1353,12 @@ function buildMessageTimeline(
       }
     });
     if (message.errorMessage) {
-      // 瞬态错误不渲染：后面紧跟另一条 assistant = 已重试过（覆盖 resume 回放）；
+      // 瞬态错误不渲染：后面紧跟另一条 assistant = 已重试过（覆盖 resume 回放；重启续跑前可能插了 system）；
       // 末条且 running = 重试倒计时中（错误文本展示在 RetryBar 上，先渲染再删会抽搐）。
       // 只有真正的终态错误（非 running 的末次尝试）才落红。
-      const retried = messages[messageIndex + 1]?.role === 'assistant';
+      let next = messageIndex + 1;
+      while (messages[next]?.role === 'system') next++;
+      const retried = messages[next]?.role === 'assistant';
       const pendingRetry = running && messageIndex === messages.length - 1;
       const exitCaused = suppressedError !== undefined && message.errorMessage === suppressedError;
       if (!retried && !pendingRetry && !exitCaused) {
@@ -1348,6 +1367,30 @@ function buildMessageTimeline(
     }
   });
   return items;
+}
+
+/** 被重启中止、已续跑的半截回复：折叠行只带原文，不进正文 / 工具卡片 / 错误行 */
+function resumedReplyItem(
+  message: ProjectedMessage,
+  absIndex: number,
+  cwd: string | undefined
+): TimelineItem {
+  const join = (type: 'text' | 'thinking') =>
+    message.content
+      .flatMap((part) => (part.type === type && part.text.trim() ? [part.text.trim()] : []))
+      .join('\n\n');
+  return {
+    kind: 'resumed-reply',
+    key: `${absIndex}-resumed`,
+    thinking: join('thinking'),
+    text: join('text'),
+    tools: message.content.flatMap((part) =>
+      part.type === 'toolCall'
+        ? [{ name: part.name, summary: summarizeArgs(part.arguments, cwd) }]
+        : []
+    ),
+    expanded: false,
+  };
 }
 
 /**
@@ -1365,6 +1408,59 @@ export function terminalErrorText(
 
 const customEntryTime = (entry: AgentSessionCustomEntry): number =>
   entry.kind === 'capability-receipt' ? entry.receipt.occurredAt : entry.at;
+
+const WRAP_UP_OPEN = `<${TASK_WRAP_UP_TAG}>`;
+
+function messageText(message: ProjectedMessage): string {
+  return message.content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .join('\n')
+    .trim();
+}
+
+function carriesTaskWrapUp(text: string): boolean {
+  if (!text.includes(WRAP_UP_OPEN)) return false;
+  if (leadingTaskWrapUp(text)) return true;
+  const skills = splitSkillBlocks(text);
+  return Boolean(skills && leadingTaskWrapUp(skills.rest));
+}
+
+/**
+ * 消息本身没有来源字段，以宿主落盘的收尾提醒条目为准：每条提醒之后，
+ * 第一条带清单的进模型消息（用户消息或工具结果）才是宿主搭上的。返回绝对下标。
+ */
+function hostTaskWrapUpIndexes(
+  messages: readonly TimelineMessage[],
+  entries: readonly AgentSessionCustomEntry[],
+  historyBaseIndex: number
+): Set<number> {
+  const hosts = new Set<number>();
+  const nudges = entries
+    .filter((entry) => entry.kind === 'task-wrap-up-nudge')
+    .map((entry) => entry.at)
+    .sort((left, right) => left - right);
+  if (nudges.length === 0) return hosts;
+  let next = 0;
+  let armed = false;
+  messages.forEach((message, index) => {
+    if (message.optimistic) return;
+    const at = message.timestamp ?? Number.NEGATIVE_INFINITY;
+    while (next < nudges.length && (nudges[next] ?? 0) <= at) {
+      armed = true;
+      next += 1;
+    }
+    if (!armed || (message.role !== 'user' && message.role !== 'toolResult')) return;
+    const text = messageText(message);
+    if (message.role === 'toolResult') {
+      if (text.includes(WRAP_UP_OPEN)) armed = false;
+      return;
+    }
+    if (!carriesTaskWrapUp(text)) return;
+    hosts.add(historyBaseIndex + index);
+    armed = false;
+  });
+  return hosts;
+}
 
 /** 行 key 的消息下标（`3` 或 `3-1`）；非消息行（custom/chrome）返回 -1 */
 const messageItemIndex = (item: TimelineItem): number => {
@@ -1576,7 +1672,7 @@ export function buildTimeline(
     if (entry.kind === 'tool-batch-label') batchLabels.set(entry.callId, entry.label);
     else rowEntries.push(entry);
   }
-  const messageItems = buildMessageTimeline(
+  const builtItems = buildMessageTimeline(
     messages,
     running,
     cwd,
@@ -1588,6 +1684,15 @@ export function buildTimeline(
     options?.secretarySession === true,
     options?.interrupted?.suppressedError
   );
+  const hostWrapUps = hostTaskWrapUpIndexes(messages, rowEntries, historyBaseIndex);
+  const messageItems =
+    hostWrapUps.size === 0
+      ? builtItems
+      : builtItems.map((item) =>
+          item.kind === 'user' && !item.deliveryState && hostWrapUps.has(messageItemIndex(item))
+            ? { ...item, hostTaskWrapUp: true as const }
+            : item
+        );
   const merged =
     rowEntries.length === 0
       ? messageItems
@@ -2421,7 +2526,9 @@ export function foldTimeline(
   options: TimelineFoldOptions = {}
 ): TimelineItem[] {
   const surfaced = foldSecretarySurface(
-    items,
+    items.map((item) =>
+      item.kind === 'resumed-reply' ? { ...item, expanded: expandedKeys.has(item.key) } : item
+    ),
     running,
     expandedKeys,
     options.foldToolOnlyTurns === true

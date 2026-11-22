@@ -158,6 +158,7 @@ import { resolveExternalRevealTarget, sessionWrittenPaths } from '../services/ex
 import { searchFiles } from '../services/fileSearch';
 import { resolveLocalUnderCwd } from '../services/filesWorkspace';
 import { memoryCompleteFromSettings } from '../services/llama/chat';
+import { setSecretaryReportResolver } from '../services/localImageProtocol';
 import { clearMcpStatuses, recordMcpStatus } from '../services/mcpStatusCache';
 import { type Complete, redactSecrets } from '../services/memory/distill';
 import { memorySpaceContext, secretaryReadProjectIds } from '../services/memory/space';
@@ -192,6 +193,13 @@ import {
 import { turnRestriction } from '../services/secretary/peers';
 import { buildSecretarySystemPrompt } from '../services/secretary/prompt';
 import {
+  getSecretaryReportStore,
+  reportImageRoots,
+  SecretaryReportStore,
+  secretaryReportsRoot,
+  setSecretaryReportStore,
+} from '../services/secretary/reportImages';
+import {
   ensureSecretaryProjects,
   type SecretaryContext,
   secretaryContext,
@@ -210,6 +218,8 @@ import {
 } from '../services/sessionActivity';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import {
+  findHistoryMessage,
+  type HistoryProjectionOptions,
   projectParentHistoryAll,
   projectParentHistoryPage,
   projectParentHistoryTail,
@@ -325,9 +335,9 @@ export function observedSessionStatus(sessionId: string): PluginSessionStatus {
     : status;
 }
 
-/** 秘书 session_tasks 的数据源：worker 后台任务在 Main 的最近一次投影 */
+/** 秘书 session_tasks 与自动归档的数据源：会话及其子代理起的后台任务（worker 在 Main 的最近一次投影） */
 export function observedBackgroundTasks(sessionId: string): ObservedTask[] {
-  return backgroundTaskStates.tasks(sessionId);
+  return backgroundTaskStates.tasksInTree(sessionId);
 }
 
 /** 主会话名下还有没结束的子代理 Run：结束时 AgentService 会通知并叫醒主会话 */
@@ -502,6 +512,7 @@ function removeConversationFiles(conversation: {
   const project = sourceAuthority?.project(conversation.projectId);
   peekExtensionPlugins()?.forgetSession(conversation.conversationId);
   getSecretaryImageStore()?.remove(conversation.conversationId);
+  getSecretaryReportStore()?.remove(conversation.conversationId);
   removeConversationSessionFiles({
     sessionDir: path.join(app.getPath('userData'), 'agent', 'sessions'),
     conversationId: conversation.conversationId,
@@ -788,11 +799,33 @@ export function promptRootFromMain(
 export function steerRootFromMain(
   sessionId: string,
   text: string,
-  deliveryId: string
+  deliveryId: string,
+  images?: AttachedImage[]
 ): AgentActionResult {
   const identity = exactIdentity(sessionId);
   if (!identity) return { ok: false, error: STALE_SESSION_ERROR };
-  return steerSession(identity, text, undefined, deliveryId);
+  return steerSession(identity, text, images, deliveryId);
+}
+
+/** 根会话刚 spawn / 恢复时 worker 还没报 parent-ready：等它报，最多等 timeoutMs */
+const IMAGE_INPUT_WAIT_MS = 30_000;
+
+/**
+ * 根会话当前模型能否看图（worker 在 parent-ready / model-changed 里报）。
+ * 正在启动的会话等就绪；会话没在跑、启动失败或超时都返回 undefined，调用方按不能看图处理。
+ */
+export async function rootImageInput(
+  sessionId: string,
+  timeoutMs = IMAGE_INPUT_WAIT_MS
+): Promise<boolean | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const identity = exactIdentity(sessionId);
+    if (identity && agentSessionIndex.isReady(identity))
+      return agentSessionIndex.imageInput(sessionId);
+    if (!agentSessionIndex.isAlive(sessionId) || Date.now() >= deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 export async function releaseRootFromMain(sessionId: string): Promise<AgentActionResult> {
@@ -1257,7 +1290,8 @@ async function readParentHistoryTail(
 /** 根会话 pi jsonl 的尾窗 / 分页投影；路径须落在 sessions 目录内 */
 export async function readSessionHistoryFile(
   sessionFile: string | undefined,
-  beforeIndex?: number
+  beforeIndex?: number,
+  options?: HistoryProjectionOptions
 ): Promise<ParentHistoryTailResult> {
   const sessionDir = path.join(app.getPath('userData'), 'agent', 'sessions');
   const resolved = resolveParentHistoryFile(sessionDir, sessionFile);
@@ -1278,8 +1312,8 @@ export async function readSessionHistoryFile(
     return {
       ok: true,
       ...(beforeIndex === undefined
-        ? projectParentHistoryTail(branch)
-        : projectParentHistoryPage(branch, beforeIndex)),
+        ? projectParentHistoryTail(branch, options)
+        : projectParentHistoryPage(branch, beforeIndex, options)),
     };
   } catch (error) {
     return {
@@ -1295,7 +1329,8 @@ export async function readSessionHistoryFile(
  * 路径同样必须落在 sessions 目录内，读不到就返回空，让调用方报 not-found。
  */
 async function readFullSessionHistory(
-  sessionFile: string | undefined
+  sessionFile: string | undefined,
+  options?: HistoryProjectionOptions
 ): Promise<ProjectedMessage[]> {
   const sessionDir = path.join(app.getPath('userData'), 'agent', 'sessions');
   const resolved = resolveParentHistoryFile(sessionDir, sessionFile);
@@ -1303,22 +1338,24 @@ async function readFullSessionHistory(
   try {
     const { SessionManager } = await import('@earendil-works/pi-coding-agent');
     const manager = SessionManager.open(resolved, sessionDir);
-    return projectParentHistoryAll(manager.getBranch());
+    return projectParentHistoryAll(manager.getBranch(), options);
   } catch {
     return [];
   }
 }
 
 /**
- * 秘书 session_read 的 index 模式：按绝对下标取一条消息。
- * 下标口径与列表模式的 index 一致（投影后的绝对位置，baseIndex + 偏移）。
+ * 秘书 session_read 的全文模式：优先按 jsonl entryId 取一条消息，下标只作兼容回退。
+ * 下标口径与列表模式的 index 一致（投影后的绝对位置，baseIndex + 偏移），会话重建后会漂移。
  */
 export async function readSessionMessage(
   sessionFile: string | undefined,
-  index: number
-): Promise<ProjectedMessage | null> {
-  const messages = await readFullSessionHistory(sessionFile);
-  return messages[index] ?? null;
+  target: { entryId: string } | { index: number }
+): Promise<{ index: number; message: ProjectedMessage } | null> {
+  return findHistoryMessage(
+    await readFullSessionHistory(sessionFile, { messageIds: true }),
+    target
+  );
 }
 
 /** 秘书 session_activity：最近工具调用，不含任何工具输出 */
@@ -1701,6 +1738,8 @@ async function runAgentControl(
       return agentService.stop({ ...base, runId: request.runId });
     case 'dismiss':
       return agentService.dismiss({ ...base, agentId: request.agentId });
+    case 'resume':
+      return agentService.resume({ ...base, agentId: request.agentId });
   }
 }
 
@@ -1763,6 +1802,20 @@ export function registerAgentHandlers(): void {
   setSecretaryImageStore(secretaryImages);
   // 启动后扫一次，不和启动抢 IO
   setTimeout(() => void secretaryImages.sweep(), 15_000).unref();
+  const secretaryReports = new SecretaryReportStore({
+    root: secretaryReportsRoot(app.getPath('userData')),
+    roots: (conversationId) =>
+      reportImageRoots(sessionWorktree(agentSessionIndex.workspaceRoot(conversationId))?.path),
+  });
+  setSecretaryReportStore(secretaryReports);
+  setSecretaryReportResolver((conversationId, name) =>
+    secretaryReports.imageFile(conversationId, name)
+  );
+  // 报告截图留 7 天：启动后扫一次，之后每天一次
+  setTimeout(() => {
+    void secretaryReports.sweep();
+    setInterval(() => void secretaryReports.sweep(), 24 * 60 * 60 * 1000).unref();
+  }, 20_000).unref();
   setBrowserFileRootResolver((conversationId) => {
     const conversation = sourceAuthority?.conversation(conversationId);
     const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
@@ -1849,6 +1902,7 @@ export function registerAgentHandlers(): void {
       if (identity) sendAgentCommand({ type: 'agent-notify', identity, text, urgent });
     },
     onProgress: (ownerId, runs) => subagentProgressPush.update(ownerId, runs),
+    childTasks: (sessionId) => backgroundTaskStates.tasks(sessionId),
     allowedModes: (context) => {
       const state = readSettingsState() ?? {};
       const projects = Array.isArray(state.projects) ? state.projects : [];
@@ -1895,6 +1949,14 @@ export function registerAgentHandlers(): void {
       steer: async (input) => steerSession(input.identity, input.prompt),
       stop: async (input) => abortSession(input.identity),
       dismiss: async (input) => dismissChildSession(input.identity.parent, input.identity, false),
+      resume: (input) =>
+        dispatchService!.resumeControlledAgent(input.context.owner.ownerId, input.identity),
+      retry: async (input) =>
+        retrySession(input.identity, true, {
+          turnId: input.runId,
+          requestBudget: true,
+          requestsUsed: input.requestsUsed,
+        }),
       validate: async (input) => {
         const source = sourceBindings?.resolveParentSource(input.context.owner.ownerId);
         if (!source) return { ok: false, error: 'Agent parent workspace is unavailable.' };
@@ -3176,6 +3238,10 @@ export function registerAgentHandlers(): void {
     notifyDesktop().setViewedSession(isNonEmptyString(sessionId) ? sessionId : null);
     // 正在查看的会话不参与 worker 侧闲置回收，否则 release 后 ChatView 会立刻 resume 形成拉锯
     setPinnedSessions('viewed', isNonEmptyString(sessionId) ? [sessionId] : []);
+    // 正开着而先没收走的已完成派出会话：切走后归档
+    void import('./secretary').then((secretary) =>
+      secretary.onViewedConversationChanged(isNonEmptyString(sessionId) ? sessionId : null)
+    );
   });
 
   ipcMain.on(IPC_CHANNELS.AGENT_SESSION_MUTED, (_event, sessionId: unknown, muted: unknown) => {

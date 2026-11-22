@@ -72,6 +72,29 @@ describe('BackgroundTaskTracker', () => {
     expect(new BackgroundTaskTracker().tasks('nope')).toEqual([]);
   });
 
+  it('tasksInTree：会话自己的任务加上它子代理起的任务，子代理的标出归属', () => {
+    const tracker = new BackgroundTaskTracker();
+    tracker.observe(started(task({ taskId: 'own', startedAt: 1_000 })));
+    tracker.observe({
+      type: 'task-started',
+      identity: { sessionId: 's1::cw-child', generation: 'g2' },
+      seq: 1,
+      task: task({ taskId: 'sub', startedAt: 2_000 }),
+    } as RendererAgentEvent);
+    tracker.observe({
+      type: 'task-started',
+      identity: { sessionId: 's10', generation: 'g3' },
+      seq: 1,
+      task: task({ taskId: 'other' }),
+    } as RendererAgentEvent);
+    expect(tracker.tasks('s1').map((item) => item.taskId)).toEqual(['own']);
+    expect(tracker.tasksInTree('s1')).toEqual([
+      expect.objectContaining({ taskId: 'sub', ownerSessionId: 's1::cw-child' }),
+      expect.objectContaining({ taskId: 'own' }),
+    ]);
+    expect(tracker.tasksInTree('s1')[1]).not.toHaveProperty('ownerSessionId');
+  });
+
   it('hasRunning：任一会话还有在跑的后台命令（回合已结束也算），全部结束后为 false', () => {
     const tracker = new BackgroundTaskTracker();
     expect(tracker.hasRunning()).toBe(false);
@@ -111,5 +134,18 @@ describe('BackgroundTaskTracker', () => {
     } as RendererAgentEvent);
     expect(tracker.tasks('s3')).toEqual([]);
     expect(tracker.hasRunning()).toBe(false);
+  });
+
+  it('worker 报完启动时的全量之前不算知道：标记后通知订阅者，每次换代都通知', () => {
+    const tracker = new BackgroundTaskTracker();
+    let notified = 0;
+    tracker.onReported(() => {
+      notified += 1;
+    });
+    expect(tracker.reported()).toBe(false);
+    tracker.markReported();
+    expect(tracker.reported()).toBe(true);
+    tracker.markReported();
+    expect(notified).toBe(2);
   });
 });

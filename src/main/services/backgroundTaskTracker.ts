@@ -19,6 +19,8 @@ export interface ObservedTask {
   suspectedIdle?: true;
   /** agent 或用户留下运行 */
   kept?: true;
+  /** 子代理起的任务：所属子会话 id（只在 tasksInTree 里给出） */
+  ownerSessionId?: string;
 }
 
 const toObserved = (task: BackgroundTaskInfo): ObservedTask => ({
@@ -35,14 +37,50 @@ const toObserved = (task: BackgroundTaskInfo): ObservedTask => ({
 
 export class BackgroundTaskTracker {
   private readonly bySession = new Map<string, Map<string, ObservedTask>>();
+  private hasReported = false;
+  private readonly reportedListeners = new Set<() => void>();
+
+  /**
+   * worker 启动时已把认回的任务（含没打开的会话）全部报上来。在此之前空表只是「还不知道」，
+   * 不能当成没有任务（应用刚启动、worker 还没起来时就是这样）。
+   */
+  reported(): boolean {
+    return this.hasReported;
+  }
+
+  /** worker 的 ready 握手：认回任务的事件都排在它前面，到这里任务表才算全量 */
+  markReported(): void {
+    this.hasReported = true;
+    for (const listener of this.reportedListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.warn('[bg-tasks] reported listener failed:', error);
+      }
+    }
+  }
+
+  onReported(listener: () => void): () => void {
+    this.reportedListeners.add(listener);
+    return () => this.reportedListeners.delete(listener);
+  }
 
   /** 会话最近一次已知的后台任务，按开始时间倒序 */
   tasks(sessionId: string): ObservedTask[] {
     const tasks = this.bySession.get(sessionId);
     if (!tasks) return [];
-    return [...tasks.values()].sort(
-      (left, right) => right.startedAt - left.startedAt || left.taskId.localeCompare(right.taskId)
-    );
+    return [...tasks.values()].sort(byNewest);
+  }
+
+  /** 会话自己的加上它子代理（`${sessionId}::…`）起的后台任务，子代理的带 ownerSessionId */
+  tasksInTree(sessionId: string): ObservedTask[] {
+    const all: ObservedTask[] = [];
+    for (const [owner, tasks] of this.bySession) {
+      if (owner === sessionId) all.push(...tasks.values());
+      else if (owner.startsWith(`${sessionId}::`))
+        for (const task of tasks.values()) all.push({ ...task, ownerSessionId: owner });
+    }
+    return all.sort(byNewest);
   }
 
   /** 任一会话还有没结束的后台命令（回合结束了也可能还在跑） */
@@ -107,6 +145,10 @@ export class BackgroundTaskTracker {
     if (next.size === 0) this.bySession.delete(sessionId);
     else this.bySession.set(sessionId, next);
   }
+}
+
+function byNewest(left: ObservedTask, right: ObservedTask): number {
+  return right.startedAt - left.startedAt || left.taskId.localeCompare(right.taskId);
 }
 
 /** worker 后台任务在 Main 的投影（ipc/agent 喂事件，秘书与退出前的安全点判断读它） */

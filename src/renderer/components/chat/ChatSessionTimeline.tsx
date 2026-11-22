@@ -23,6 +23,7 @@ import {
 import { useSettingsStore } from '@/stores/settings';
 import { ChatFindBar, consumePendingFindQuery, OPEN_CHAT_FIND_EVENT } from './ChatFindBar';
 import { timelineSearchHits } from './chatSearch';
+import { markFileLinksStale } from './fileLinkResolver';
 import { MarkdownLinkContext } from './Markdown';
 import { MessageTimeline, type MessageTimelineHandle } from './MessageTimeline';
 
@@ -41,12 +42,15 @@ export function ChatSessionTimeline({
   emptyTitle,
   onSuggestion,
   timelineRef,
+  peek = false,
 }: {
   conversationId: string;
   cwd?: string;
   emptyTitle: string;
   onSuggestion?: (prompt: string) => void;
   timelineRef: RefObject<MessageTimelineHandle | null>;
+  /** 弹窗旁观：不接全局查找、不因新编辑自动开 Changes */
+  peek?: boolean;
 }) {
   const projectId = useSessionsStore((state) => state.conversations[conversationId]?.projectId);
   const secretarySession = useSettingsStore((state) =>
@@ -175,7 +179,7 @@ export function ChatSessionTimeline({
     toolOutputs,
     toolStartedAt,
   ]);
-  useOpenChangesOnEdit(timeline, conversationId);
+  useOpenChangesOnEdit(timeline, peek ? undefined : conversationId);
 
   const timelineActivity = chatTimelineActivity({
     started,
@@ -196,6 +200,7 @@ export function ChatSessionTimeline({
   );
 
   useEffect(() => {
+    if (peek) return;
     const open = () => {
       const pending = consumePendingFindQuery();
       setFindOpen(true);
@@ -206,9 +211,10 @@ export function ChatSessionTimeline({
     };
     window.addEventListener(OPEN_CHAT_FIND_EVENT, open);
     return () => window.removeEventListener(OPEN_CHAT_FIND_EVENT, open);
-  }, []);
+  }, [peek]);
 
   useEffect(() => {
+    if (peek) return;
     const pending = consumePendingFindQuery();
     setFindIndex(0);
     if (pending) {
@@ -219,7 +225,7 @@ export function ChatSessionTimeline({
     if (!conversationId) return;
     setFindQuery('');
     setFindOpen(false);
-  }, [conversationId]);
+  }, [conversationId, peek]);
 
   useEffect(() => {
     if (!findOpen || findHits.length === 0) return;
@@ -256,17 +262,17 @@ export function ChatSessionTimeline({
     return () => window.removeEventListener('keydown', onKey);
   }, [findOpen, stepFind]);
 
-  const markdownLinkContext = useMemo(
-    () =>
-      projectId
-        ? {
-            conversationId,
-            projectId,
-            ...(cwd ? { cwd } : {}),
-          }
-        : null,
-    [conversationId, cwd, projectId]
-  );
+  const markdownLinkContext = useMemo(() => {
+    // 进入（切换到）会话：能打开的链接缓存在子组件挂载时后台复查
+    markFileLinksStale();
+    return projectId
+      ? {
+          conversationId,
+          projectId,
+          ...(cwd ? { cwd } : {}),
+        }
+      : null;
+  }, [conversationId, cwd, projectId]);
 
   /*
    * 全量渲染时（远程桌面）上滑分页的滚动锚定：iOS Safari 不支持 overflow-anchor，

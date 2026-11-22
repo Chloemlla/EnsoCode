@@ -522,6 +522,7 @@ export const IPC_PRODUCT_COVERAGE = {
   SECRETARY_UNTRACKED_REMOVE: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_FEED: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_DAILY: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_DONE_REPORT: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_STATE: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_CHANGED: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_BIND: excluded('Experimental secretary agent; not an Enso capability.'),
@@ -560,7 +561,13 @@ export const IPC_PRODUCT_COVERAGE = {
   WINDOW_MAXIMIZED_CHANGED: excluded('Renderer window-state event transport.'),
   WINDOW_FULLSCREEN_CHANGED: excluded('Renderer fullscreen-state event transport.'),
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: excluded('macOS title-bar implementation detail.'),
+  WINDOW_REFRESH_DRAG_REGIONS: excluded(
+    'macOS window-shape refresh after a layout change; not a user product action.'
+  ),
   WINDOW_OPEN_SETTINGS: surfaces('window.open-settings'),
+  WINDOW_TOGGLE_SIDEBAR: excluded(
+    'Main-to-renderer transport for the macOS View menu; the toggle itself stays in the renderer.'
+  ),
   SETTINGS_DEEP_LINK: excluded('Settings window deep-link transport.'),
   SETTINGS_DEEP_LINK_CONSUME: excluded('Settings window deep-link handshake.'),
   WINDOW_POPUP_MENU: excluded('Native application menu popup; renderer chrome only.'),
@@ -853,6 +860,9 @@ export const IPC_PRODUCT_COVERAGE = {
   FILES_OPEN_CONTEXT: excluded('User right-clicks a chat file link; not a model capability.'),
   FILES_SEARCH_WORKSPACE: excluded(
     'Side panel Files name/content search scoped to conversation cwd.'
+  ),
+  FILES_RESOLVE_LINKS: excluded(
+    'Chat file link rendering checks which workspace paths exist; not a model capability.'
   ),
   PAIR_CANCEL: excluded('Phone second-screen pairing transport; not an Enso capability.'),
   PAIR_CATALOG: excluded('Phone second-screen pairing transport; not an Enso capability.'),

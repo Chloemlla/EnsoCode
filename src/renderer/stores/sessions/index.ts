@@ -11,6 +11,7 @@ import {
   scopedDefaultModels,
 } from '@shared/defaultModel';
 import { isPluginPresetId } from '@shared/extensionPlugins/preset';
+import { normalizeLocale, translate } from '@shared/i18n';
 import {
   EMPTY_PLAN_STATE,
   type PlanRespondAction,
@@ -167,6 +168,16 @@ function planToolEnabled(projectId: string): boolean {
 
 /** 离开时盖章；正在看的会话由 viewedId 保热，TTL 从离开起算 */
 const lastViewedAt: Record<string, number> = {};
+/** 弹窗旁观中的会话（引用计数）：与正在看同等保热，但不改 activeId */
+const peekedIds = new Map<string, number>();
+
+function hotSessionIds(
+  conversations: Parameters<typeof btwHotSessionIds>[0]
+): ReturnType<typeof btwHotSessionIds> {
+  const ids = btwHotSessionIds(conversations);
+  for (const id of peekedIds.keys()) ids.add(id);
+  return ids;
+}
 const WORKTREE_STATUS_CONCURRENCY = 6;
 const parentTailInFlight = new Set<string>();
 const olderHistoryInFlight = new Set<string>();
@@ -545,8 +556,9 @@ interface SessionsState {
   /** 回退到已确认 user；本地序号先解析为 entryId。冷会话先 resume 并等待 worker 可用。
    *  restoreFiles 同时还原工作树文件 */
   rewind(conversationId: string, anchor: string | number, restoreFiles?: boolean): void;
-  /** 手动压缩上下文（/compact 与上下文面板按钮共用）。忙碌时 worker 排队，本轮结束后执行 */
-  compact(conversationId: string, instructions?: string): void;
+  /** 手动压缩上下文（/compact 与上下文面板按钮共用）。忙碌时 worker 排队，本轮结束后执行。
+   *  不能压或被 Main 拒绝时弹 toast；quiet 供手机代发：提示该给手机，不该弹在桌面上 */
+  compact(conversationId: string, instructions?: string, options?: { quiet?: boolean }): void;
   /** UI 提示过压缩失败后清掉错误，避免重复弹提示 */
   clearCompactionError(conversationId: string): void;
   forkFromMessage(conversationId: string, userIndexFromEnd: number): Promise<string | null>;
@@ -1256,7 +1268,7 @@ export const useSessionsStore = create<SessionsState>()(
                   lastViewedAt,
                   now,
                   MESSAGE_CACHE_TTL_MS,
-                  btwHotSessionIds(conversations)
+                  hotSessionIds(conversations)
                 );
                 const next = applyAgentEvent(conversation, id, event);
                 const title = conversation.title || firstUserText(next) || '';
@@ -1796,7 +1808,7 @@ export const useSessionsStore = create<SessionsState>()(
             lastViewedAt,
             Date.now(),
             MESSAGE_CACHE_TTL_MS,
-            btwHotSessionIds(current.conversations)
+            hotSessionIds(current.conversations)
           )
         ) {
           // 冷会话不落正文，但错过了运行态（如另一窗口新建的会话）仍要补：快照会领养 generation，只补一次
@@ -1941,7 +1953,7 @@ export const useSessionsStore = create<SessionsState>()(
               lastViewedAt,
               Date.now(),
               MESSAGE_CACHE_TTL_MS,
-              btwHotSessionIds(state.conversations)
+              hotSessionIds(state.conversations)
             ) &&
             (next.messages.length > 0 || next.customEntries.length > 0)
               ? {
@@ -3281,17 +3293,18 @@ export const useSessionsStore = create<SessionsState>()(
           if (!id) return 'no conversation';
           const conversation = get().conversations[id];
           if (!conversation) return 'no conversation';
-          if (conversation.workspaceMigrating) return 'workspace operation in progress';
+          // /compact 应用级命令:压缩上下文,不发给 agent。工作区操作中/未启动由 compact() 提示原因
+          const compactCommand = parseCompactCommand(text);
+          if (conversation.workspaceMigrating && !compactCommand) {
+            return 'workspace operation in progress';
+          }
           if (conversation.rewinding || conversation.restoringFiles) return 'rewind in progress';
           // 只读回放的已结束实例：必须在乐观回显之前拦，否则会往只读历史里插一条
           // 根本没发出去的用户消息。
           if (conversation?.historyOnly) {
             return 'this Agent instance has ended — its history is read-only';
           }
-          // /compact 应用级命令:压缩上下文,不发给 agent。会话未启动时无上下文可压
-          const compactCommand = parseCompactCommand(text);
           if (compactCommand) {
-            if (!conversation.started) return 'nothing to compact yet';
             get().compact(id, compactCommand.instructions);
             return null;
           }
@@ -4082,11 +4095,37 @@ export const useSessionsStore = create<SessionsState>()(
           );
         },
 
-        compact(conversationId, instructions) {
+        compact(conversationId, instructions, options) {
           const conversation = get().conversations[conversationId];
-          if (!conversation?.started || conversation.workspaceMigrating || conversation.compaction)
+          if (!conversation) return;
+          const t = (key: string) =>
+            translate(normalizeLocale(useSettingsStore.getState().language), key);
+          const toast = (toast: { type: 'info' | 'error'; title?: string; description: string }) =>
+            void import('@/components/ui/toast')
+              .then(({ addToast }) => addToast(toast))
+              .catch(() => {});
+          const blocked = !conversation.started
+            ? 'Session not started yet — nothing to compact'
+            : conversation.workspaceMigrating
+              ? 'Workspace operation in progress — compact again when it finishes'
+              : conversation.compaction === 'running'
+                ? 'Compaction already in progress'
+                : conversation.compaction === 'queued'
+                  ? 'Compaction is queued and runs after this turn'
+                  : undefined;
+          if (blocked) {
+            if (!options?.quiet) toast({ type: 'info', description: t(blocked) });
             return;
-          void window.electronAPI.agent.compact(conversationId, instructions);
+          }
+          // Main 侧拒绝（会话已释放/换代、工作区锁）同样不能静默
+          void window.electronAPI.agent.compact(conversationId, instructions).then((result) => {
+            if (result.ok || options?.quiet) return;
+            toast({
+              type: 'error',
+              title: t('Compaction failed'),
+              description: result.error ?? '',
+            });
+          });
         },
 
         clearCompactionError(conversationId) {
@@ -4481,7 +4520,7 @@ function sweepColdMessages(current = useSessionsStore.getState()): void {
     lastViewedAt,
     Date.now(),
     MESSAGE_CACHE_TTL_MS,
-    btwHotSessionIds(current.conversations)
+    hotSessionIds(current.conversations)
   );
   if (next !== current.conversations) useSessionsStore.setState({ conversations: next });
 }
@@ -4493,7 +4532,7 @@ function sweepExpiredStamps(current = useSessionsStore.getState()): void {
     lastViewedAt,
     Date.now(),
     MESSAGE_CACHE_TTL_MS,
-    btwHotSessionIds(current.conversations)
+    hotSessionIds(current.conversations)
   );
   if (next !== current.conversations) useSessionsStore.setState({ conversations: next });
 }
@@ -4508,7 +4547,7 @@ function armColdEvictTimer(): void {
     viewedFromState(current),
     Date.now(),
     MESSAGE_CACHE_TTL_MS,
-    btwHotSessionIds(current.conversations)
+    hotSessionIds(current.conversations)
   );
   // 没有未来到期点时仍排一个满 TTL，清掉从未盖章的正文；0 表示刚扫过已过期项。
   const wait = delay !== null && delay > 0 ? delay : MESSAGE_CACHE_TTL_MS;
@@ -4599,6 +4638,33 @@ useSessionsStore.subscribe((state) => {
   sweepExpiredStamps(state);
   armColdEvictTimer();
 });
+
+/**
+ * 不切换会话地旁观一条会话（秘书弹窗）：期间正文保热、实时事件照常落地，
+ * 打开时按「切进来」的口径补历史与快照。返回释放函数，释放时按离开盖章。
+ */
+export function peekConversation(conversationId: string): () => void {
+  peekedIds.set(conversationId, (peekedIds.get(conversationId) ?? 0) + 1);
+  const state = useSessionsStore.getState();
+  const conversation = state.conversations[conversationId];
+  if (conversation && viewedFromState(state) !== conversationId) {
+    if (conversation.parentId) loadViewedChildHistory(conversationId);
+    else if (needsHistoryHydration(conversation)) void hydrateParentHistoryTail(conversationId);
+    if (needsWorkerSnapshot(conversation))
+      void window.electronAPI.agent.requestSnapshot(conversationId);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (peekedIds.get(conversationId) ?? 1) - 1;
+    if (left > 0) peekedIds.set(conversationId, left);
+    else peekedIds.delete(conversationId);
+    if (viewedFromState(useSessionsStore.getState()) !== conversationId)
+      lastViewedAt[conversationId] = Date.now();
+    armColdEvictTimer();
+  };
+}
 
 const localForkTargets = new Set<string>();
 

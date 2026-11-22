@@ -5,7 +5,8 @@
  * - 分支：只碰 feat/ fix/ chore/ 前缀、且已经合进 feat/secretary-agent 或 main 的
  *   （祖先关系，或 GitHub 上已合并 PR 的 head 正是分支 tip，即 squash 合并）；
  *   基线分支、当前检出的分支、任何 worktree 正在用的分支都不列也不删。
- * - worktree：只碰会话 worktree 根下的，删之前先确认没有未提交改动。
+ * - worktree：只碰会话 worktree 根下的，删之前先确认没有未提交改动（半删残局例外，见
+ *   worktreeState）；删除是先改名进 `<根>/.trash` 再注销登记，空间后台释放，不会删到一半。
  * - 会话：只归档，不删除。
  *
  * 性能：一个仓库只跑固定几条 git（for-each-ref 批量判合入），du 放后台带缓存，
@@ -30,6 +31,7 @@ import type {
   SecretaryProfile,
 } from '@shared/types/secretary';
 import { CLEANUP_ITEM_KINDS } from '@shared/types/secretary';
+import { isTrashPath, type RetireResult, worktreeTrash } from '../worktree/trash';
 import { appendAudit } from './audit';
 import type { SavedProposal } from './proposals';
 import { type GitRunner, parseWorktrees, runGit } from './repoStatus';
@@ -73,6 +75,16 @@ export const CLEANUP_SCAN_TTL_MS = 60_000;
 const SEP = '|';
 const HEADS = 'refs/heads/';
 
+/** 正在跑的派发会话占着的 worktree 标 in-use：列清单与确认选择都按当下的事实判 */
+async function markBusyWorktrees(ports: CleanupPorts, items: CleanupItem[]): Promise<void> {
+  const busy = (await ports.busyWorktrees?.()) ?? new Set<string>();
+  if (busy.size === 0) return;
+  for (const item of items) {
+    if (item.kind === 'worktree' && !item.blocked && item.path && busy.has(item.path))
+      item.blocked = 'in-use';
+  }
+}
+
 export const branchItemId = (repoPath: string, branch: string): string =>
   `branch${SEP}${repoPath}${SEP}${branch}`;
 export const worktreeItemId = (target: string): string => `worktree${SEP}${target}`;
@@ -99,6 +111,10 @@ export interface CleanupPorts {
   /** 任何秘书正在跑的派发会话占着的 worktree（真实路径）；缺省表示没有 */
   busyWorktrees?(): MaybePromise<ReadonlySet<string>>;
   archive(conversationId: string, at: number): MaybePromise<void>;
+  /** 删 worktree：改名进 root 下的回收目录并注销登记，空间后台释放 */
+  removeWorktree(repoPath: string, target: string, root: string): Promise<RetireResult>;
+  /** 跨卷退回、还在后台删的 worktree：清单不再列 */
+  removingWorktree?(target: string): boolean;
   audit(entry: SecretaryAuditEntry): void;
   now(): number;
 }
@@ -278,7 +294,8 @@ function repoItems(
   project: ProjectAuthority,
   repo: CleanupRepo,
   resolvedPaths: readonly (string | null)[],
-  roots: readonly string[]
+  roots: readonly string[],
+  removing: (target: string) => boolean = () => false
 ): CleanupItem[] {
   const items: CleanupItem[] = [];
   const inUse = new Set(
@@ -308,6 +325,8 @@ function repoItems(
     const resolved = resolvedPaths[index] ?? worktree.path;
     // 只碰会话 worktree 根下的目录，别的地方是用户自己的检出
     if (!roots.some((root) => isUnderRoot(resolved, root))) return;
+    // 已经移进回收目录或正在后台删的，不再列
+    if (isTrashPath(resolved, roots) || removing(resolved)) return;
     const merged = worktree.branch ? (repo.merged.get(worktree.branch) ?? []) : [];
     const blocked = !worktree.branch
       ? 'detached-head'
@@ -355,7 +374,12 @@ export async function scanCleanup(
       const resolved = await Promise.all(
         repo.worktrees.map((worktree) => ports.realpath(worktree.path))
       );
-      return { repo, items: repoItems(project, repo, resolved, roots) };
+      return {
+        repo,
+        items: repoItems(project, repo, resolved, roots, (target) =>
+          Boolean(ports.removingWorktree?.(target))
+        ),
+      };
     };
     const read = await mapLimit(
       projects,
@@ -383,11 +407,7 @@ export async function scanCleanup(
       'Scan hit its time limit: repos in incomplete were skipped this time. Call cleanup_list again in a moment.'
     );
   // 任何秘书正在跑的派发会话还用着的 worktree：不管归谁，都不能清
-  const busy = (await ports.busyWorktrees?.()) ?? new Set<string>();
-  for (const item of items) {
-    if (item.kind === 'worktree' && !item.blocked && item.path && busy.has(item.path))
-      item.blocked = 'in-use';
-  }
+  await markBusyWorktrees(ports, items);
   const sizeTargets = items.filter((item) => item.kind === 'worktree' && !item.blocked);
   let measured = 0;
   if (options.sizeBudgetMs !== false && sizeTargets.length > 0) {
@@ -582,6 +602,7 @@ export async function selectCleanupItems(
   if (ids.length > CLEANUP_MAX_ITEMS)
     return { ok: false, error: `too many ids: ${ids.length}, the limit is ${CLEANUP_MAX_ITEMS}` };
   const current = scan ?? (await scanCleanup(ports, { sizeBudgetMs: false }));
+  await markBusyWorktrees(ports, current.items);
   const byId = new Map(current.items.map((item) => [item.id, item]));
   const selected: CleanupItem[] = [];
   const unknown: string[] = [];
@@ -624,6 +645,8 @@ export async function selectAllCleanupItems(
   scan?: CleanupScan
 ): Promise<CleanupSelectionResult> {
   const current = scan ?? (await scanCleanup(ports, { sizeBudgetMs: false }));
+  // 复用的扫描快照里没有之后才开始跑的会话：按现在的占用再判一次
+  await markBusyWorktrees(ports, current.items);
   const items = current.items.filter(
     (item) => !item.blocked && (!projectId || item.projectId === projectId)
   );
@@ -642,6 +665,13 @@ export interface CleanupActionReport {
   name: string;
   action: 'deleted' | 'archived' | 'skipped';
   reason?: string;
+  /**
+   * worktree 删除后还在后台做的事：free-space 表示登记已清、目录在回收目录里等删；
+   * remove 表示跨卷退回 git worktree remove，登记与目录都在后台清
+   */
+  background?: 'free-space' | 'remove';
+  /** 删之前是半删残局（只剩被跟踪文件的删除） */
+  halfRemoved?: true;
 }
 
 export interface CleanupApplyResult {
@@ -651,11 +681,26 @@ export interface CleanupApplyResult {
   skipped: number;
 }
 
-/** 未提交改动：worktree 里哪怕只有一个未跟踪文件也不删 */
-async function worktreeIsClean(ports: CleanupPorts, target: string): Promise<boolean> {
+/**
+ * worktree 能不能删：
+ * - clean：没有任何改动；
+ * - half-removed：上次删到一半的残局。porcelain 每一行都是 ` D `（被跟踪文件在工作区被删、
+ *   暂存区没动），没有修改、新增、暂存、改名，也没有未跟踪的非忽略文件。这些文件的内容都在
+ *   HEAD 里，删掉不丢任何东西；
+ * - dirty：其余一律不删，哪怕只有一个未跟踪文件。
+ * 先确认 target 自己就是 git 顶层：.git 文件被删掉时 git 会往上找到别的仓库，不能拿那份状态判。
+ */
+export async function worktreeState(
+  ports: CleanupPorts,
+  target: string
+): Promise<'clean' | 'half-removed' | 'dirty'> {
+  const top = await gitOut(ports, target, ['rev-parse', '--show-toplevel']);
+  if (!top || (await ports.realpath(top)) !== target) return 'dirty';
   const result = await ports.git(target, ['status', '--porcelain=v1', '--untracked-files=normal']);
-  if (result.code !== 0) return false;
-  return result.stdout.trim() === '';
+  if (result.code !== 0) return 'dirty';
+  const lines = result.stdout.split('\n').filter((line) => line !== '');
+  if (lines.length === 0) return 'clean';
+  return lines.every((line) => line.startsWith(' D ')) ? 'half-removed' : 'dirty';
 }
 
 /** 每次执行清理都加一，handler 缓存的扫描按它判断是否作废 */
@@ -694,7 +739,11 @@ async function applyCleanupItems(
       op: `cleanup_${entry.kind}`,
       targetId: entry.id,
       ok: entry.action !== 'skipped',
-      detail: entry.reason ?? entry.action,
+      detail: [
+        entry.reason ?? entry.action,
+        ...(entry.halfRemoved ? ['half-removed'] : []),
+        ...(entry.background ? [`background: ${entry.background}`] : []),
+      ].join('; '),
     });
   };
   const worktrees = draft.items.filter((item) => item.kind === 'worktree');
@@ -714,7 +763,21 @@ async function applyCleanupItems(
       });
       continue;
     }
-    if (!(await worktreeIsClean(ports, target))) {
+    const root = ports
+      .worktreeRoots()
+      .find((entry) => isUnderRoot(target, entry) && target !== entry);
+    if (!root) {
+      record({
+        id: item.id,
+        kind: 'worktree',
+        name: item.name,
+        action: 'skipped',
+        reason: 'outside-worktree-root',
+      });
+      continue;
+    }
+    const state = await worktreeState(ports, target);
+    if (state === 'dirty') {
       record({
         id: item.id,
         kind: 'worktree',
@@ -724,19 +787,25 @@ async function applyCleanupItems(
       });
       continue;
     }
-    const removed = await ports.git(repoPath, ['worktree', 'remove', '--force', target]);
-    if (removed.code !== 0) {
+    const removed = await ports.removeWorktree(repoPath, target, root);
+    if (removed.status === 'failed') {
       record({
         id: item.id,
         kind: 'worktree',
         name: item.name,
         action: 'skipped',
-        reason: 'remove-failed',
+        reason: `remove-failed: ${removed.reason}`,
       });
       continue;
     }
-    await ports.git(repoPath, ['worktree', 'prune']);
-    record({ id: item.id, kind: 'worktree', name: item.name, action: 'deleted' });
+    record({
+      id: item.id,
+      kind: 'worktree',
+      name: item.name,
+      action: 'deleted',
+      background: removed.status === 'trashed' ? 'free-space' : 'remove',
+      ...(state === 'half-removed' ? { halfRemoved: true as const } : {}),
+    });
   }
 
   // worktree 已经删完，这时再读一次仓库就是执行时的事实；删一条分支不影响别的分支的判定，
@@ -835,6 +904,12 @@ async function applyCleanupItems(
 /** 给秘书与卡片看的一句话结果 */
 export function cleanupReportText(result: CleanupApplyResult): string {
   const parts = [`deleted ${result.deleted}`];
+  const freeing = result.report.filter((entry) => entry.background === 'free-space').length;
+  const removing = result.report.filter((entry) => entry.background === 'remove').length;
+  if (freeing > 0)
+    parts.push(`${freeing} worktree(s) unregistered, disk space being freed in the background`);
+  if (removing > 0)
+    parts.push(`${removing} worktree(s) being removed in the background (different volume)`);
   if (result.archived > 0) parts.push(`archived ${result.archived}`);
   if (result.skipped > 0) {
     const skipped = result.report
@@ -846,6 +921,11 @@ export function cleanupReportText(result: CleanupApplyResult): string {
 }
 
 export interface CleanupHandlerPorts extends CleanupPorts {
+  /**
+   * 这个秘书的「清理不用确认」是否开着。缺省关：照旧落确认卡。
+   * 每次调用现读，设置页改完立即生效，不依赖缓存。
+   */
+  skipConfirm?(): MaybePromise<boolean>;
   /** 落一条待确认的清理提案；同类同参的卡已经在等就复用，不再叠一张 */
   saveProposal(
     items: CleanupItem[],
@@ -952,6 +1032,45 @@ export function createSecretaryCleanupHandlers(
           detail: selection.error.slice(0, 200),
         });
         return { ok: false, error: selection.error };
+      }
+      if (await ports.skipConfirm?.()) {
+        // 同一条删除路径：applyCleanup 执行前按事实重新校验，安全限制一个不少
+        const applied = await applyCleanup(
+          ports,
+          { items: selection.items },
+          ctx.secretaryConversationId
+        );
+        ports.audit({
+          at: ports.now(),
+          secretaryConversationId: ctx.secretaryConversationId,
+          op: 'cleanup_apply',
+          ok: true,
+          detail: `without confirmation: ${cleanupReportText(applied)}`.slice(0, 200),
+        });
+        return {
+          ok: true,
+          result: {
+            status: 'applied',
+            total: applied.report.length,
+            deleted: applied.deleted,
+            archived: applied.archived,
+            skipped: applied.skipped,
+            items: applied.report.map((entry) => ({
+              id: entry.id,
+              kind: entry.kind,
+              name: entry.name,
+              result: entry.action,
+              ...(entry.reason ? { reason: entry.reason } : {}),
+              ...(entry.background ? { background: entry.background } : {}),
+              ...(entry.halfRemoved ? { halfRemoved: true } : {}),
+            })),
+            ...(applied.report.some((entry) => entry.background)
+              ? {
+                  note: 'Deleted worktrees are already gone from git and their paths; free-space means the directory sits in the worktree root .trash and its disk space is freed in the background. remove means it is on another volume and git worktree remove runs in the background.',
+                }
+              : {}),
+          },
+        };
       }
       const saved = await ports.saveProposal(selection.items, ctx.secretaryConversationId);
       ports.audit({
@@ -1113,6 +1232,8 @@ export function realCleanupPorts(
     rows: async () => (await import('../../ipc/settings')).readPersistedConversations(),
     dispatchFile: () => new SecretaryStore(ctx.dir).dispatch(),
     busyWorktrees: async () => (await import('./crossSecretary')).runningWorktreePaths(),
+    removeWorktree: (repoPath, target, root) => worktreeTrash.retire({ repoPath, target, root }),
+    removingWorktree: (target) => worktreeTrash.isRemoving(target),
     archive: async (conversationId, at) => {
       const { patchConversationsState } = await import('../../ipc/settings');
       patchConversationsState((state) => {
@@ -1136,6 +1257,7 @@ export function cleanupHandlersFor(
   ctx: SecretaryContext,
   profile?: () => MaybePromise<SecretaryProfile | null>
 ): ReturnType<typeof createSecretaryCleanupHandlers> {
+  const readProfile = profile ?? (() => new SecretaryStore(ctx.dir).profile());
   return createSecretaryCleanupHandlers({
     ...realCleanupPorts(ctx, profile),
     // 提案落盘在派发模块里：这里动态取，避免 cleanup ↔ dispatch 的静态环
@@ -1143,5 +1265,7 @@ export function cleanupHandlersFor(
       const { saveCleanupProposal, dispatchPortsFor } = await import('./dispatch');
       return saveCleanupProposal(items, secretaryConversationId, dispatchPortsFor(ctx));
     },
+    // 读这个秘书自己的档案：设置页改完，下一次清理就按新值走，不用重启
+    skipConfirm: async () => (await readProfile())?.cleanupSkipConfirm === true,
   });
 }

@@ -70,6 +70,7 @@ export const IPC_CHANNELS = {
   SECRETARY_FEED: 'secretary:feed',
   /** 秘书：按天汇总的看板（日报），入参是日期，缺省今天 */
   SECRETARY_DAILY: 'secretary:daily',
+  SECRETARY_DONE_REPORT: 'secretary:done-report',
   /** 秘书联系方式：读绑定状态（不含 token） */
   SECRETARY_CONTACT_STATE: 'secretary:contact-state',
   /** main → 主界面 renderer：联系方式状态变化 */
@@ -127,7 +128,11 @@ export const IPC_CHANNELS = {
   WINDOW_MAXIMIZED_CHANGED: 'window:maximized-changed',
   WINDOW_FULLSCREEN_CHANGED: 'window:fullscreen-changed',
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: 'window:set-traffic-lights-visible',
+  /** renderer → main：macOS 布局变化后重算窗口形状与拖拽命中区 */
+  WINDOW_REFRESH_DRAG_REGIONS: 'window:refresh-drag-regions',
   WINDOW_OPEN_SETTINGS: 'window:open-settings',
+  /** main → 主界面 renderer：macOS View 菜单要求切换侧栏（与渲染层快捷键同一条逻辑） */
+  WINDOW_TOGGLE_SIDEBAR: 'window:toggle-sidebar',
   /** main → settings renderer：打开后切分类并闪行 */
   SETTINGS_DEEP_LINK: 'settings:deep-link',
   SETTINGS_DEEP_LINK_CONSUME: 'settings:deep-link-consume',
@@ -423,6 +428,7 @@ export const IPC_CHANNELS = {
   FILES_OPEN: 'files:open',
   FILES_OPEN_CONTEXT: 'files:open-context',
   FILES_SEARCH_WORKSPACE: 'files:search-workspace',
+  FILES_RESOLVE_LINKS: 'files:resolve-links',
 
   GIT_DIFF_HEAD: 'git:diff-head',
   GIT_STATUS: 'git:status',
@@ -738,8 +744,8 @@ export const IPC_CHANNELS = {
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];
 
-/** 重启在等哪种命令：在跑的工具，或没法脱离应用、只能等它结束的转后台命令 */
-export type RestartWaitReason = 'tool' | 'background-not-detachable';
+/** 重启在等什么：在跑的工具、没法脱离应用只能等它结束的转后台命令，或正在写的回复 */
+export type RestartWaitReason = 'tool' | 'background-not-detachable' | 'reply';
 
 /** 等待弹层等完命令要做什么：菜单重启、安装更新、退出（Cmd+Q / 关窗 / 菜单退出） */
 export type AppExitReason = 'restart' | 'update' | 'quit';

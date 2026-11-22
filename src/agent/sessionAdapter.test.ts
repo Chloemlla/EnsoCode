@@ -16,11 +16,15 @@ import {
 import { Type } from 'typebox';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  abortedReplyEntryId,
   batchSteering,
   buildSessionDisplayMessages,
   continueSessionActivity,
   editLatestAssistantForRetry,
   editUnfinishedAssistantForResume,
+  INTERRUPTED_TOOL_RESULT,
+  markRestartResumedReply,
+  settleInterruptedToolCalls,
   silentTurnRecoveryExtension,
   steerActiveSession,
   steerDetachable,
@@ -708,6 +712,87 @@ describe('Pi session adapter integration', () => {
     }
   );
 
+  it('子代理续跑：中断时在跑的工具补一条结果未知的错误结果，不原样重放；已有结果的照旧', async () => {
+    const counted = countedTool('finish');
+    const h = await harness([{ content: [{ type: 'text', text: 'Checked state, done.' }] }], {
+      tools: [counted.tool],
+    });
+    h.manager.appendMessage({ role: 'user', content: 'Run both.', timestamp: Date.now() });
+    h.manager.appendMessage(
+      assistant(model, {
+        content: [
+          { type: 'toolCall', id: 'done-call', name: 'adapter_test_tool', arguments: {} },
+          { type: 'toolCall', id: 'inflight-call', name: 'adapter_test_tool', arguments: {} },
+        ],
+        stopReason: 'toolUse',
+      })
+    );
+    h.manager.appendMessage({
+      role: 'toolResult',
+      toolCallId: 'done-call',
+      toolName: 'adapter_test_tool',
+      content: [{ type: 'text', text: 'saved result' }],
+      isError: false,
+      timestamp: Date.now(),
+    });
+    h.session.refreshContext();
+    expect(settleInterruptedToolCalls(h.session)).toBe(1);
+    await continueSessionActivity(h.session);
+    expect(counted.state.runs).toBe(0);
+    const request = h.requests[0]!;
+    expect(shape(request)).toEqual([
+      'user',
+      'assistant:toolUse:done-call,inflight-call',
+      'toolResult:done-call',
+      'toolResult:inflight-call',
+    ]);
+    const [saved, synthetic] = request.messages.filter((message) => message.role === 'toolResult');
+    expect(textOf(saved)).toBe('saved result');
+    expect(synthetic).toMatchObject({ isError: true });
+    expect(textOf(synthetic)).toBe(INTERRUPTED_TOOL_RESULT);
+    // 合成结果落盘：之后再重开会话也不会被当成没跑过
+    expect(
+      h.manager
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.type === 'message' &&
+            entry.message.role === 'toolResult' &&
+            entry.message.toolCallId === 'inflight-call'
+        )
+    ).toBe(true);
+  });
+
+  it.each(['stop', 'aborted', 'answered'] as const)(
+    '子代理续跑：没有在跑的工具（%s）时不补结果',
+    async (tail) => {
+      const h = await harness([]);
+      h.manager.appendMessage({ role: 'user', content: 'Go.', timestamp: Date.now() });
+      h.manager.appendMessage(
+        assistant(
+          model,
+          tail === 'stop'
+            ? { content: [{ type: 'text', text: 'Finished.' }] }
+            : { ...toolCall('call-1'), ...(tail === 'aborted' ? { stopReason: 'aborted' } : {}) }
+        )
+      );
+      if (tail === 'answered') {
+        h.manager.appendMessage({
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'adapter_test_tool',
+          content: [{ type: 'text', text: 'ok' }],
+          isError: false,
+          timestamp: Date.now(),
+        });
+      }
+      h.session.refreshContext();
+      const before = h.session.agent.state.messages.length;
+      expect(settleInterruptedToolCalls(h.session)).toBe(0);
+      expect(h.session.agent.state.messages).toHaveLength(before);
+    }
+  );
+
   it('续跑清理只动未完成的 assistant：正常结束的（如验收没过后补原因）保留', async () => {
     const h = await harness([{ content: [{ type: 'text', text: 'Fixed.' }] }]);
     h.manager.appendMessage({ role: 'user', content: 'Do it.', timestamp: Date.now() });
@@ -720,6 +805,45 @@ describe('Pi session adapter integration', () => {
       '<delegation-check-failed id="d">The acceptance check failed.</delegation-check-failed>'
     );
     expect(shape(h.requests[0]!)).toEqual(['user', 'assistant:stop:', 'user']);
+  });
+
+  it('重启续跑：中止的回复移出模型上下文，记一条续跑标记，展示投影据此给它打 restartResumed', async () => {
+    const h = await harness([{ content: [{ type: 'text', text: 'Resumed and done.' }] }]);
+    h.manager.appendMessage({ role: 'user', content: 'Write it.', timestamp: Date.now() });
+    h.manager.appendMessage(
+      assistant(model, {
+        content: [{ type: 'text', text: 'Half written' }],
+        stopReason: 'aborted',
+        errorMessage: 'This operation was aborted',
+      })
+    );
+    h.session.refreshContext();
+    const targetId = abortedReplyEntryId(h.session);
+    expect(targetId).toEqual(expect.any(String));
+    expect(editUnfinishedAssistantForResume(h.session)).toBe(true);
+    markRestartResumedReply(h.session, targetId!);
+    await continueSessionActivity(h.session);
+    expect(shape(h.requests[0]!)).toEqual(['user']);
+    const displayed = buildSessionDisplayMessages(h.session) as Array<{
+      role: string;
+      restartResumed?: boolean;
+    }>;
+    expect(
+      displayed.filter((message) => message.role === 'assistant').map((m) => m.restartResumed)
+    ).toEqual([true, undefined]);
+  });
+
+  it('用户点停止等其它中止（没有续跑标记）：展示照原样，不打 restartResumed', async () => {
+    const h = await harness([{ content: [{ type: 'text', text: 'Retry succeeded.' }] }]);
+    h.manager.appendMessage({ role: 'user', content: 'Write it.', timestamp: Date.now() });
+    h.manager.appendMessage(
+      assistant(model, { content: [{ type: 'text', text: 'Half' }], stopReason: 'aborted' })
+    );
+    h.session.refreshContext();
+    expect(editLatestAssistantForRetry(h.session)).toBe(true);
+    await continueSessionActivity(h.session);
+    const displayed = buildSessionDisplayMessages(h.session) as Array<{ restartResumed?: boolean }>;
+    expect(displayed.some((message) => message.restartResumed)).toBe(false);
   });
 
   it('manual retry 用 canonical context edit 隐藏旧错误而保留原始 session entry', async () => {

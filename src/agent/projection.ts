@@ -167,6 +167,9 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
   if (value.role === 'user' && typeof value.entryId === 'string' && value.entryId.trim()) {
     projected.entryId = value.entryId;
   }
+  if (typeof value.messageId === 'string' && value.messageId.trim()) {
+    projected.messageId = value.messageId;
+  }
   if (typeof value.toolName === 'string') projected.toolName = value.toolName;
   if (typeof value.toolCallId === 'string') projected.toolCallId = value.toolCallId;
   if (typeof value.isError === 'boolean') projected.isError = value.isError;
@@ -187,6 +190,7 @@ export function projectMessage(value: unknown): ProjectedMessage | null {
   if (typeof value.errorMessage === 'string') projected.errorMessage = value.errorMessage;
   if (typeof value.timestamp === 'number') projected.timestamp = value.timestamp;
   if (value.role === 'assistant' && typeof value.model === 'string') projected.model = value.model;
+  if (value.role === 'assistant' && value.restartResumed === true) projected.restartResumed = true;
   if (value.role === 'assistant' && value.privacyMask !== undefined) {
     const privacyMask = parseMaskReport(value.privacyMask);
     if (privacyMask) projected.privacyMask = privacyMask;

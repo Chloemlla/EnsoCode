@@ -154,8 +154,13 @@ export interface TurnDigest {
   firstUserText: string;
   /** 本轮全部 user 文本（清洗后 '\n' 拼接，截头） */
   userText: string;
-  /** 本轮最后一条含 text 的 assistant 文本（截尾） */
+  /** 本轮最后一条含 text 的 assistant 文本（截尾）；整轮只有工具调用时为空串 */
   assistantText: string;
+  /**
+   * 整轮没有任何文字回复时的最后一个工具：秘书据此把静默收工当成异常。
+   * 有文字结论时不带，避免把正常收工误报成卡住。
+   */
+  lastTool?: { name: string; ok: boolean };
 }
 
 /** 本轮汇报的硬上限：装得下一份正常汇报，又挡住异常长输出 */
@@ -593,6 +598,9 @@ export interface AgentControlDismissRequest {
   agentId: string;
 }
 
+/** 续跑被中断（parked）的 task：重开原会话文件，接着未完成的回合跑，不追加新 prompt */
+export type AgentControlResumeRequest = AgentControlDismissRequest;
+
 export interface AgentControlWaitRequest {
   context: AgentControlContext;
   requestId: string;
@@ -604,6 +612,8 @@ export interface AgentControlWaitRequest {
 /** 子代理阻塞等待：不写时限按默认，写了也不超过上限。完成会自动通知，等待只用于下一步离不开结果时 */
 export const AGENT_WAIT_DEFAULT_MS = 30 * 1000;
 export const AGENT_WAIT_MAX_MS = 5 * 60 * 1000;
+/** 每个 task 最多 resume 几次：反复被打断多半不是瞬态问题，再续只是空耗请求 */
+export const AGENT_TASK_MAX_RESUMES = 3;
 
 export interface AgentControlListRequest {
   context: AgentControlContext;
@@ -742,7 +752,8 @@ export type AgentControlToolRequest =
   | { operation: 'list'; status?: AgentInstanceStatus; cursor?: string; limit: number }
   | { operation: 'message'; to: string; text: string }
   | { operation: 'stop'; runId: string }
-  | { operation: 'dismiss'; agentId: string };
+  | { operation: 'dismiss'; agentId: string }
+  | { operation: 'resume'; agentId: string };
 
 export type AgentControlToolResponse =
   | { ok: true; value: unknown }
@@ -844,6 +855,7 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         ? (value as unknown as AgentControlToolRequest)
         : null;
     case 'dismiss':
+    case 'resume':
       return hasExactKeys(value, ['operation', 'agentId']) && nonEmpty(value.agentId)
         ? (value as unknown as AgentControlToolRequest)
         : null;
@@ -1658,6 +1670,11 @@ export type AgentCommand =
       instanceId?: string;
       /** 只移出未完成（出错/中断/停在工具调用）的最后一条 assistant；已正常完成则回执 nothing-to-retry */
       unfinishedOnly?: true;
+      /** 子代理续跑：沿用 Main 的 runId 作为本轮 turnId，并像 prompt-child 一样计请求预算 */
+      turnId?: string;
+      requestBudget?: true;
+      /** 子代理续跑：之前各段已用的模型请求数，预算接着累计 */
+      requestsUsed?: number;
     }
   /** 释放父会话：中断并销毁 worker 侧会话（含全部 coworker/child），jsonl 留盘可 resume。
    *  用于 Move to worktree 等需要换 cwd 重新 spawn 的场景。 */
@@ -1756,6 +1773,14 @@ export interface MessageTiming {
   completedMs?: number;
 }
 
+/** 重启等安全点时回复在写的会话：这次模型请求的发出 / 首 token / 最近一次出 token 时刻 */
+export interface RestartReplyProgress {
+  requestStartMs: number;
+  firstTokenMs?: number;
+  /** 正文、思考、工具参数的增量都算出 token */
+  lastOutputMs?: number;
+}
+
 /** todo 工具的清单项（toolResult.details 透出，整表替换语义） */
 export interface TodoItem {
   content: string;
@@ -1773,6 +1798,8 @@ export interface ProjectedCodemodeCall {
 export interface ProjectedMessage {
   /** 已持久化的 user entry 标识；未确认的消息没有该字段。 */
   entryId?: string;
+  /** 任意角色的 jsonl entry 标识；仅秘书只读链路按需附带，跨分页定位消息用 */
+  messageId?: string;
   rtk?: RtkToolStats;
   /** 前台命令被移交为后台任务时的任务 id */
   backgroundTaskId?: string;
@@ -1802,6 +1829,8 @@ export interface ProjectedMessage {
   duration?: number;
   /** 该 step 的计时打点（仅 assistant 消息带） */
   timing?: MessageTiming;
+  /** 应用重启时写到一半被中止、新进程已在后面接着写的回复（仅 assistant）：时间线折叠成一行 */
+  restartResumed?: boolean;
   /** todo 工具 toolResult 的清单快照 */
   todos?: TodoItem[];
   /** 工具执行耗时（仅 toolResult 消息带；worker 按 tool_execution_start/end 打点，不含排队） */
@@ -1912,6 +1941,8 @@ export type ParentLifecycleEvent =
       seq: number;
       sessionFile: string;
       model: ModelRef;
+      /** 当前模型是否接收图片输入；Main 据此决定转发的图是给图片块还是只给路径 */
+      imageInput?: boolean;
     }
   | {
       /**
@@ -1922,6 +1953,7 @@ export type ParentLifecycleEvent =
       identity: SessionIdentity;
       seq: number;
       model: ModelRef;
+      imageInput?: boolean;
     }
   | {
       type: 'parent-rejected';
@@ -2105,6 +2137,8 @@ export type AgentWorkerEvent =
       retryExhausted?: true;
       /** 应用退出窗口内的断流/断连：不是会话失败，按 interrupted 收口（Main 判定） */
       interrupted?: { at: number; kind: ExitKind };
+      /** 本轮被 abort 命令中断（如重试倒计时中停止） */
+      aborted?: true;
     }
   | {
       /** 瞬态错误后 pi 将自动重试：非终态，不 settle 轮次；下一个 status/turn-* 事件清除 */
@@ -2345,6 +2379,8 @@ export type AgentWorkerEvent =
         toolsInFlight: string[];
         /** 要求保留后台命令时仍要等的转后台命令（没法脱离 worker，如走管道的远程命令） */
         undetachableTasks?: string[];
+        /** 回复在写（没有工具在跑）：Main 按出 token 的时刻决定还等不等 */
+        reply?: RestartReplyProgress;
       }[];
     }
   | {
@@ -2862,7 +2898,10 @@ const isMcpOAuthRefreshResult = (value: unknown): boolean =>
 
 /** turn-completed.digest 的形状校验：三段必须是字符串（允许空），不允许多余键 */
 export function parseTurnDigest(value: unknown): TurnDigest | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['firstUserText', 'userText', 'assistantText'])) {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['firstUserText', 'userText', 'assistantText', 'lastTool'])
+  ) {
     return null;
   }
   if (
@@ -2872,7 +2911,24 @@ export function parseTurnDigest(value: unknown): TurnDigest | null {
   ) {
     return null;
   }
-  return value as unknown as TurnDigest;
+  const digest: TurnDigest = {
+    firstUserText: value.firstUserText,
+    userText: value.userText,
+    assistantText: value.assistantText,
+  };
+  if (value.lastTool !== undefined) {
+    if (
+      !isRecord(value.lastTool) ||
+      !hasExactKeys(value.lastTool, ['name', 'ok']) ||
+      typeof value.lastTool.name !== 'string' ||
+      value.lastTool.name.trim().length === 0 ||
+      typeof value.lastTool.ok !== 'boolean'
+    ) {
+      return null;
+    }
+    digest.lastTool = { name: value.lastTool.name, ok: value.lastTool.ok };
+  }
+  return digest;
 }
 
 export function parseTurnReport(value: unknown): TurnReport | null {
@@ -4417,9 +4473,21 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         ? (value as unknown as AgentCommand)
         : null;
     case 'retry':
-      return hasOnlyKeys(value, ['type', 'identity', 'instanceId', 'unfinishedOnly']) &&
+      return hasOnlyKeys(value, [
+        'type',
+        'identity',
+        'instanceId',
+        'unfinishedOnly',
+        'turnId',
+        'requestBudget',
+        'requestsUsed',
+      ]) &&
         parseAnySessionIdentity(value.identity) &&
         (value.unfinishedOnly === undefined || value.unfinishedOnly === true) &&
+        (value.turnId === undefined || isNonEmptyString(value.turnId)) &&
+        (value.requestBudget === undefined || value.requestBudget === true) &&
+        (value.requestsUsed === undefined ||
+          (Number.isInteger(value.requestsUsed) && (value.requestsUsed as number) >= 0)) &&
         (value.instanceId === undefined ||
           (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
         ? (value as unknown as AgentCommand)
@@ -4532,11 +4600,16 @@ function parseLifecycleEvent(value: Record<string, unknown>): AgentWorkerEvent |
   if (!identity || !isSequence(value.seq)) return null;
   switch (value.type) {
     case 'parent-ready':
-      return isNonEmptyString(value.sessionFile) && parseModelRef(value.model)
+      return isNonEmptyString(value.sessionFile) &&
+        parseModelRef(value.model) &&
+        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'model-changed':
-      return parseModelRef(value.model) ? (value as unknown as AgentWorkerEvent) : null;
+      return parseModelRef(value.model) &&
+        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
     case 'parent-rejected':
     case 'parent-ended':
       return hasOnlyKeys(value, ['type', 'identity', 'seq', 'reason', 'instanceId']) &&
@@ -4572,6 +4645,26 @@ function parseLifecycleEvent(value: Record<string, unknown>): AgentWorkerEvent |
 /** 收窄 worker → Main/Renderer 统一事件；缺 generation 的旧事件拒绝。 */
 const isOptionalTimestamp = (value: unknown): boolean =>
   value === undefined || (typeof value === 'number' && Number.isFinite(value));
+
+const DEFERRED_SESSION_KEYS = new Set([
+  'identity',
+  'reason',
+  'toolsInFlight',
+  'undetachableTasks',
+  'reply',
+]);
+
+function isRestartReplyProgress(value: unknown): value is RestartReplyProgress {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every(
+      (key) => key === 'requestStartMs' || key === 'firstTokenMs' || key === 'lastOutputMs'
+    ) &&
+    isNonNegativeNumber(value.requestStartMs) &&
+    (value.firstTokenMs === undefined || isNonNegativeNumber(value.firstTokenMs)) &&
+    (value.lastOutputMs === undefined || isNonNegativeNumber(value.lastOutputMs))
+  );
+}
 
 export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
   if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
@@ -4719,10 +4812,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       value.sessions.every(
         (entry) =>
           isRecord(entry) &&
-          (hasExactKeys(entry, ['identity', 'reason', 'toolsInFlight']) ||
-            (hasExactKeys(entry, ['identity', 'reason', 'toolsInFlight', 'undetachableTasks']) &&
-              Array.isArray(entry.undetachableTasks) &&
+          Object.keys(entry).every((key) => DEFERRED_SESSION_KEYS.has(key)) &&
+          (entry.undetachableTasks === undefined ||
+            (Array.isArray(entry.undetachableTasks) &&
               entry.undetachableTasks.every(isNonEmptyString))) &&
+          (entry.reply === undefined || isRestartReplyProgress(entry.reply)) &&
           parseSessionIdentity(entry.identity) &&
           (entry.reason === 'tool-in-flight' || entry.reason === 'turn-in-progress') &&
           Array.isArray(entry.toolsInFlight) &&
@@ -4949,7 +5043,8 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       return isNonEmptyString(value.turnId) &&
         isNonEmptyString(value.error) &&
         (value.undelivered === undefined || value.undelivered === true) &&
-        (value.retryExhausted === undefined || value.retryExhausted === true)
+        (value.retryExhausted === undefined || value.retryExhausted === true) &&
+        (value.aborted === undefined || value.aborted === true)
         ? (value as unknown as AgentWorkerEvent)
         : null;
     case 'turn-retry':
