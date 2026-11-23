@@ -15,8 +15,16 @@ import {
   type HeadlessSessionRuntime,
   onHeadlessIdle,
 } from '@shared/pair/headlessQueue';
+import { queuedStartOf } from '@shared/secretary/queuedSession';
 import type { RendererAgentEvent } from '@shared/types/agent';
 import type { SecretaryAuditEntry } from '@shared/types/secretary';
+import {
+  classifyUpstreamError,
+  type GoalUpstreamRetry,
+  parseGoalUpstreamRetry,
+  upstreamContinuationText,
+} from '@shared/upstreamRecovery';
+import type { UpstreamRecoveryService } from '../upstreamRecovery';
 
 /** 与 renderer 的 continueGoal 同口径：连续 3 轮没有新输出就停，防无界烧钱 */
 export const NO_PROGRESS_LIMIT = 3;
@@ -53,6 +61,14 @@ export interface DispatchDriverPorts {
    * 由 Main 接上 host.tick 以外的短定时，避免干等下一分钟。
    */
   requestWatch?(): void;
+  /** 全局上游健康闸门与退避调度器 */
+  upstreamRecovery?: UpstreamRecoveryService;
+  /** 会话当前配置的 provider id（worker 事件未携带时的兜底） */
+  providerOf?(conversationId: string): string | undefined;
+  /** 瞬态/配额故障进入等待上游恢复时通知上层（如秘书） */
+  onUpstreamWaiting?(conversationId: string, retry: GoalUpstreamRetry): void;
+  /** 退避窗口耗尽最终失败时通知上层 */
+  onUpstreamExhausted?(conversationId: string, error: string): void;
 }
 
 export interface DispatchDriver {
@@ -79,6 +95,8 @@ export interface DispatchDriver {
   watch(now: number): BackgroundStall[];
   /** 会话被停止：撤掉续跑与看门狗，之后不许再唤醒它 */
   forget(conversationId: string): void;
+  /** 上游健康闸门唤醒（探测、provider 恢复或手动立即重试） */
+  wakeUpstream(conversationId: string, reason: 'probe' | 'recovered' | 'manual'): boolean;
 }
 
 interface TrackedTask extends WatchedBackgroundTask {
@@ -144,6 +162,7 @@ function goalFrom(value: unknown): HeadlessGoal | undefined {
     status !== 'waiting'
   )
     return undefined;
+  const retry = parseGoalUpstreamRetry(goal.retry);
   return {
     text: goal.text,
     status,
@@ -151,6 +170,7 @@ function goalFrom(value: unknown): HeadlessGoal | undefined {
     autoTurns: typeof goal.autoTurns === 'number' ? goal.autoTurns : 0,
     ...(typeof goal.noProgressRuns === 'number' ? { noProgressRuns: goal.noProgressRuns } : {}),
     ...(typeof goal.lastOutput === 'string' ? { lastOutput: goal.lastOutput } : {}),
+    ...(retry ? { retry } : {}),
   };
 }
 
@@ -185,6 +205,8 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
   const compacting = new Map<string, boolean>();
   /** 这一轮空闲已经投过 goal 续跑：压缩结束不能再投一次，否则第二次 prompt 会把会话打成 error */
   const continued = new Set<string>();
+  /** 上一轮收束时还挂着自定提醒：提醒会叫醒会话，goal 先不续跑 */
+  const awaitingReminder = new Set<string>();
   /**
    * 后台任务。等它们时不续跑，完成通知会自己唤醒会话。
    * 通知没到、进程没了或到了截止时间，由 watch 补一次唤醒并交给秘书报停滞。
@@ -192,12 +214,16 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
   const tasksBySession = new Map<string, Map<string, TrackedTask>>();
   /** 这一轮结束时还有后台任务：会话空闲是在等通知，不是做完了 */
   const awaiting = new Set<string>();
+  /** 开始这次等待的轮末时刻：在它之前结束的任务，通知已随那一轮送到，不再算「没唤醒」 */
+  const awaitingSince = new Map<string, number>();
   const pending = new Map<string, PendingStall>();
   /** 超时或进程已死之后，完成通知已经把会话跑完一轮：还要报停滞，但不要再 prompt */
   const consumedWaits = new Set<string>();
   const watchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** 投出去的投递：worker 回执 delivery-settled / delivery-rejected 时结算 */
   const inflight = new Map<string, InflightDelivery>();
+  /** 用户显式停止/暂停过的会话：除非用户重新恢复或下发新目标，否则绝不再自动重试 */
+  const userStopped = new Set<string>();
   /** 自己写回触发的合并回调不能再投递，否则同一条消息发两遍 */
   let saving = false;
 
@@ -299,7 +325,8 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
 
   function runtimeOf(conversationId: string): HeadlessSessionRuntime | null {
     const row = ports.row(conversationId);
-    if (row?.driver !== 'main') return null;
+    // 排队会话还没开始：不泵队列、不续目标，启动泵撤掉 queuedStart 后才归驱动者管
+    if (row?.driver !== 'main' || queuedStartOf(row)) return null;
     seedTasks(conversationId, row);
     const status = ports.status(conversationId);
     return {
@@ -423,7 +450,11 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
   ): void {
     const applied = onHeadlessIdle(runtime);
     const continuation = isContinuation(applied.deliver);
-    if (continuation && (!allowContinue || runningCount(conversationId) > 0)) return;
+    if (
+      continuation &&
+      (!allowContinue || runningCount(conversationId) > 0 || awaitingReminder.has(conversationId))
+    )
+      return;
     if (continuation) continued.add(conversationId);
     commit(conversationId, runtime, applied);
   }
@@ -438,11 +469,15 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
     const decision = backgroundWaitStall(
       {
         awaiting: awaiting.has(conversationId),
-        idle: status.state === 'idle',
+        // 压缩中 worker 先不投完成通知，压完才投：不当成没唤醒
+        idle: status.state === 'idle' && compacting.get(conversationId) !== true,
         pendingUser: status.pendingAsks + status.pendingApprovals > 0,
         consumed:
           pending.get(conversationId)?.consumed === true || consumedWaits.has(conversationId),
-        tasks: [...taskMap(conversationId).values()],
+        tasks: [...taskMap(conversationId).values()].filter(
+          (task) =>
+            task.endedAt === undefined || task.endedAt >= (awaitingSince.get(conversationId) ?? 0)
+        ),
       },
       now
     );
@@ -535,6 +570,89 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
       }
       if (event.type === 'turn-failed') {
         forgetDeliveries(conversationId);
+        const goal = runtime.goal;
+        const canAutoRecover =
+          !event.aborted &&
+          !event.interrupted &&
+          !userStopped.has(conversationId) &&
+          ports.upstreamRecovery !== undefined &&
+          (goal?.status === 'active' ||
+            (goal?.status === 'waiting' && goal.retry?.reason === 'upstream'));
+
+        if (canAutoRecover && goal) {
+          const classified = classifyUpstreamError(
+            { error: event.error, retryExhausted: event.retryExhausted },
+            clock()
+          );
+          if (classified.kind === 'transient' || classified.kind === 'quota') {
+            const provider =
+              event.provider ??
+              ports.providerOf?.(conversationId) ??
+              goal.retry?.provider ??
+              'default';
+            const result = ports.upstreamRecovery!.reportFailure({
+              id: conversationId,
+              kind: 'session',
+              provider,
+              errorKind: classified.kind,
+              lastError: event.error,
+              ...(classified.resetAt !== undefined ? { resetAt: classified.resetAt } : {}),
+              ...(goal.retry
+                ? { since: goal.retry.since, previousAttempt: goal.retry.attempt }
+                : {}),
+            });
+            if (result.action === 'wait') {
+              const retry: GoalUpstreamRetry = {
+                reason: 'upstream',
+                kind: result.waiter.errorKind,
+                provider: result.waiter.provider,
+                attempt: result.waiter.attempt,
+                since: result.waiter.since,
+                at: result.waiter.nextAt,
+                lastError: result.waiter.lastError,
+                ...(result.waiter.resetAt !== undefined ? { resetAt: result.waiter.resetAt } : {}),
+              };
+              save(conversationId, {
+                ...runtime,
+                started: true,
+                status: 'idle',
+                abortRequested: false,
+                goal: {
+                  ...goal,
+                  status: 'waiting',
+                  note: undefined,
+                  retry,
+                },
+              });
+              ports.onUpstreamWaiting?.(conversationId, retry);
+              return;
+            }
+            const exhaustedNote = `${event.error} (upstream auto-retry window exhausted after ${result.attempt} attempts)`;
+            save(conversationId, {
+              ...runtime,
+              started: true,
+              status: 'failed',
+              abortRequested: false,
+              goal: { ...goal, status: 'paused', note: exhaustedNote, retry: undefined },
+            });
+            ports.onUpstreamExhausted?.(conversationId, exhaustedNote);
+            return;
+          }
+          // 永久错误：按原逻辑暂停，但附带可操作排查建议
+          const note = classified.hint ? `${event.error}\n${classified.hint}` : event.error;
+          commit(
+            conversationId,
+            runtime,
+            onHeadlessIdle({
+              ...runtime,
+              started: true,
+              status: 'failed',
+              goal: { ...goal, status: 'paused', note, retry: undefined },
+            })
+          );
+          return;
+        }
+
         commit(
           conversationId,
           runtime,
@@ -543,7 +661,14 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
             started: true,
             status: 'failed',
             ...(runtime.goal?.status === 'active'
-              ? { goal: { ...runtime.goal, status: 'paused' as const, note: event.error } }
+              ? {
+                  goal: {
+                    ...runtime.goal,
+                    status: 'paused' as const,
+                    note: event.error,
+                    retry: undefined,
+                  },
+                }
               : {}),
           })
         );
@@ -551,6 +676,22 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
       }
       if (event.type !== 'turn-completed') return;
       forgetDeliveries(conversationId);
+      const completedProvider =
+        event.provider ?? ports.providerOf?.(conversationId) ?? runtime.goal?.retry?.provider;
+      if (!event.aborted && completedProvider) {
+        ports.upstreamRecovery?.reportSuccess(completedProvider, conversationId);
+      }
+      const recoveredRuntime: HeadlessSessionRuntime =
+        !event.aborted &&
+        runtime.goal?.status === 'waiting' &&
+        runtime.goal.retry?.reason === 'upstream'
+          ? {
+              ...runtime,
+              goal: { ...runtime.goal, status: 'active', note: undefined, retry: undefined },
+            }
+          : runtime;
+      if (event.awaitingReminder) awaitingReminder.add(conversationId);
+      else awaitingReminder.delete(conversationId);
       // 中断的轮不续跑、不泵队列；压缩中的收束等压缩结束事件再收
       if (event.aborted || compacting.get(conversationId)) {
         // 本轮还没投过：压缩结束时允许补投一次
@@ -563,6 +704,7 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
         // 上一轮失败已经叫醒并跑完，这次又开始等：允许再报一次
         if (item?.consumed) pending.delete(conversationId);
         awaiting.add(conversationId);
+        awaitingSince.set(conversationId, clock());
         armWatch(conversationId);
       } else {
         const item = pending.get(conversationId);
@@ -575,7 +717,7 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
           consumedWaits.delete(conversationId);
         }
       }
-      const guarded = withProgress(runtime, event.digest?.assistantText);
+      const guarded = withProgress(recoveredRuntime, event.digest?.assistantText);
       pump(
         conversationId,
         { ...guarded, started: true, status: 'idle', abortRequested: false },
@@ -606,6 +748,8 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
       if (live && !replaceable.includes(live.status)) return { ok: false, error: 'goal-active' };
       const trimmed = text.trim();
       if (!trimmed) return { ok: false, error: 'empty goal' };
+      userStopped.delete(conversationId);
+      ports.upstreamRecovery?.cancel(conversationId);
       save(conversationId, {
         ...runtime,
         goal: { text: trimmed, status: 'active', autoTurns: 0, noProgressRuns: 0 },
@@ -617,6 +761,13 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
       const runtime = runtimeOf(conversationId);
       if (!runtime) return { ok: false, error: 'not-main-driven' };
       if (action === 'set' && !text?.trim()) return { ok: false, error: 'empty goal' };
+      if (action === 'pause' || action === 'clear') {
+        userStopped.add(conversationId);
+        ports.upstreamRecovery?.cancel(conversationId);
+      } else {
+        userStopped.delete(conversationId);
+        ports.upstreamRecovery?.cancel(conversationId);
+      }
       // 恢复即重置安全计数：人已过目（与 renderer 的 resumeGoal 同口径）
       const current: HeadlessSessionRuntime =
         action === 'resume' && runtime.goal
@@ -627,6 +778,7 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
                 autoTurns: 0,
                 noProgressRuns: 0,
                 lastOutput: undefined,
+                retry: undefined,
               },
             }
           : runtime;
@@ -652,17 +804,51 @@ export function createDispatchDriver(ports: DispatchDriverPorts): DispatchDriver
     },
 
     forget(conversationId) {
+      userStopped.add(conversationId);
+      ports.upstreamRecovery?.cancel(conversationId);
       awaiting.delete(conversationId);
       pending.delete(conversationId);
       consumedWaits.delete(conversationId);
       continued.delete(conversationId);
       tasksBySession.delete(conversationId);
+      awaitingReminder.delete(conversationId);
       const timer = watchTimers.get(conversationId);
       if (timer) {
         clearTimeout(timer);
         watchTimers.delete(conversationId);
       }
       forgetDeliveries(conversationId);
+    },
+
+    wakeUpstream(conversationId, reason) {
+      if (reason === 'manual') {
+        userStopped.delete(conversationId);
+      } else if (userStopped.has(conversationId)) {
+        return false;
+      }
+      const runtime = runtimeOf(conversationId);
+      if (runtime?.goal?.status !== 'waiting' || runtime.goal.retry?.reason !== 'upstream') {
+        return false;
+      }
+      if (
+        runtime.status === 'running' ||
+        runtime.compaction ||
+        runtime.pendingApprovals > 0 ||
+        runtime.pendingAsks > 0
+      ) {
+        return false;
+      }
+      const delivery: HeadlessDelivery = {
+        kind: 'prompt',
+        text: upstreamContinuationText(runtime.goal.text),
+      };
+      const nextRuntime: HeadlessSessionRuntime = {
+        ...runtime,
+        started: true,
+        status: 'running',
+      };
+      commit(conversationId, runtime, { runtime: nextRuntime, deliver: delivery });
+      return true;
     },
   };
 }

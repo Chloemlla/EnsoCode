@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { OauthFlowEvent } from '@shared/oauthFlow';
 import type { OauthLoginEvent, OauthLoginPrompt } from '@shared/types';
-import { IPC_CHANNELS, OAUTH_LABEL_MAX_LENGTH } from '@shared/types';
+import { IPC_CHANNELS } from '@shared/types/ipc';
+import { OAUTH_LABEL_MAX_LENGTH } from '@shared/types/oauthProviders';
 import type { WebContents } from 'electron';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -28,12 +29,6 @@ vi.mock('./uiHost', async () =>
 );
 vi.mock('./proxyConfig', () => ({
   getProxyConfig: () => ({ whenReady: async () => true }),
-}));
-// 登录完成会后台触发目录刷新；不 mock 的话，动态 import('./modelDirectory') 会经
-// settings.ts → oauthProviders.ts 的静态链把本模块重新拉回模块注册表，时机不定，
-// 会踩掉下文 resetModules + doMock 搭建的 fake runtime（“unknown oauth provider”）。
-vi.mock('./modelDirectory', () => ({
-  refreshModelDirectory: async () => {},
 }));
 
 /** 造一个可解码的 JWT（只有 payload 有意义，签名不校验） */
@@ -385,8 +380,8 @@ describe('OAuth 凭证跨窗口失效通知', () => {
     try {
       const { broadcastOauthCredentialsChanged } = await import('./oauthProviders');
       broadcastOauthCredentialsChanged(source as unknown as WebContents);
-      expect(sourceSend).not.toHaveBeenCalled();
-      expect(destroyedSend).not.toHaveBeenCalled();
+      expect(sourceSend).not.toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
+      expect(destroyedSend).not.toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
       expect(otherSend).toHaveBeenCalledOnce();
       expect(otherSend).toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
     } finally {
@@ -422,7 +417,7 @@ describe('OAuth 凭证跨窗口失效通知', () => {
           ?.accounts.map((account) => account.key)
       ).toEqual(['anthropic']);
       expect(otherSend).toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
-      expect(sourceSend).not.toHaveBeenCalled();
+      expect(sourceSend).not.toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
     } finally {
       restore();
       electronMocks.windows.splice(0);
@@ -1573,6 +1568,42 @@ describe('登录成功凭证失效通知', () => {
       expect(sourceSend).not.toHaveBeenCalledWith(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED);
     } finally {
       electronMocks.windows.splice(0);
+      vi.doUnmock('@earendil-works/pi-coding-agent');
+      vi.resetModules();
+    }
+  });
+});
+
+describe('OAuth 模型清单变化通知', () => {
+  it('runtime 预热刷完 catalog 后通知订阅者，退订后不再收到', async () => {
+    vi.resetModules();
+    const providers: Array<{ id: string; name: string; getModels: () => never[] }> = [];
+    const runtime = {
+      registerProvider: (id: string) => providers.push({ id, name: id, getModels: () => [] }),
+      registerNativeProvider: () => {},
+      unregisterProvider: () => {},
+      getProvider: (id: string) => providers.find((provider) => provider.id === id),
+      getProviders: () => providers,
+      listCredentials: async () => [],
+      refresh: async () => ({ aborted: false, errors: new Map() }),
+    };
+    vi.doMock('@earendil-works/pi-coding-agent', () => ({
+      ModelRuntime: { create: async () => runtime },
+    }));
+    try {
+      const { ensureProviderModelsRefreshed, getRuntime, onOauthCatalogChanged } = await import(
+        './oauthProviders'
+      );
+      const listener = vi.fn();
+      const unsubscribe = onOauthCatalogChanged(listener);
+      await getRuntime();
+      await vi.waitFor(() => expect(listener).toHaveBeenCalled());
+
+      unsubscribe();
+      listener.mockClear();
+      await ensureProviderModelsRefreshed(runtime as never, 'google-antigravity', { force: true });
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
       vi.doUnmock('@earendil-works/pi-coding-agent');
       vi.resetModules();
     }

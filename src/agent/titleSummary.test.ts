@@ -1,8 +1,5 @@
-import {
-  type ProjectedMessage,
-  type SpawnModelConfig,
-  TURN_REPORT_MAX_CHARS,
-} from '@shared/types/agent';
+import type { ProjectedMessage, SpawnModelConfig } from '@shared/types/agent';
+import { TURN_REPORT_MAX_CHARS } from '@shared/types/agentConstants';
 import { describe, expect, it } from 'vitest';
 import {
   buildInitialTitleUserText,
@@ -84,6 +81,12 @@ describe('extractTitle：模型回复 → 可用标题', () => {
 describe('buildTitleUserText：送给模型的用户消息（清洗后的用户原文）', () => {
   it('原样保留短消息', () => {
     expect(buildTitleUserText('帮我修 bug')).toBe('帮我修 bug');
+  });
+
+  it('选中文本引用块不进标题输入，只留追问', () => {
+    expect(buildTitleUserText('<quote>\n很长的一段引用\n</quote>\n这段为什么报错')).toBe(
+      '这段为什么报错'
+    );
   });
 
   it('超长消息截断到 2000 字符，避免为一个标题烧长上下文', () => {

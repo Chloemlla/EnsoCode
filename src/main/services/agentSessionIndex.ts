@@ -140,6 +140,7 @@ function identityOf(
           | 'graceful-restart-ready'
           | 'background-tasks-detached'
           | 'session-wake-requested'
+          | 'session-reminder-due'
           | 'unopened-background-tasks';
       }
     | McpWorkerEvent
@@ -267,6 +268,13 @@ export class AgentSessionIndex {
           !('parent' in session.identity) && session.alive && session.status === 'running'
       )
       .map((session) => session.identity.sessionId);
+  }
+
+  /** 有子代理在跑回合（父会话可能已空闲在等它）：退出要等它到安全点，重启后才能接着跑 */
+  hasRunningChild(): boolean {
+    return [...this.sessions.values()].some(
+      (session) => 'parent' in session.identity && session.alive && session.status === 'running'
+    );
   }
 
   /** 退出记录：正在跑回合的父会话 + 回合 id / 开始时刻 / 最后一条消息下标 */
@@ -560,6 +568,7 @@ export class AgentSessionIndex {
       event.type === 'graceful-restart-ready' ||
       event.type === 'background-tasks-detached' ||
       event.type === 'session-wake-requested' ||
+      event.type === 'session-reminder-due' ||
       event.type === 'unopened-background-tasks'
     )
       return false;

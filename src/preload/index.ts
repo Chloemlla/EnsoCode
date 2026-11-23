@@ -1,3 +1,4 @@
+import type { AppLogEntry, LogExportResult, LogSummaryLevel } from '@shared/appLog';
 import type { BotTemplateLibrary } from '@shared/bots/templateLibrary';
 import type {
   BtwAbortRequest,
@@ -43,6 +44,12 @@ import type {
   TreeNodeDto,
   TreeQuery,
 } from '@shared/memory/graphDto';
+import type {
+  ImportProjectSessionsMode,
+  ImportProjectSessionsPreview,
+  ImportProjectSessionsResult,
+  RemoveEmptyProjectResult,
+} from '@shared/moveConversation';
 import type {
   OauthFlowControlRequest,
   OauthFlowEvent,
@@ -131,36 +138,35 @@ import type {
   SshHostKeyChallenge,
   TestProviderResult,
 } from '@shared/types';
-import { IPC_CHANNELS } from '@shared/types';
-import type {
-  AgentActionResult,
-  AgentRunProgress,
-  AgentSpawnRequest,
-  ApprovalDecision,
-  ApprovalMode,
-  AttachedImage,
-  AuthorityMutationResult,
-  ChildHistoryResult,
-  ChildRunListResult,
-  ConversationAuthorityProjection,
-  ConversationAuthorityRequest,
-  ConversationReloadResult,
-  CreateConversationAuthorityRequest,
-  CreateProjectAuthorityRequest,
-  DispatchMainEvent,
-  McpStatusEvent,
-  McpStatusPush,
-  ParentHistoryTailResult,
-  ProjectAuthorityProjection,
-  RemoveProjectAuthorityRequest,
-  RendererAgentEvent,
-  SelectProjectAuthorityRequest,
-  SourceAuthorityProjection,
-  ThinkingLevel,
-  TitleSummaryInput,
-  UpdateConversationSelectionRequest,
+import {
+  type AgentActionResult,
+  type AgentRunProgress,
+  type AgentSpawnRequest,
+  type ApprovalDecision,
+  type ApprovalMode,
+  type AttachedImage,
+  type AuthorityMutationResult,
+  type ChildHistoryResult,
+  type ChildRunListResult,
+  type ConversationAuthorityProjection,
+  type ConversationAuthorityRequest,
+  type ConversationReloadResult,
+  type CreateConversationAuthorityRequest,
+  type CreateProjectAuthorityRequest,
+  type DispatchMainEvent,
+  type McpStatusEvent,
+  type McpStatusPush,
+  type ParentHistoryTailResult,
+  type ProjectAuthorityProjection,
+  parseDispatchMainEvent,
+  type RemoveProjectAuthorityRequest,
+  type RendererAgentEvent,
+  type SelectProjectAuthorityRequest,
+  type SourceAuthorityProjection,
+  type ThinkingLevel,
+  type TitleSummaryInput,
+  type UpdateConversationSelectionRequest,
 } from '@shared/types/agent';
-import { parseDispatchMainEvent } from '@shared/types/agent';
 import type {
   BotAbilitySuggestRequest,
   BotAbilitySuggestResult,
@@ -225,9 +231,20 @@ import type {
   DesignTopLeftRect,
   DesignXyRect,
 } from '@shared/types/browser';
-import type { DcgActionResult, DcgStatus } from '@shared/types/dcg';
+import type {
+  DcgActionResult,
+  DcgRuleExemption,
+  DcgRuleState,
+  DcgStatus,
+  DcgUpdateCheck,
+} from '@shared/types/dcg';
 import type { SessionChangeSnapshots } from '@shared/types/fileChanges';
-import type { RestartOverlayState } from '@shared/types/ipc';
+import {
+  IPC_CHANNELS,
+  type OpenDevToolsResult,
+  type RestartBlocker,
+  type RestartOverlayState,
+} from '@shared/types/ipc';
 import type {
   AgentDispatchRequest,
   AgentDispatchResult,
@@ -265,7 +282,7 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
 } from '@shared/types/sidePanel';
-import type { UpdaterState, UpdateStatus } from '@shared/types/updater';
+import type { RestartToUpdateResult, UpdaterState, UpdateStatus } from '@shared/types/updater';
 import type {
   WorkflowPresetDraft,
   WorkflowPresetSaveResult,
@@ -280,6 +297,7 @@ import type {
 } from '@shared/types/worktree';
 import type { UpdateChannel } from '@shared/updater/channel';
 import type { AutoRestartMode } from '@shared/updater/idleRestart';
+import type { GoalUpstreamRetry, ProviderHealthSnapshot } from '@shared/upstreamRecovery';
 import type { BotUsageOverviewResult, BotUsageSummaryResult } from '@shared/usage/botUsage';
 import type { UsageRangeDays, UsageSummaryResult } from '@shared/usage/types';
 import type { TitleBarAppearance } from '@shared/windowControls';
@@ -292,14 +310,51 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron';
 
 function parseRestartOverlay(value: unknown): RestartOverlayState | null {
   if (!value || typeof value !== 'object') return null;
-  const { phase, reason, exit } = value as { phase?: unknown; reason?: unknown; exit?: unknown };
+  const { phase, reason, exit, blockers } = value as {
+    phase?: unknown;
+    reason?: unknown;
+    exit?: unknown;
+    blockers?: unknown;
+  };
   if (phase === 'restarting' || phase === 'resuming') return { phase };
   if (phase !== 'waiting') return null;
+  const parsed = parseRestartBlockers(blockers);
   return {
     phase,
     reason: reason === 'background-not-detachable' || reason === 'reply' ? reason : 'tool',
     exit: exit === 'update' || exit === 'quit' ? exit : 'restart',
+    ...(parsed ? { blockers: parsed } : {}),
   };
+}
+
+function isBlockerKind(value: unknown): value is RestartBlocker['kind'] {
+  return (
+    value === 'tool' ||
+    value === 'background' ||
+    value === 'reply' ||
+    value === 'starting' ||
+    value === 'turn'
+  );
+}
+
+function parseRestartBlockers(value: unknown): RestartBlocker[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const blockers: RestartBlocker[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as { sessionId?: unknown; kind?: unknown; tools?: unknown };
+    if (typeof row.sessionId !== 'string' || row.sessionId.length === 0) continue;
+    if (!isBlockerKind(row.kind)) continue;
+    const blocker: RestartBlocker = { sessionId: row.sessionId, kind: row.kind };
+    if (row.kind === 'tool' && Array.isArray(row.tools)) {
+      const tools = row.tools.filter(
+        (name): name is string => typeof name === 'string' && name.length > 0
+      );
+      if (tools.length > 0) blocker.tools = tools;
+    }
+    blockers.push(blocker);
+  }
+  return blockers.length > 0 ? blockers : undefined;
 }
 
 const electronAPI = {
@@ -365,6 +420,19 @@ const electronAPI = {
     }): Promise<
       { ok: true; value: ConversationAuthorityProjection } | { ok: false; error: string }
     > => ipcRenderer.invoke(IPC_CHANNELS.CONVERSATIONS_MOVE, input),
+    importProjectSessions: (input: {
+      sourceProjectId: string;
+      targetProjectId: string;
+      mode: ImportProjectSessionsMode;
+    }): Promise<ImportProjectSessionsResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONVERSATIONS_IMPORT_PROJECT, input),
+    importProjectSessionsPreview: (input: {
+      sourceProjectId: string;
+      targetProjectId: string;
+    }): Promise<ImportProjectSessionsPreview> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONVERSATIONS_IMPORT_PROJECT_PREVIEW, input),
+    removeEmptyProject: (input: { projectId: string }): Promise<RemoveEmptyProjectResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECT_REMOVE_EMPTY, input),
     /** Main 拒收本窗口的会话写回，要求重新读会话 */
     onConversationsResync: (callback: () => void): (() => void) => {
       const listener = () => callback();
@@ -482,6 +550,9 @@ const electronAPI = {
     /** 结果卡「知道了」：这条结果不再占工作台的「需要你处理」 */
     dismissResult: (conversationId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_DISMISS_RESULT, { conversationId }),
+    /** 出问题的等待派发卡「忽略」：从等待表里移除 */
+    dismissPending: (pendingId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_DISMISS_PENDING, { pendingId }),
     /** 用户手动把一条派发记录标记完成，或撤销这个标记放回进行中 */
     markResult: (
       conversationId: string,
@@ -500,6 +571,18 @@ const electronAPI = {
       text?: string;
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_GOAL_ACTION, request),
+    /** 排队会话立即开始：不看上限；followUp 是排队期间在输入框发的消息，排在首条之后送达 */
+    startQueued: (
+      conversationId: string,
+      followUp?: { text: string; images?: AttachedImage[] }
+    ): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_QUEUED_START, {
+        conversationId,
+        ...(followUp ? { followUp } : {}),
+      }),
+    /** 取消排队会话：还没开始的会话直接删除；已开始或正在启动的拒绝 */
+    cancelQueued: (conversationId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_QUEUED_CANCEL, { conversationId }),
     /** 全部定时（含系统生成的每日简报与待办提醒），下一次触发时间由 Main 算 */
     listSchedules: (
       secretaryId?: string
@@ -733,6 +816,14 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.RESOURCES_SESSIONS_CLEAN_DONE, requestId, removed),
   },
 
+  logs: {
+    errors: (minLevel: LogSummaryLevel): Promise<AppLogEntry[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.LOGS_ERRORS, minLevel),
+    export: (hours: number): Promise<LogExportResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.LOGS_EXPORT, hours),
+    revealExport: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.LOGS_REVEAL_EXPORT),
+  },
+
   memory: {
     list: (query: MemoryListQuery): Promise<MemoryListResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.MEMORY_LIST, query),
@@ -830,6 +921,18 @@ const electronAPI = {
     status: (): Promise<DcgStatus> => ipcRenderer.invoke(IPC_CHANNELS.DCG_STATUS),
     install: (): Promise<DcgActionResult> => ipcRenderer.invoke(IPC_CHANNELS.DCG_INSTALL),
     uninstall: (): Promise<DcgActionResult> => ipcRenderer.invoke(IPC_CHANNELS.DCG_UNINSTALL),
+    checkUpdate: (): Promise<DcgUpdateCheck> => ipcRenderer.invoke(IPC_CHANNELS.DCG_CHECK_UPDATE),
+    ruleState: (ruleId: string): Promise<DcgRuleState | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DCG_RULE_STATE, ruleId),
+    ruleAllowed: (ruleId: string): Promise<DcgRuleState | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DCG_RULE_ALLOWED, ruleId),
+    ruleExempt: (ruleId: string): Promise<DcgRuleState | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DCG_RULE_EXEMPT, ruleId),
+    ruleRevoke: (ruleId: string): Promise<DcgRuleExemption[] | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DCG_RULE_REVOKE, ruleId),
+    listExemptions: (): Promise<DcgRuleExemption[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DCG_EXEMPTIONS_LIST),
+    clearExemptions: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.DCG_EXEMPTIONS_CLEAR),
   },
 
   providers: {
@@ -1189,8 +1292,8 @@ const electronAPI = {
     prompt: (
       sessionId: string,
       text: string,
-      images?: AttachedImage[],
-      deliveryId?: string
+      images: AttachedImage[] | undefined,
+      deliveryId: string
     ): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_PROMPT, sessionId, text, images, deliveryId),
     steer: (
@@ -1202,8 +1305,12 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_STEER, sessionId, text, images, deliveryId),
     withdrawSteer: (sessionId: string, deliveryId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_WITHDRAW_STEER, sessionId, deliveryId),
-    abort: (sessionId: string): Promise<AgentActionResult> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT, sessionId),
+    /** 用户停止带 stopSubagents 与 cancelReminders：一并停子代理、取消会话自己定的提醒 */
+    abort: (
+      sessionId: string,
+      options?: { stopSubagents?: boolean; cancelReminders?: boolean }
+    ): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT, sessionId, options),
     abortRetry: (sessionId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_ABORT_RETRY, sessionId),
     retry: (
@@ -1211,6 +1318,24 @@ const electronAPI = {
       options?: { unfinishedOnly?: boolean }
     ): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_RETRY, sessionId, options),
+    reportUpstreamFailure: (input: {
+      sessionId: string;
+      error: string;
+      provider?: string;
+      retryExhausted?: boolean;
+      since?: number;
+      previousAttempt?: number;
+    }): Promise<
+      | { action: 'wait'; retry: GoalUpstreamRetry }
+      | { action: 'exhausted'; note: string }
+      | { action: 'permanent'; hint?: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.AGENT_UPSTREAM_REPORT_FAILURE, input),
+    retryUpstreamNow: (waiterId: string): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_UPSTREAM_RETRY_NOW, { waiterId }),
+    cancelUpstreamWait: (sessionId: string): Promise<AgentActionResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_UPSTREAM_CANCEL, sessionId),
+    listUpstreamHealth: (): Promise<ProviderHealthSnapshot[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_LIST),
     /** 释放父会话（worker 侧销毁，jsonl 留盘），之后可携新 cwd resume（Move to worktree） */
     release: (sessionId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_RELEASE, sessionId),
@@ -1347,7 +1472,7 @@ const electronAPI = {
     fork: (
       sessionId: string,
       targetConversationId: string,
-      anchor: { entryId: string } | { userIndexFromEnd: number }
+      anchor: { entryId: string } | { turnIndexFromEnd: number }
     ): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_FORK, sessionId, targetConversationId, anchor),
     /** 上报当前正在查看的会话（null = 没在看任何会话），供 main 抑制重复的系统通知 */
@@ -1366,6 +1491,24 @@ const electronAPI = {
       const listener = (_: unknown, event: RendererAgentEvent) => callback(event);
       ipcRenderer.on(IPC_CHANNELS.AGENT_EVENT, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_EVENT, listener);
+    },
+    onUpstreamHealth: (callback: (snapshots: ProviderHealthSnapshot[]) => void): (() => void) => {
+      const listener = (_: unknown, snapshots: ProviderHealthSnapshot[]) => callback(snapshots);
+      ipcRenderer.on(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_EVENT, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_EVENT, listener);
+    },
+    onUpstreamWake: (
+      callback: (event: {
+        conversationId: string;
+        reason: 'probe' | 'recovered' | 'manual';
+      }) => void
+    ): (() => void) => {
+      const listener = (
+        _: unknown,
+        event: { conversationId: string; reason: 'probe' | 'recovered' | 'manual' }
+      ) => callback(event);
+      ipcRenderer.on(IPC_CHANNELS.AGENT_UPSTREAM_WAKE_EVENT, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_UPSTREAM_WAKE_EVENT, listener);
     },
   },
 
@@ -1420,6 +1563,8 @@ const electronAPI = {
       conversationId: string
     ): Promise<{ ok: true; value: WorktreeStatus } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.WORKTREE_STATUS, conversationId),
+    statuses: (): Promise<Record<string, WorktreeStatus>> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WORKTREE_STATUSES),
     remove: (
       conversationId: string
     ): Promise<{ ok: true; value: null } | { ok: false; error: string }> =>
@@ -1560,7 +1705,8 @@ const electronAPI = {
     checkForUpdates: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
     downloadUpdate: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_DOWNLOAD_UPDATE),
     /** 走优雅重启的安全点：当前工具结束后重启安装，后台命令交给新实例 */
-    quitAndInstall: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL),
+    quitAndInstall: (): Promise<RestartToUpdateResult | undefined> =>
+      ipcRenderer.invoke(IPC_CHANNELS.UPDATER_QUIT_AND_INSTALL),
     setAutoUpdateEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_AUTO_UPDATE_ENABLED, enabled),
     setAutoRestartMode: (mode: AutoRestartMode): Promise<void> =>
@@ -1681,6 +1827,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_REFRESH_DRAG_REGIONS),
     openSettings: (link?: SettingsDeepLink): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_SETTINGS, link),
+    openDevTools: (): Promise<OpenDevToolsResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_DEV_TOOLS),
     onToggleSidebar: (callback: () => void): (() => void) => {
       const listener = () => callback();
       ipcRenderer.on(IPC_CHANNELS.WINDOW_TOGGLE_SIDEBAR, listener);

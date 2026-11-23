@@ -6,6 +6,7 @@ import type {
   RendererAgentEvent,
   SourceAuthorityProjection,
 } from '@shared/types/agent';
+import type { GoalUpstreamRetry, ProviderHealthSnapshot } from '@shared/upstreamRecovery';
 import { vi } from 'vitest';
 import type * as SettingsModule from '../settings';
 import type * as SessionsModule from './index';
@@ -13,6 +14,10 @@ import type * as SessionsModule from './index';
 export let onAgentEvent: ((event: RendererAgentEvent) => void) | undefined;
 export let onDispatchEvent: ((event: DispatchMainEvent) => void) | undefined;
 export let onConversationsResync: (() => void) | undefined;
+export let onUpstreamHealth: ((snapshots: ProviderHealthSnapshot[]) => void) | undefined;
+export let onUpstreamWake:
+  | ((event: { conversationId: string; reason: 'probe' | 'recovered' | 'manual' }) => void)
+  | undefined;
 
 export interface SessionProjectionState {
   sourceProjection: SourceAuthorityProjection;
@@ -29,6 +34,16 @@ export function bindSessionProjection(state: SessionProjectionState) {
 }
 
 export const agentPrompt = vi.fn(async () => ({ ok: true }));
+export const reportUpstreamFailure = vi.fn(
+  async (): Promise<
+    | { action: 'wait'; retry: GoalUpstreamRetry }
+    | { action: 'exhausted'; note: string }
+    | { action: 'permanent'; hint?: string }
+  > => ({ action: 'permanent' })
+);
+export const retryUpstreamNow = vi.fn(async () => ({ ok: true }));
+export const cancelUpstreamWait = vi.fn(async () => ({ ok: true }));
+export const listUpstreamHealth = vi.fn(async (): Promise<ProviderHealthSnapshot[]> => []);
 export const readConversations = vi.fn(
   async (): Promise<{ value: unknown; seq: number }> => ({
     value: null,
@@ -156,7 +171,9 @@ export const hireCoworker = vi.fn(
 export const summarizeTitle = vi.fn(
   async (): Promise<{ ok: boolean; error?: string }> => ({ ok: true })
 );
-export const agentAbort = vi.fn(async (_id: string) => ({ ok: true }));
+export const agentAbort = vi.fn(async (_id: string, _options?: { stopSubagents?: boolean }) => ({
+  ok: true,
+}));
 export const agentRelease = vi.fn(async (_id: string) => ({ ok: true }));
 export const btwSpawn = vi.fn(async () => ({ ok: true }));
 export const btwDispose = vi.fn(async () => ({ ok: true }));
@@ -179,6 +196,13 @@ export const agentSetApprovalMode = vi.fn(
     ({ ok: true }) as { ok: boolean; error?: string }
 );
 export const secretaryGoalAction = vi.fn(async (_request: unknown) => ({ ok: true }));
+export const secretaryStartQueued = vi.fn(
+  async (
+    _id: string,
+    _followUp?: { text: string }
+  ): Promise<{ ok: true } | { ok: false; error: string }> => ({ ok: true })
+);
+export const secretaryCancelQueued = vi.fn(async (_id: string) => ({ ok: true as const }));
 
 export function installSessionGlobals(options?: { captureAsks?: boolean }) {
   const onDispatch = options?.captureAsks
@@ -236,6 +260,25 @@ export function installSessionGlobals(options?: { captureAsks?: boolean }) {
         withdrawSteer: agentWithdrawSteer,
         setPlanMode: agentSetPlanMode,
         setApprovalMode: agentSetApprovalMode,
+        reportUpstreamFailure,
+        retryUpstreamNow,
+        cancelUpstreamWait,
+        listUpstreamHealth,
+        onUpstreamHealth: vi.fn((callback: (snapshots: ProviderHealthSnapshot[]) => void) => {
+          onUpstreamHealth = callback;
+          return vi.fn();
+        }),
+        onUpstreamWake: vi.fn(
+          (
+            callback: (event: {
+              conversationId: string;
+              reason: 'probe' | 'recovered' | 'manual';
+            }) => void
+          ) => {
+            onUpstreamWake = callback;
+            return vi.fn();
+          }
+        ),
       },
       btw: {
         spawn: btwSpawn,
@@ -245,6 +288,8 @@ export function installSessionGlobals(options?: { captureAsks?: boolean }) {
       },
       secretary: {
         goalAction: secretaryGoalAction,
+        startQueued: secretaryStartQueued,
+        cancelQueued: secretaryCancelQueued,
       },
       agentDispatch: {
         bindSource,
@@ -293,6 +338,10 @@ export async function seedParent() {
 export async function resetSessionHarness() {
   agentPrompt.mockClear();
   secretaryGoalAction.mockClear();
+  secretaryStartQueued.mockReset();
+  secretaryStartQueued.mockResolvedValue({ ok: true });
+  secretaryCancelQueued.mockReset();
+  secretaryCancelQueued.mockResolvedValue({ ok: true });
   dispatch.mockReset();
   registerModelSelection.mockClear();
   bindSource.mockClear();

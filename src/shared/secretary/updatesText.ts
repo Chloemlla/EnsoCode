@@ -1,10 +1,16 @@
 import type { SecretaryResultKind } from '../types/secretary';
 import { RESULT_KINDS } from './parse';
+import { unescapeUntrusted } from './transcript';
 
 export type SecretaryUpdateLine =
   | { kind: SecretaryResultKind; text: string; conversationId?: string; detail?: string }
   | { kind: 'proposal' | 'schedule' | 'pending'; text: string; detail?: string }
-  | { kind: 'ask-relay' | 'leftover'; text: string; conversationId?: string; detail?: string };
+  | {
+      kind: 'ask-relay' | 'leftover' | 'queued';
+      text: string;
+      conversationId?: string;
+      detail?: string;
+    };
 
 const BLOCK = /^<(session-updates|secretary-schedule)>\n([\s\S]*?)\n<\/\1>(?:\n|$)/;
 const HEAD = /^- \[([a-z-]+)(?: (?:session|pending):([^\]\s]+))?\] ([^\n]*)(?:\n|$)/;
@@ -30,6 +36,8 @@ function lineOf(
   if (kind === 'ask-relay') return conversationId ? { kind, text, conversationId } : null;
   // 遗留巡检也要点名会话：秘书据此用 session_task_stop 停掉
   if (kind === 'leftover') return conversationId ? { kind, text, conversationId } : null;
+  // 排队会话启动失败或被取消：点名会话，秘书据此决定重派或告诉用户
+  if (kind === 'queued') return conversationId ? { kind, text, conversationId } : null;
   if (!isResultKind(kind)) return null;
   return conversationId ? { kind, text, conversationId } : { kind, text };
 }
@@ -47,10 +55,7 @@ function parseBody(tag: string, body: string): SecretaryUpdateLine[] | null {
       // 正文里的结束标签在注入时已转义，第一个未转义的才是包裹的结尾
       const end = rest.indexOf(END_TAG);
       if (end < 0) return null;
-      line.detail = rest
-        .slice(open[0].length, end)
-        .split('<\\/untrusted-content')
-        .join('</untrusted-content');
+      line.detail = unescapeUntrusted(rest.slice(open[0].length, end));
       rest = rest.slice(end + END_TAG.length);
       if (rest.startsWith('\n')) rest = rest.slice(1);
       else if (rest) return null;

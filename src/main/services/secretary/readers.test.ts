@@ -18,6 +18,7 @@ import {
 } from '../sessionHistoryTail';
 import {
   createSecretaryReadHandlers,
+  projectAliasesFromSettings,
   type SecretaryReadPorts,
   type SecretarySessionStatus,
 } from './readers';
@@ -263,6 +264,95 @@ describe('project_info', () => {
   });
 });
 
+describe('项目别名', () => {
+  const aliased = (aliases: Record<string, string>) =>
+    createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [
+          project({ projectId: 'p1', canonicalPath: '/repo/alpha' }),
+          project({ projectId: 'p2', canonicalPath: '/repo/beta' }),
+        ],
+        projectAliases: () => aliases,
+      })
+    );
+
+  it('有别名时 project_list 与 project_info 的名字取别名，并带上 alias', async () => {
+    const handlers = aliased({ p1: '  官网前端 ' });
+
+    const list = await run(handlers.project_list);
+    expect(list.projects).toEqual([
+      { projectId: 'p2', name: 'beta', kind: 'local', path: '/repo/beta', lastActivityAt: null },
+      {
+        projectId: 'p1',
+        name: '官网前端',
+        alias: '官网前端',
+        directoryName: 'alpha',
+        kind: 'local',
+        path: '/repo/alpha',
+        lastActivityAt: null,
+      },
+    ]);
+    expect(await run(handlers.project_info, { projectId: 'p1' })).toMatchObject({
+      name: '官网前端',
+      alias: '官网前端',
+      directoryName: 'alpha',
+      path: '/repo/alpha',
+    });
+  });
+
+  it('别名为空串或全空白时回退到目录名，不带 alias', async () => {
+    const handlers = aliased({ p1: '', p2: '   ' });
+
+    const list = await run(handlers.project_list);
+    expect(list.projects).toEqual([
+      { projectId: 'p1', name: 'alpha', kind: 'local', path: '/repo/alpha', lastActivityAt: null },
+      { projectId: 'p2', name: 'beta', kind: 'local', path: '/repo/beta', lastActivityAt: null },
+    ]);
+    const info = await run(handlers.project_info, { projectId: 'p2' });
+    expect(info.name).toBe('beta');
+    expect(info).not.toHaveProperty('alias');
+  });
+
+  it('别名同样脱敏', async () => {
+    const handlers = aliased({ p1: `别名 ${SECRET}` });
+
+    const list = await run(handlers.project_list);
+    const info = await run(handlers.project_info, { projectId: 'p1' });
+    expect(JSON.stringify(list)).not.toContain(SECRET);
+    expect(JSON.stringify(info)).not.toContain(SECRET);
+    expect(info.name).toContain('别名');
+  });
+});
+
+describe('projectAliasesFromSettings', () => {
+  it('从 settings.json 的项目列表取非空别名，坏数据跳过', () => {
+    expect(
+      projectAliasesFromSettings({
+        'enso-settings': {
+          state: {
+            projects: [
+              { id: 'p1', path: '/repo/alpha', alias: '官网' },
+              { id: 'p2', path: '/repo/beta' },
+              { id: 'p3', alias: '   ' },
+              { id: 'p4', alias: 42 },
+              { alias: '无 id' },
+              null,
+              'junk',
+            ],
+          },
+        },
+      })
+    ).toEqual({ p1: '官网' });
+  });
+
+  it('设置缺失或结构不对时返回空表', () => {
+    expect(projectAliasesFromSettings(null)).toEqual({});
+    expect(projectAliasesFromSettings({ 'enso-settings': { state: { projects: {} } } })).toEqual(
+      {}
+    );
+  });
+});
+
 describe('session_list', () => {
   it('只列根会话：跳过 child、bot、已归档与不可见项目，最新在前', async () => {
     const handlers = createSecretaryReadHandlers(
@@ -392,6 +482,28 @@ describe('session_read', () => {
       baseIndex,
     });
 
+  it('带出结构化结果，自述按不可信内容脱敏', async () => {
+    const handlers = createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({ s1: row() }),
+        conversations: () => [conversation('s1', 'p1')],
+        goalResult: () => ({
+          at: 5,
+          result: { summary: `done ${SECRET}`, commits: ['abc1234'] },
+          checks: [{ kind: 'commit', ref: 'abc1234', status: 'verified' }],
+        }),
+      })
+    );
+    const result = await run(handlers.session_read, { conversationId: 's1' });
+    const goal = result.goalResult as { at: number; result: string; checks: unknown[] };
+    expect(goal.at).toBe(5);
+    expect(goal.checks).toEqual([{ kind: 'commit', ref: 'abc1234', status: 'verified' }]);
+    expect(goal.result).toContain('<untrusted-content source="session:s1">');
+    expect(goal.result).toContain('abc1234');
+    expect(goal.result).not.toContain(SECRET);
+  });
+
   it('只给 user 与 assistant 正文，脱敏后包进 untrusted-content', async () => {
     const handlers = createSecretaryReadHandlers(
       makePorts({
@@ -473,6 +585,34 @@ describe('session_read', () => {
 
     expect(result.messages).toEqual([]);
     expect(result.historyError).toBe('not-found');
+  });
+
+  it('完成后被自动归档的派出会话仍可读；用户手动归档的仍 not-found', async () => {
+    const handlers = createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({
+          auto: row({ archived: true, archivedAt: 9 }),
+          manual: row({ archived: true, archivedAt: 7 }),
+        }),
+        conversations: () => [conversation('auto', 'p1'), conversation('manual', 'p1')],
+        autoArchived: (conversationId, archivedRow) =>
+          conversationId === 'auto' && archivedRow.archivedAt === 9,
+      })
+    );
+    const auto = await handlers.session_read(
+      { conversationId: 'auto' },
+      { secretaryConversationId: 'sec-1' }
+    );
+    expect(auto.ok).toBe(true);
+    expect(
+      await handlers.session_read(
+        { conversationId: 'manual' },
+        { secretaryConversationId: 'sec-1' }
+      )
+    ).toEqual({ ok: false, error: 'not-found' });
+    const listed = await handlers.session_list({}, { secretaryConversationId: 'sec-1' });
+    expect(JSON.stringify(listed)).not.toContain('"auto"');
   });
 
   it('child、已归档、未知会话与不可见项目一律 not-found', async () => {
@@ -831,6 +971,41 @@ describe('session_tasks', () => {
     expect(rows[2]?.stalled).toBe(true);
   });
 
+  it('挂着的自定提醒一并给出：到点时间、还剩多久、标签、属于哪个子代理；session_read 带简表', async () => {
+    const now = Date.now();
+    const base = { createdAt: 0, prompt: 'secret prompt', ifIdle: true, chain: 1 };
+    const ports = makePorts({
+      projects: () => [project()],
+      rows: () => ({ s1: row() }),
+      conversations: () => [conversation('s1', 'p1')],
+      reminders: () => [
+        { ...base, id: 'r00000001', sessionId: 's1::cw-a', dueAt: now + 60_000 },
+        { ...base, id: 'r00000002', sessionId: 's1', dueAt: now + 120_000, label: 'ci' },
+      ],
+    });
+    const handlers = createSecretaryReadHandlers(ports);
+    const tasks = await run(handlers.session_tasks, { conversationId: 's1' });
+    const reminders = tasks.reminders as Record<string, unknown>[];
+    expect(reminders).toHaveLength(2);
+    expect(reminders[0]).toMatchObject({ id: 'r00000001', subagent: 's1::cw-a' });
+    expect(reminders[0]?.inMs as number).toBeGreaterThan(50_000);
+    expect(reminders[1]).toMatchObject({ id: 'r00000002', label: 'ci', dueAt: now + 120_000 });
+    expect(reminders[1]).not.toHaveProperty('subagent');
+    expect(JSON.stringify(tasks)).not.toContain('secret prompt');
+
+    const read = await run(handlers.session_read, { conversationId: 's1' });
+    expect(read.reminders).toEqual([
+      { dueAt: now + 60_000 },
+      { dueAt: now + 120_000, label: 'ci' },
+    ]);
+
+    const none = await run(
+      createSecretaryReadHandlers({ ...ports, reminders: () => [] }).session_tasks,
+      { conversationId: 's1' }
+    );
+    expect(none).not.toHaveProperty('reminders');
+  });
+
   it('不可见会话一律 not-found', async () => {
     const handlers = createSecretaryReadHandlers(makePorts());
     expect(
@@ -1020,5 +1195,48 @@ describe('repo_status', () => {
       ok: false,
       error: 'invalid arguments',
     });
+  });
+});
+
+describe('排队会话的读取', () => {
+  const queued = (queuedAt: number, extra: Record<string, unknown> = {}) =>
+    row({
+      sessionFile: undefined,
+      secretaryOrigin: { secretaryConversationId: 'sec-1', secretaryId: 's1' },
+      queuedStart: { queuedAt, text: '修构建', ...extra },
+    });
+  const handlers = () =>
+    createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({
+          q2: queued(20),
+          q1: queued(10),
+          bad: queued(5, { failed: { at: 6, error: `spawn failed ${SECRET}` } }),
+        }),
+        conversations: () => [
+          conversation('q1', 'p1'),
+          conversation('q2', 'p1'),
+          conversation('bad', 'p1'),
+        ],
+      })
+    );
+
+  it('session_list 显示 queued 与位次，启动失败的显示脱敏后的原因', async () => {
+    const result = await run(handlers().session_list);
+    const byId = Object.fromEntries(
+      (result.sessions as { conversationId: string }[]).map((s) => [s.conversationId, s])
+    );
+    expect(byId.q1).toMatchObject({ state: 'queued', queuePosition: 1 });
+    expect(byId.q2).toMatchObject({ state: 'queued', queuePosition: 2 });
+    expect(byId.bad).toMatchObject({ state: 'queued' });
+    expect(byId.bad).not.toHaveProperty('queuePosition');
+    expect(String((byId.bad as { queueFailed?: string }).queueFailed)).toContain('spawn failed');
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it('session_read 同样显示 queued 与位次', async () => {
+    const result = await run(handlers().session_read, { conversationId: 'q2' });
+    expect(result).toMatchObject({ state: 'queued', queuePosition: 2 });
   });
 });

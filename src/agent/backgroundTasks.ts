@@ -7,7 +7,12 @@ import { getPowerShellConfig, type ToolDefinition } from '@earendil-works/pi-cod
 import { SHELL_READ_HINT, SHELL_SLEEP_HINT, SHELL_TIMEOUT_HINT } from '@shared/shellHints';
 import { SHELL_LIMITS, type ShellLimits } from '@shared/shellLimits';
 import type { BackgroundTaskInfo, BackgroundTaskKeep } from '@shared/types/agent';
-import { commandKey, commandSummary, type DetachedTaskRecord } from './detachedTasksManifest';
+import {
+  commandKey,
+  commandSummary,
+  type DetachedTaskRecord,
+  type InterruptedTaskRecord,
+} from './detachedTasksManifest';
 import {
   bindForegroundCommand,
   type DetachableProcess,
@@ -17,6 +22,7 @@ import {
   ForegroundYieldError,
 } from './foregroundCommand';
 import { killProcessTree } from './killTree';
+import { ensureSessionTempDir, sessionTempDir } from './sessionTempDir';
 import {
   attachFileBacked,
   defaultRunProbe,
@@ -66,6 +72,22 @@ const TASK_OUTPUT_LIMIT = 30_000;
 const EMIT_INTERVAL_MS = 500;
 /** 认回任务时从上一代日志读回内存的尾部上限：够面板 tail 用，不把大日志整个读进来 */
 const RECOVER_TAIL_BYTES = 64 * 1024;
+/** 因重启中断的通知里附的输出尾部 */
+const RESTART_NOTICE_TAIL = 1_500;
+
+export function restartInterruptedNotice(record: InterruptedTaskRecord, tail: string): string {
+  const ranMin = Math.max(0, Math.round((record.stoppedAt - record.startedAt) / 60_000));
+  const lines = [
+    `Background task ${record.taskId} was terminated because the app restarted (status: interrupted-by-restart). It had run about ${ranMin} min.`,
+    `Command: ${record.command}`,
+    `Its output up to the restart is in ${record.logPath}${tail ? '; the last lines were:' : ' (no output yet).'}`,
+    ...(tail ? [tail] : []),
+    record.resident
+      ? 'It was a long-running service. It was not restarted automatically; start it again only if you still need it.'
+      : 'Its result is lost. If you still need it, run the command again; continue with any goal you were working on.',
+  ];
+  return lines.join('\n');
+}
 
 interface Task {
   info: BackgroundTaskInfo;
@@ -120,6 +142,9 @@ interface Task {
   cwd?: string;
   /** 上一代 worker 交出、本代认回的任务 */
   recovered?: boolean;
+  /** 上一代收尾时被停掉的任务：完成通知换成这段说明 */
+  restartNotice?: string;
+  restartResident?: boolean;
   waiters: Array<() => void>;
   details?: unknown;
   finalize?: () => Promise<unknown>;
@@ -177,7 +202,12 @@ export interface TaskEvents {
   /** 存活任务集合或状态变化时的全量快照（REPLACE 语义）：漏了 edge 事件或静默清理也能收敛 */
   onLevel?(sessionId: string, tasks: BackgroundTaskInfo[]): void;
   /** 未被模型知情的任务结束时触发：supervisor 决定注入唤醒或挂 pending 搭车 */
-  onCompletionNotify(sessionId: string, text: string, options?: { durable?: boolean }): void;
+  /** quiet：只落盘随下一轮送达，不单独叫醒会话（因重启停掉的常驻服务） */
+  onCompletionNotify(
+    sessionId: string,
+    text: string,
+    options?: { durable?: boolean; quiet?: boolean }
+  ): void;
 }
 
 /** 毫秒转秒（保留一位小数），用于工具描述与回执里的时长 */
@@ -755,9 +785,13 @@ export class BackgroundTaskManager {
     this.emitLevel(task.sessionId);
     // 幂等抑制：模型已知情（阻塞等到 / 自己停的且收到回执）就不再打扰
     if (!task.consumed) {
-      const text = this.completionText(task);
+      const text = task.restartNotice ?? this.completionText(task);
       // 认回的任务所属会话可能还没打开：通知要落盘等它打开，不能丢
-      if (task.recovered) this.events.onCompletionNotify(task.sessionId, text, { durable: true });
+      if (task.recovered)
+        this.events.onCompletionNotify(task.sessionId, text, {
+          durable: true,
+          ...(task.restartResident ? { quiet: true } : {}),
+        });
       else this.events.onCompletionNotify(task.sessionId, text);
     }
   }
@@ -979,6 +1013,62 @@ export class BackgroundTaskManager {
   stopAll(): void {
     for (const task of this.tasks.values()) {
       if (task.info.status === 'running') this.stop(task.info.taskId, true);
+    }
+  }
+
+  /**
+   * worker 收尾前：还在跑、即将被停掉的任务（含空闲会话的）。记进台账后调 handOverNotices，
+   * 本代不再发完成通知，由下一代在任务表留下「因重启中断」并通知一次。子代理的任务记到根会话（子会话不随换代恢复），
+   * keepChild 认定重启后会续跑的子会话除外：记给它本身，续跑时交给它
+   */
+  interruptedOnShutdown(
+    now = Date.now(),
+    keepChild: (sessionId: string) => boolean = () => false
+  ): InterruptedTaskRecord[] {
+    const records: InterruptedTaskRecord[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.info.status !== 'running' || task.settling) continue;
+      records.push({
+        taskId: task.info.taskId,
+        sessionId: keepChild(task.sessionId)
+          ? task.sessionId
+          : (task.sessionId.split('::')[0] ?? task.sessionId),
+        command: commandSummary(task.info.command),
+        startedAt: task.info.startedAt,
+        stoppedAt: now,
+        logPath: task.logPath,
+        resident:
+          task.info.keep !== undefined || classifyCommand(task.info.command).class === 'server',
+      });
+    }
+    return records;
+  }
+
+  handOverNotices(taskIds: readonly string[]): void {
+    for (const taskId of taskIds) {
+      const task = this.tasks.get(taskId);
+      if (task) task.consumed = true;
+    }
+  }
+
+  /** 新一代：上一代收尾时停掉的任务按原 taskId 留在任务表（failed + interrupted），通知所属会话一次 */
+  recoverInterrupted(records: readonly InterruptedTaskRecord[]): void {
+    for (const record of records) {
+      if (this.tasks.has(record.taskId)) continue;
+      const task = this.register(record.sessionId, record.taskId, record.command, {
+        startedAt: record.startedAt,
+        kill: () => {},
+        appendLog: true,
+      });
+      task.recovered = true;
+      task.info.interrupted = 'restart';
+      task.restartResident = record.resident;
+      task.restartNotice = restartInterruptedNotice(
+        record,
+        stripVTControlCharacters(task.output.slice(-RESTART_NOTICE_TAIL)).trim()
+      );
+      this.announce(task);
+      this.finish(task, 'failed');
     }
   }
 
@@ -1255,14 +1345,24 @@ function explicitTimeoutSec(record: Record<string, unknown>): number | undefined
     : undefined;
 }
 
+/** PowerShell 临时文件只进会话专属目录；拿不到安全路径时也只给禁令，不再指向 Temp 根 */
+function powerShellTempNote(tempDir: string | null): string {
+  return tempDir
+    ? `Put temporary scripts and files only in ${tempDir} (this session's own temp folder, created ` +
+        'for you); never write to or clean up the shared $env:TEMP root, and when cleaning up delete ' +
+        'only inside that folder. '
+    : 'Avoid temporary files; never write to or clean up the shared $env:TEMP root. ';
+}
+
 /** 说明里点名的命令按工具所在的 shell 写：PowerShell 会话不能看到 bash 写法 */
-function shellTerms(name: string) {
+function shellTerms(name: string, tempDir: string | null) {
   return name === 'powershell'
     ? {
         kind: 'PowerShell',
         syntax:
           'Commands run in PowerShell, not bash: there is no head, tail or /tmp — use ' +
-          'Select-Object -First N / -Last N and $env:TEMP, and chain with ; (&& and || need PowerShell 7). ',
+          'Select-Object -First N / -Last N, and chain with ; (&& and || need PowerShell 7). ' +
+          powerShellTempNote(tempDir),
         sessionState: 'Set-Location, $env: changes',
         follow: 'Get-Content -Wait',
         readCommands: 'Get-Content',
@@ -1375,7 +1475,9 @@ export function withBackground(
   // 描述文案按建工具时的时限生成（新会话随设置更新）；执行路径每次现读 manager.limits
   const limits = manager.limits;
   const name = definition.name;
-  const terms = shellTerms(name);
+  // 只有本机 PowerShell 需要：远程会话的命令跑在远端，本机 Temp 路径对它无意义
+  const tempDir = name === 'powershell' && !transform ? sessionTempDir(sessionId, { cwd }) : null;
+  const terms = shellTerms(name, tempDir);
   const baseParams = definition.parameters as unknown as {
     properties?: Record<string, unknown>;
     [key: string]: unknown;
@@ -1429,9 +1531,11 @@ export function withBackground(
       `Never background a command with ${terms.detach} — set background: true on ${name}, which tracks the job and wakes you when it ends.`,
       `A ${name} yield receipt means the command is still running as a background job, not that it failed: do not rerun it and do not poll it (task_output loops, sleep) — continue other work or end your turn; its completion wakes you automatically.`,
       `timeout only kills — it does not extend the foreground wait. If a command may outlast the yield (~${yieldSec(limits.yieldDefaultMs)}s; ~${yieldSec(limits.yieldBuildMs)}s for builds), set background: true from the start and end your turn. Never poll with ${terms.poll}, or task_output loops.`,
+      'To wait for CI, a deploy or another external result, set a reminder with remind_me (when available) and end your turn; do not keep a sleep or --watch command running just to wait.',
     ],
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const record = params as { command?: string; background?: boolean };
+      if (tempDir) ensureSessionTempDir(tempDir);
       // 重启后认回的同一命令还在跑：不再起第二个（dev server 之类会撞端口）
       const duplicate =
         typeof record.command === 'string' && !transform

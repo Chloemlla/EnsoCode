@@ -1,6 +1,6 @@
 import { parseSecretaryUpdates } from '@shared/secretary/updatesText';
 import type { ProjectAuthority } from '@shared/types/agent';
-import { TURN_REPORT_MAX_CHARS } from '@shared/types/agent';
+import { TURN_REPORT_MAX_CHARS } from '@shared/types/agentConstants';
 import type {
   DispatchRecord,
   PendingDispatch,
@@ -278,6 +278,31 @@ describe('回传正文', () => {
     expect(text).toContain('- [goal-complete session:c1] app · 已完成');
   });
 
+  it('核验摘要在不可信包裹外，会话自述在包裹内并先脱敏', () => {
+    const text = formatSessionUpdates([
+      update({
+        kind: 'goal-complete',
+        text: 'app · 已完成',
+        lastText: '正文',
+        goalResult: {
+          at: 1,
+          result: {
+            summary: 'shipped sk-abcdefghijklmnopqrstuvwxyz123456',
+            commits: ['abc1234def'],
+          },
+          checks: [{ kind: 'commit', ref: 'abc1234def', status: 'verified' }],
+        },
+      }),
+    ]);
+    const checkAt = text.indexOf('核验：sha abc1234 在 main ✓');
+    const wrappedAt = text.indexOf('<untrusted-content source="session:c1">');
+    expect(checkAt).toBeGreaterThan(-1);
+    expect(wrappedAt).toBeGreaterThan(checkAt);
+    expect(text.slice(wrappedAt)).toContain('commits abc1234def');
+    expect(text.slice(wrappedAt)).toContain('正文');
+    expect(text).not.toContain('sk-abcdefghijklmnopqrstuvwxyz123456');
+  });
+
   it('界面解析与回传格式一致', () => {
     const batch = [
       update({
@@ -427,6 +452,23 @@ describe('工作台投影', () => {
     expect(board.done.map((card) => (card.kind === 'session' ? card.conversationId : ''))).toEqual([
       'done',
     ]);
+  });
+
+  it('有别名时卡片项目名用别名', () => {
+    const file = emptyFile({
+      dispatched: {
+        running: record({ conversationId: 'running', projectId: 'p1' }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: { running: { id: 'running', title: '在跑', sessionFile: '/tmp/r.jsonl' } },
+      statuses: { running },
+      projects,
+      aliases: { p1: '  官网前端 ' },
+      todos: [{ id: 't1', text: '看构建', projectId: 'p1', createdAt: 1, updatedAt: 1 }],
+    });
+    expect(board.running[0]).toMatchObject({ projectName: '官网前端' });
+    expect(board.todos[0]).toMatchObject({ projectName: '官网前端' });
   });
 
   it('被应用退出打断的会话不在进行中，落成 interrupted 结果', () => {
@@ -1103,5 +1145,105 @@ describe('常驻服务与遗留任务', () => {
       backgroundRunning: true,
       backgroundPersistent: true,
     });
+  });
+});
+
+describe('排队会话', () => {
+  const projects = [
+    { projectId: 'p1', canonicalPath: '/tmp/enso-code', state: 'active' },
+  ] as ProjectAuthority[];
+  const queuedRow = (queuedAt: number, extra: Record<string, unknown> = {}) => ({
+    title: `排队 ${queuedAt}`,
+    projectId: 'p1',
+    secretaryOrigin: { secretaryConversationId: 'sec1', secretaryId: 's1' },
+    queuedStart: { queuedAt, text: '修构建', ...extra },
+  });
+
+  it('不算在跑；正在启动的占着名额', () => {
+    const queued = record({ conversationId: 'q', lastState: 'idle' });
+    expect(countsAsRunning(queued, queuedRow(1), idle)).toBe(false);
+    expect(countsAsRunning(queued, queuedRow(1, { startingAt: 5 }), idle)).toBe(true);
+  });
+
+  it('看板：排队卡在真正在跑的后面、按排队先后带位次；启动失败的进需要你处理', () => {
+    const file = emptyFile({
+      dispatched: {
+        run: record({ conversationId: 'run', projectId: 'p1' }),
+        q2: record({ conversationId: 'q2', projectId: 'p1', lastState: 'idle', createdAt: 1 }),
+        q1: record({ conversationId: 'q1', projectId: 'p1', lastState: 'idle', createdAt: 2 }),
+        bad: record({ conversationId: 'bad', projectId: 'p1', lastState: 'idle' }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: {
+        run: { id: 'run', title: '在跑', sessionFile: '/tmp/r.jsonl' },
+        q2: queuedRow(20),
+        q1: queuedRow(10),
+        bad: queuedRow(5, { failed: { at: 6, error: 'spawn failed' } }),
+      },
+      statuses: { run: running, q1: idle, q2: idle, bad: idle },
+      projects,
+      todos: [{ id: 't1', text: '修构建', createdAt: 1, updatedAt: 1, conversationId: 'q1' }],
+    });
+    expect(
+      board.running.map((card) =>
+        card.kind === 'session' ? [card.conversationId, card.state, card.queuePosition] : []
+      )
+    ).toEqual([
+      ['run', 'running', undefined],
+      ['q1', 'queued', 1],
+      ['q2', 'queued', 2],
+    ]);
+    expect(board.needsYou).toEqual([
+      expect.objectContaining({
+        conversationId: 'bad',
+        state: 'queued',
+        queueFailed: 'spawn failed',
+      }),
+    ]);
+    expect(board.done).toEqual([]);
+    expect(board.todos[0]).toMatchObject({ phase: 'active', sessionState: 'queued' });
+  });
+
+  it('结构化结果 needsUser 非空时进工作台「需要你处理」，为空或手动标完成时进「完成」', () => {
+    const file = emptyFile({
+      dispatched: {
+        need: record({
+          conversationId: 'need',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10 },
+          goalResult: { at: 10, result: { summary: '待拍板', needsUser: ['确认账号'] } },
+        }),
+        done: record({
+          conversationId: 'done',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10 },
+          goalResult: { at: 10, result: { summary: '已完成', needsUser: [] } },
+        }),
+        manual: record({
+          conversationId: 'manual',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 11, manual: true },
+          goalResult: { at: 10, result: { needsUser: ['旧提示'] } },
+        }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: {
+        need: { title: '需用户确认', sessionFile: '/s/need.jsonl' },
+        done: { title: '已完成', sessionFile: '/s/done.jsonl' },
+        manual: { title: '手动收口', sessionFile: '/s/manual.jsonl' },
+      },
+      statuses: { need: idle, done: idle, manual: idle },
+      projects,
+      todos: [],
+    });
+    expect(board.needsYou.map((c) => (c.kind === 'session' ? c.conversationId : ''))).toEqual([
+      'need',
+    ]);
+    expect(board.done.map((c) => (c.kind === 'session' ? c.conversationId : '')).sort()).toEqual([
+      'done',
+      'manual',
+    ]);
   });
 });

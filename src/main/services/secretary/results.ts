@@ -1,6 +1,12 @@
-import { projectNameFromPath } from '@shared/projectName';
+import {
+  formatGoalResultChecks,
+  formatGoalResultClaims,
+  hasNeedsUser,
+} from '@shared/secretary/goalResult';
+import { queuedStartOf, queuePositions } from '@shared/secretary/queuedSession';
 import { wrapUntrusted } from '@shared/secretary/transcript';
-import { type ProjectAuthority, TURN_REPORT_MAX_CHARS, type TurnReport } from '@shared/types/agent';
+import type { ProjectAuthority, TurnReport } from '@shared/types/agent';
+import { TURN_REPORT_MAX_CHARS } from '@shared/types/agentConstants';
 import {
   type DispatchRecord,
   NEEDS_YOU_RESULTS,
@@ -15,7 +21,9 @@ import {
   type SecretaryUntrackedView,
   type SecretaryUpdate,
 } from '@shared/types/secretary';
+import { type GoalUpstreamRetry, parseGoalUpstreamRetry } from '@shared/upstreamRecovery';
 import { redactSecrets } from '../memory/distill';
+import { secretaryProjectName } from './projectLabel';
 import type { SecretarySessionStatus } from './readers';
 import { todoSessionView, todoStatus } from './todoLifecycle';
 
@@ -115,7 +123,13 @@ function isResultUpdate(
 ): update is Extract<SecretaryUpdate, { kind: SecretaryResultKind }> {
   // 转交提问也带会话 id，但它不是这一轮的结果：不参与「同一会话只留最新结果」的替换
   // 遗留巡检同理：它说的是后台任务，不是这一轮的结论
-  return 'conversationId' in update && update.kind !== 'ask-relay' && update.kind !== 'leftover';
+  // 排队会话的启动失败与取消也不是一轮的结论
+  return (
+    'conversationId' in update &&
+    update.kind !== 'ask-relay' &&
+    update.kind !== 'leftover' &&
+    update.kind !== 'queued'
+  );
 }
 
 /** 同一件事只入队一次；同一会话只保留最新结果，旧状态已被新状态取代 */
@@ -191,8 +205,14 @@ function formatLine(update: SecretaryUpdate): string {
         ? ` pending:${update.pendingId}`
         : '';
   const head = `- [${update.kind}${marker}] ${update.text}`;
-  if (!update.lastText) return head;
-  return `${head}\n${wrapUntrusted(untrustedSource(update), redactSecrets(update.lastText))}`;
+  const lines = [head];
+  if (update.goalResult?.checks && update.goalResult.checks.length > 0) {
+    lines.push(formatGoalResultChecks(update.goalResult));
+  }
+  const claims = update.goalResult ? formatGoalResultClaims(update.goalResult.result) : '';
+  const body = [update.lastText, claims].filter((part) => part && part.length > 0).join('\n');
+  if (!body) return lines.join('\n');
+  return `${lines.join('\n')}\n${wrapUntrusted(untrustedSource(update), redactSecrets(body))}`;
 }
 
 /**
@@ -348,13 +368,14 @@ export const SETTLED_RESULTS: ReadonlySet<SecretaryResultKind> = new Set([
   'interrupted',
 ]);
 
-export type SessionLiveState = 'running' | 'idle' | 'waiting' | 'error' | 'not-started';
+export type SessionLiveState = 'running' | 'idle' | 'waiting' | 'error' | 'not-started' | 'queued';
 
-/** 没有会话文件的派发记录还没真正开始 */
+/** 行上有 queuedStart 的是排队会话；没有会话文件的派发记录还没真正开始 */
 export function sessionLiveState(
   row: Record<string, unknown> | undefined,
   status: SecretarySessionStatus | undefined
 ): SessionLiveState {
+  if (queuedStartOf(row)) return 'queued';
   if (!row?.sessionFile) return 'not-started';
   return status?.state ?? 'idle';
 }
@@ -405,14 +426,29 @@ export function sessionStillGoing(input: {
   return input.goalStatus === 'active';
 }
 
+export function upstreamRetryOf(
+  row: Record<string, unknown> | undefined
+): GoalUpstreamRetry | undefined {
+  const goal = row?.goal;
+  if (!goal || typeof goal !== 'object') return undefined;
+  const record = goal as Record<string, unknown>;
+  if (record.status !== 'waiting') return undefined;
+  return parseGoalUpstreamRetry(record.retry);
+}
+
 /** 一条派发记录此刻算不算在跑；三处计数都走这里 */
 export function countsAsRunning(
   record: DispatchRecord,
   row: Record<string, unknown> | undefined,
   status: SecretarySessionStatus | undefined
 ): boolean {
+  // 正在启动的排队会话已经占了名额：否则启动期间并发的派发会多建一个
+  const queued = queuedStartOf(row);
+  if (queued) return queued.startingAt !== undefined;
   const state = sessionStateOf(record, row, status);
   if (sessionNeedsUser(record, state)) return false;
+  if (record.stoppedAt !== undefined && state !== 'running') return false;
+  if (upstreamRetryOf(row)) return true;
   // 用户撤销手动标记：放回进行中，直到这一轮出现新结果
   if (record.manualUndoneAt !== undefined && record.lastResult === undefined) return true;
   return sessionStillGoing({
@@ -427,12 +463,13 @@ export function countsAsRunning(
 }
 
 export function sessionNeedsUser(record: DispatchRecord, state: SessionLiveState): boolean {
-  return (
-    state === 'waiting' ||
-    (record.lastResult !== undefined &&
-      NEEDS_YOU_RESULTS.has(record.lastResult.kind) &&
-      !record.lastResult.dismissed)
-  );
+  if (state === 'waiting') return true;
+  const result = record.lastResult;
+  if (!result || result.dismissed) return false;
+  if (result.kind === 'goal-complete' || result.kind === 'goal-blocked') {
+    return !result.manual && hasNeedsUser(record.goalResult);
+  }
+  return NEEDS_YOU_RESULTS.has(result.kind);
 }
 
 /** 待办看到的会话：记录上还在跑、或目标还要续时，不因实时状态暂时空闲就当成做完 */
@@ -461,6 +498,7 @@ export interface BoardInput {
   statuses: Readonly<Record<string, SecretarySessionStatus>>;
   projects: readonly ProjectAuthority[];
   todos: readonly SecretaryTodo[];
+  aliases?: Readonly<Record<string, string>>;
 }
 
 type SessionCard = Extract<SecretaryCard, { kind: 'session' }>;
@@ -469,7 +507,7 @@ type SessionCard = Extract<SecretaryCard, { kind: 'session' }>;
 export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): SecretaryBoard {
   const projectName = (projectId: string): string => {
     const project = input.projects.find((candidate) => candidate.projectId === projectId);
-    return project ? projectNameFromPath(project.canonicalPath) : '';
+    return secretaryProjectName(project, input.aliases);
   };
 
   const needsYou: SecretaryCard[] = Object.values(file.proposals)
@@ -484,7 +522,9 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
     }));
 
   const running: SecretaryCard[] = [];
+  const queuedCards: { card: SecretaryCard; at: number }[] = [];
   const done: SessionCard[] = [];
+  const positions = queuePositions(input.rows);
   for (const record of Object.values(file.dispatched)) {
     const row = input.rows[record.conversationId];
     if (!row) continue;
@@ -493,6 +533,9 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
     const status = input.statuses[record.conversationId];
     const state = sessionStateOf(record, row, status);
     const going = countsAsRunning(record, row, status);
+    const queued = queuedStartOf(row);
+    const upstreamRetry = upstreamRetryOf(row);
+    const position = positions.get(record.conversationId);
     // 巡检报过停住、之后没有新活动：进行中列表标「已停住」，等它真的动起来才消失
     const stalled =
       going &&
@@ -517,6 +560,7 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
         : {}),
       ...(record.lastResult?.manual ? { manual: true as const } : {}),
       ...(going && state !== 'running' ? { continuing: true as const } : {}),
+      ...(upstreamRetry ? { upstreamRetry } : {}),
       ...(going && record.backgroundRunning ? { backgroundRunning: true as const } : {}),
       ...(going && record.backgroundPersistent ? { backgroundPersistent: true as const } : {}),
       ...(stalled ? { stalled } : {}),
@@ -528,7 +572,15 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
       ...(record.baseRef ? { baseRef: record.baseRef } : {}),
       ...(record.branch ? { branch: record.branch } : {}),
       ...(record.model ? { model: record.model } : {}),
+      ...(position !== undefined ? { queuePosition: position } : {}),
+      ...(queued?.failed ? { queueFailed: queued.failed.error } : {}),
     };
+    // 排队会话放在真正在跑的后面；自动启动失败的要用户立即开始或取消
+    if (queued) {
+      if (queued.failed) needsYou.push(card);
+      else queuedCards.push({ card, at: queued.queuedAt });
+      continue;
+    }
     const needsYouNow = sessionNeedsUser(record, state);
     if (needsYouNow) needsYou.push(card);
     else if (going) running.push(card);
@@ -547,6 +599,10 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
   running.sort(
     (left, right) => cardAt(right) - cardAt(left) || cardKey(left).localeCompare(cardKey(right))
   );
+  queuedCards.sort(
+    (left, right) => left.at - right.at || cardKey(left.card).localeCompare(cardKey(right.card))
+  );
+  running.push(...queuedCards.map((entry) => entry.card));
   done.sort(
     (left, right) =>
       (right.resultAt ?? right.stateSince) - (left.resultAt ?? left.stateSince) ||
@@ -574,7 +630,7 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
         {
           ...todo,
           phase,
-          ...(project ? { projectName: projectNameFromPath(project.canonicalPath) } : {}),
+          ...(project ? { projectName: secretaryProjectName(project, input.aliases) } : {}),
           ...(session?.title ? { sessionTitle: redactSecrets(session.title) } : {}),
           ...(todo.conversationId
             ? { sessionState: session?.present ? session.state : ('gone' as const) }
@@ -604,7 +660,8 @@ function cardAt(card: SecretaryCard): number {
 export function takeoverViews(
   file: SecretaryDispatchFile,
   rows: Readonly<Record<string, Record<string, unknown>>>,
-  projects: readonly ProjectAuthority[]
+  projects: readonly ProjectAuthority[],
+  aliases: Readonly<Record<string, string>> = {}
 ): SecretaryTakeoverView[] {
   const views: SecretaryTakeoverView[] = [];
   for (const record of Object.values(file.dispatched)) {
@@ -615,7 +672,7 @@ export function takeoverViews(
     views.push({
       conversationId: record.conversationId,
       projectId: record.projectId,
-      projectName: project ? projectNameFromPath(project.canonicalPath) : '',
+      projectName: secretaryProjectName(project, aliases),
       title: typeof row.title === 'string' ? row.title : '',
       grantedAt: record.takeover.grantedAt,
       via: record.takeover.via,
@@ -632,7 +689,8 @@ export function takeoverViews(
 export function untrackedViews(
   file: SecretaryDispatchFile,
   rows: Readonly<Record<string, Record<string, unknown>>>,
-  projects: readonly ProjectAuthority[]
+  projects: readonly ProjectAuthority[],
+  aliases: Readonly<Record<string, string>> = {}
 ): SecretaryUntrackedView[] {
   const views: SecretaryUntrackedView[] = [];
   for (const conversationId of file.untracked ?? []) {
@@ -643,7 +701,7 @@ export function untrackedViews(
     views.push({
       conversationId,
       projectId,
-      projectName: project ? projectNameFromPath(project.canonicalPath) : '',
+      projectName: secretaryProjectName(project, aliases),
       title: typeof row.title === 'string' ? row.title : '',
     });
   }

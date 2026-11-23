@@ -21,8 +21,7 @@ import {
   normalizeContextMenuOpen,
   normalizeFileOpenRules,
 } from '@shared/fileOpening';
-import type { Locale } from '@shared/i18n';
-import { normalizeLocale } from '@shared/i18n';
+import { type Locale, normalizeLocale } from '@shared/i18n';
 import { liveActivityFoldDelaySec as normalizeLiveActivityFoldDelaySec } from '@shared/liveActivityFoldDelay';
 import {
   DEFAULT_MAX_ACTIVE_COWORKERS,
@@ -49,6 +48,7 @@ import { applyProjectGroupPatch } from '@shared/projectGroups';
 import { projectNameFromPath } from '@shared/projectName';
 import { applyIncomingProviders } from '@shared/providerIdentity';
 import { normalizeProxyMode, type ProxyMode } from '@shared/proxy';
+import { parseRecentModels, pushRecentModel, removeRecentModel } from '@shared/recentModels';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
 import { DEFAULT_SSH_TIMEOUT_SECONDS, normalizeSshTimeoutSeconds } from '@shared/sshTimeout';
 import {
@@ -59,8 +59,8 @@ import {
 import { parseTerminalShell } from '@shared/terminalShell';
 import { DEFAULT_THEME_KEY } from '@shared/theme/builtinThemes';
 import type { ThemeKey } from '@shared/theme/types';
-import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types';
-import type { AgentMode, SourceAuthorityProjection } from '@shared/types/agent';
+import type { AgentMode, ModelRef, SourceAuthorityProjection } from '@shared/types/agent';
+import { DEFAULT_DISABLED_BUILTIN_TOOLS } from '@shared/types/builtinTools';
 import { DEFAULT_UPDATE_CHANNEL } from '@shared/updater/channel';
 import type { AutoRestartMode } from '@shared/updater/idleRestart';
 import { parseUsageModelPricing } from '@shared/usage/pricing';
@@ -197,6 +197,7 @@ const initialState = {
   worktreeRoot: '',
   favoriteTerminalThemes: [] as string[],
   pinnedModels: [] as string[],
+  recentModels: [] as ModelRef[],
   statusLineSegments: [...DEFAULT_STATUS_LINE_SEGMENTS] as StatusLineSegmentId[],
   loadLocalSkills: true,
   loadHarnessAssets: false,
@@ -249,6 +250,7 @@ const initialState = {
   expandLiveEdits: true,
   expandLiveReasoning: true,
   autoCollapseTurns: false,
+  quoteSelectionButton: true,
   collapseCompletedActivity: true,
   collapseLiveActivity: false,
   liveActivityFoldDelaySec: 5,
@@ -406,6 +408,11 @@ export const useSettingsStore = create<SettingsState>()(
             : [...state.pinnedModels, key],
         })),
 
+      recordRecentModel: (ref) =>
+        set((state) => ({ recentModels: pushRecentModel(state.recentModels, ref) })),
+      removeRecentModel: (ref) =>
+        set((state) => ({ recentModels: removeRecentModel(state.recentModels, ref) })),
+
       setLoadLocalSkills: (loadLocalSkills) => set({ loadLocalSkills }),
       setLoadHarnessAssets: (loadHarnessAssets) => set({ loadHarnessAssets }),
       setWindowsLocalShell: (windowsLocalShell) =>
@@ -471,6 +478,7 @@ export const useSettingsStore = create<SettingsState>()(
       setExpandLiveEdits: (expandLiveEdits) => set({ expandLiveEdits }),
       setExpandLiveReasoning: (expandLiveReasoning) => set({ expandLiveReasoning }),
       setAutoCollapseTurns: (autoCollapseTurns) => set({ autoCollapseTurns }),
+      setQuoteSelectionButton: (quoteSelectionButton) => set({ quoteSelectionButton }),
       setCollapseCompletedActivity: (collapseCompletedActivity) =>
         set({ collapseCompletedActivity }),
       setCollapseLiveActivity: (collapseLiveActivity) => set({ collapseLiveActivity }),
@@ -1231,6 +1239,10 @@ export const useSettingsStore = create<SettingsState>()(
         const accentColor = resolveAccentColor(s.accentColor);
         if (accentColor !== s.accentColor) {
           useSettingsStore.setState({ accentColor });
+        }
+        const recentModels = parseRecentModels(s.recentModels);
+        if (JSON.stringify(recentModels) !== JSON.stringify(s.recentModels)) {
+          useSettingsStore.setState({ recentModels });
         }
         const segments = normalizeStatusLineSegments(s.statusLineSegments);
         if (

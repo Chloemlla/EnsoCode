@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { isReservedAgentTypeName } from '@shared/builtinAgents';
 import type { ConfigSyncSummary } from '@shared/types';
-import { DEFAULT_PRESET_ID, resolveEditMode } from '@shared/types';
+import { DEFAULT_PRESET_ID } from '@shared/types/assets';
+import { resolveEditMode } from '@shared/types/editMode';
 
 import { type ConfigSyncBundle, PROVIDER_DEVICE_FIELDS } from './types';
 
@@ -53,6 +54,7 @@ const SCALAR_SETTING_KEYS = [
   'expandLiveEdits',
   'expandLiveReasoning',
   'autoCollapseTurns',
+  'quoteSelectionButton',
   'collapseCompletedActivity',
   'collapseLiveActivity',
   'liveActivityFoldDelaySec',
@@ -811,6 +813,7 @@ export function planImport(
     'expandLiveEdits',
     'expandLiveReasoning',
     'autoCollapseTurns',
+    'quoteSelectionButton',
     'collapseCompletedActivity',
     'collapseLiveActivity',
     'liveActivityFoldDelaySec',

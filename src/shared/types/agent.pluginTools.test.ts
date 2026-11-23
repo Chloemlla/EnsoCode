@@ -241,13 +241,25 @@ describe('插件工具协议', () => {
         triggerTurn: false,
       })
     ).not.toBeNull();
+    // 插件上限是 32K，宿主包上不可信包裹后会略长，送进 worker 时要放得下
     expect(
       parseAgentCommand({
         type: 'plugin-inject',
         identity: parent,
         pluginId: 'example.demo',
         pluginName: 'Demo',
-        text: 'x'.repeat(32 * 1024 + 1),
+        text: 'x'.repeat(32 * 1024 + 100),
+        deliverAs: 'followUp',
+        triggerTurn: true,
+      })
+    ).not.toBeNull();
+    expect(
+      parseAgentCommand({
+        type: 'plugin-inject',
+        identity: parent,
+        pluginId: 'example.demo',
+        pluginName: 'Demo',
+        text: 'x'.repeat(36 * 1024 + 1),
         deliverAs: 'steer',
         triggerTurn: true,
       })
@@ -277,6 +289,34 @@ describe('插件工具协议', () => {
     expect(withImages([{ data: 'AAAA', mimeType: 'image/jpeg' }])).not.toBeNull();
     expect(withImages([{ data: 'AAAA', mimeType: 'application/pdf' }])).toBeNull();
     expect(withImages('AAAA')).toBeNull();
+    const withOrigin = (extra: Record<string, unknown>) =>
+      parseAgentCommand({
+        type: 'plugin-inject',
+        identity: parent,
+        pluginId: 'example.demo',
+        pluginName: 'Demo',
+        text: 'hello',
+        deliverAs: 'followUp',
+        triggerTurn: true,
+        ...extra,
+      });
+    expect(withOrigin({ origin: 'owner' })).toMatchObject({ origin: 'owner' });
+    expect(withOrigin({ origin: 'external' })).toMatchObject({ origin: 'external' });
+    expect(withOrigin({ origin: 'trusted' })).toBeNull();
+    expect(
+      withOrigin({
+        sender: { channel: 'telegram', userId: 7, isOwner: true, role: 'owner' },
+      })
+    ).toMatchObject({ sender: { channel: 'telegram', userId: '7' } });
+    expect(
+      (
+        withOrigin({
+          sender: { channel: 'telegram', userId: '7', isOwner: true },
+        }) as { sender?: object } | null
+      )?.sender
+    ).not.toHaveProperty('isOwner');
+    expect(withOrigin({ sender: { channel: 'bad channel' } })).toBeNull();
+    expect(withOrigin({ sender: [] })).toBeNull();
   });
 
   it('plugin-tool-result 成功与失败两种形状', () => {

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Script tests
+        run: node --test 'scripts/*.test.mjs'
+
+  # vitest 按文件分 3 片并行；形式化模型由 formal job 跑完整界限，分片里不再重复跑小界限
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Test (shard ${{ matrix.shard }}/3)
+        run: pnpm exec vitest run --shard=${{ matrix.shard }}/3 --exclude='**/*.formal.test.ts'
+
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup
+
+      - name: Formal models
+        run: pnpm test:formal

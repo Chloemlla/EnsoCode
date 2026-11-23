@@ -4,9 +4,9 @@ import {
   parseAgentWorkerEvent,
   parseResolvedChildProfileProof,
   parseTitleSummaryInput,
-  TURN_REPORT_MAX_CHARS,
 } from './agent';
 import { child, model, parent, proof, RECEIPT_ID } from './agent.testUtils';
+import { TURN_REPORT_MAX_CHARS } from './agentConstants';
 
 describe('removed project memory protocol', () => {
   it('拒绝旧记忆管线命令与进度事件', () => {
@@ -316,17 +316,6 @@ describe('标题总结命令与事件', () => {
     expect(parseAgentWorkerEvent({ ...event, identity: parent })).toBeNull();
   });
 
-  it('turn-failed 的 undelivered 只接受 true/缺省', () => {
-    const event = { type: 'turn-failed', identity: parent, seq: 3, turnId: 't', error: 'stuck' };
-    expect(parseAgentWorkerEvent(event)).toEqual(event);
-    expect(parseAgentWorkerEvent({ ...event, undelivered: true })).toEqual({
-      ...event,
-      undelivered: true,
-    });
-    expect(parseAgentWorkerEvent({ ...event, undelivered: 'yes' })).toBeNull();
-    expect(parseAgentWorkerEvent({ ...event, undelivered: false })).toBeNull();
-  });
-
   it('turn-completed 带合法 digest 往返', () => {
     const event = {
       type: 'turn-completed',
@@ -443,6 +432,29 @@ describe('标题总结命令与事件', () => {
     expect(
       parseAgentWorkerEvent({ ...event, requestBudgetStop: true, requestBudgetError: '' })
     ).toBeNull();
+  });
+
+  it('turn-completed / turn-failed 的 awaitingTasks 只接受 true，continues 必须是非空回合号', () => {
+    const completed = { type: 'turn-completed', identity: parent, seq: 1, turnId: 'turn-2' };
+    const failed = { ...completed, type: 'turn-failed', error: 'boom' };
+    const held = { ...completed, continues: 'turn-1', awaitingTasks: true };
+    expect(parseAgentWorkerEvent(held)).toEqual(held);
+    expect(parseAgentWorkerEvent({ ...failed, continues: 'turn-1' })).toEqual({
+      ...failed,
+      continues: 'turn-1',
+    });
+    expect(parseAgentWorkerEvent({ ...completed, awaitingTasks: false })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...completed, continues: '' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...failed, continues: 1 })).toBeNull();
+  });
+
+  it('turn-completed 的 awaitingReminder 只接受 true', () => {
+    const completed = { type: 'turn-completed', identity: parent, seq: 1, turnId: 'turn-2' };
+    expect(parseAgentWorkerEvent({ ...completed, awaitingReminder: true })).toEqual({
+      ...completed,
+      awaitingReminder: true,
+    });
+    expect(parseAgentWorkerEvent({ ...completed, awaitingReminder: false })).toBeNull();
   });
 });
 
@@ -759,6 +771,14 @@ describe('重启保留后台命令的协议', () => {
     expect(parseAgentWorkerEvent({ type: 'session-wake-requested', sessionId: '' })).toBeNull();
     expect(
       parseAgentWorkerEvent({ type: 'session-wake-requested', sessionId: 'a', extra: 1 })
+    ).toBeNull();
+    expect(parseAgentWorkerEvent({ type: 'session-reminder-due', sessionId: 'conv-1' })).toEqual({
+      type: 'session-reminder-due',
+      sessionId: 'conv-1',
+    });
+    expect(parseAgentWorkerEvent({ type: 'session-reminder-due', sessionId: '' })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ type: 'session-reminder-due', sessionId: 'a', extra: 1 })
     ).toBeNull();
     const unopened = {
       type: 'unopened-background-tasks',

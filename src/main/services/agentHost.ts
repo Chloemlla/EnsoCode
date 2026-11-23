@@ -32,7 +32,7 @@ import {
 } from '@shared/defaultModel';
 import { ELEVATE_ASKPASS_ENV } from '@shared/elevation';
 import { presetOverlay } from '@shared/extensionPlugins/preset';
-import { PLUGIN_INJECT_MAX_CHARS } from '@shared/extensionPlugins/protocol';
+import { PLUGIN_INJECT_WIRE_MAX_CHARS } from '@shared/extensionPlugins/protocol';
 import {
   parseRestartCheckpoint,
   RESTART_CHECKPOINT_ENV,
@@ -60,38 +60,34 @@ import {
 import { resolveShellLimits, type ShellLimits } from '@shared/shellLimits';
 import { parseSmartCompactMode } from '@shared/smartCompactMode';
 import {
-  projectDisabledBuiltinTools,
-  projectTrustedCode,
-  resolveDisabledBuiltinTools,
-  resolveEditMode,
-} from '@shared/types';
-import type {
-  AgentCommand,
-  AgentRemoteConfig,
-  AgentSessionCustomEntry,
-  AgentSpawnRequest,
-  AgentTypeSpawnConfig,
-  AgentWorkerEvent,
-  ApprovalDecision,
-  ApprovalMode,
-  AttachedImage,
-  McpOAuthRefreshResult,
-  McpServerSpawnConfig,
-  ModelRef,
-  ResolvedAgentTypeSpawnConfig,
-  RestartReplyProgress,
-  SessionReloadResult,
-  SpawnModelConfig,
-  SubagentModelOption,
-  ThinkingLevel,
-  TitleSummaryInput,
-  VirtualClassifierCredentials,
-  VirtualSpawnClassifier,
-  WorkerCustomProvider,
-  WorkerExitedEvent,
+  type AgentCommand,
+  type AgentRemoteConfig,
+  type AgentSessionCustomEntry,
+  type AgentSpawnRequest,
+  type AgentTypeSpawnConfig,
+  type AgentWorkerEvent,
+  type ApprovalDecision,
+  type ApprovalMode,
+  type AttachedImage,
+  type McpOAuthRefreshResult,
+  type McpServerSpawnConfig,
+  type ModelRef,
+  parseAgentCommand,
+  parseAgentWorkerEvent,
+  type ResolvedAgentTypeSpawnConfig,
+  type RestartReplyProgress,
+  type SessionReloadResult,
+  type SpawnModelConfig,
+  type SubagentModelOption,
+  type ThinkingLevel,
+  type TitleSummaryInput,
+  type VirtualClassifierCredentials,
+  type VirtualSpawnClassifier,
+  type WorkerCustomProvider,
+  type WorkerExitedEvent,
+  type WorkerSwappedEvent,
 } from '@shared/types/agent';
-import { parseAgentCommand, parseAgentWorkerEvent, THINKING_LEVELS } from '@shared/types/agent';
-import type { SubagentModelEntry } from '@shared/types/assets';
+import { THINKING_LEVELS } from '@shared/types/agentConstants';
 import {
   type AgentTypeEntry,
   BUILTIN_AGENT_TYPES,
@@ -99,9 +95,15 @@ import {
   type McpServerEntry,
   type Preset,
   type SkillEntry,
+  type SubagentModelEntry,
 } from '@shared/types/assets';
-import { persistedSettingsState } from '@shared/types/builtinTools';
-import type { RestartWaitReason } from '@shared/types/ipc';
+import {
+  persistedSettingsState,
+  projectDisabledBuiltinTools,
+  resolveDisabledBuiltinTools,
+} from '@shared/types/builtinTools';
+import { resolveEditMode } from '@shared/types/editMode';
+import type { RestartBlocker, RestartWaitReason } from '@shared/types/ipc';
 import {
   MODEL_REASONING_OVERRIDES,
   MODEL_THINKING_LEVEL_OVERRIDES,
@@ -111,6 +113,7 @@ import {
   type ModelThinkingLevelOverride,
 } from '@shared/types/llm';
 import type { AgentDispatchTask } from '@shared/types/mentions';
+import { projectTrustedCode } from '@shared/types/project';
 import type { SecretaryToolDescriptor } from '@shared/types/secretary';
 import { parseDisabledWorkflowPresets } from '@shared/types/workflow';
 import {
@@ -147,7 +150,8 @@ import { backgroundTaskStates } from './backgroundTaskTracker';
 import { type MemberAgentType, memberSpawnDescription } from './bots/botAgentType';
 import { BuiltinToolScopes, sessionDisabledTools, withoutKeepEnabled } from './builtinToolScopes';
 import { isComputerPlatformSupported } from './computer/support';
-import { dcgRoot, installedDcgPath } from './dcgBinary';
+import { DCG_VERSION, dcgRoot, installedDcgPath } from './dcgBinary';
+import { activeDcgExemptRules } from './dcgRuleMemory';
 import { ensureElevationServer } from './elevation';
 import {
   getExtensionPlugins,
@@ -155,6 +159,10 @@ import {
   setPluginSessionBridge,
 } from './extensionPlugins';
 import { PluginAgentRuns } from './extensionPlugins/agentRuns';
+import type {
+  PluginInjectDeliveryDecision,
+  PluginInjectPrepareInput,
+} from './extensionPlugins/injectTrust';
 import { PluginMcpRequests } from './extensionPlugins/mcpRequests';
 import {
   type GracefulRestartRequest,
@@ -309,13 +317,19 @@ export async function selectOauthPoolAccount(
 }
 /** worker 已过 'spawn'：在此之前 postMessage 不保证送达（含已 fork 未 spawn 的窗口） */
 let workerReady = false;
-let onEvent: ((event: AgentWorkerEvent | WorkerExitedEvent) => void) | null = null;
+let onEvent: ((event: AgentWorkerEvent | WorkerExitedEvent | WorkerSwappedEvent) => void) | null =
+  null;
 /** worker 就绪前到达的快照请求，spawn 后补发。true = 全量，string = 单会话。 */
 let snapshotPending: false | true | string = false;
 /** worker 已 fork 未 spawn 窗口内到达的命令：postMessage 不保证送达，spawn 后按序补发 */
 let commandsPending: AgentCommand[] = [];
 /** worker 曾启动后退出：spawn 时可按需重建（首次启动前不行，要等 env/PATH 探测） */
 let workerExited = false;
+/**
+ * 应用退出已停掉 worker：之后到达的命令不再拉起新 worker。否则新 worker 会认回刚交出的后台命令，
+ * 随应用退出又停掉，交接清单就此用掉，新版本里任务凭空消失（2026-11-23 更新重启现场）
+ */
+let quitStopped = false;
 const gracefulRestart = new GracefulWorkerRestart<WorkerProcess>();
 /** 不可闲置回收的会话，按来源（桌面查看 / 手机订阅）分桶；worker 重启后需重发并集 */
 const pinnedBySource = new Map<string, readonly string[]>();
@@ -337,7 +351,7 @@ export function setPinnedSessions(source: 'viewed' | 'pair', sessionIds: readonl
 }
 
 export function setAgentEventListener(
-  listener: (event: AgentWorkerEvent | WorkerExitedEvent) => void
+  listener: (event: AgentWorkerEvent | WorkerExitedEvent | WorkerSwappedEvent) => void
 ): void {
   onEvent = listener;
 }
@@ -352,7 +366,7 @@ export function customWorkflowPresetDir(): string {
 }
 
 export function startAgentWorker(options: { restartCheckpointFile?: string } = {}): void {
-  if (worker) return;
+  if (worker || quitStopped) return;
   const askpass = ensureElevationServer();
   const child = utilityProcess.fork(agentWorkerPath, [], {
     serviceName: AGENT_WORKER_SERVICE_NAME,
@@ -474,6 +488,8 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
         // 退出 / 安装更新时不换代，写好恢复清单后放行退出
         if (worker === child && gracefulRestart.ready(child, event.checkpoint)) {
           workerReady = false;
+          // 子代理 Run 按断点续跑：Main 要知道哪些子会话停在了安全点
+          onEvent?.(event);
           if (gracefulRestart.quitting && quitCheckpoint) {
             const checkpoint = parseRestartCheckpoint(event.checkpoint);
             if (checkpoint) {
@@ -560,6 +576,8 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
       // 优雅重启：会话不算失败，下一代按断点重建并接着跑；先重发 spawn，再发换代期间排队的命令
       commandsPending = [...swap.replay, ...commandsPending];
       startAgentWorker({ restartCheckpointFile: path.join(dataDir, RESTART_CHECKPOINT_FILE) });
+      // 子会话不随 spawn 重发：由 Main 的子代理服务按断点在父会话就绪后重开续跑
+      onEvent?.({ type: 'worker-swapped' });
       return;
     }
     // 超时退出时 worker 收尾落的断点先写成清单：订阅者收到退出事件时就知道哪些会话重启后接着跑
@@ -614,6 +632,7 @@ export function recordAgentWorkerGone(details: {
 export function stopAgentWorker(): void {
   gracefulRestart.reset();
   keepBackgroundOnQuit = false;
+  quitStopped = false;
   workspaceLocks.failAll('agent worker stopped');
   pluginMcp.failAll('agent worker stopped');
   pluginAgents.failAll('agent worker stopped');
@@ -660,6 +679,7 @@ export async function restartAgentWorker(timeoutMs = 5_000): Promise<boolean> {
  * 等安全点超时的话，worker 收尾（中止命令）时可能才落断点：退出后据此补写恢复清单。
  */
 export async function stopAgentWorkerForQuit(timeoutMs: number): Promise<void> {
+  quitStopped = true;
   const child = worker;
   const pending = quitCheckpoint;
   // 清会话前留一份设置：补写清单时要配上（worker 退出时写，没等到退出就在这里补写）
@@ -754,11 +774,13 @@ interface QuitCheckpoint {
   toolsRunning: boolean;
   /** 已告诉弹层在等什么（工具 / 脱离不了的转后台命令 / 回复）；还没报过推迟时为 null */
   waitReason: RestartWaitReason | null;
+  /** 最近一次告诉弹层的会话级原因；和 waitReason 一起按内容去重 */
+  blockers: RestartBlocker[];
   /** worker 最近一次报告的推迟：超时时据此记下每个会话在干什么 */
   lastDeferred: DeferredSessions | null;
   /** 等安全点期间见过的每次模型请求（会话 + 请求发出时刻），结束时逐个记进退出日志 */
   replies: Map<string, ReplyTrack>;
-  waitingForTools: Array<(reason: RestartWaitReason) => void>;
+  waitingForTools: Array<(reason: RestartWaitReason, blockers: RestartBlocker[]) => void>;
   observe(sessions: DeferredSessions): void;
   settle(result: QuitCheckpointResult): void;
   /** 用户不等了：按超时收尾；已经有结果返回 false */
@@ -774,13 +796,13 @@ let lastDeferredLog = '';
  * 应用退出 / 安装更新：先请 worker 停到安全点、写好断点，Main 再把恢复清单落到 dataDir，
  * 冷启动据此续跑。没有正在跑的会话、也没有在跑的后台命令时直接放行；同一次退出只发一次请求，再调用拿同一个结果。
  * 有工具在跑就等它结束（上限 QUIT_TOOL_WAIT_LIMIT_MS），没有时等这一轮回复写完：保底 QUIT_REPLY_WAIT_FLOOR_MS，
- * 之后还在出 token 就顺延、停止超过 QUIT_REPLY_IDLE_MS 或到 QUIT_REPLY_WAIT_CAP_MS 为止（到点 worker 收尾中止回复并记成续跑点）；onWaitingForTools 在 worker 报告推迟时回调在等什么（已在等则立即回调）。
+ * 之后还在出 token 就顺延、停止超过 QUIT_REPLY_IDLE_MS 或到 QUIT_REPLY_WAIT_CAP_MS 为止（到点 worker 收尾中止回复并记成续跑点）；onWaitingForTools 在 worker 报告推迟时回调在等什么，以及每个会话挡住的原因，原因或挡住的会话变了再回调（已在等则立即回调）。
  */
 export function prepareAgentWorkerForQuit(options: {
   reason: RestartExitReason;
   /** 有根回合在跑，或回合已结束但还有后台命令在跑（ipc/sessionIndex.needsQuitCheckpoint） */
   hasRunningSessions: () => boolean;
-  onWaitingForTools?: (reason: RestartWaitReason) => void;
+  onWaitingForTools?: (reason: RestartWaitReason, blockers: RestartBlocker[]) => void;
   /** 应用会重新打开：能脱离的转后台命令留给下一代认回，不等它们结束 */
   keepBackgroundTasks?: boolean;
 }): Promise<QuitCheckpointResult> {
@@ -788,7 +810,8 @@ export function prepareAgentWorkerForQuit(options: {
   if (quitCheckpoint) {
     if (options.onWaitingForTools) {
       quitCheckpoint.waitingForTools.push(options.onWaitingForTools);
-      if (quitCheckpoint.waitReason) options.onWaitingForTools(quitCheckpoint.waitReason);
+      if (quitCheckpoint.waitReason)
+        options.onWaitingForTools(quitCheckpoint.waitReason, quitCheckpoint.blockers);
     }
     return quitCheckpoint.promise;
   }
@@ -855,6 +878,7 @@ export function prepareAgentWorkerForQuit(options: {
     resumable: new Set(),
     toolsRunning: false,
     waitReason: null,
+    blockers: [],
     lastDeferred: null,
     replies: new Map(),
     waitingForTools: options.onWaitingForTools ? [options.onWaitingForTools] : [],
@@ -868,11 +892,18 @@ export function prepareAgentWorkerForQuit(options: {
           ? 'background-not-detachable'
           : 'tool'
         : sessions.length > 0
-          ? 'reply'
+          ? sessions.every((session) => session.reason === 'session-starting')
+            ? 'tool'
+            : 'reply'
           : null;
-      if (waitReason && waitReason !== state.waitReason) {
+      const blockers = sessions.map(deferKind);
+      if (
+        waitReason &&
+        (waitReason !== state.waitReason || !sameBlockers(blockers, state.blockers))
+      ) {
         state.waitReason = waitReason;
-        for (const notify of state.waitingForTools) notify(waitReason);
+        state.blockers = blockers;
+        for (const notify of state.waitingForTools) notify(waitReason, blockers);
       }
       if (running !== state.toolsRunning) {
         state.toolsRunning = running;
@@ -1024,18 +1055,44 @@ function logReplyOutcomes(state: QuitCheckpoint, outcome: ReplyOutcome): void {
   }
 }
 
+function deferKind(session: DeferredSessions[number]): RestartBlocker {
+  const sessionId = session.identity.sessionId;
+  if (session.reason === 'session-starting') return { sessionId, kind: 'starting' };
+  const tools = [...new Set(session.toolNames ?? [])];
+  if (tools.length > 0) return { sessionId, kind: 'tool', tools };
+  if (session.toolsInFlight.length > 0) return { sessionId, kind: 'background' };
+  if (session.reply) return { sessionId, kind: 'reply' };
+  return { sessionId, kind: 'turn' };
+}
+
+function sameBlockers(left: readonly RestartBlocker[], right: readonly RestartBlocker[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function deferredSessionLabel(sessionId: string): string {
+  const splitAt = sessionId.indexOf('::');
+  if (splitAt === -1) return sessionId.slice(0, 8);
+  return `${sessionId.slice(splitAt + 2, splitAt + 10)}(子会话)`;
+}
+
 /** 退出时每个没到安全点的会话在干什么（worker 最近一次推迟报告） */
 function describeDeferred(sessions: DeferredSessions | null): string {
-  if (!sessions?.length) return 'worker 没报告推迟';
+  if (!sessions?.length) return 'worker 没报告推迟（可能卡在会话打开或 worker 无响应）';
   return sessions
-    .map(
-      (session) =>
-        `${session.identity.sessionId.slice(0, 8)}=${
-          session.toolsInFlight.length > 0
-            ? `工具在跑(${session.toolsInFlight.join(',')})`
-            : '回复在写'
-        }`
-    )
+    .map((session) => {
+      const blocker = deferKind(session);
+      const what =
+        blocker.kind === 'starting'
+          ? '正在打开会话'
+          : blocker.kind === 'tool'
+            ? `工具在跑(${blocker.tools?.join(',')})`
+            : blocker.kind === 'background'
+              ? `转后台命令在跑(${session.toolsInFlight.join(',')})`
+              : blocker.kind === 'reply'
+                ? '回复在写'
+                : '回合收尾中';
+      return `${deferredSessionLabel(session.identity.sessionId)}=${what}`;
+    })
     .join(' ');
 }
 
@@ -1044,7 +1101,7 @@ function describeCheckpoint(checkpoint: RestartCheckpoint, resumable: ReadonlySe
   return checkpoint.sessions
     .map(
       (entry) =>
-        `${entry.sessionId.slice(0, 8)}=${
+        `${deferredSessionLabel(entry.sessionId)}=${
           !resumable.has(entry.sessionId)
             ? '不进清单'
             : entry.nextStep === 'model-request'
@@ -1697,6 +1754,7 @@ export function spawnSession(
   // worker 崩溃/退出后不自动拉起的话，所有会话都只能靠重启 app 恢复；在 spawn 入口按需重建
   if (!worker && workerExited) startAgentWorker();
   const dcgPath = state?.dcgEnabled === true ? installedDcgPath(dcgRoot()) : null;
+  const dcgExemptRules = dcgPath ? activeDcgExemptRules(dcgRoot(), DCG_VERSION) : [];
   const sent = sendAgentCommand({
     type: 'spawn-parent',
     identity,
@@ -1711,6 +1769,7 @@ export function spawnSession(
     ...(windowsLocalShell !== 'auto' ? { windowsLocalShell } : {}),
     rtkEnabled: state?.rtkEnabled !== false,
     ...(dcgPath ? { dcgPath } : {}),
+    ...(dcgExemptRules.length > 0 ? { dcgExemptRules } : {}),
     ...(exploreFoldEnabled ? { exploreFoldEnabled: true } : {}),
     editMode,
     ...(compactStrategy !== 'standard' ? { compactStrategy } : {}),
@@ -2163,24 +2222,48 @@ export function sendPluginInterceptResultToSession(
 
 export function registerPluginSessionBridge(
   lookup: (sessionId: string) => SessionIdentity | undefined,
-  /** 投递前改写正文：秘书会话要把插件消息包成不可信内容 */
-  decorate?: (sessionId: string, pluginId: string, text: string) => string
+  /** 投递前统一判定来源和不可信包裹 */
+  prepare?: (sessionId: string, input: PluginInjectPrepareInput) => PluginInjectDeliveryDecision
 ): void {
   setPluginSessionBridge({
     inject(sessionId, message) {
-      const text = decorate?.(sessionId, message.pluginId, message.text) ?? message.text;
-      if (text.length > PLUGIN_INJECT_MAX_CHARS) return { ok: false, error: '注入文本过长' };
+      const {
+        images,
+        text: rawText,
+        trusted: _trusted,
+        requestedTrusted,
+        permissions,
+        source,
+        sender,
+        ...rest
+      } = message;
+      const decision = prepare?.(sessionId, {
+        pluginId: message.pluginId,
+        text: rawText,
+        requestedTrusted,
+        permissions,
+        source,
+        sender,
+      });
+      const text = decision?.text ?? rawText;
+      if (text.length > PLUGIN_INJECT_WIRE_MAX_CHARS) return { ok: false, error: '注入文本过长' };
       const identity = lookup(sessionId);
       if (!identity) return { ok: false, error: '会话不在运行', notRunning: true };
-      const { images, ...rest } = message;
       const sent = sendAgentCommand({
         type: 'plugin-inject',
         identity,
         ...rest,
         text,
+        ...(decision?.origin ? { origin: decision.origin } : {}),
+        ...(sender ? { sender } : {}),
         ...(images.length ? { images } : {}),
       });
-      return sent.ok ? { ok: true } : { ok: false, error: sent.error ?? '无法注入消息' };
+      if (!sent.ok) return { ok: false, error: sent.error ?? '无法注入消息' };
+      return {
+        ok: true,
+        ...(decision?.trustedIgnored ? { trustedIgnored: true } : {}),
+        ...(decision?.trustedOverriddenByExternal ? { trustedOverriddenByExternal: true } : {}),
+      };
     },
     abort(sessionId) {
       const identity = lookup(sessionId);
@@ -2242,8 +2325,9 @@ export function setSessionReasoning(
 export function promptSession(
   identity: SessionIdentity,
   text: string,
-  images?: AttachedImage[],
-  deliveryId?: string,
+  images: AttachedImage[] | undefined,
+  /** 未送达时 worker 按它回执 delivery-rejected；调用方没有自己的号就现生成一个 */
+  deliveryId: string,
   /** 带新消息的断点续跑：worker 先移出未完成的最后一条 assistant 再 prompt */
   resume?: true
 ): { ok: boolean; error?: string } {
@@ -2252,7 +2336,7 @@ export function promptSession(
     identity,
     text,
     ...(images?.length ? { images } : {}),
-    ...(deliveryId ? { deliveryId } : {}),
+    deliveryId,
     ...(resume ? { resume } : {}),
     ...instanceField(identity),
   });
@@ -2627,7 +2711,7 @@ export function rewindSession(
 export function forkSession(
   identity: SessionIdentity,
   targetConversationId: string,
-  anchor: { entryId: string } | { userIndexFromEnd: number }
+  anchor: { entryId: string } | { turnIndexFromEnd: number }
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({
     type: 'fork',
@@ -2635,7 +2719,7 @@ export function forkSession(
     targetConversationId,
     ...('entryId' in anchor
       ? { entryId: anchor.entryId }
-      : { userIndexFromEnd: anchor.userIndexFromEnd }),
+      : { turnIndexFromEnd: anchor.turnIndexFromEnd }),
   });
 }
 
@@ -2654,6 +2738,16 @@ export function keepBackgroundTask(
   reason: string | null
 ): { ok: boolean; error?: string } {
   return sendAgentCommand({ type: 'task-keep', sessionId, taskId, reason });
+}
+
+/** 清掉根会话及其子会话的自定提醒（用户停止、删除、会话已不可用） */
+export function clearSessionReminders(sessionId: string): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'reminders-clear', sessionId });
+}
+
+/** 把已到点的自定提醒交给会话（会话已在 worker 里） */
+export function fireSessionReminders(sessionId: string): { ok: boolean; error?: string } {
+  return sendAgentCommand({ type: 'reminders-fire', sessionId });
 }
 
 export function backgroundForegroundTool(

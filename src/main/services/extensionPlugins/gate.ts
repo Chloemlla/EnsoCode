@@ -20,7 +20,9 @@ import {
   type PluginHostApi,
   type PluginHostCapabilities,
   type PluginInjectImage,
+  type PluginInjectSender,
   parsePluginInjectImages,
+  parsePluginInjectSender,
 } from '@shared/extensionPlugins/protocol';
 import { parseStatusPatch, type StatusPatch } from '@shared/extensionPlugins/statusItems';
 import type { SpawnModelConfig } from '@shared/types/agent';
@@ -217,6 +219,9 @@ export interface GateDeps {
       images: PluginInjectImage[];
       deliverAs: 'steer' | 'followUp' | 'nextTurn';
       triggerTurn: boolean;
+      /** 插件请求免包裹；是否生效由服务按 agent.injectTrusted 判 */
+      trusted: boolean;
+      sender?: PluginInjectSender;
     }
   ): { ok: true } | { ok: false; error: string; notRunning?: boolean };
   /** 让发起窗口启动没在运行的会话（有历史就恢复）；就绪与否由注入重试判断 */
@@ -501,7 +506,7 @@ export class PluginHostGate {
 
   /**
    * 缺省发起会话；指向别的会话要用户授权跨会话。
-   * 常驻进程不在调用里（inv 为 null），只能凭跨会话授权指明会话。
+   * 常驻进程不在调用里或调用已结束（inv 为 null），只能凭跨会话授权指明会话。
    */
   private targetSession(
     pluginId: string,
@@ -541,7 +546,8 @@ export class PluginHostGate {
       if (inv.cancelled) throw pluginError('ABORTED', '调用已取消');
       return inv;
     };
-    const optionalInvocation = () => (invocationId === undefined ? null : invocation());
+    /** 调用已结束（id 不在表里）按无调用处理：插件本就能不带 id 来调，回退不多给任何权限 */
+    const optionalInvocation = () => (this.invocations.get(invocationId) ? invocation() : null);
     const gestured = (what: string) => {
       const inv = invocation();
       if (!inv.gesture || this.deps.now() - inv.createdAt > GESTURE_TTL_MS)
@@ -742,6 +748,10 @@ export class PluginHostGate {
           throw pluginError('INVALID_ARGS', 'deliverAs 不合法');
         if (a.triggerTurn !== undefined && typeof a.triggerTurn !== 'boolean')
           throw pluginError('INVALID_ARGS', 'triggerTurn 不合法');
+        if (a.trusted !== undefined && typeof a.trusted !== 'boolean')
+          throw pluginError('INVALID_ARGS', 'trusted 不合法');
+        const sender = parsePluginInjectSender(a.sender);
+        if (sender === null) throw pluginError('INVALID_ARGS', 'sender 不合法');
         const bridge = this.deps.inject;
         if (!bridge) throw pluginError('UNSUPPORTED', '当前环境不能注入消息');
         this.admitInject(pluginId);
@@ -751,6 +761,8 @@ export class PluginHostGate {
           images,
           deliverAs,
           triggerTurn: a.triggerTurn === true,
+          trusted: a.trusted === true,
+          ...(sender ? { sender } : {}),
         };
         const result = await this.untilRunning(
           () => bridge(pluginId, input),

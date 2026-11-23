@@ -14,6 +14,11 @@ export const IPC_CHANNELS = {
   CONVERSATIONS_REGISTER: 'conversations:register',
   /** 把会话改挂到另一个项目：改权威 projectId，并补丁 persist 行 */
   CONVERSATIONS_MOVE: 'conversations:move',
+  CONVERSATIONS_IMPORT_PROJECT: 'conversations:import-project',
+  /** 整项目导入前的预览：源目录是否还在、已复制过几次 */
+  CONVERSATIONS_IMPORT_PROJECT_PREVIEW: 'conversations:import-project-preview',
+  /** 只把已无会话的项目移出列表，不删任何文件 */
+  PROJECT_REMOVE_EMPTY: 'projects:remove-empty',
   /** main → 主界面 renderer：它的会话写回被拒收，需重新读会话 */
   CONVERSATIONS_RESYNC: 'conversations:resync',
   /** 秘书：工作台与聊天卡片读的同一份 Main 状态 */
@@ -28,12 +33,18 @@ export const IPC_CHANNELS = {
   SECRETARY_TODO_MUTATE: 'secretary:todo-mutate',
   /** 秘书：用户点过工作台结果卡的「知道了」，这条结果不再占需要你处理 */
   SECRETARY_DISMISS_RESULT: 'secretary:dismiss-result',
+  /** 秘书：用户忽略一条出问题的等待派发，从等待表里移除 */
+  SECRETARY_DISMISS_PENDING: 'secretary:dismiss-pending',
   /** 秘书：用户手动把一条派发记录标记完成，或撤销这个标记放回进行中 */
   SECRETARY_MARK_RESULT: 'secretary:mark-result',
   /** 秘书：停掉一条派发记录里遗留的后台任务（常驻服务、卡死的命令） */
   SECRETARY_STOP_TASKS: 'secretary:stop-tasks',
   /** 秘书：派出会话的目标由 Main 续跑，界面只发指令 */
   SECRETARY_GOAL_ACTION: 'secretary:goal-action',
+  /** 秘书：排队会话「立即开始」，不看上限；可带用户在排队期间发的一条消息，排在首条之后 */
+  SECRETARY_QUEUED_START: 'secretary:queued-start',
+  /** 秘书：取消排队会话 */
+  SECRETARY_QUEUED_CANCEL: 'secretary:queued-cancel',
   /** 秘书：全部定时（含系统生成的每日简报与待办提醒） */
   SECRETARY_SCHEDULES_LIST: 'secretary:schedules-list',
   /** 秘书：删除一条定时；系统生成的条目由档案与待办派生，不接受删除 */
@@ -131,6 +142,8 @@ export const IPC_CHANNELS = {
   /** renderer → main：macOS 布局变化后重算窗口形状与拖拽命中区 */
   WINDOW_REFRESH_DRAG_REGIONS: 'window:refresh-drag-regions',
   WINDOW_OPEN_SETTINGS: 'window:open-settings',
+  /** renderer → main：给本机主窗口打开独立 DevTools（window: 前缀，远程一律不可调） */
+  WINDOW_OPEN_DEV_TOOLS: 'window:open-dev-tools',
   /** main → 主界面 renderer：macOS View 菜单要求切换侧栏（与渲染层快捷键同一条逻辑） */
   WINDOW_TOGGLE_SIDEBAR: 'window:toggle-sidebar',
   /** main → settings renderer：打开后切分类并闪行 */
@@ -197,6 +210,11 @@ export const IPC_CHANNELS = {
   RESOURCES_SESSIONS_CLEAN_REQUEST: 'resources:sessions-clean-request',
   RESOURCES_SESSIONS_CLEAN_DONE: 'resources:sessions-clean-done',
 
+  // 设置 → 日志
+  LOGS_ERRORS: 'logs:errors',
+  LOGS_EXPORT: 'logs:export',
+  LOGS_REVEAL_EXPORT: 'logs:reveal-export',
+
   // 记忆管理
   MEMORY_LIST: 'memory:list',
   MEMORY_DETAIL: 'memory:detail',
@@ -230,6 +248,13 @@ export const IPC_CHANNELS = {
   DCG_STATUS: 'dcg:status',
   DCG_INSTALL: 'dcg:install',
   DCG_UNINSTALL: 'dcg:uninstall',
+  DCG_CHECK_UPDATE: 'dcg:check-update',
+  DCG_RULE_STATE: 'dcg:rule-state',
+  DCG_RULE_ALLOWED: 'dcg:rule-allowed',
+  DCG_RULE_EXEMPT: 'dcg:rule-exempt',
+  DCG_RULE_REVOKE: 'dcg:rule-revoke',
+  DCG_EXEMPTIONS_LIST: 'dcg:exemptions-list',
+  DCG_EXEMPTIONS_CLEAR: 'dcg:exemptions-clear',
   MEMORY_REEMBED: 'memory:reembed',
   MEMORY_CHANGED: 'memory:changed',
   MEMORY_GRAPH: 'memory:graph',
@@ -296,6 +321,12 @@ export const IPC_CHANNELS = {
   AGENT_ABORT: 'agent:abort',
   AGENT_ABORT_RETRY: 'agent:abort-retry',
   AGENT_RETRY: 'agent:retry',
+  AGENT_UPSTREAM_REPORT_FAILURE: 'agent:upstream-report-failure',
+  AGENT_UPSTREAM_RETRY_NOW: 'agent:upstream-retry-now',
+  AGENT_UPSTREAM_CANCEL: 'agent:upstream-cancel',
+  AGENT_UPSTREAM_HEALTH_LIST: 'agent:upstream-health-list',
+  AGENT_UPSTREAM_HEALTH_EVENT: 'agent:upstream-health',
+  AGENT_UPSTREAM_WAKE_EVENT: 'agent:upstream-wake',
   AGENT_EVENT: 'agent:event',
   AGENT_SNAPSHOT: 'agent:snapshot',
   /** 取走上次应用退出时被打断的回合（取一次即清空） */
@@ -353,6 +384,7 @@ export const IPC_CHANNELS = {
   WORKTREE_GET: 'worktree:get',
   WORKTREE_LIST: 'worktree:list',
   WORKTREE_STATUS: 'worktree:status',
+  WORKTREE_STATUSES: 'worktree:statuses',
   WORKTREE_REMOVE: 'worktree:remove',
   WORKTREE_REBUILD: 'worktree:rebuild',
   WORKTREE_REPO_CLEAN: 'worktree:repo-clean',
@@ -744,8 +776,21 @@ export const IPC_CHANNELS = {
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];
 
+export type OpenDevToolsResult = { ok: true } | { ok: false; error: string };
+
 /** 重启在等什么：在跑的工具、没法脱离应用只能等它结束的转后台命令，或正在写的回复 */
 export type RestartWaitReason = 'tool' | 'background-not-detachable' | 'reply';
+
+/**
+ * 重启正在等的一个会话：子会话的 sessionId 形如 `父会话::子会话`。
+ * tool=工具在跑（tools 为工具名）；background=转后台的命令还在跑；reply=回复在写；
+ * starting=会话正在打开；turn=回合在收尾（压缩、重试等）
+ */
+export interface RestartBlocker {
+  sessionId: string;
+  kind: 'tool' | 'background' | 'reply' | 'starting' | 'turn';
+  tools?: string[];
+}
 
 /** 等待弹层等完命令要做什么：菜单重启、安装更新、退出（Cmd+Q / 关窗 / 菜单退出） */
 export type AppExitReason = 'restart' | 'update' | 'quit';
@@ -755,6 +800,12 @@ export type AppExitReason = 'restart' | 'update' | 'quit';
  * 新实例在恢复会话
  */
 export type RestartOverlayState =
-  | { phase: 'waiting'; reason: RestartWaitReason; exit: AppExitReason }
+  | {
+      phase: 'waiting';
+      reason: RestartWaitReason;
+      exit: AppExitReason;
+      /** 还没到安全点的会话与在等什么；worker 还没报告时缺省 */
+      blockers?: RestartBlocker[];
+    }
   | { phase: 'restarting' }
   | { phase: 'resuming' };

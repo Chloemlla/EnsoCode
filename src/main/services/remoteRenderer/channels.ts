@@ -1,4 +1,4 @@
-import { IPC_CHANNELS } from '@shared/types';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 
 /** 宿主原生能力或作用于宿主桌面的通道（打开窗口/对话框/定位文件/系统剪贴板等），远端一律不可调 */
 const DENIED_PREFIXES = [
@@ -13,6 +13,7 @@ const DENIED_PREFIXES = [
   'app:',
   'notification:',
   'pair:',
+  'logs:',
 ];
 
 const DENIED: ReadonlySet<string> = new Set([
@@ -27,6 +28,13 @@ const DENIED: ReadonlySet<string> = new Set([
   IPC_CHANNELS.RESOURCES_STORAGE_REVEAL,
   IPC_CHANNELS.DCG_INSTALL,
   IPC_CHANNELS.DCG_UNINSTALL,
+  IPC_CHANNELS.DCG_CHECK_UPDATE,
+  IPC_CHANNELS.DCG_RULE_STATE,
+  IPC_CHANNELS.DCG_RULE_ALLOWED,
+  IPC_CHANNELS.DCG_RULE_EXEMPT,
+  IPC_CHANNELS.DCG_RULE_REVOKE,
+  IPC_CHANNELS.DCG_EXEMPTIONS_LIST,
+  IPC_CHANNELS.DCG_EXEMPTIONS_CLEAR,
   IPC_CHANNELS.BOT_OPEN_WORKSPACE,
   IPC_CHANNELS.BOT_ARTIFACT_OPEN,
   IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME,

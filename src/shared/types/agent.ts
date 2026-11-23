@@ -27,14 +27,10 @@ import {
   parseCapabilityResult,
 } from '../capabilities/types';
 import { type CompactStrategy, parseCompactStrategy } from '../compactStrategy';
+import { isDcgRuleId } from '../dcgRuleMemory';
 import type { DefaultModelRef } from '../defaultModel';
 import type { ExitKind } from '../exitInterrupt';
 import { parsePluginArtifactInfo } from '../extensionPlugins/artifacts';
-import type {
-  InterceptPayload,
-  PluginEventName,
-  PluginInterceptEvent,
-} from '../extensionPlugins/events';
 import {
   AGENT_END_TEXT_MAX,
   BEFORE_AGENT_START_PROMPT_MAX,
@@ -42,25 +38,32 @@ import {
   CONTEXT_PART_KINDS,
   CONTEXT_USAGE_BUCKETS,
   type ContextPart,
+  type InterceptPayload,
   isChildInterceptEvent,
   isInterceptEvent,
   PLUGIN_EVENTS,
   PLUGIN_INTERCEPT_EVENTS,
+  type PluginEventName,
+  type PluginInterceptEvent,
 } from '../extensionPlugins/events';
 import {
   PLUGIN_AGENT_MAX_TIMEOUT_MS,
   PLUGIN_AGENT_PROMPT_MAX_CHARS,
   PLUGIN_AGENT_SYSTEM_MAX_CHARS,
-  PLUGIN_INJECT_MAX_CHARS,
+  PLUGIN_INJECT_WIRE_MAX_CHARS,
   PLUGIN_PROGRESS_MAX_CHARS,
   type PluginAgentRunEvent,
   type PluginAgentSource,
   type PluginArtifactInfo,
   type PluginInjectImage,
+  type PluginInjectOrigin,
+  type PluginInjectSender,
   type PluginMessageSource,
   parsePluginAgentRunEvent,
   parsePluginAgentSource,
   parsePluginInjectImages,
+  parsePluginInjectOrigin,
+  parsePluginInjectSender,
   parsePluginMessageSource,
 } from '../extensionPlugins/protocol';
 import { parsePluginToolName } from '../extensionPlugins/toolName';
@@ -93,6 +96,7 @@ import { parseProviderHeaders } from '../providers/providerHeaders';
 import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsage';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSecretaryToolDescriptors } from '../secretary/customTools';
+import { type GoalResult, parseGoalResult } from '../secretary/goalResult';
 import { SECRETARY_INTERNAL_OPS, SECRETARY_OPS, type SecretaryInvokeOp } from '../secretary/tools';
 import { resolveShellLimits, type ShellLimits } from '../shellLimits';
 import { parseSmartCompactMode, type SmartCompactMode } from '../smartCompactMode';
@@ -104,6 +108,14 @@ import {
   type WebSearchChainEntry,
 } from '../webSearchChain';
 import { WINDOWS_LOCAL_SHELLS, type WindowsLocalShell } from '../windowsLocalShell';
+import {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  THINKING_LEVELS,
+  type ThinkingLevel,
+  TURN_REPORT_MAX_CHARS,
+} from './agentConstants';
+import { type DcgGuardHit, type DcgWarning, isDcgGuardHit, isDcgWarning } from './dcg';
 import { type EditMode, isEditMode } from './editMode';
 import {
   PROJECTED_APPLY_PATCH_PATH_COUNT_LIMIT,
@@ -130,6 +142,13 @@ import { isWorkflowPresetId, parseWorkflowRunSnapshot, type WorkflowRunSnapshot 
 
 export type { ChildSessionIdentity, SessionIdentity } from '../builtinAgents';
 export { parseChildSessionIdentity, parseSessionIdentity } from '../builtinAgents';
+export {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  THINKING_LEVELS,
+  type ThinkingLevel,
+  TURN_REPORT_MAX_CHARS,
+};
 
 /**
  * Main → worker 的自定义 provider 注册信息。api 在 shared 侧保持 string，
@@ -162,9 +181,6 @@ export interface TurnDigest {
    */
   lastTool?: { name: string; ok: boolean };
 }
-
-/** 本轮汇报的硬上限：装得下一份正常汇报，又挡住异常长输出 */
-export const TURN_REPORT_MAX_CHARS = 8000;
 
 /** 本轮最后一条 assistant 结论原文，worker 侧截尾到 TURN_REPORT_MAX_CHARS；秘书终态回传用 */
 export interface TurnReport {
@@ -244,14 +260,6 @@ export interface VirtualSpawnConfig {
   classifier?: VirtualSpawnClassifier;
 }
 
-/** 思考努力档位（reasoning 开启时有效），值域对齐 pi 的 ThinkingLevel。off 由 reasoningEnabled 表达 */
-export const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-
-/** 审批档位：supervised 全审 / auto-edits 免文件 / assistant 助手代审 / full 全放行 */
-export const APPROVAL_MODES = ['supervised', 'auto-edits', 'full', 'assistant'] as const;
-export type ApprovalMode = (typeof APPROVAL_MODES)[number];
-
 /** 审批请求的操作类别 */
 export type ApprovalKind = 'command' | 'file-edit' | 'file-write' | 'mcp';
 
@@ -317,8 +325,8 @@ export interface ApprovalRequestInfo {
   expiresAt?: number;
   /** 托管判定无效（超时 / 出错 / 缺字段）退回人工的原因 */
   reviewFallback?: ApprovalReviewFallback;
-  /** dcg 命令守卫命中的规则与原因 */
-  guard?: { ruleId: string; reason: string };
+  /** dcg 命令守卫命中的规则与原因；decision=warn 时只是提示 */
+  guard?: DcgGuardHit;
 }
 
 /** 提问是谁收的尾：用户在原会话里直接答、秘书代答、超时兜底 */
@@ -368,6 +376,8 @@ export interface BackgroundTaskInfo {
   idle?: { since: number; ports: number[] };
   /** 留下运行：agent 收尾表态或用户手动保留；at 起 1 小时内不参与闲置判定，之后重新检查 */
   keep?: BackgroundTaskKeep;
+  /** 上一代 worker 收尾时被停掉（应用重启 / 退出）：status 是 failed，任务表标「因重启中断」 */
+  interrupted?: 'restart';
 }
 
 /** 手动保留理由上限 */
@@ -407,6 +417,7 @@ export interface ShellFailure {
 export interface ShellDetails {
   backgroundTaskId?: string;
   shellFailure?: ShellFailure;
+  dcgWarning?: DcgWarning;
 }
 
 export function parseShellFailure(value: unknown): ShellFailure | null {
@@ -710,6 +721,10 @@ export type AgentServiceErrorCode =
   | 'forbidden'
   | 'mode-disabled'
   | 'not-found'
+  /** id 属于 Main 重启前：内存里的 Run / Agent 记录已丢 */
+  | 'restart-lost'
+  /** id 属于别的会话或别的 agent */
+  | 'other-owner'
   | 'invalid-state'
   | 'run-mismatch'
   | 'runtime-unavailable';
@@ -759,6 +774,33 @@ export type AgentControlToolResponse =
   | { ok: true; value: unknown }
   | { ok: false; code: AgentServiceErrorCode; error: string };
 
+type ClosedParser<R> = (value: Record<string, unknown>) => R | null;
+
+function parseClosed<T extends string, R>(
+  table: Record<T, (value: Record<string, unknown>) => R>,
+  type: string,
+  value: Record<string, unknown>
+): R | null {
+  if (!Object.hasOwn(table, type)) return null;
+  return table[type as T](value);
+}
+
+function requireEventIdentity(
+  kind: 'any' | 'parent' | 'child',
+  parse: ClosedParser<AgentWorkerEvent>
+): ClosedParser<AgentWorkerEvent> {
+  return (value) => {
+    const identity =
+      kind === 'child'
+        ? parseChildSessionIdentity(value.identity)
+        : kind === 'parent'
+          ? parseSessionIdentity(value.identity)
+          : parseAnySessionIdentity(value.identity);
+    if (!identity || !isSequence(value.seq)) return null;
+    return parse(value);
+  };
+}
+
 export function parseAgentControlToolRequest(value: unknown): AgentControlToolRequest | null {
   if (!isRecord(value) || typeof value.operation !== 'string') return null;
   const nonEmpty = (input: unknown): input is string =>
@@ -771,8 +813,22 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
     return hasExactKeys(gate, ['commandRef']) && nonEmpty(gate.commandRef);
   };
   const optionalGate = value.gate === undefined || gateValid(value.gate);
-  switch (value.operation) {
-    case 'spawn':
+
+  const parseRunIdOperation = (value: Record<string, unknown>): AgentControlToolRequest | null => {
+    return hasExactKeys(value, ['operation', 'runId']) && nonEmpty(value.runId)
+      ? (value as unknown as AgentControlToolRequest)
+      : null;
+  };
+
+  const parseAgentIdOperation = (
+    value: Record<string, unknown>
+  ): AgentControlToolRequest | null => {
+    return hasExactKeys(value, ['operation', 'agentId']) && nonEmpty(value.agentId)
+      ? (value as unknown as AgentControlToolRequest)
+      : null;
+  };
+  const parsers = {
+    spawn: (value: Record<string, unknown>): AgentControlToolRequest | null => {
       return hasOnlyKeys(value, [
         'operation',
         'mode',
@@ -800,7 +856,8 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         optionalGate
         ? (value as unknown as AgentControlToolRequest)
         : null;
-    case 'send':
+    },
+    send: (value: Record<string, unknown>): AgentControlToolRequest | null => {
       return hasOnlyKeys(value, [
         'operation',
         'agentId',
@@ -820,7 +877,8 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         optionalGate
         ? (value as unknown as AgentControlToolRequest)
         : null;
-    case 'wait':
+    },
+    wait: (value: Record<string, unknown>): AgentControlToolRequest | null => {
       return hasOnlyKeys(value, ['operation', 'runIds', 'until', 'timeoutMs']) &&
         Array.isArray(value.runIds) &&
         value.runIds.length > 0 &&
@@ -833,12 +891,10 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
             (value.timeoutMs as number) <= AGENT_WAIT_MAX_MS))
         ? (value as unknown as AgentControlToolRequest)
         : null;
-    case 'report':
-    case 'stop':
-      return hasExactKeys(value, ['operation', 'runId']) && nonEmpty(value.runId)
-        ? (value as unknown as AgentControlToolRequest)
-        : null;
-    case 'list':
+    },
+    report: parseRunIdOperation,
+    stop: parseRunIdOperation,
+    list: (value: Record<string, unknown>): AgentControlToolRequest | null => {
       return hasOnlyKeys(value, ['operation', 'status', 'cursor', 'limit']) &&
         (value.status === undefined ||
           ['creating', 'ready', 'active', 'parked', 'closed'].includes(value.status as string)) &&
@@ -848,20 +904,18 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         (value.limit as number) <= 100
         ? (value as unknown as AgentControlToolRequest)
         : null;
-    case 'message':
+    },
+    message: (value: Record<string, unknown>): AgentControlToolRequest | null => {
       return hasExactKeys(value, ['operation', 'to', 'text']) &&
         nonEmpty(value.to) &&
         nonEmpty(value.text)
         ? (value as unknown as AgentControlToolRequest)
         : null;
-    case 'dismiss':
-    case 'resume':
-      return hasExactKeys(value, ['operation', 'agentId']) && nonEmpty(value.agentId)
-        ? (value as unknown as AgentControlToolRequest)
-        : null;
-    default:
-      return null;
-  }
+    },
+    dismiss: parseAgentIdOperation,
+    resume: parseAgentIdOperation,
+  } satisfies Record<AgentControlToolRequest['operation'], ClosedParser<AgentControlToolRequest>>;
+  return parseClosed(parsers, value.operation, value);
 }
 
 function parseAgentControlToolResponse(value: unknown): AgentControlToolResponse | null {
@@ -876,6 +930,8 @@ function parseAgentControlToolResponse(value: unknown): AgentControlToolResponse
     'forbidden',
     'mode-disabled',
     'not-found',
+    'restart-lost',
+    'other-owner',
     'invalid-state',
     'run-mismatch',
     'runtime-unavailable',
@@ -1342,6 +1398,8 @@ export type AgentCommand =
       rtkEnabled?: boolean;
       /** dcg 命令守卫二进制；Main 仅在启用且已安装时下发 */
       dcgPath?: string;
+      /** 用户按规则记忆豁免的 dcg rule_id（仅当前 dcg 版本有效） */
+      dcgExemptRules?: string[];
       /** ssh 项目：工具执行切到远端。Main 从项目权威派生，不信任 renderer。 */
       remote?: AgentRemoteConfig;
       /** 旁路会话：首条 prompt 前缀注入，消费一次 */
@@ -1428,13 +1486,10 @@ export type AgentCommand =
       agentType?: string;
       resumeFile: string;
     }
-  | {
-      type: 'prompt' | 'steer';
+  | ({
       identity: SessionIdentity;
       text: string;
       images?: AttachedImage[];
-      /** renderer 乐观回显的投递标识；worker 在对应 user 消息上屏后以 delivery-settled 回执 */
-      deliveryId?: string;
       /** Bot 插话仅允许进入活轮；不再忙时交回 Main 重新准入。 */
       activeOnly?: true;
       /**
@@ -1449,7 +1504,18 @@ export type AgentCommand =
        * Main 据此认出拒绝属于哪个实例。
        */
       instanceId?: string;
-    }
+    } & (
+      | {
+          type: 'prompt';
+          /** 投递标识：worker 在对应 user 消息上屏后以 delivery-settled 回执，没进 pi 时以 delivery-rejected 回执 */
+          deliveryId: string;
+        }
+      | {
+          type: 'steer';
+          /** renderer 乐观回显的投递标识；worker 在对应 user 消息上屏后以 delivery-settled 回执 */
+          deliveryId?: string;
+        }
+    ))
   | { type: 'set-model'; identity: SessionIdentity; model: SpawnModelConfig }
   | { type: 'set-thinking'; identity: SessionIdentity; level: ThinkingLevel }
   /** 仅带人设 spawn 的父会话（秘书）：就地换系统提示词，下一轮生效 */
@@ -1560,6 +1626,10 @@ export type AgentCommand =
   | { type: 'task-stop'; sessionId: string; taskId: string }
   /** 用户手动保留（可附理由）；reason 为 null 取消保留 */
   | { type: 'task-keep'; sessionId: string; taskId: string; reason: string | null }
+  /** 按会话 id 寻址：把已到点的自定提醒交给会话；会话没打开就不动，打开时补发 */
+  | { type: 'reminders-fire'; sessionId: string }
+  /** 清掉根会话及其子会话的自定提醒与链计数（用户停止、删除、归档） */
+  | { type: 'reminders-clear'; sessionId: string }
   | { type: 'tool-background'; identity: SessionIdentity; toolCallId: string }
   | { type: 'workflow-stop'; identity: SessionIdentity; runId: string }
   | { type: 'subagent-stop'; identity: SessionIdentity; agentId: string }
@@ -1602,6 +1672,8 @@ export type AgentCommand =
       images?: PluginInjectImage[];
       deliverAs: 'steer' | 'followUp' | 'nextTurn';
       triggerTurn: boolean;
+      origin?: PluginInjectOrigin;
+      sender?: PluginInjectSender;
     }
   | {
       type: 'rewind';
@@ -1616,7 +1688,8 @@ export type AgentCommand =
       identity: SessionIdentity;
       targetConversationId: string;
       entryId?: string;
-      userIndexFromEnd?: number;
+      /** 轮次输入（用户消息或插件投递）从末尾数第几条 */
+      turnIndexFromEnd?: number;
     }
   | { type: 'abort'; identity: SessionIdentity }
   | {
@@ -1805,6 +1878,8 @@ export interface ProjectedMessage {
   backgroundTaskId?: string;
   /** bash / powershell 结果的结构化失败分类 */
   shellFailure?: ShellFailure;
+  /** dcg warn 档命中：不拦，只提示 */
+  dcgWarning?: DcgWarning;
   /** 插件工具写出的产出文件 */
   pluginArtifacts?: PluginArtifactInfo[];
   /** ImageGen 已落盘的本地图片，含 codemode 嵌套生成的产物。 */
@@ -2015,6 +2090,7 @@ export type RendererAgentEvent =
       | { type: 'graceful-restart-ready' }
       | { type: 'background-tasks-detached' }
       | { type: 'session-wake-requested' }
+      | { type: 'session-reminder-due' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -2036,6 +2112,9 @@ export type RendererAgentEvent =
 
 /** detail：Main 汇总的退出原因（退出码 / worker 致命异常首行） */
 export type WorkerExitedEvent = { type: 'worker-exited'; detail?: string };
+
+/** 优雅重启换代（Main 不退）：旧 worker 已按断点退出，会话由下一代接着跑；只给 Main 内部，不进会话广播 */
+export type WorkerSwappedEvent = { type: 'worker-swapped' };
 
 export function workspaceBranchChangedNote(branch: string): string {
   return `<workspace-branch-changed>\nThe current workspace is now on Git branch ${JSON.stringify(branch)}. The directory is unchanged, but file contents may differ. Re-read relevant files before relying on earlier observations or edits. This is background information only, not a task or goal.\n</workspace-branch-changed>`;
@@ -2089,7 +2168,14 @@ export type AgentWorkerEvent =
       requestId: string;
     }
   | { type: 'delivery-settled'; identity: SessionIdentity; seq: number; deliveryId: string }
-  | { type: 'delivery-rejected'; identity: SessionIdentity; seq: number; deliveryId: string }
+  | {
+      type: 'delivery-rejected';
+      identity: SessionIdentity;
+      seq: number;
+      deliveryId: string;
+      /** 上一轮停不下来，限时内等不到空闲：重发多半还会撞上，要重开会话 */
+      reason?: 'turn-stuck';
+    }
   | { type: 'delivery-deferred'; identity: SessionIdentity; seq: number; deliveryId: string }
   | {
       type: 'status';
@@ -2124,6 +2210,14 @@ export type AgentWorkerEvent =
       requestBudgetError?: string;
       /** 秘书对本轮系统回传调用了 silence_turn（或旧静默标记）：不弹通知 */
       silent?: true;
+      /** 子代理被后台任务唤醒的这一轮接续的 Run（被持有的那一轮的 turnId） */
+      continues?: string;
+      /** 子代理还有自己起的、在跑、没表态的后台任务：Run 继续持有，等任务完成唤醒它 */
+      awaitingTasks?: true;
+      /** 根会话还挂着自定提醒：在等自己定的时间点，goal 先不续跑 */
+      awaitingReminder?: true;
+      /** 本轮实际使用的 provider id，供上游健康闸门判断恢复 */
+      provider?: string;
     }
   | {
       type: 'turn-failed';
@@ -2131,14 +2225,16 @@ export type AgentWorkerEvent =
       seq: number;
       turnId: string;
       error: string;
-      /** 消息从未提交给 pi（僵尸轮超时等）：renderer 应收回乐观回显并把文本退回输入框 */
-      undelivered?: true;
       /** pi 回合内自动重试已用尽、最终仍是它判定的瞬态错误（网络 / 限流 / 5xx） */
       retryExhausted?: true;
       /** 应用退出窗口内的断流/断连：不是会话失败，按 interrupted 收口（Main 判定） */
       interrupted?: { at: number; kind: ExitKind };
       /** 本轮被 abort 命令中断（如重试倒计时中停止） */
       aborted?: true;
+      /** 同 turn-completed：失败也结束被持有的 Run */
+      continues?: string;
+      /** 本轮实际使用的 provider id，供上游健康闸门按 provider 聚合退避 */
+      provider?: string;
     }
   | {
       /** 瞬态错误后 pi 将自动重试：非终态，不 settle 轮次；下一个 status/turn-* 事件清除 */
@@ -2307,6 +2403,8 @@ export type AgentWorkerEvent =
       seq: number;
       kind: 'complete' | 'blocked' | 'wait';
       note: string;
+      /** goal_complete 的结构化结果；非法值在解析时丢掉，不拒事件 */
+      result?: GoalResult;
     }
   | { type: 'plan-state'; identity: SessionIdentity; seq: number; state: PlanState }
   | {
@@ -2377,6 +2475,8 @@ export type AgentWorkerEvent =
         identity: SessionIdentity;
         reason: RestartDeferReason;
         toolsInFlight: string[];
+        /** 在跑的工具调用名（不含转后台的命令），供弹层与超时日志说清在等什么 */
+        toolNames?: string[];
         /** 要求保留后台命令时仍要等的转后台命令（没法脱离 worker，如走管道的远程命令） */
         undetachableTasks?: string[];
         /** 回复在写（没有工具在跑）：Main 按出 token 的时刻决定还等不等 */
@@ -2399,6 +2499,11 @@ export type AgentWorkerEvent =
        * 请 Main 按恢复清单打开它，worker 打开后把完成通知交给新一轮。旁路消费
        */
       type: 'session-wake-requested';
+      sessionId: string;
+    }
+  | {
+      /** 根会话的自定提醒到点：Main 判定会话还在（未删除、未归档）后回 reminders-fire，冷会话先打开。旁路消费 */
+      type: 'session-reminder-due';
       sessionId: string;
     }
   | {
@@ -2858,6 +2963,7 @@ function hasValidProjectedMetadata(value: Record<string, unknown>): boolean {
     return false;
   }
   if (value.shellFailure !== undefined && !parseShellFailure(value.shellFailure)) return false;
+  if (value.dcgWarning !== undefined && !isDcgWarning(value.dcgWarning)) return false;
   if (value.pluginSource !== undefined && !parsePluginMessageSource(value.pluginSource))
     return false;
   if (
@@ -3493,9 +3599,8 @@ function parseSafeChildRef(value: unknown): SafeChildRef | null {
     : null;
 }
 
-export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustomEntry | null {
-  if (!isRecord(value)) return null;
-  if (value.kind === 'oauth-account-selected') {
+const agentSessionCustomEntryParsers = {
+  'oauth-account-selected': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
     return hasOnlyKeys(value, [
       'kind',
       'accountKey',
@@ -3512,13 +3617,13 @@ export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustom
       Number.isFinite(value.at)
       ? (value as unknown as AgentSessionCustomEntry)
       : null;
-  }
-  if (value.kind === 'capability-receipt') {
+  },
+  'capability-receipt': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
     if (!hasExactKeys(value, ['kind', 'receipt'])) return null;
     const receipt = parseCapabilityReceipt(value.receipt);
     return receipt ? { kind: 'capability-receipt', receipt } : null;
-  }
-  if (value.kind === 'task-wrap-up-nudge') {
+  },
+  'task-wrap-up-nudge': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
     return hasExactKeys(value, ['kind', 'count', 'at']) &&
       Number.isInteger(value.count) &&
       (value.count as number) > 0 &&
@@ -3526,8 +3631,8 @@ export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustom
       Number.isFinite(value.at)
       ? (value as unknown as AgentSessionCustomEntry)
       : null;
-  }
-  if (value.kind === 'tool-batch-label') {
+  },
+  'tool-batch-label': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
     return hasExactKeys(value, ['kind', 'callId', 'label', 'at']) &&
       isNonEmptyString(value.callId) &&
       isNonEmptyString(value.label) &&
@@ -3536,28 +3641,36 @@ export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustom
       Number.isFinite(value.at)
       ? (value as unknown as AgentSessionCustomEntry)
       : null;
-  }
-  const child = parseSafeChildRef(value.child);
-  if (!child || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
-  if (value.kind === 'agent-dispatch' && hasExactKeys(value, ['kind', 'child', 'at'])) {
-    return value as unknown as AgentSessionCustomEntry;
-  }
-  if (
-    value.kind === 'agent-completed' &&
-    hasOnlyKeys(value, ['kind', 'child', 'receiptSummary', 'at']) &&
-    (value.receiptSummary === undefined || typeof value.receiptSummary === 'string')
-  ) {
-    return value as unknown as AgentSessionCustomEntry;
-  }
-  if (
-    value.kind === 'agent-failed' &&
-    hasExactKeys(value, ['kind', 'child', 'errorCode', 'message', 'at']) &&
-    isNonEmptyString(value.errorCode) &&
-    isNonEmptyString(value.message)
-  ) {
-    return value as unknown as AgentSessionCustomEntry;
-  }
-  return null;
+  },
+  'agent-dispatch': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
+    const child = parseSafeChildRef(value.child);
+    if (!child || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
+    return hasExactKeys(value, ['kind', 'child', 'at'])
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  },
+  'agent-completed': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
+    const child = parseSafeChildRef(value.child);
+    if (!child || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
+    return hasOnlyKeys(value, ['kind', 'child', 'receiptSummary', 'at']) &&
+      (value.receiptSummary === undefined || typeof value.receiptSummary === 'string')
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  },
+  'agent-failed': (value: Record<string, unknown>): AgentSessionCustomEntry | null => {
+    const child = parseSafeChildRef(value.child);
+    if (!child || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
+    return hasExactKeys(value, ['kind', 'child', 'errorCode', 'message', 'at']) &&
+      isNonEmptyString(value.errorCode) &&
+      isNonEmptyString(value.message)
+      ? (value as unknown as AgentSessionCustomEntry)
+      : null;
+  },
+} satisfies Record<AgentSessionCustomEntry['kind'], ClosedParser<AgentSessionCustomEntry>>;
+
+export function parseAgentSessionCustomEntry(value: unknown): AgentSessionCustomEntry | null {
+  if (!isRecord(value) || typeof value.kind !== 'string') return null;
+  return parseClosed(agentSessionCustomEntryParsers, value.kind, value);
 }
 
 export function parseResolvedChildProfileProof(value: unknown): ResolvedChildProfileProof | null {
@@ -3588,36 +3701,40 @@ export function parseResolvedChildProfileProof(value: unknown): ResolvedChildPro
   return value as unknown as ResolvedChildProfileProof;
 }
 
+const parseSafeTextRecord = (value: Record<string, unknown>): SafeJournalRecord | null => {
+  return hasExactKeys(value, ['type', 'text', 'at']) && typeof value.text === 'string'
+    ? (value as unknown as SafeJournalRecord)
+    : null;
+};
+const safeJournalRecordParsers = {
+  'safe-user-text': parseSafeTextRecord,
+  'safe-assistant-text': parseSafeTextRecord,
+  'enso-operation': (value: Record<string, unknown>): SafeJournalRecord | null => {
+    return hasExactKeys(value, ['type', 'operationId', 'capabilityId', 'toolCallId', 'at']) &&
+      isNonEmptyString(value.operationId) &&
+      isProductSurfaceId(value.capabilityId) &&
+      isNonEmptyString(value.toolCallId)
+      ? (value as unknown as SafeJournalRecord)
+      : null;
+  },
+  'safe-model-result': (value: Record<string, unknown>): SafeJournalRecord | null => {
+    return hasExactKeys(value, ['type', 'toolCallId', 'modelResult', 'at']) &&
+      isNonEmptyString(value.toolCallId) &&
+      parseCapabilityResult(value.modelResult)
+      ? (value as unknown as SafeJournalRecord)
+      : null;
+  },
+  'capability-receipt': (value: Record<string, unknown>): SafeJournalRecord | null => {
+    return hasExactKeys(value, ['type', 'receipt', 'at']) && parseCapabilityReceipt(value.receipt)
+      ? (value as unknown as SafeJournalRecord)
+      : null;
+  },
+} satisfies Record<SafeJournalRecord['type'], ClosedParser<SafeJournalRecord>>;
+
 export function parseSafeJournalRecord(value: unknown): SafeJournalRecord | null {
-  if (!isRecord(value) || typeof value.at !== 'number' || !Number.isFinite(value.at)) {
-    return null;
-  }
-  switch (value.type) {
-    case 'safe-user-text':
-    case 'safe-assistant-text':
-      return hasExactKeys(value, ['type', 'text', 'at']) && typeof value.text === 'string'
-        ? (value as unknown as SafeJournalRecord)
-        : null;
-    case 'enso-operation':
-      return hasExactKeys(value, ['type', 'operationId', 'capabilityId', 'toolCallId', 'at']) &&
-        isNonEmptyString(value.operationId) &&
-        isProductSurfaceId(value.capabilityId) &&
-        isNonEmptyString(value.toolCallId)
-        ? (value as unknown as SafeJournalRecord)
-        : null;
-    case 'safe-model-result':
-      return hasExactKeys(value, ['type', 'toolCallId', 'modelResult', 'at']) &&
-        isNonEmptyString(value.toolCallId) &&
-        parseCapabilityResult(value.modelResult)
-        ? (value as unknown as SafeJournalRecord)
-        : null;
-    case 'capability-receipt':
-      return hasExactKeys(value, ['type', 'receipt', 'at']) && parseCapabilityReceipt(value.receipt)
-        ? (value as unknown as SafeJournalRecord)
-        : null;
-    default:
-      return null;
-  }
+  if (!isRecord(value) || typeof value.at !== 'number' || !Number.isFinite(value.at)) return null;
+  if (typeof value.type !== 'string') return null;
+  return parseClosed(safeJournalRecordParsers, value.type, value);
 }
 
 export function parseSafeJournalProjection(value: unknown): SafeJournalProjection | null {
@@ -3806,10 +3923,72 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
   return value as unknown as SessionSnapshot;
 }
 
-/** 收窄 Main → worker 命令。旧 global/builtin session shape 一律拒绝。 */
-export function parseAgentCommand(value: unknown): AgentCommand | null {
-  if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
-  if (value.type === 'oauth-pool-result') {
+const parseWorkspaceLockCommand = (value: Record<string, unknown>): AgentCommand | null => {
+  return hasOnlyKeys(
+    value,
+    value.type === 'lock-workspace'
+      ? ['type', 'requestId', 'conversationIds']
+      : ['type', 'requestId', 'conversationIds', 'branch']
+  ) &&
+    isNonEmptyString(value.requestId) &&
+    Array.isArray(value.conversationIds) &&
+    value.conversationIds.length > 0 &&
+    value.conversationIds.every(isNonEmptyString) &&
+    new Set(value.conversationIds).size === value.conversationIds.length &&
+    (value.branch === undefined || isNonEmptyString(value.branch))
+    ? (value as unknown as AgentCommand)
+    : null;
+};
+
+const parsePromptOrSteer = (value: Record<string, unknown>): AgentCommand | null => {
+  const images = value.images === undefined ? [] : parseAttachedImages(value.images);
+  return hasOnlyKeys(value, [
+    'type',
+    'identity',
+    'text',
+    'images',
+    'deliveryId',
+    'activeOnly',
+    'resume',
+    'instanceId',
+  ]) &&
+    parseAnySessionIdentity(value.identity) &&
+    typeof value.text === 'string' &&
+    images !== null &&
+    (value.text.length > 0 || images.length > 0) &&
+    (value.activeOnly === undefined ||
+      (value.type === 'steer' && value.activeOnly === true && isDeliveryId(value.deliveryId))) &&
+    (value.resume === undefined || (value.type === 'prompt' && value.resume === true)) &&
+    ((value.type === 'steer' && value.deliveryId === undefined) ||
+      isDeliveryId(value.deliveryId)) &&
+    (value.instanceId === undefined ||
+      (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
+    ? (value as unknown as AgentCommand)
+    : null;
+};
+
+const parseHostResultCommand = (value: Record<string, unknown>): AgentCommand | null => {
+  if (
+    !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
+    !parseAnySessionIdentity(value.identity) ||
+    !isNonEmptyString(value.requestId) ||
+    typeof value.ok !== 'boolean'
+  ) {
+    return null;
+  }
+  const shapeOk = value.ok
+    ? value.error === undefined
+    : isNonEmptyString(value.error) && value.result === undefined;
+  return shapeOk ? (value as unknown as AgentCommand) : null;
+};
+
+const parseIdentityOnlyCommand = (value: Record<string, unknown>): AgentCommand | null => {
+  return hasExactKeys(value, ['type', 'identity']) && parseAnySessionIdentity(value.identity)
+    ? (value as unknown as AgentCommand)
+    : null;
+};
+const agentCommandParsers = {
+  'oauth-pool-result': (value: Record<string, unknown>): AgentCommand | null => {
     return hasOnlyKeys(value, ['type', 'requestId', 'accountKey', 'selectionReceipt', 'error']) &&
       isNonEmptyString(value.requestId) &&
       ((isCodexAccountKey(value.accountKey) &&
@@ -3820,556 +3999,540 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
           isNonEmptyString(value.error)))
       ? (value as unknown as AgentCommand)
       : null;
-  }
-  if (value.type === 'mcp-oauth-refresh-result') {
+  },
+  'mcp-oauth-refresh-result': (value: Record<string, unknown>): AgentCommand | null => {
     return hasOnlyKeys(value, ['type', 'requestId', 'result']) &&
       isNonEmptyString(value.requestId) &&
       isMcpOAuthRefreshResult(value.result)
       ? (value as unknown as AgentCommand)
       : null;
-  }
-  switch (value.type) {
-    case 'lock-workspace':
-    case 'unlock-workspace':
-      return hasOnlyKeys(
-        value,
-        value.type === 'lock-workspace'
-          ? ['type', 'requestId', 'conversationIds']
-          : ['type', 'requestId', 'conversationIds', 'branch']
-      ) &&
-        isNonEmptyString(value.requestId) &&
-        Array.isArray(value.conversationIds) &&
-        value.conversationIds.length > 0 &&
-        value.conversationIds.every(isNonEmptyString) &&
-        new Set(value.conversationIds).size === value.conversationIds.length &&
-        (value.branch === undefined || isNonEmptyString(value.branch))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'spawn-parent': {
-      if (
-        !hasOnlyKeys(value, [
-          'type',
-          'identity',
-          'cwd',
-          'model',
-          'resumeFile',
-          'reasoningEnabled',
-          'thinkingLevel',
-          'loadLocalSkills',
-          'loadHarnessAssets',
-          'trustedProjectCode',
-          'exploreFoldEnabled',
-          'editMode',
-          'hashlineEditEnabled',
-          'compactStrategy',
-          'smartCompactEnabled',
-          'smartCompactSummaryModel',
-          'smartCompactMode',
-          'memoryLanguage',
-          'skillPaths',
-          'mcpServers',
-          'pluginTools',
-          'secretaryTools',
-          'workflowPresetFiles',
-          'pluginEvents',
-          'instruction',
-          'approvalMode',
-          'autoRejectApprovals',
-          'askRelay',
-          'approvalReviewer',
-          'approvalReviewerClassifier',
-          'approvalReviewerManaged',
-          'approvalReviewerAllowThreshold',
-          'agentTypes',
-          'subagentModels',
-          'disabledTools',
-          'windowsLocalShell',
-          'rtkEnabled',
-          'dcgPath',
-          'remote',
-          'rolePrompt',
-          'systemPrompt',
-          'systemPromptAppend',
-          'systemPromptBoost',
-          'refusalRetryPrompt',
-          'botMode',
-          'botGroupTasks',
-          'botDiscussMode',
-          'botRoutines',
-          'secretaryMode',
-          'botDelegationTask',
-          'botWriteLock',
-          'protectedActions',
-          'planMode',
-          'instanceId',
-        ]) ||
-        !parseSessionIdentity(value.identity) ||
-        typeof value.cwd !== 'string' ||
-        !parseSessionModelConfig(value.model) ||
-        (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
-        (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
-        (value.trustedProjectCode !== undefined &&
-          !(
-            Array.isArray(value.trustedProjectCode) &&
-            value.trustedProjectCode.length <= 500 &&
-            value.trustedProjectCode.every(
-              (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
-            )
-          )) ||
-        (value.pluginTools !== undefined && !isPluginToolList(value.pluginTools)) ||
-        (value.secretaryTools !== undefined &&
-          parseSecretaryToolDescriptors(value.secretaryTools) === null) ||
-        (value.workflowPresetFiles !== undefined &&
-          !(
-            Array.isArray(value.workflowPresetFiles) &&
-            value.workflowPresetFiles.length <= 500 &&
-            value.workflowPresetFiles.every(
-              (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
-            )
-          )) ||
-        (value.pluginEvents !== undefined && !isPluginEventPlan(value.pluginEvents)) ||
-        (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
-        (value.dcgPath !== undefined && !isNonEmptyString(value.dcgPath)) ||
-        (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
-        (value.windowsLocalShell !== undefined &&
-          !(WINDOWS_LOCAL_SHELLS as readonly string[]).includes(
-            value.windowsLocalShell as string
-          )) ||
-        (value.exploreFoldEnabled !== undefined && typeof value.exploreFoldEnabled !== 'boolean') ||
-        (value.editMode !== undefined && !isEditMode(value.editMode)) ||
-        (value.hashlineEditEnabled !== undefined &&
-          typeof value.hashlineEditEnabled !== 'boolean') ||
-        (value.compactStrategy !== undefined &&
-          parseCompactStrategy(value.compactStrategy) === null) ||
-        (value.smartCompactEnabled !== undefined &&
-          typeof value.smartCompactEnabled !== 'boolean') ||
-        (value.smartCompactSummaryModel !== undefined &&
-          parseSpawnModelConfig(value.smartCompactSummaryModel) === null) ||
-        (value.smartCompactMode !== undefined &&
-          parseSmartCompactMode(value.smartCompactMode) === null) ||
-        (value.memoryLanguage !== undefined && typeof value.memoryLanguage !== 'string') ||
-        (value.remote !== undefined && parseAgentRemoteConfig(value.remote) === null) ||
-        (value.subagentModels !== undefined &&
-          (!Array.isArray(value.subagentModels) ||
-            value.subagentModels.some((entry) => parseSubagentModelOption(entry) === null))) ||
-        (value.approvalReviewer !== undefined &&
-          parseSpawnModelConfig(value.approvalReviewer) === null) ||
-        (value.askRelay !== undefined &&
-          (!isRecord(value.askRelay) || !isNonEmptyString(value.askRelay.name))) ||
-        (value.approvalReviewerAllowThreshold !== undefined &&
-          (!isApprovalAllowThreshold(value.approvalReviewerAllowThreshold) ||
-            value.approvalReviewerClassifier === undefined)) ||
-        (value.approvalReviewerManaged !== undefined &&
-          (value.approvalReviewerManaged !== true ||
-            value.approvalReviewerClassifier === undefined)) ||
-        (value.approvalReviewerClassifier !== undefined &&
-          (value.approvalReviewer !== undefined ||
-            !parseClassifierCredentials(value.approvalReviewerClassifier))) ||
-        (value.rolePrompt !== undefined && !isNonEmptyString(value.rolePrompt)) ||
-        (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt)) ||
-        (value.systemPromptAppend !== undefined && !isNonEmptyString(value.systemPromptAppend)) ||
-        (value.systemPromptBoost !== undefined && !isNonEmptyString(value.systemPromptBoost)) ||
-        (value.refusalRetryPrompt !== undefined && !isNonEmptyString(value.refusalRetryPrompt)) ||
-        (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
-        (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
-        (value.botDiscussMode !== undefined && typeof value.botDiscussMode !== 'boolean') ||
-        (value.botDiscussMode === true &&
-          (value.botMode !== true || value.botGroupTasks !== true)) ||
-        (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||
-        (value.secretaryMode !== undefined && typeof value.secretaryMode !== 'boolean') ||
-        (value.botDelegationTask !== undefined && typeof value.botDelegationTask !== 'boolean') ||
-        (value.botWriteLock !== undefined &&
-          (!isRecord(value.botWriteLock) ||
-            !isNonEmptyString(value.botWriteLock.label) ||
-            !Array.isArray(value.botWriteLock.ancestors) ||
-            !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
-        (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean') ||
-        (value.instanceId !== undefined && !isUuid(value.instanceId))
-      ) {
-        return null;
-      }
-      return value as unknown as AgentCommand;
-    }
-    case 'spawn-child':
-      return hasOnlyKeys(value, ['type', 'identity', 'cwd', 'config', 'resumeFile']) &&
-        parseChildSessionIdentity(value.identity) &&
-        typeof value.cwd === 'string' &&
-        parseResolvedAgentTypeSpawnConfig(value.config) &&
-        (value.resumeFile === undefined || isNonEmptyString(value.resumeFile))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'prompt-child':
-      return hasOnlyKeys(value, ['type', 'identity', 'requestId', 'task', 'requestBudget']) &&
-        parseChildSessionIdentity(value.identity) &&
-        isNonEmptyString(value.requestId) &&
-        parseAgentDispatchTask(value.task) &&
-        (value.requestBudget === undefined || value.requestBudget === true)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'agent-control-result':
-      return hasExactKeys(value, ['type', 'identity', 'requestId', 'response']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.requestId) &&
-        parseAgentControlToolResponse(value.response)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'dismiss-child': {
-      const parent = parseSessionIdentity(value.parent);
-      const child = parseChildSessionIdentity(value.child);
-      return hasOnlyKeys(value, ['type', 'parent', 'child', 'notify']) &&
-        parent &&
-        child &&
-        child.parent.sessionId === parent.sessionId &&
-        child.parent.generation === parent.generation &&
-        (value.notify === undefined || typeof value.notify === 'boolean')
-        ? (value as unknown as AgentCommand)
-        : null;
-    }
-    case 'dismiss-coworker': {
-      const parent = parseSessionIdentity(value.parent);
-      return hasOnlyKeys(value, ['type', 'parent', 'coworkerId', 'notify']) &&
-        parent &&
-        isNonEmptyString(value.coworkerId) &&
-        // 归属校验：coworker id 恒为 `父id::cw-…`，防跨会话误解雇
-        value.coworkerId.startsWith(`${parent.sessionId}::cw-`) &&
-        (value.notify === undefined || typeof value.notify === 'boolean')
-        ? (value as unknown as AgentCommand)
-        : null;
-    }
-    case 'resume-coworker': {
-      const parent = parseSessionIdentity(value.parent);
-      return hasOnlyKeys(value, [
-        'type',
-        'parent',
-        'coworkerId',
-        'name',
-        'agentType',
-        'resumeFile',
-      ]) &&
-        parent &&
-        isNonEmptyString(value.coworkerId) &&
-        value.coworkerId.startsWith(`${parent.sessionId}::cw-`) &&
-        isNonEmptyString(value.name) &&
-        (value.agentType === undefined || isNonEmptyString(value.agentType)) &&
-        isNonEmptyString(value.resumeFile)
-        ? (value as unknown as AgentCommand)
-        : null;
-    }
-    case 'complete-text':
-      return hasOnlyKeys(value, [
-        'type',
-        'requestId',
-        'systemPrompt',
-        'userText',
-        'candidates',
-        'timeoutMs',
-        'maxTokens',
-        'stream',
-        'reasoning',
-        'probe',
-      ]) &&
-        isNonEmptyString(value.requestId) &&
-        typeof value.systemPrompt === 'string' &&
-        typeof value.userText === 'string' &&
-        typeof value.timeoutMs === 'number' &&
-        Number.isFinite(value.timeoutMs) &&
-        value.timeoutMs > 0 &&
-        (value.maxTokens === undefined ||
-          (typeof value.maxTokens === 'number' &&
-            Number.isInteger(value.maxTokens) &&
-            value.maxTokens > 0)) &&
-        (value.stream === undefined || value.stream === true) &&
-        (value.reasoning === undefined ||
-          value.reasoning === 'off' ||
-          THINKING_LEVELS.includes(value.reasoning as ThinkingLevel)) &&
-        (value.probe === undefined || value.probe === true) &&
-        Array.isArray(value.candidates) &&
-        value.candidates.length >= 1 &&
-        value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
-        value.candidates.every((candidate) => parseSpawnModelConfig(candidate))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'abort-complete-text':
-      return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'classify-choice':
-      return hasExactKeys(value, [
-        'type',
-        'requestId',
-        'classifier',
-        'state',
-        'instructions',
-        'criteria',
-        'timeoutMs',
-      ]) &&
-        isNonEmptyString(value.requestId) &&
-        parseClassifierCredentials(value.classifier) &&
-        isRecord(value.state) &&
-        isNonEmptyString(value.instructions) &&
-        isRecord(value.criteria) &&
-        Object.keys(value.criteria).length > 0 &&
-        Object.values(value.criteria).every(isNonEmptyString) &&
-        typeof value.timeoutMs === 'number' &&
-        Number.isFinite(value.timeoutMs) &&
-        value.timeoutMs > 0
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'abort-classify-choice':
-      return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'summarize-title':
-      return hasExactKeys(value, ['type', 'conversationId', 'input', 'candidates']) &&
-        isNonEmptyString(value.conversationId) &&
-        parseTitleSummaryInput(value.input) &&
-        Array.isArray(value.candidates) &&
-        value.candidates.length >= 1 &&
-        value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
-        value.candidates.every((candidate) => parseSpawnModelConfig(candidate))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'prompt':
-    case 'steer': {
-      const images = value.images === undefined ? [] : parseAttachedImages(value.images);
-      return hasOnlyKeys(value, [
+  },
+  'lock-workspace': parseWorkspaceLockCommand,
+  'unlock-workspace': parseWorkspaceLockCommand,
+  'spawn-parent': (value: Record<string, unknown>): AgentCommand | null => {
+    if (
+      !hasOnlyKeys(value, [
         'type',
         'identity',
-        'text',
-        'images',
-        'deliveryId',
-        'activeOnly',
-        'resume',
+        'cwd',
+        'model',
+        'resumeFile',
+        'reasoningEnabled',
+        'thinkingLevel',
+        'loadLocalSkills',
+        'loadHarnessAssets',
+        'trustedProjectCode',
+        'exploreFoldEnabled',
+        'editMode',
+        'hashlineEditEnabled',
+        'compactStrategy',
+        'smartCompactEnabled',
+        'smartCompactSummaryModel',
+        'smartCompactMode',
+        'memoryLanguage',
+        'skillPaths',
+        'mcpServers',
+        'pluginTools',
+        'secretaryTools',
+        'workflowPresetFiles',
+        'pluginEvents',
+        'instruction',
+        'approvalMode',
+        'autoRejectApprovals',
+        'askRelay',
+        'approvalReviewer',
+        'approvalReviewerClassifier',
+        'approvalReviewerManaged',
+        'approvalReviewerAllowThreshold',
+        'agentTypes',
+        'subagentModels',
+        'disabledTools',
+        'windowsLocalShell',
+        'rtkEnabled',
+        'dcgPath',
+        'dcgExemptRules',
+        'remote',
+        'rolePrompt',
+        'systemPrompt',
+        'systemPromptAppend',
+        'systemPromptBoost',
+        'refusalRetryPrompt',
+        'botMode',
+        'botGroupTasks',
+        'botDiscussMode',
+        'botRoutines',
+        'secretaryMode',
+        'botDelegationTask',
+        'botWriteLock',
+        'protectedActions',
+        'planMode',
         'instanceId',
-      ]) &&
-        parseAnySessionIdentity(value.identity) &&
-        typeof value.text === 'string' &&
-        images !== null &&
-        (value.text.length > 0 || images.length > 0) &&
-        (value.activeOnly === undefined ||
-          (value.type === 'steer' &&
-            value.activeOnly === true &&
-            isDeliveryId(value.deliveryId))) &&
-        (value.resume === undefined || (value.type === 'prompt' && value.resume === true)) &&
-        (value.deliveryId === undefined || isDeliveryId(value.deliveryId)) &&
-        (value.instanceId === undefined ||
-          (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
-        ? (value as unknown as AgentCommand)
-        : null;
+      ]) ||
+      !parseSessionIdentity(value.identity) ||
+      typeof value.cwd !== 'string' ||
+      !parseSessionModelConfig(value.model) ||
+      (value.resumeFile !== undefined && !isNonEmptyString(value.resumeFile)) ||
+      (value.loadHarnessAssets !== undefined && typeof value.loadHarnessAssets !== 'boolean') ||
+      (value.trustedProjectCode !== undefined &&
+        !(
+          Array.isArray(value.trustedProjectCode) &&
+          value.trustedProjectCode.length <= 500 &&
+          value.trustedProjectCode.every(
+            (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
+          )
+        )) ||
+      (value.pluginTools !== undefined && !isPluginToolList(value.pluginTools)) ||
+      (value.secretaryTools !== undefined &&
+        parseSecretaryToolDescriptors(value.secretaryTools) === null) ||
+      (value.workflowPresetFiles !== undefined &&
+        !(
+          Array.isArray(value.workflowPresetFiles) &&
+          value.workflowPresetFiles.length <= 500 &&
+          value.workflowPresetFiles.every(
+            (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 1024
+          )
+        )) ||
+      (value.pluginEvents !== undefined && !isPluginEventPlan(value.pluginEvents)) ||
+      (value.rtkEnabled !== undefined && typeof value.rtkEnabled !== 'boolean') ||
+      (value.dcgPath !== undefined && !isNonEmptyString(value.dcgPath)) ||
+      (value.dcgExemptRules !== undefined &&
+        !(
+          Array.isArray(value.dcgExemptRules) &&
+          value.dcgExemptRules.length <= 500 &&
+          value.dcgExemptRules.every(isDcgRuleId)
+        )) ||
+      (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
+      (value.windowsLocalShell !== undefined &&
+        !(WINDOWS_LOCAL_SHELLS as readonly string[]).includes(value.windowsLocalShell as string)) ||
+      (value.exploreFoldEnabled !== undefined && typeof value.exploreFoldEnabled !== 'boolean') ||
+      (value.editMode !== undefined && !isEditMode(value.editMode)) ||
+      (value.hashlineEditEnabled !== undefined && typeof value.hashlineEditEnabled !== 'boolean') ||
+      (value.compactStrategy !== undefined &&
+        parseCompactStrategy(value.compactStrategy) === null) ||
+      (value.smartCompactEnabled !== undefined && typeof value.smartCompactEnabled !== 'boolean') ||
+      (value.smartCompactSummaryModel !== undefined &&
+        parseSpawnModelConfig(value.smartCompactSummaryModel) === null) ||
+      (value.smartCompactMode !== undefined &&
+        parseSmartCompactMode(value.smartCompactMode) === null) ||
+      (value.memoryLanguage !== undefined && typeof value.memoryLanguage !== 'string') ||
+      (value.remote !== undefined && parseAgentRemoteConfig(value.remote) === null) ||
+      (value.subagentModels !== undefined &&
+        (!Array.isArray(value.subagentModels) ||
+          value.subagentModels.some((entry) => parseSubagentModelOption(entry) === null))) ||
+      (value.approvalReviewer !== undefined &&
+        parseSpawnModelConfig(value.approvalReviewer) === null) ||
+      (value.askRelay !== undefined &&
+        (!isRecord(value.askRelay) || !isNonEmptyString(value.askRelay.name))) ||
+      (value.approvalReviewerAllowThreshold !== undefined &&
+        (!isApprovalAllowThreshold(value.approvalReviewerAllowThreshold) ||
+          value.approvalReviewerClassifier === undefined)) ||
+      (value.approvalReviewerManaged !== undefined &&
+        (value.approvalReviewerManaged !== true ||
+          value.approvalReviewerClassifier === undefined)) ||
+      (value.approvalReviewerClassifier !== undefined &&
+        (value.approvalReviewer !== undefined ||
+          !parseClassifierCredentials(value.approvalReviewerClassifier))) ||
+      (value.rolePrompt !== undefined && !isNonEmptyString(value.rolePrompt)) ||
+      (value.systemPrompt !== undefined && !isNonEmptyString(value.systemPrompt)) ||
+      (value.systemPromptAppend !== undefined && !isNonEmptyString(value.systemPromptAppend)) ||
+      (value.systemPromptBoost !== undefined && !isNonEmptyString(value.systemPromptBoost)) ||
+      (value.refusalRetryPrompt !== undefined && !isNonEmptyString(value.refusalRetryPrompt)) ||
+      (value.botMode !== undefined && typeof value.botMode !== 'boolean') ||
+      (value.botGroupTasks !== undefined && typeof value.botGroupTasks !== 'boolean') ||
+      (value.botDiscussMode !== undefined && typeof value.botDiscussMode !== 'boolean') ||
+      (value.botDiscussMode === true && (value.botMode !== true || value.botGroupTasks !== true)) ||
+      (value.botRoutines !== undefined && typeof value.botRoutines !== 'boolean') ||
+      (value.secretaryMode !== undefined && typeof value.secretaryMode !== 'boolean') ||
+      (value.botDelegationTask !== undefined && typeof value.botDelegationTask !== 'boolean') ||
+      (value.botWriteLock !== undefined &&
+        (!isRecord(value.botWriteLock) ||
+          !isNonEmptyString(value.botWriteLock.label) ||
+          !Array.isArray(value.botWriteLock.ancestors) ||
+          !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
+      (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean') ||
+      (value.instanceId !== undefined && !isUuid(value.instanceId))
+    ) {
+      return null;
     }
-    case 'set-model':
-      return hasExactKeys(value, ['type', 'identity', 'model']) &&
-        parseAnySessionIdentity(value.identity) &&
-        parseSessionModelConfig(value.model)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-thinking':
-      return hasExactKeys(value, ['type', 'identity', 'level']) &&
-        parseAnySessionIdentity(value.identity) &&
-        THINKING_LEVELS.includes(value.level as ThinkingLevel)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-system-prompt':
-      return hasExactKeys(value, ['type', 'identity', 'systemPrompt']) &&
-        parseSessionIdentity(value.identity) &&
-        isNonEmptyString(value.systemPrompt)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-reasoning':
-      return hasOnlyKeys(value, ['type', 'identity', 'enabled', 'level']) &&
-        parseAnySessionIdentity(value.identity) &&
-        typeof value.enabled === 'boolean' &&
-        (value.level === undefined || THINKING_LEVELS.includes(value.level as ThinkingLevel))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'approval-respond':
-      return hasExactKeys(value, ['type', 'identity', 'requestId', 'decision']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.requestId) &&
-        isApprovalDecision(value.decision)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'request-timeout':
-      return hasExactKeys(value, ['type', 'identity', 'kind', 'requestId']) &&
-        parseAnySessionIdentity(value.identity) &&
-        (value.kind === 'approval' || value.kind === 'ask') &&
-        isNonEmptyString(value.requestId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'agent-notify':
-      return hasExactKeys(value, ['type', 'identity', 'text', 'urgent']) &&
-        parseSessionIdentity(value.identity) &&
-        isNonEmptyString(value.text) &&
-        typeof value.urgent === 'boolean'
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-approval-mode':
-      return hasOnlyKeys(value, ['type', 'identity', 'mode', 'autoReject']) &&
-        parseAnySessionIdentity(value.identity) &&
-        APPROVAL_MODES.includes(value.mode as ApprovalMode) &&
-        (value.autoReject === undefined || typeof value.autoReject === 'boolean')
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-ask-relay':
-      return hasOnlyKeys(value, ['type', 'identity', 'relay']) &&
-        parseAnySessionIdentity(value.identity) &&
-        (value.relay === undefined || (isRecord(value.relay) && isNonEmptyString(value.relay.name)))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-plan-mode':
-      return hasExactKeys(value, ['type', 'identity', 'active']) &&
-        parseSessionIdentity(value.identity) &&
-        typeof value.active === 'boolean'
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plan-respond':
-      return hasOnlyKeys(value, ['type', 'identity', 'planId', 'action', 'feedback']) &&
-        parseSessionIdentity(value.identity) &&
-        isNonEmptyString(value.planId) &&
-        PLAN_RESPOND_ACTIONS.includes(value.action as PlanRespondAction) &&
-        (value.feedback === undefined ||
-          (typeof value.feedback === 'string' && value.feedback.length <= PLAN_FEEDBACK_MAX))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-approval-reviewer':
-      return hasOnlyKeys(value, ['type', 'model', 'classifier', 'managed', 'allowThreshold']) &&
-        (value.allowThreshold === undefined ||
-          (isApprovalAllowThreshold(value.allowThreshold) && value.classifier !== undefined)) &&
-        (value.model === undefined || parseSpawnModelConfig(value.model)) &&
-        (value.classifier === undefined ||
-          (value.model === undefined && parseClassifierCredentials(value.classifier))) &&
-        (value.managed === undefined || (value.managed === true && value.classifier !== undefined))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-compact-route':
-      return hasOnlyKeys(value, ['type', 'model', 'mode']) &&
-        (value.model === undefined || parseSpawnModelConfig(value.model) !== null) &&
-        (value.mode === undefined || parseSmartCompactMode(value.mode) !== null)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-max-active-coworkers':
-      return hasExactKeys(value, ['type', 'limit']) && parseMaxActiveCoworkers(value.limit) !== null
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-auto-retry-limit':
-      return hasExactKeys(value, ['type', 'limit']) && parseAutoRetryLimit(value.limit) !== null
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-long-cache-retention':
-      return hasExactKeys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-shell-limits':
-      return hasExactKeys(value, ['type', 'limits']) &&
-        isRecord(value.limits) &&
-        JSON.stringify(resolveShellLimits(value.limits)) === JSON.stringify(value.limits)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-privacy-masking':
-      return hasExactKeys(value, ['type', 'settings']) &&
-        JSON.stringify(parsePrivacyMaskSettings(value.settings)) === JSON.stringify(value.settings)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-image-generation-config':
-      return hasOnlyKeys(value, ['type', 'config', 'error']) &&
-        (value.config === null || parseImageGenerationConfig(value.config) !== null) &&
-        (value.error === undefined ||
-          (typeof value.error === 'string' && value.error.length <= 1024))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-web-search-config':
-      return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
-        (value.configured === undefined || typeof value.configured === 'boolean') &&
-        Array.isArray(value.chain) &&
-        value.chain.length <= WEB_SEARCH_CHAIN_MAX &&
-        value.chain.every(isWebSearchChainEntry)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-disabled-workflow-presets':
-      return hasExactKeys(value, ['type', 'ids']) &&
-        Array.isArray(value.ids) &&
-        value.ids.length <= 64 &&
-        value.ids.every((id) => typeof id === 'string' && isWorkflowPresetId(id))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-builtin-tools':
-      return hasExactKeys(value, ['type', 'identity', 'disabledTools']) &&
-        parseSessionIdentity(value.identity) &&
-        Array.isArray(value.disabledTools) &&
-        value.disabledTools.length <= 64 &&
-        value.disabledTools.every(
-          (id) => typeof id === 'string' && id.length > 0 && id.length <= 64
-        )
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'set-model-directory':
-      return hasExactKeys(value, ['type', 'snapshot', 'customProviders'])
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'ask-respond':
-      return hasOnlyKeys(value, ['type', 'identity', 'requestId', 'answer', 'by', 'name']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.requestId) &&
-        isNonEmptyString(value.answer) &&
-        (value.by === undefined || value.by === 'user' || value.by === 'relay') &&
-        (value.name === undefined || isNonEmptyString(value.name))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'browser-result':
-    case 'memory-result':
-    case 'delegation-result':
-    case 'computer-result':
-    case 'plugin-tool-result': {
-      if (
-        !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
-        !parseAnySessionIdentity(value.identity) ||
-        !isNonEmptyString(value.requestId) ||
-        typeof value.ok !== 'boolean'
-      ) {
-        return null;
-      }
-      const shapeOk = value.ok
-        ? value.error === undefined
-        : isNonEmptyString(value.error) && value.result === undefined;
-      return shapeOk ? (value as unknown as AgentCommand) : null;
+    return value as unknown as AgentCommand;
+  },
+  'spawn-child': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'cwd', 'config', 'resumeFile']) &&
+      parseChildSessionIdentity(value.identity) &&
+      typeof value.cwd === 'string' &&
+      parseResolvedAgentTypeSpawnConfig(value.config) &&
+      (value.resumeFile === undefined || isNonEmptyString(value.resumeFile))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'prompt-child': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'requestId', 'task', 'requestBudget']) &&
+      parseChildSessionIdentity(value.identity) &&
+      isNonEmptyString(value.requestId) &&
+      parseAgentDispatchTask(value.task) &&
+      (value.requestBudget === undefined || value.requestBudget === true)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'agent-control-result': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'requestId', 'response']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.requestId) &&
+      parseAgentControlToolResponse(value.response)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'dismiss-child': (value: Record<string, unknown>): AgentCommand | null => {
+    const parent = parseSessionIdentity(value.parent);
+    const child = parseChildSessionIdentity(value.child);
+    return hasOnlyKeys(value, ['type', 'parent', 'child', 'notify']) &&
+      parent &&
+      child &&
+      child.parent.sessionId === parent.sessionId &&
+      child.parent.generation === parent.generation &&
+      (value.notify === undefined || typeof value.notify === 'boolean')
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'dismiss-coworker': (value: Record<string, unknown>): AgentCommand | null => {
+    const parent = parseSessionIdentity(value.parent);
+    return hasOnlyKeys(value, ['type', 'parent', 'coworkerId', 'notify']) &&
+      parent &&
+      isNonEmptyString(value.coworkerId) &&
+      // 归属校验：coworker id 恒为 `父id::cw-…`，防跨会话误解雇
+      value.coworkerId.startsWith(`${parent.sessionId}::cw-`) &&
+      (value.notify === undefined || typeof value.notify === 'boolean')
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'resume-coworker': (value: Record<string, unknown>): AgentCommand | null => {
+    const parent = parseSessionIdentity(value.parent);
+    return hasOnlyKeys(value, [
+      'type',
+      'parent',
+      'coworkerId',
+      'name',
+      'agentType',
+      'resumeFile',
+    ]) &&
+      parent &&
+      isNonEmptyString(value.coworkerId) &&
+      value.coworkerId.startsWith(`${parent.sessionId}::cw-`) &&
+      isNonEmptyString(value.name) &&
+      (value.agentType === undefined || isNonEmptyString(value.agentType)) &&
+      isNonEmptyString(value.resumeFile)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'complete-text': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, [
+      'type',
+      'requestId',
+      'systemPrompt',
+      'userText',
+      'candidates',
+      'timeoutMs',
+      'maxTokens',
+      'stream',
+      'reasoning',
+      'probe',
+    ]) &&
+      isNonEmptyString(value.requestId) &&
+      typeof value.systemPrompt === 'string' &&
+      typeof value.userText === 'string' &&
+      typeof value.timeoutMs === 'number' &&
+      Number.isFinite(value.timeoutMs) &&
+      value.timeoutMs > 0 &&
+      (value.maxTokens === undefined ||
+        (typeof value.maxTokens === 'number' &&
+          Number.isInteger(value.maxTokens) &&
+          value.maxTokens > 0)) &&
+      (value.stream === undefined || value.stream === true) &&
+      (value.reasoning === undefined ||
+        value.reasoning === 'off' ||
+        THINKING_LEVELS.includes(value.reasoning as ThinkingLevel)) &&
+      (value.probe === undefined || value.probe === true) &&
+      Array.isArray(value.candidates) &&
+      value.candidates.length >= 1 &&
+      value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
+      value.candidates.every((candidate) => parseSpawnModelConfig(candidate))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'abort-complete-text': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'classify-choice': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, [
+      'type',
+      'requestId',
+      'classifier',
+      'state',
+      'instructions',
+      'criteria',
+      'timeoutMs',
+    ]) &&
+      isNonEmptyString(value.requestId) &&
+      parseClassifierCredentials(value.classifier) &&
+      isRecord(value.state) &&
+      isNonEmptyString(value.instructions) &&
+      isRecord(value.criteria) &&
+      Object.keys(value.criteria).length > 0 &&
+      Object.values(value.criteria).every(isNonEmptyString) &&
+      typeof value.timeoutMs === 'number' &&
+      Number.isFinite(value.timeoutMs) &&
+      value.timeoutMs > 0
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'abort-classify-choice': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'summarize-title': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'conversationId', 'input', 'candidates']) &&
+      isNonEmptyString(value.conversationId) &&
+      parseTitleSummaryInput(value.input) &&
+      Array.isArray(value.candidates) &&
+      value.candidates.length >= 1 &&
+      value.candidates.length <= TITLE_SUMMARY_MAX_CANDIDATES &&
+      value.candidates.every((candidate) => parseSpawnModelConfig(candidate))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  prompt: parsePromptOrSteer,
+  steer: parsePromptOrSteer,
+  'set-model': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'model']) &&
+      parseAnySessionIdentity(value.identity) &&
+      parseSessionModelConfig(value.model)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-thinking': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'level']) &&
+      parseAnySessionIdentity(value.identity) &&
+      THINKING_LEVELS.includes(value.level as ThinkingLevel)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-system-prompt': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'systemPrompt']) &&
+      parseSessionIdentity(value.identity) &&
+      isNonEmptyString(value.systemPrompt)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-reasoning': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'enabled', 'level']) &&
+      parseAnySessionIdentity(value.identity) &&
+      typeof value.enabled === 'boolean' &&
+      (value.level === undefined || THINKING_LEVELS.includes(value.level as ThinkingLevel))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'approval-respond': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'requestId', 'decision']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.requestId) &&
+      isApprovalDecision(value.decision)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'request-timeout': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'kind', 'requestId']) &&
+      parseAnySessionIdentity(value.identity) &&
+      (value.kind === 'approval' || value.kind === 'ask') &&
+      isNonEmptyString(value.requestId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'agent-notify': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'text', 'urgent']) &&
+      parseSessionIdentity(value.identity) &&
+      isNonEmptyString(value.text) &&
+      typeof value.urgent === 'boolean'
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-approval-mode': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'mode', 'autoReject']) &&
+      parseAnySessionIdentity(value.identity) &&
+      APPROVAL_MODES.includes(value.mode as ApprovalMode) &&
+      (value.autoReject === undefined || typeof value.autoReject === 'boolean')
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-ask-relay': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'relay']) &&
+      parseAnySessionIdentity(value.identity) &&
+      (value.relay === undefined || (isRecord(value.relay) && isNonEmptyString(value.relay.name)))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-plan-mode': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'active']) &&
+      parseSessionIdentity(value.identity) &&
+      typeof value.active === 'boolean'
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plan-respond': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'planId', 'action', 'feedback']) &&
+      parseSessionIdentity(value.identity) &&
+      isNonEmptyString(value.planId) &&
+      PLAN_RESPOND_ACTIONS.includes(value.action as PlanRespondAction) &&
+      (value.feedback === undefined ||
+        (typeof value.feedback === 'string' && value.feedback.length <= PLAN_FEEDBACK_MAX))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-approval-reviewer': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'model', 'classifier', 'managed', 'allowThreshold']) &&
+      (value.allowThreshold === undefined ||
+        (isApprovalAllowThreshold(value.allowThreshold) && value.classifier !== undefined)) &&
+      (value.model === undefined || parseSpawnModelConfig(value.model)) &&
+      (value.classifier === undefined ||
+        (value.model === undefined && parseClassifierCredentials(value.classifier))) &&
+      (value.managed === undefined || (value.managed === true && value.classifier !== undefined))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-compact-route': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'model', 'mode']) &&
+      (value.model === undefined || parseSpawnModelConfig(value.model) !== null) &&
+      (value.mode === undefined || parseSmartCompactMode(value.mode) !== null)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-max-active-coworkers': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'limit']) && parseMaxActiveCoworkers(value.limit) !== null
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-auto-retry-limit': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'limit']) && parseAutoRetryLimit(value.limit) !== null
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-long-cache-retention': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-shell-limits': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'limits']) &&
+      isRecord(value.limits) &&
+      JSON.stringify(resolveShellLimits(value.limits)) === JSON.stringify(value.limits)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-privacy-masking': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'settings']) &&
+      JSON.stringify(parsePrivacyMaskSettings(value.settings)) === JSON.stringify(value.settings)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-image-generation-config': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'config', 'error']) &&
+      (value.config === null || parseImageGenerationConfig(value.config) !== null) &&
+      (value.error === undefined || (typeof value.error === 'string' && value.error.length <= 1024))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-web-search-config': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'chain', 'configured']) &&
+      (value.configured === undefined || typeof value.configured === 'boolean') &&
+      Array.isArray(value.chain) &&
+      value.chain.length <= WEB_SEARCH_CHAIN_MAX &&
+      value.chain.every(isWebSearchChainEntry)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-disabled-workflow-presets': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'ids']) &&
+      Array.isArray(value.ids) &&
+      value.ids.length <= 64 &&
+      value.ids.every((id) => typeof id === 'string' && isWorkflowPresetId(id))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-builtin-tools': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'disabledTools']) &&
+      parseSessionIdentity(value.identity) &&
+      Array.isArray(value.disabledTools) &&
+      value.disabledTools.length <= 64 &&
+      value.disabledTools.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 64)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'set-model-directory': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'snapshot', 'customProviders'])
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'ask-respond': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'requestId', 'answer', 'by', 'name']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.answer) &&
+      (value.by === undefined || value.by === 'user' || value.by === 'relay') &&
+      (value.name === undefined || isNonEmptyString(value.name))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'browser-result': parseHostResultCommand,
+  'memory-result': parseHostResultCommand,
+  'delegation-result': parseHostResultCommand,
+  'computer-result': parseHostResultCommand,
+  'plugin-tool-result': parseHostResultCommand,
+  'secretary-result': (value: Record<string, unknown>): AgentCommand | null => {
+    if (
+      !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
+      !parseSessionIdentity(value.identity) ||
+      !isNonEmptyString(value.requestId) ||
+      typeof value.ok !== 'boolean'
+    ) {
+      return null;
     }
-    case 'secretary-result': {
-      if (
-        !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
-        !parseSessionIdentity(value.identity) ||
-        !isNonEmptyString(value.requestId) ||
-        typeof value.ok !== 'boolean'
-      ) {
-        return null;
-      }
-      const shapeOk = value.ok
-        ? value.error === undefined
-        : isNonEmptyString(value.error) && value.result === undefined;
-      return shapeOk ? (value as unknown as AgentCommand) : null;
+    const shapeOk = value.ok
+      ? value.error === undefined
+      : isNonEmptyString(value.error) && value.result === undefined;
+    return shapeOk ? (value as unknown as AgentCommand) : null;
+  },
+  'plugin-intercept-result': (value: Record<string, unknown>): AgentCommand | null => {
+    if (
+      !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
+      !parseSessionIdentity(value.identity) ||
+      !isNonEmptyString(value.requestId) ||
+      typeof value.ok !== 'boolean'
+    ) {
+      return null;
     }
-    case 'plugin-intercept-result': {
-      if (
-        !hasOnlyKeys(value, ['type', 'identity', 'requestId', 'ok', 'result', 'error']) ||
-        !parseSessionIdentity(value.identity) ||
-        !isNonEmptyString(value.requestId) ||
-        typeof value.ok !== 'boolean'
-      ) {
-        return null;
-      }
-      const shapeOk = value.ok
-        ? value.error === undefined
-        : isNonEmptyString(value.error) && value.result === undefined;
-      return shapeOk ? (value as unknown as AgentCommand) : null;
-    }
-    case 'plugin-tool-progress':
-      return hasExactKeys(value, ['type', 'identity', 'requestId', 'text']) &&
-        parseSessionIdentity(value.identity) &&
-        isNonEmptyString(value.requestId) &&
-        isBoundedText(value.text, PLUGIN_PROGRESS_MAX_CHARS)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plugin-inject':
-      return hasOnlyKeys(value, [...PLUGIN_INJECT_KEYS, 'images']) &&
+    const shapeOk = value.ok
+      ? value.error === undefined
+      : isNonEmptyString(value.error) && value.result === undefined;
+    return shapeOk ? (value as unknown as AgentCommand) : null;
+  },
+  'plugin-tool-progress': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'requestId', 'text']) &&
+      parseSessionIdentity(value.identity) &&
+      isNonEmptyString(value.requestId) &&
+      isBoundedText(value.text, PLUGIN_PROGRESS_MAX_CHARS)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plugin-inject': (value: Record<string, unknown>): AgentCommand | null => {
+    const sender = value.sender === undefined ? undefined : parsePluginInjectSender(value.sender);
+    if (value.sender !== undefined && !sender) return null;
+    const origin = value.origin === undefined ? undefined : parsePluginInjectOrigin(value.origin);
+    if (value.origin !== undefined && !origin) return null;
+    if (
+      !(
+        hasOnlyKeys(value, [...PLUGIN_INJECT_KEYS, 'images', 'origin', 'sender']) &&
         PLUGIN_INJECT_KEYS.every((key) => key in value) &&
         parsePluginInjectImages(value.images) !== null &&
         parseSessionIdentity(value.identity) &&
@@ -4378,271 +4541,254 @@ export function parseAgentCommand(value: unknown): AgentCommand | null {
         isNonEmptyString(value.pluginName) &&
         value.pluginName.length <= 256 &&
         isNonEmptyString(value.text) &&
-        isBoundedText(value.text, PLUGIN_INJECT_MAX_CHARS) &&
+        isBoundedText(value.text, PLUGIN_INJECT_WIRE_MAX_CHARS) &&
         (value.deliverAs === 'steer' ||
           value.deliverAs === 'followUp' ||
           value.deliverAs === 'nextTurn') &&
         typeof value.triggerTurn === 'boolean'
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'workflow-stop':
-      return hasExactKeys(value, ['type', 'identity', 'runId']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.runId) &&
-        value.runId.length <= 80
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'task-stop':
-      return hasExactKeys(value, ['type', 'sessionId', 'taskId']) &&
-        isNonEmptyString(value.sessionId) &&
-        isNonEmptyString(value.taskId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'task-keep':
-      return hasExactKeys(value, ['type', 'sessionId', 'taskId', 'reason']) &&
-        isNonEmptyString(value.sessionId) &&
-        isNonEmptyString(value.taskId) &&
-        (value.reason === null ||
-          (typeof value.reason === 'string' && value.reason.length <= TASK_KEEP_REASON_MAX))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'tool-background':
-      return hasExactKeys(value, ['type', 'identity', 'toolCallId']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.toolCallId) &&
-        value.toolCallId.length <= 512
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'subagent-stop':
-      return hasExactKeys(value, ['type', 'identity', 'agentId']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isNonEmptyString(value.agentId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'compact':
-      return hasOnlyKeys(value, ['type', 'identity', 'instructions']) &&
-        parseAnySessionIdentity(value.identity) &&
-        (value.instructions === undefined || isNonEmptyString(value.instructions))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'rewind':
-      return hasOnlyKeys(value, [
-        'type',
-        'identity',
-        'entryId',
-        'userIndexFromEnd',
-        'restoreFiles',
-      ]) &&
-        parseAnySessionIdentity(value.identity) &&
-        (value.entryId !== undefined
-          ? isNonEmptyString(value.entryId) &&
-            value.entryId.trim().length > 0 &&
-            value.userIndexFromEnd === undefined
-          : isSequence(value.userIndexFromEnd)) &&
-        (value.restoreFiles === undefined || typeof value.restoreFiles === 'boolean')
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'fork': {
-      const hasEntry = typeof value.entryId === 'string';
-      const hasIndex = typeof value.userIndexFromEnd === 'number';
-      return hasOnlyKeys(value, [
-        'type',
-        'identity',
-        'targetConversationId',
-        'entryId',
-        'userIndexFromEnd',
-      ]) &&
-        parseAnySessionIdentity(value.identity) &&
-        isUuid(value.targetConversationId) &&
-        (hasEntry
-          ? !hasIndex && isNonEmptyString(value.entryId)
-          : hasIndex && isSequence(value.userIndexFromEnd))
-        ? (value as unknown as AgentCommand)
-        : null;
-    }
-    case 'abort':
-    case 'abort-retry':
-    case 'release-parent':
-      return hasExactKeys(value, ['type', 'identity']) && parseAnySessionIdentity(value.identity)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'withdraw-steer':
-      return hasExactKeys(value, ['type', 'identity', 'deliveryId']) &&
-        parseAnySessionIdentity(value.identity) &&
-        isDeliveryId(value.deliveryId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'retry':
-      return hasOnlyKeys(value, [
-        'type',
-        'identity',
-        'instanceId',
-        'unfinishedOnly',
-        'turnId',
-        'requestBudget',
-        'requestsUsed',
-      ]) &&
-        parseAnySessionIdentity(value.identity) &&
-        (value.unfinishedOnly === undefined || value.unfinishedOnly === true) &&
-        (value.turnId === undefined || isNonEmptyString(value.turnId)) &&
-        (value.requestBudget === undefined || value.requestBudget === true) &&
-        (value.requestsUsed === undefined ||
-          (Number.isInteger(value.requestsUsed) && (value.requestsUsed as number) >= 0)) &&
-        (value.instanceId === undefined ||
-          (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'append-session-custom-entry':
-      return hasExactKeys(value, ['type', 'identity', 'entry']) &&
-        parseAnySessionIdentity(value.identity) &&
-        parseAgentSessionCustomEntry(value.entry)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'reload-session':
-      return hasExactKeys(value, ['type', 'requestId', 'sessionId']) &&
-        isNonEmptyString(value.requestId) &&
-        isNonEmptyString(value.sessionId)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'snapshot':
-      if (hasExactKeys(value, ['type'])) return { type: 'snapshot' };
-      return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
-        ? { type: 'snapshot', sessionId: value.sessionId }
-        : null;
-    case 'pin-sessions':
-      return hasExactKeys(value, ['type', 'sessionIds']) &&
-        Array.isArray(value.sessionIds) &&
-        value.sessionIds.every((id) => typeof id === 'string')
-        ? { type: 'pin-sessions', sessionIds: value.sessionIds }
-        : null;
-    case 'graceful-restart':
-      if (hasExactKeys(value, ['type'])) return { type: 'graceful-restart' };
-      return hasExactKeys(value, ['type', 'keepBackgroundTasks']) &&
-        value.keepBackgroundTasks === true
-        ? { type: 'graceful-restart', keepBackgroundTasks: true }
-        : null;
-    case 'detach-background-tasks':
-      return hasExactKeys(value, ['type']) ? { type: 'detach-background-tasks' } : null;
-    case 'warm-mcp':
-      return hasExactKeys(value, ['type', 'servers']) && Array.isArray(value.servers)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plugin-mcp-list':
-      return hasExactKeys(value, ['type', 'requestId', 'servers']) &&
-        isNonEmptyString(value.requestId) &&
-        Array.isArray(value.servers)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plugin-mcp-call':
-      return hasExactKeys(value, ['type', 'requestId', 'servers', 'server', 'tool', 'args']) &&
-        isNonEmptyString(value.requestId) &&
-        Array.isArray(value.servers) &&
-        isNonEmptyString(value.server) &&
-        isNonEmptyString(value.tool) &&
-        isRecord(value.args)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plugin-mcp-cancel':
-      return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
-        ? { type: 'plugin-mcp-cancel', requestId: value.requestId }
-        : null;
-    case 'plugin-agent-run':
-      return hasOnlyKeys(value, [
-        'type',
-        'requestId',
-        'identity',
-        'prompt',
-        'systemPrompt',
-        'context',
-        'timeoutMs',
-        'model',
-      ]) &&
-        isNonEmptyString(value.requestId) &&
-        parseSessionIdentity(value.identity) &&
-        isNonEmptyString(value.prompt) &&
-        isBoundedText(value.prompt, PLUGIN_AGENT_PROMPT_MAX_CHARS) &&
-        (value.systemPrompt === undefined ||
-          (typeof value.systemPrompt === 'string' &&
-            isBoundedText(value.systemPrompt, PLUGIN_AGENT_SYSTEM_MAX_CHARS))) &&
-        (value.context === 'conversation' ||
-          value.context === 'fork' ||
-          value.context === 'none') &&
-        Number.isInteger(value.timeoutMs) &&
-        (value.timeoutMs as number) > 0 &&
-        (value.timeoutMs as number) <= PLUGIN_AGENT_MAX_TIMEOUT_MS &&
-        (value.model === undefined || parseSpawnModelConfig(value.model) !== null)
-        ? (value as unknown as AgentCommand)
-        : null;
-    case 'plugin-agent-cancel':
-      return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
-        ? { type: 'plugin-agent-cancel', requestId: value.requestId }
-        : null;
-    case 'set-proxy-env': {
-      if (!hasExactKeys(value, ['type', 'env']) || !isRecord(value.env)) return null;
-      for (const entry of Object.values(value.env)) {
-        if (entry !== null && typeof entry !== 'string') return null;
-      }
-      return value as unknown as AgentCommand;
-    }
-    default:
+      )
+    )
       return null;
-  }
+    if (!sender && !origin) return value as unknown as AgentCommand;
+    return {
+      ...(value as unknown as AgentCommand),
+      ...(origin ? { origin } : {}),
+      ...(sender ? { sender } : {}),
+    };
+  },
+  'workflow-stop': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'runId']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.runId) &&
+      value.runId.length <= 80
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'task-stop': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'sessionId', 'taskId']) &&
+      isNonEmptyString(value.sessionId) &&
+      isNonEmptyString(value.taskId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'task-keep': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'sessionId', 'taskId', 'reason']) &&
+      isNonEmptyString(value.sessionId) &&
+      isNonEmptyString(value.taskId) &&
+      (value.reason === null ||
+        (typeof value.reason === 'string' && value.reason.length <= TASK_KEEP_REASON_MAX))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'reminders-fire': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'reminders-clear': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'tool-background': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'toolCallId']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.toolCallId) &&
+      value.toolCallId.length <= 512
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'subagent-stop': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'agentId']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isNonEmptyString(value.agentId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  compact: (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'instructions']) &&
+      parseAnySessionIdentity(value.identity) &&
+      (value.instructions === undefined || isNonEmptyString(value.instructions))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  rewind: (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, [
+      'type',
+      'identity',
+      'entryId',
+      'userIndexFromEnd',
+      'restoreFiles',
+    ]) &&
+      parseAnySessionIdentity(value.identity) &&
+      (value.entryId !== undefined
+        ? isNonEmptyString(value.entryId) &&
+          value.entryId.trim().length > 0 &&
+          value.userIndexFromEnd === undefined
+        : isSequence(value.userIndexFromEnd)) &&
+      (value.restoreFiles === undefined || typeof value.restoreFiles === 'boolean')
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  fork: (value: Record<string, unknown>): AgentCommand | null => {
+    const hasEntry = typeof value.entryId === 'string';
+    const hasIndex = typeof value.turnIndexFromEnd === 'number';
+    return hasOnlyKeys(value, [
+      'type',
+      'identity',
+      'targetConversationId',
+      'entryId',
+      'turnIndexFromEnd',
+    ]) &&
+      parseAnySessionIdentity(value.identity) &&
+      isUuid(value.targetConversationId) &&
+      (hasEntry
+        ? !hasIndex && isNonEmptyString(value.entryId)
+        : hasIndex && isSequence(value.turnIndexFromEnd))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  abort: parseIdentityOnlyCommand,
+  'abort-retry': parseIdentityOnlyCommand,
+  'release-parent': parseIdentityOnlyCommand,
+  'withdraw-steer': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'deliveryId']) &&
+      parseAnySessionIdentity(value.identity) &&
+      isDeliveryId(value.deliveryId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  retry: (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, [
+      'type',
+      'identity',
+      'instanceId',
+      'unfinishedOnly',
+      'turnId',
+      'requestBudget',
+      'requestsUsed',
+    ]) &&
+      parseAnySessionIdentity(value.identity) &&
+      (value.unfinishedOnly === undefined || value.unfinishedOnly === true) &&
+      (value.turnId === undefined || isNonEmptyString(value.turnId)) &&
+      (value.requestBudget === undefined || value.requestBudget === true) &&
+      (value.requestsUsed === undefined ||
+        (Number.isInteger(value.requestsUsed) && (value.requestsUsed as number) >= 0)) &&
+      (value.instanceId === undefined ||
+        (isUuid(value.instanceId) && parseSessionIdentity(value.identity) !== null))
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'append-session-custom-entry': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'identity', 'entry']) &&
+      parseAnySessionIdentity(value.identity) &&
+      parseAgentSessionCustomEntry(value.entry)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'reload-session': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId', 'sessionId']) &&
+      isNonEmptyString(value.requestId) &&
+      isNonEmptyString(value.sessionId)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  snapshot: (value: Record<string, unknown>): AgentCommand | null => {
+    if (hasExactKeys(value, ['type'])) return { type: 'snapshot' };
+    return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
+      ? { type: 'snapshot', sessionId: value.sessionId }
+      : null;
+  },
+  'pin-sessions': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'sessionIds']) &&
+      Array.isArray(value.sessionIds) &&
+      value.sessionIds.every((id) => typeof id === 'string')
+      ? { type: 'pin-sessions', sessionIds: value.sessionIds }
+      : null;
+  },
+  'graceful-restart': (value: Record<string, unknown>): AgentCommand | null => {
+    if (hasExactKeys(value, ['type'])) return { type: 'graceful-restart' };
+    return hasExactKeys(value, ['type', 'keepBackgroundTasks']) &&
+      value.keepBackgroundTasks === true
+      ? { type: 'graceful-restart', keepBackgroundTasks: true }
+      : null;
+  },
+  'detach-background-tasks': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type']) ? { type: 'detach-background-tasks' } : null;
+  },
+  'warm-mcp': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'servers']) && Array.isArray(value.servers)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plugin-mcp-list': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId', 'servers']) &&
+      isNonEmptyString(value.requestId) &&
+      Array.isArray(value.servers)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plugin-mcp-call': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId', 'servers', 'server', 'tool', 'args']) &&
+      isNonEmptyString(value.requestId) &&
+      Array.isArray(value.servers) &&
+      isNonEmptyString(value.server) &&
+      isNonEmptyString(value.tool) &&
+      isRecord(value.args)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plugin-mcp-cancel': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
+      ? { type: 'plugin-mcp-cancel', requestId: value.requestId }
+      : null;
+  },
+  'plugin-agent-run': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasOnlyKeys(value, [
+      'type',
+      'requestId',
+      'identity',
+      'prompt',
+      'systemPrompt',
+      'context',
+      'timeoutMs',
+      'model',
+    ]) &&
+      isNonEmptyString(value.requestId) &&
+      parseSessionIdentity(value.identity) &&
+      isNonEmptyString(value.prompt) &&
+      isBoundedText(value.prompt, PLUGIN_AGENT_PROMPT_MAX_CHARS) &&
+      (value.systemPrompt === undefined ||
+        (typeof value.systemPrompt === 'string' &&
+          isBoundedText(value.systemPrompt, PLUGIN_AGENT_SYSTEM_MAX_CHARS))) &&
+      (value.context === 'conversation' || value.context === 'fork' || value.context === 'none') &&
+      Number.isInteger(value.timeoutMs) &&
+      (value.timeoutMs as number) > 0 &&
+      (value.timeoutMs as number) <= PLUGIN_AGENT_MAX_TIMEOUT_MS &&
+      (value.model === undefined || parseSpawnModelConfig(value.model) !== null)
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
+  'plugin-agent-cancel': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'requestId']) && isNonEmptyString(value.requestId)
+      ? { type: 'plugin-agent-cancel', requestId: value.requestId }
+      : null;
+  },
+  'set-proxy-env': (value: Record<string, unknown>): AgentCommand | null => {
+    if (!hasExactKeys(value, ['type', 'env']) || !isRecord(value.env)) return null;
+    for (const entry of Object.values(value.env)) {
+      if (entry !== null && typeof entry !== 'string') return null;
+    }
+    return value as unknown as AgentCommand;
+  },
+} satisfies Record<AgentCommand['type'], ClosedParser<AgentCommand>>;
+
+/** 收窄 Main → worker 命令。旧 global/builtin session shape 一律拒绝。 */
+export function parseAgentCommand(value: unknown): AgentCommand | null {
+  if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  return parseClosed(agentCommandParsers, value.type, value);
 }
 
-function parseLifecycleEvent(value: Record<string, unknown>): AgentWorkerEvent | null {
-  const identity =
-    value.type === 'child-reserved' ||
-    value.type === 'child-ready' ||
-    value.type === 'child-rejected' ||
-    value.type === 'child-ended'
-      ? parseChildSessionIdentity(value.identity)
-      : parseSessionIdentity(value.identity);
-  if (!identity || !isSequence(value.seq)) return null;
-  switch (value.type) {
-    case 'parent-ready':
-      return isNonEmptyString(value.sessionFile) &&
-        parseModelRef(value.model) &&
-        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'model-changed':
-      return parseModelRef(value.model) &&
-        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'parent-rejected':
-    case 'parent-ended':
-      return hasOnlyKeys(value, ['type', 'identity', 'seq', 'reason', 'instanceId']) &&
-        isNonEmptyString(value.reason) &&
-        (value.instanceId === undefined || isUuid(value.instanceId))
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'child-rejected':
-    case 'child-ended':
-      return isNonEmptyString(value.reason) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'child-reserved':
-      return isNonEmptyString(value.requestId) && parseChildConversationMetadata(value.metadata)
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'child-ready': {
-      const proof = parseResolvedChildProfileProof(value.proof);
-      if (
-        !hasExactKeys(value, ['type', 'identity', 'seq', 'sessionFile', 'proof']) ||
-        !isNonEmptyString(value.sessionFile) ||
-        !proof ||
-        !('typeKey' in identity) ||
-        proof.typeKey !== identity.typeKey
-      ) {
-        return null;
-      }
-      return value as unknown as AgentWorkerEvent;
-    }
-    default:
-      return null;
-  }
-}
-
-/** 收窄 worker → Main/Renderer 统一事件；缺 generation 的旧事件拒绝。 */
 const isOptionalTimestamp = (value: unknown): boolean =>
   value === undefined || (typeof value === 'number' && Number.isFinite(value));
 
@@ -4650,6 +4796,7 @@ const DEFERRED_SESSION_KEYS = new Set([
   'identity',
   'reason',
   'toolsInFlight',
+  'toolNames',
   'undetachableTasks',
   'reply',
 ]);
@@ -4666,15 +4813,56 @@ function isRestartReplyProgress(value: unknown): value is RestartReplyProgress {
   );
 }
 
-export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
-  if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
-  if (value.type === 'privacy-mask-ledger') {
+const parseWorkspaceLockResult = (value: Record<string, unknown>): AgentWorkerEvent | null => {
+  return hasOnlyKeys(value, ['type', 'requestId', 'ok', 'error']) &&
+    isNonEmptyString(value.requestId) &&
+    (value.ok === true
+      ? value.error === undefined
+      : value.ok === false && isNonEmptyString(value.error))
+    ? (value as unknown as AgentWorkerEvent)
+    : null;
+};
+const parseParentLifecycleEnd = requireEventIdentity(
+  'parent',
+  (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return hasOnlyKeys(value, ['type', 'identity', 'seq', 'reason', 'instanceId']) &&
+      isNonEmptyString(value.reason) &&
+      (value.instanceId === undefined || isUuid(value.instanceId))
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+);
+
+const parseChildLifecycleEnd = requireEventIdentity(
+  'child',
+  (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return isNonEmptyString(value.reason) ? (value as unknown as AgentWorkerEvent) : null;
+  }
+);
+const parseDeliveryOutcome = requireEventIdentity(
+  'any',
+  (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return hasExactKeys(value, ['type', 'identity', 'seq', 'deliveryId']) &&
+      isDeliveryId(value.deliveryId)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }
+);
+
+const parseTaskEvent = requireEventIdentity(
+  'any',
+  (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return isNonEmptyString(value.taskId) ? (value as unknown as AgentWorkerEvent) : null;
+  }
+);
+const agentWorkerEventParsers = {
+  'privacy-mask-ledger': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     const record = parsePrivacyMaskRecord(value.record);
     return hasExactKeys(value, ['type', 'record']) && record
       ? { type: 'privacy-mask-ledger', record }
       : null;
-  }
-  if (value.type === 'oauth-pool-select') {
+  },
+  'oauth-pool-select': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasOnlyKeys(value, [
       'type',
       'requestId',
@@ -4693,29 +4881,10 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       (value.failed === undefined || parseOauthPoolFailure(value.failed) !== null)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (
-    value.type === 'parent-ready' ||
-    value.type === 'model-changed' ||
-    value.type === 'parent-rejected' ||
-    value.type === 'parent-ended' ||
-    value.type === 'child-reserved' ||
-    value.type === 'child-ready' ||
-    value.type === 'child-rejected' ||
-    value.type === 'child-ended'
-  ) {
-    return parseLifecycleEvent(value);
-  }
-  if (value.type === 'workspace-lock-result' || value.type === 'workspace-unlock-result') {
-    return hasOnlyKeys(value, ['type', 'requestId', 'ok', 'error']) &&
-      isNonEmptyString(value.requestId) &&
-      (value.ok === true
-        ? value.error === undefined
-        : value.ok === false && isNonEmptyString(value.error))
-      ? (value as unknown as AgentWorkerEvent)
-      : null;
-  }
-  if (value.type === 'plugin-mcp-result') {
+  },
+  'workspace-lock-result': parseWorkspaceLockResult,
+  'workspace-unlock-result': parseWorkspaceLockResult,
+  'plugin-mcp-result': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     if (!isNonEmptyString(value.requestId)) return null;
     if (value.ok === true)
       return hasExactKeys(value, ['type', 'requestId', 'ok', 'value'])
@@ -4726,14 +4895,14 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       isNonEmptyString(value.error)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'plugin-agent-event') {
+  },
+  'plugin-agent-event': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     if (!hasExactKeys(value, ['type', 'requestId', 'event']) || !isNonEmptyString(value.requestId))
       return null;
     const event = parsePluginAgentRunEvent(value.event);
     return event ? { type: 'plugin-agent-event', requestId: value.requestId, event } : null;
-  }
-  if (value.type === 'session-reloaded') {
+  },
+  'session-reloaded': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     if (
       !hasExactKeys(value, ['type', 'requestId', 'result']) ||
       !isNonEmptyString(value.requestId) ||
@@ -4750,14 +4919,14 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           hasExactKeys(result, ['ok', 'error']) &&
           isNonEmptyString(result.error);
     return valid ? (value as unknown as AgentWorkerEvent) : null;
-  }
-  if (value.type === 'snapshot') {
+  },
+  snapshot: (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return Array.isArray(value.sessions) &&
       value.sessions.every((session) => parseSessionSnapshot(session) !== null)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'mcp-status') {
+  },
+  'mcp-status': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     // 该事件会广播到全部窗口，字段白名单 + 逐项类型都要卡死
     return hasOnlyKeys(value, [
       'type',
@@ -4776,37 +4945,37 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
       MCP_CONNECTION_STATES.includes(value.state as McpConnectionState)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'mcp-oauth-refresh') {
+  },
+  'mcp-oauth-refresh': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasOnlyKeys(value, ['type', 'requestId', 'serverId', 'rejected']) &&
       isNonEmptyString(value.requestId) &&
       isNonEmptyString(value.serverId) &&
       (value.rejected === undefined || isNonEmptyString(value.rejected))
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'title-generated') {
+  },
+  'title-generated': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'conversationId', 'title']) &&
       isNonEmptyString(value.conversationId) &&
       isNonEmptyString(value.title)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'title-failed') {
+  },
+  'title-failed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'conversationId', 'error']) &&
       isNonEmptyString(value.conversationId) &&
       isNonEmptyString(value.error)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'tool-batch-completed') {
+  },
+  'tool-batch-completed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'identity', 'digest']) &&
       parseSessionIdentity(value.identity) &&
       parseToolBatchDigest(value.digest)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'graceful-restart-deferred') {
+  },
+  'graceful-restart-deferred': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'sessions']) &&
       Array.isArray(value.sessions) &&
       value.sessions.every(
@@ -4816,115 +4985,193 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           (entry.undetachableTasks === undefined ||
             (Array.isArray(entry.undetachableTasks) &&
               entry.undetachableTasks.every(isNonEmptyString))) &&
+          (entry.toolNames === undefined ||
+            (Array.isArray(entry.toolNames) && entry.toolNames.every(isNonEmptyString))) &&
           (entry.reply === undefined || isRestartReplyProgress(entry.reply)) &&
           parseSessionIdentity(entry.identity) &&
-          (entry.reason === 'tool-in-flight' || entry.reason === 'turn-in-progress') &&
+          (entry.reason === 'tool-in-flight' ||
+            entry.reason === 'turn-in-progress' ||
+            entry.reason === 'session-starting') &&
           Array.isArray(entry.toolsInFlight) &&
           entry.toolsInFlight.every(isNonEmptyString)
       )
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
+  },
   // 断点内容由 Main 用 parseRestartCheckpoint 细验（该函数带 node:fs，渲染层不能引）
-  if (value.type === 'graceful-restart-ready') {
+  'graceful-restart-ready': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'checkpoint']) &&
       isRecord(value.checkpoint) &&
       Array.isArray(value.checkpoint.sessions)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'background-tasks-detached') {
+  },
+  'background-tasks-detached': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'detached']) &&
       typeof value.detached === 'number' &&
       Number.isInteger(value.detached) &&
       value.detached >= 0
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'session-wake-requested') {
+  },
+  'session-wake-requested': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'unopened-background-tasks') {
+  },
+  'session-reminder-due': (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return hasExactKeys(value, ['type', 'sessionId']) && isNonEmptyString(value.sessionId)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  },
+  'unopened-background-tasks': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'sessionId', 'tasks']) &&
       isNonEmptyString(value.sessionId) &&
       Array.isArray(value.tasks) &&
       value.tasks.every((task) => isRecord(task) && isNonEmptyString(task.taskId))
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'text-delta') {
+  },
+  'text-delta': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasOnlyKeys(value, ['type', 'requestId', 'text', 'thinking']) &&
       isNonEmptyString(value.requestId) &&
       typeof value.text === 'string' &&
       (value.thinking === undefined || typeof value.thinking === 'string')
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'text-completed') {
+  },
+  'text-completed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'requestId', 'text']) &&
       isNonEmptyString(value.requestId) &&
       typeof value.text === 'string'
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'text-failed') {
+  },
+  'text-failed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'requestId', 'error']) &&
       isNonEmptyString(value.requestId) &&
       isNonEmptyString(value.error)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'choice-classified') {
+  },
+  'choice-classified': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'requestId', 'probabilities']) &&
       isNonEmptyString(value.requestId) &&
       isRecord(value.probabilities) &&
       Object.values(value.probabilities).every((p) => typeof p === 'number' && Number.isFinite(p))
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  if (value.type === 'choice-failed') {
+  },
+  'choice-failed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'requestId', 'error']) &&
       isNonEmptyString(value.requestId) &&
       isNonEmptyString(value.error)
       ? (value as unknown as AgentWorkerEvent)
       : null;
-  }
-  const identity = parseAnySessionIdentity(value.identity);
-  if (!identity || !isSequence(value.seq)) return null;
-  switch (value.type) {
-    case 'request-body': {
+  },
+  'parent-ready': requireEventIdentity(
+    'parent',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      return isNonEmptyString(value.sessionFile) &&
+        parseModelRef(value.model) &&
+        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    }
+  ),
+  'model-changed': requireEventIdentity(
+    'parent',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      return parseModelRef(value.model) &&
+        (value.imageInput === undefined || typeof value.imageInput === 'boolean')
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    }
+  ),
+  'parent-rejected': parseParentLifecycleEnd,
+  'parent-ended': parseParentLifecycleEnd,
+  'child-rejected': parseChildLifecycleEnd,
+  'child-ended': parseChildLifecycleEnd,
+  'child-reserved': requireEventIdentity(
+    'child',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      return isNonEmptyString(value.requestId) && parseChildConversationMetadata(value.metadata)
+        ? (value as unknown as AgentWorkerEvent)
+        : null;
+    }
+  ),
+  'child-ready': requireEventIdentity(
+    'child',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      const proof = parseResolvedChildProfileProof(value.proof);
+      const identity = parseChildSessionIdentity(value.identity);
+      if (!identity) return null;
+      if (
+        !hasExactKeys(value, ['type', 'identity', 'seq', 'sessionFile', 'proof']) ||
+        !isNonEmptyString(value.sessionFile) ||
+        !proof ||
+        !('typeKey' in identity) ||
+        proof.typeKey !== identity.typeKey
+      ) {
+        return null;
+      }
+      return value as unknown as AgentWorkerEvent;
+    }
+  ),
+  'request-body': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      const identity = parseAnySessionIdentity(value.identity);
+      if (!identity || !isSequence(value.seq)) return null;
       const usage = parseRequestBodyUsage(value.usage);
       return hasExactKeys(value, ['type', 'identity', 'seq', 'usage']) && usage
         ? { type: 'request-body', identity, seq: value.seq, usage }
         : null;
     }
-    case 'agent-control-invoke':
+  ),
+  'agent-control-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'request']) &&
         isNonEmptyString(value.requestId) &&
         parseAgentControlToolRequest(value.request)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'agent-control-cancel':
+    }
+  ),
+  'agent-control-cancel': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'kind']) &&
         isNonEmptyString(value.requestId) &&
         (value.kind === 'abort' || value.kind === 'detach')
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'browser-invoke':
+    }
+  ),
+  'browser-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
         BROWSER_OPS.includes(value.op as BrowserOp)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'memory-invoke':
+    }
+  ),
+  'memory-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
         MEMORY_OPS.includes(value.op as MemoryOp)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'delegation-invoke':
+    }
+  ),
+  'delegation-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         parseSessionIdentity(value.identity) &&
         isNonEmptyString(value.requestId) &&
@@ -4938,7 +5185,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           value.op === 'report_blocked')
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'secretary-invoke':
+    }
+  ),
+  'secretary-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         parseSessionIdentity(value.identity) &&
         isNonEmptyString(value.requestId) &&
@@ -4946,18 +5197,30 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           (SECRETARY_INTERNAL_OPS as readonly string[]).includes(value.op as string))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'computer-invoke':
+    }
+  ),
+  'computer-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId', 'op', 'params']) &&
         isNonEmptyString(value.requestId) &&
         COMPUTER_OPS.includes(value.op as ComputerOp)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'computer-cancel':
+    }
+  ),
+  'computer-cancel': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
         isNonEmptyString(value.requestId)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'plugin-tool-invoke':
+    }
+  ),
+  'plugin-tool-invoke': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasPluginAgentKeys(value, [
         'type',
         'identity',
@@ -4971,12 +5234,20 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         parsePluginToolName(value.toolName) !== null
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'plugin-tool-cancel':
+    }
+  ),
+  'plugin-tool-cancel': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
         isNonEmptyString(value.requestId)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'plugin-event':
+    }
+  ),
+  'plugin-event': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasPluginAgentKeys(value, ['type', 'identity', 'seq', 'event', 'data']) &&
         parseSessionIdentity(value.identity) &&
         typeof value.event === 'string' &&
@@ -4987,7 +5258,11 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           : isPluginObserveData(value.event, value.data))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'plugin-intercept':
+    }
+  ),
+  'plugin-intercept': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasPluginAgentKeys(value, [
         'type',
         'identity',
@@ -5005,30 +5280,44 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         isPluginInterceptPayload(value.event, value.payload)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'workspace-branch-context-consumed':
+    }
+  ),
+  'workspace-branch-context-consumed': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'requestId']) &&
         isNonEmptyString(value.requestId)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'delivery-settled':
-    case 'delivery-rejected':
-    case 'delivery-deferred':
-      return hasExactKeys(value, ['type', 'identity', 'seq', 'deliveryId']) &&
-        isDeliveryId(value.deliveryId)
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'status':
-      return (value.status === 'idle' || value.status === 'running' || value.status === 'failed') &&
-        (value.turnId === undefined || isNonEmptyString(value.turnId))
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'message-upsert':
+    }
+  ),
+  'delivery-settled': parseDeliveryOutcome,
+  'delivery-rejected': (value) => {
+    const { reason, ...rest } = value;
+    return (reason === undefined || reason === 'turn-stuck') && parseDeliveryOutcome(rest)
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  },
+  'delivery-deferred': parseDeliveryOutcome,
+  status: requireEventIdentity('any', (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    return (value.status === 'idle' || value.status === 'running' || value.status === 'failed') &&
+      (value.turnId === undefined || isNonEmptyString(value.turnId))
+      ? (value as unknown as AgentWorkerEvent)
+      : null;
+  }),
+  'message-upsert': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isSequence(value.index) &&
         isRecord(value.message) &&
         hasValidProjectedMetadata(value.message)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'turn-completed':
+    }
+  ),
+  'turn-completed': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isNonEmptyString(value.turnId) &&
         (value.digest === undefined || parseTurnDigest(value.digest)) &&
         (value.report === undefined || parseTurnReport(value.report)) &&
@@ -5036,18 +5325,31 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         (value.silent === undefined || value.silent === true) &&
         (value.requestBudgetStop === undefined || value.requestBudgetStop === true) &&
         (value.requestBudgetError === undefined ||
-          (value.requestBudgetStop === true && isNonEmptyString(value.requestBudgetError)))
+          (value.requestBudgetStop === true && isNonEmptyString(value.requestBudgetError))) &&
+        (value.continues === undefined || isNonEmptyString(value.continues)) &&
+        (value.awaitingTasks === undefined || value.awaitingTasks === true) &&
+        (value.awaitingReminder === undefined || value.awaitingReminder === true) &&
+        (value.provider === undefined || isNonEmptyString(value.provider))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'turn-failed':
+    }
+  ),
+  'turn-failed': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isNonEmptyString(value.turnId) &&
         isNonEmptyString(value.error) &&
-        (value.undelivered === undefined || value.undelivered === true) &&
         (value.retryExhausted === undefined || value.retryExhausted === true) &&
-        (value.aborted === undefined || value.aborted === true)
+        (value.aborted === undefined || value.aborted === true) &&
+        (value.continues === undefined || isNonEmptyString(value.continues)) &&
+        (value.provider === undefined || isNonEmptyString(value.provider))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'turn-retry':
+    }
+  ),
+  'turn-retry': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return Number.isInteger(value.attempt) &&
         (value.attempt as number) >= 1 &&
         Number.isInteger(value.maxAttempts) &&
@@ -5056,14 +5358,26 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         isNonEmptyString(value.error)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'retry-skipped':
+    }
+  ),
+  'retry-skipped': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return hasExactKeys(value, ['type', 'identity', 'seq', 'reason']) &&
         RETRY_SKIPPED_REASONS.includes(value.reason as RetrySkippedReason)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'messages-truncated':
+    }
+  ),
+  'messages-truncated': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isSequence(value.length) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'rewind-done': {
+    }
+  ),
+  'rewind-done': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       const editorImages =
         value.editorImages === undefined ? undefined : parseAttachedImages(value.editorImages);
       return (value.editorText === undefined || typeof value.editorText === 'string') &&
@@ -5072,22 +5386,37 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         ? (value as unknown as AgentWorkerEvent)
         : null;
     }
-    case 'fork-done':
+  ),
+  'fork-done': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isUuid(value.targetConversationId) &&
         (value.sessionFile === undefined || typeof value.sessionFile === 'string') &&
         (value.entryId === undefined || isNonEmptyString(value.entryId)) &&
         (value.error === undefined || typeof value.error === 'string')
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'compaction':
+    }
+  ),
+  compaction: requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return (value.state === 'queued' || value.state === 'start' || value.state === 'end') &&
         (value.error === undefined || typeof value.error === 'string') &&
         (value.abandoned === undefined || value.abandoned === true)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'commands':
+    }
+  ),
+  commands: requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return Array.isArray(value.commands) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'session-meta': {
+    }
+  ),
+  'session-meta': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       const occupancy =
         value.occupancy === undefined ? undefined : parseContextOccupancy(value.occupancy);
       if (value.occupancy !== undefined && !occupancy) return null;
@@ -5103,7 +5432,10 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           } as unknown as AgentWorkerEvent)
         : null;
     }
-    case 'approval-request':
+  ),
+  'approval-request': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isRecord(value.request) &&
         isNonEmptyString(value.request.requestId) &&
         isNonEmptyString(value.request.tool) &&
@@ -5120,23 +5452,31 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
         isOptionalTimestamp(value.request.expiresAt) &&
         (value.request.reviewFallback === undefined ||
           APPROVAL_REVIEW_FALLBACKS.includes(value.request.reviewFallback as never)) &&
-        (value.request.guard === undefined ||
-          (isRecord(value.request.guard) &&
-            hasOnlyKeys(value.request.guard, ['ruleId', 'reason']) &&
-            isNonEmptyString(value.request.guard.ruleId) &&
-            isNonEmptyString(value.request.guard.reason)))
+        (value.request.guard === undefined || isDcgGuardHit(value.request.guard))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'approval-resolved':
+    }
+  ),
+  'approval-resolved': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isNonEmptyString(value.requestId) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'ask-resolved':
+    }
+  ),
+  'ask-resolved': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isNonEmptyString(value.requestId) &&
         (value.by === undefined || (ASK_ANSWER_BY as readonly unknown[]).includes(value.by)) &&
         (value.answer === undefined || typeof value.answer === 'string') &&
         (value.name === undefined || isNonEmptyString(value.name))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'ask-request':
+    }
+  ),
+  'ask-request': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isRecord(value.ask) &&
         isNonEmptyString(value.ask.requestId) &&
         isNonEmptyString(value.ask.question) &&
@@ -5148,51 +5488,99 @@ export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
           (isRecord(value.ask.relay) && isNonEmptyString(value.ask.relay.name)))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'subagent-update':
+    }
+  ),
+  'subagent-update': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isRecord(value.agent) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'coworker-update':
+    }
+  ),
+  'coworker-update': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isRecord(value.coworker) && isNonEmptyString(value.coworker.id)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'goal-signal':
-      return (value.kind === 'complete' || value.kind === 'blocked' || value.kind === 'wait') &&
-        typeof value.note === 'string'
-        ? (value as unknown as AgentWorkerEvent)
-        : null;
-    case 'plan-state': {
+    }
+  ),
+  'goal-signal': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
+      if (
+        (value.kind !== 'complete' && value.kind !== 'blocked' && value.kind !== 'wait') ||
+        typeof value.note !== 'string'
+      ) {
+        return null;
+      }
+      if (!('result' in value)) return value as unknown as AgentWorkerEvent;
+      const parsed = parseGoalResult(value.result);
+      if (!parsed.ok) {
+        const rest = { ...value };
+        delete rest.result;
+        return rest as unknown as AgentWorkerEvent;
+      }
+      return { ...value, result: parsed.value } as unknown as AgentWorkerEvent;
+    }
+  ),
+  'plan-state': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       const state = parsePlanState(value.state);
       return hasExactKeys(value, ['type', 'identity', 'seq', 'state']) && state
         ? ({ ...value, state } as unknown as AgentWorkerEvent)
         : null;
     }
-    case 'workflow-status': {
+  ),
+  'workflow-status': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       const run = parseWorkflowRunSnapshot(value.run);
       return hasExactKeys(value, ['type', 'identity', 'seq', 'run']) && run
         ? ({ ...value, run } as unknown as AgentWorkerEvent)
         : null;
     }
-    case 'tool-output':
+  ),
+  'tool-output': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isNonEmptyString(value.toolCallId) &&
         typeof value.output === 'string' &&
         (value.startedAt === undefined || typeof value.startedAt === 'number') &&
         (value.deadlineAt === undefined || Number.isFinite(value.deadlineAt))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'task-started':
+    }
+  ),
+  'task-started': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return isRecord(value.task) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'task-output':
-    case 'task-ended':
-      return isNonEmptyString(value.taskId) ? (value as unknown as AgentWorkerEvent) : null;
-    case 'background-tasks-level':
+    }
+  ),
+  'task-output': parseTaskEvent,
+  'task-ended': parseTaskEvent,
+  'background-tasks-level': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return Array.isArray(value.tasks) &&
         value.tasks.every((task) => isRecord(task) && isNonEmptyString(task.taskId))
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    case 'session-custom-entry':
+    }
+  ),
+  'session-custom-entry': requireEventIdentity(
+    'any',
+    (value: Record<string, unknown>): AgentWorkerEvent | null => {
       return parseAgentSessionCustomEntry(value.entry)
         ? (value as unknown as AgentWorkerEvent)
         : null;
-    default:
-      return null;
-  }
+    }
+  ),
+} satisfies Record<AgentWorkerEvent['type'], ClosedParser<AgentWorkerEvent>>;
+
+/** 收窄 worker → Main/Renderer 统一事件；缺 generation 的旧事件拒绝。 */
+export function parseAgentWorkerEvent(value: unknown): AgentWorkerEvent | null {
+  if (!isRecord(value) || !isNonEmptyString(value.type)) return null;
+  return parseClosed(agentWorkerEventParsers, value.type, value);
 }

@@ -88,6 +88,7 @@ import {
   qoderProviderConfig,
 } from '@shared/providers/qoder';
 import { looksLikeRefusal } from '@shared/refusalRetry';
+import { REMINDER_MAX_DELAY_MS, REMINDERS_FILE } from '@shared/reminders';
 import type { RequestBodyUsage } from '@shared/requestBodyUsage';
 import { turnCalledSilenceTurn, turnRequestedSilence } from '@shared/secretary/silence';
 import { isSecretaryToolAllowed, type SecretaryInvokeOp } from '@shared/secretary/tools';
@@ -130,6 +131,7 @@ import { type EditMode, resolveEditMode } from '@shared/types/editMode';
 import type { ModelEntry } from '@shared/types/llm';
 import { providerIdOfAccountKey } from '@shared/types/oauthProviders';
 import type { SecretaryToolDescriptor } from '@shared/types/secretary';
+import { classifyUpstreamError } from '@shared/upstreamRecovery';
 import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
@@ -220,10 +222,13 @@ import {
   previewModelDirectoryPush,
   registerCustomProviderModels,
 } from './customProviderRegistry';
-import { createDcgGuard } from './dcg';
+import { createDcgGuard, withDcgExemptions, withTempRootGuard } from './dcg';
 import {
+  appendInterruptedTasks,
   DETACHED_TASKS_FILE,
+  INTERRUPTED_TASKS_FILE,
   takeDetachedTasksManifest,
+  takeInterruptedTasks,
   writeDetachedTasksManifest,
 } from './detachedTasksManifest';
 import { omitNamedTools } from './disallowedTools';
@@ -263,6 +268,7 @@ import {
   resolveOauthPoolModel,
 } from './oauthAccountPool';
 import { outputLimitRecoveryExtension } from './outputLimitRecovery';
+import { applyOwnerAskResolution, OwnerGate, withOwnerGate } from './ownerGate';
 import { withPathHints } from './pathHints';
 import { PendingNotificationStore } from './pendingNotifications';
 import { type PersonaHolder, personaExtension } from './personaExtension';
@@ -285,6 +291,7 @@ import { promptCatalogExtension } from './promptCatalog';
 import { applyWorkerProxyEnv } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
 import { enqueueReminder, REMINDER_QUEUE_LIMIT } from './reminderQueue';
+import { createReminderTools, REMINDER_RETRY_MS, ReminderStore, reminderNotice } from './reminders';
 import { withRequestBodyBudget } from './requestBodyBudget';
 import { runWithRequestBodyObserver } from './requestBodyTelemetry';
 import { budgetWrapUpPrompt, RequestBudget } from './requestBudget';
@@ -303,6 +310,7 @@ import {
   silentTurnRecoveryExtension,
   steerActiveSession,
   steerDetachable,
+  withdrawFollowUps,
 } from './sessionAdapter';
 import {
   EVICTION_SWEEP_INTERVAL_MS,
@@ -338,7 +346,7 @@ import {
   systemReminderExtension,
   withSystemReminders,
 } from './systemReminder';
-import { settleChecklist } from './taskHygiene';
+import { awaitChecklist, settleChecklist } from './taskHygiene';
 import {
   buildInitialTitleUserText,
   buildRollingTitleUserText,
@@ -456,6 +464,14 @@ interface ForkBase {
 /** fork 代理能真正执行的工具；其余照原样声明（保住缓存前缀）但调用时拒绝 */
 const FORK_TOOLS = new Set(['read', 'grep', 'find', 'ls']);
 
+interface AgentRunHold {
+  id: string;
+  /** 第一次持有起算的时限；设过即表示这次 Run 进入过持有 */
+  holdTimer?: ReturnType<typeof setTimeout>;
+  /** 到时限：due 时子代理正忙、待这一轮结束再告知；told 已要它交报告，回合结束不再持有 */
+  expiry?: 'due' | 'told';
+}
+
 interface ManagedSession {
   identity: SessionIdentity;
   childIdentity?: ChildSessionIdentity;
@@ -483,6 +499,7 @@ interface ManagedSession {
   computer?: ComputerInvoker;
   pluginTools?: PluginToolInvoker;
   pluginEvents?: PluginEventInvoker;
+  ownerGate?: OwnerGate;
   /** 最近一次 auto_retry_start 携带的原始错误（取消重试时的终态错误文案） */
   lastRetryError?: string;
   /** 无人值守开关翻转后待告知模型的一条提示（只追加，不重开会话） */
@@ -499,6 +516,8 @@ interface ManagedSession {
   abortedTurnId?: string;
   /** 已见终态 agent_end、待 agent_settled 收口；failTurn 等提前收口时清掉，settled 不再重复收 */
   settlePending?: boolean;
+  /** 排进 pi followUp 队列的用户 prompt：text 是 pi 队列里的那条文本，叫停撤回时据此对上 deliveryId */
+  queuedPrompts?: { text: string; deliveryId?: string }[];
   /** 当前用户轮已做过一次空回复自动续跑 */
   silentTurnNudgeUsed: boolean;
   /** 推脱补发正文；缺省不重试 */
@@ -516,8 +535,10 @@ interface ManagedSession {
   /** 当前模型请求的发出 / 首 token / 最近出 token 时刻；回复写完（message_end）清掉。重启等安全点时报给 Main */
   replyProgress?: RestartReplyProgress;
   toolStartAt: Map<string, number>;
+  /** 在跑的工具调用名：重启等安全点时告诉 Main 在等哪个工具 */
+  toolNames: Map<string, string>;
   toolDurations: Map<string, number>;
-  /** 优雅重启：loop 停在工具批结束、下一次模型请求之前；调用即放行 */
+  /** 优雅重启：loop 停在下一次模型请求之前（新一轮的首个请求或工具批之后），消息已落盘；调用即放行 */
   restartHold?: () => void;
   /** 优雅重启等不到安全点、收尾时中止了正在写的回复：断点记成同一轮的模型请求，新进程续跑 */
   restartAbortedTurnId?: string;
@@ -532,6 +553,9 @@ interface ManagedSession {
   pendingTaskReminders: string[];
   /** 子会话自己起的后台任务的完成通知：只搭它的下一条工具结果，不为此唤起新回合 */
   childTaskNotices?: string[];
+  /** AgentService 子代理 Run：从 prompt-child / retry 起，到这次 Run 的终态那一轮为止。
+   *  回合结束时还有自己的后台任务就继续持有，任务完成时唤醒子代理接着这次 Run 跑 */
+  agentRun?: AgentRunHold;
   /** 通知队列溢出只报一次 */
   reminderEvictionReported?: boolean;
   /** 忙碌时收到的手动压缩请求：本轮收束后自动执行（用户选择「排队」而非打断） */
@@ -952,11 +976,15 @@ export class SessionSupervisor {
     /** 重启会把能脱离的转后台命令交给下一代：安全点不等它们 */
     keepBackground?: boolean;
   };
+  /** 进程收尾中：此后中止的子代理回合不是 Run 的结局 */
+  private exiting = false;
   /** 上一代 worker 的断点，按 sessionId 等对应的 spawn-parent 认领 */
   private readonly restartResume = new Map<string, RestartCheckpointEntry>();
   private readonly gate = new OperationGate();
   private readonly workspaceSwitch = new WorkspaceSwitchGate(this.sessions);
   private readonly pendingCommands = new Map<string, number>();
+  /** 正在 spawn、还没注册的父会话：重启等它落定时要报出来，不能悄悄等 */
+  private readonly spawning = new Map<string, SessionIdentity>();
   private readonly mcp = new McpManager({
     emit: (event) => this.options.emit(event),
     refreshOAuth: (serverId, rejected) => this.requestMcpOAuthRefresh(serverId, rejected),
@@ -1086,6 +1114,9 @@ export class SessionSupervisor {
     this.deliverNotification(sessionId, text);
   });
   private readonly pendingNotifications: PendingNotificationStore;
+  private readonly reminders: ReminderStore;
+  /** 已请 Main 叫醒的根会话：同一会话在途只发一次，收到 fire/clear 或隔 60 秒才重发 */
+  private readonly reminderDueSent = new Map<string, number>();
   /** 已请 Main 打开、打开后要把待投递通知交给新一轮的会话 */
   private readonly wakeOnOpen = new Set<string>();
   /** spawn 尚未注册完就到达的内置工具开关，注册后补用 */
@@ -1208,9 +1239,81 @@ export class SessionSupervisor {
 
   /** 打开的会话没在续跑上一轮：攒下的完成通知立即开一轮；在续跑的由轮末补投 */
   private wakeAfterOpen(managed: ManagedSession): void {
+    this.fireDueReminders(managed);
     if (!this.wakeOnOpen.delete(managed.identity.sessionId) || managed.currentTurnId !== undefined)
       return;
     this.flushPendingReminders(managed);
+  }
+
+  /** 提醒定时器到点：子会话直接处理；根会话请 Main 判定后回 reminders-fire（冷会话先打开） */
+  private onRemindersDue(): void {
+    const now = Date.now();
+    const due = this.reminders.due(now);
+    for (const owner of new Set(due.map((item) => item.sessionId))) {
+      if (owner.includes('::')) {
+        const child = this.sessions.get(owner);
+        if (child) this.fireDueReminders(child);
+        continue;
+      }
+      // 换代中不叫醒，下一代启动时补
+      if (this.restart) continue;
+      const managed = this.sessions.get(owner);
+      // 正在跑且到点的都等空闲：轮末直接触发
+      if (
+        managed &&
+        this.reminderBusy(managed) &&
+        due.every((item) => item.sessionId !== owner || item.ifIdle)
+      )
+        continue;
+      // 正在打开：就绪时补发
+      if (!managed && this.spawning.has(owner)) continue;
+      const sent = this.reminderDueSent.get(owner);
+      if (sent !== undefined && now - sent < REMINDER_RETRY_MS) continue;
+      this.reminderDueSent.set(owner, now);
+      this.options.emit({ type: 'session-reminder-due', sessionId: owner });
+    }
+  }
+
+  private reminderBusy(managed: ManagedSession): boolean {
+    return (
+      managed.status === 'running' ||
+      managed.roundPending === true ||
+      managed.currentTurnId !== undefined
+    );
+  }
+
+  /**
+   * 把该会话已到点的提醒交给它：先从存储删再投递，保证只发一次。
+   * 正在跑且 ifIdle 的留到轮末；子代理不在 Run 里就丢弃（没人等它的结果）
+   */
+  private fireDueReminders(managed: ManagedSession): void {
+    const id = managed.identity.sessionId;
+    if (this.restart || this.sessions.get(id) !== managed) return;
+    const child = id.includes('::');
+    const busy = this.reminderBusy(managed);
+    const texts: string[] = [];
+    let chain = 0;
+    for (const item of this.reminders.due(Date.now())) {
+      if (item.sessionId !== id) continue;
+      if (child && !managed.agentRun) {
+        this.reminders.take(item.id);
+        continue;
+      }
+      if (busy && item.ifIdle) continue;
+      if (!this.reminders.take(item.id)) continue;
+      texts.push(reminderNotice(item));
+      chain = Math.max(chain, item.chain);
+    }
+    if (texts.length === 0) return;
+    this.reminders.setChain(id, chain);
+    this.reminderDueSent.delete(id);
+    const text = texts.join('\n\n---\n\n');
+    if (child && busy) {
+      managed.childTaskNotices ??= [];
+      enqueueReminder(managed.childTaskNotices, text);
+      return;
+    }
+    this.deliverNotification(id, text);
   }
 
   private restartDataDir(): string {
@@ -1242,6 +1345,9 @@ export class SessionSupervisor {
     }
     this.pendingNotifications = new PendingNotificationStore(
       path.join(options.sessionDir, 'pending-notifications')
+    );
+    this.reminders = new ReminderStore(path.join(options.sessionDir, REMINDERS_FILE), () =>
+      this.onRemindersDue()
     );
     this.bgTasks = new BackgroundTaskManager(
       {
@@ -1298,19 +1404,21 @@ export class SessionSupervisor {
         },
         // 完成通知走合并投递:多任务同时完成合并成一条,失败在 manager 文本里自带标注
         onCompletionNotify: (sessionId, text, notifyOptions) => {
-          // 子代理起的任务只通知子代理本身：不唤醒它（task 的 Run 可能已收口），更不打扰父会话。
+          // 子代理起的任务只通知子代理本身，不打扰父会话：它持有 Run 且空闲时唤醒它，否则搭下一条工具结果。
           // 子代理已不在时丢弃：父会话从子代理结果里得知它起过哪些任务，可用 task_output 查看
           if (sessionId.includes('::')) {
             const child = this.sessions.get(sessionId);
-            if (child) {
+            if (child?.agentRun && child.status !== 'running') {
+              this.deliverNotification(sessionId, text);
+            } else if (child) {
               child.childTaskNotices ??= [];
               enqueueReminder(child.childTaskNotices, text);
-            }
+            } else if (notifyOptions?.durable) this.persistUnopenedNotification(sessionId, text);
             return;
           }
           if (notifyOptions?.durable && !this.sessions.has(sessionId)) {
             this.persistUnopenedNotification(sessionId, text);
-            this.requestWake(sessionId);
+            if (!notifyOptions.quiet) this.requestWake(sessionId);
             return;
           }
           this.notifier.notify(sessionId, text);
@@ -1326,6 +1434,13 @@ export class SessionSupervisor {
       )
     );
     sweepOrphanRuns(this.bgTasks.outputDir, handled);
+    // 上一代收尾时停掉的在跑任务（含空闲会话的）：任务表留「因重启中断」，通知所属会话一次并叫醒
+    this.bgTasks.recoverInterrupted(
+      takeInterruptedTasks(
+        path.join(this.restartDataDir(), INTERRUPTED_TASKS_FILE),
+        this.bgTasks.outputDir
+      )
+    );
     // 断点里空闲的会话带着待投递通知：重启收尾期间结束的命令只存了盘，这一代叫醒它
     for (const entry of this.restartResume.values()) {
       if (
@@ -1755,6 +1870,23 @@ export class SessionSupervisor {
       if (!this.bgTasks.owns(command.taskId, command.sessionId)) return;
       if (command.reason === null) this.bgTasks.unkeep(command.taskId);
       else this.bgTasks.keep(command.taskId, { by: 'user', reason: command.reason });
+      const held = this.sessions.get(command.sessionId);
+      if (held?.agentRun && held.status !== 'running' && !this.awaitsOwnTasks(held))
+        this.deliverNotification(
+          command.sessionId,
+          `The user kept background task ${command.taskId} running; you no longer need to wait for it before reporting.`
+        );
+      return;
+    }
+    if (command.type === 'reminders-fire') {
+      this.reminderDueSent.delete(command.sessionId);
+      const managed = this.sessions.get(command.sessionId);
+      if (managed) this.fireDueReminders(managed);
+      return;
+    }
+    if (command.type === 'reminders-clear') {
+      this.reminderDueSent.delete(command.sessionId);
+      this.reminders.clear(command.sessionId);
       return;
     }
     const identity =
@@ -1797,12 +1929,16 @@ export class SessionSupervisor {
       return;
     }
     this.pendingCommands.set(scopeId, (this.pendingCommands.get(scopeId) ?? 0) + 1);
+    const spawning = command.type === 'spawn-parent' ? command.identity : undefined;
+    if (spawning) this.spawning.set(spawning.sessionId, spawning);
     void this.gate
       .run(identity.sessionId, () => this.execute(command))
       .finally(() => {
         const count = (this.pendingCommands.get(scopeId) ?? 1) - 1;
         if (count) this.pendingCommands.set(scopeId, count);
         else this.pendingCommands.delete(scopeId);
+        if (spawning && this.spawning.get(spawning.sessionId) === spawning)
+          this.spawning.delete(spawning.sessionId);
         this.scheduleRestartCheck();
       })
       .catch((error) => {
@@ -1930,7 +2066,8 @@ export class SessionSupervisor {
           command.instanceId,
           command.workflowPresetFiles,
           command.secretaryTools,
-          command.askRelay
+          command.askRelay,
+          command.dcgExemptRules
         );
         return;
       case 'spawn-child':
@@ -2005,6 +2142,9 @@ export class SessionSupervisor {
         }
         managed.promptedRequestIds.add(command.requestId);
         managed.currentTurnId = command.requestId;
+        this.releaseRun(managed);
+        if (command.requestBudget) managed.agentRun = { id: command.requestId };
+        this.reminders.resetChain(managed.identity.sessionId);
         managed.turnAborted = false;
         // 只有子代理 Run（Main 带 requestBudget 标记）计数；Bot 成员等不 arm，不计数
         if (command.requestBudget) managed.requestBudget?.arm();
@@ -2023,6 +2163,8 @@ export class SessionSupervisor {
       case 'prompt': {
         const managed = this.must(command.identity);
         managed.plan?.supersede();
+        // 非提醒来源的输入：提醒连续链从头算
+        this.reminders.resetChain(managed.identity.sessionId);
         const images = command.images?.map((image) => ({ type: 'image' as const, ...image }));
         if (await this.interruptRetryIfAny(managed)) {
           this.promptFresh(managed, command.text, images, command.deliveryId, command.resume);
@@ -2037,7 +2179,8 @@ export class SessionSupervisor {
         // 投影已 idle 但 pi 仍忙：压缩中（pi 拒收 prompt）不限时等压完；仍 streaming 要么
         // agent_end 尚未回流，要么是 abort 后工具不响应信号的僵尸轮——steer 进僵尸轮永远
         // 无人投递，故限时等空闲后走新轮。仍在产出或投影已回到 running 的不是僵尸，继续等。
-        // 超时按失败收口，绝不静默。
+        // 超时按 deliveryId 回执这条 prompt，绝不静默。它没开出新轮，不发 turn-*、不动 status：
+        // 消费者按会话把 turn-* 当本轮终态，仍在收束的那一轮由它自己的 agent_settled 收口。
         let activityAt = managed.activityNonce;
         if (
           !(await waitPromptable(managed.session, ZOMBIE_TURN_WAIT_MS, () => {
@@ -2049,17 +2192,7 @@ export class SessionSupervisor {
             return false;
           }))
         ) {
-          const settlePending = managed.settlePending === true;
-          this.failTurn(
-            managed,
-            'The previous turn is still running and could not be interrupted. Please retry, or reopen the conversation to reset the session.',
-            true
-          );
-          // 终态 agent_end 已经记下、轮次却还在流：不能让这次误判吃掉随后的 agent_settled，
-          // 否则失败横幅会一直盖住仍在正常收束的轮次。
-          if (settlePending && (managed.session.isStreaming || managed.session.isCompacting)) {
-            managed.settlePending = true;
-          }
+          this.emitDeliveryRejected(managed, command.deliveryId, 'turn-stuck');
           return;
         }
         this.promptFresh(managed, command.text, images, command.deliveryId, command.resume);
@@ -2079,13 +2212,18 @@ export class SessionSupervisor {
           this.promptFresh(managed, command.text, images, command.deliveryId);
           return;
         }
+        // 持有中空闲：没有活轮可插，pi 只会把插话排进没人取的队列，改开新一轮接着这次 Run
+        if (managed.agentRun && managed.status !== 'running') {
+          this.promptFresh(managed, command.text, images, command.deliveryId);
+          return;
+        }
         await this.steerTracked(managed, command.text, images, command.deliveryId);
         // 用户插话时长命令不阻塞投递：前台命令转后台（不杀），让 pi 在工具返回后读到插话
         this.bgTasks.backgroundAllForeground(managed.identity.sessionId, 'steer');
         return;
       }
       case 'abort-retry':
-        this.must(command.identity).session.abortRetry();
+        this.cancelRetry(this.must(command.identity));
         return;
       case 'withdraw-steer': {
         const managed = this.must(command.identity);
@@ -2115,11 +2253,24 @@ export class SessionSupervisor {
           editUnfinishedAssistantForResume(managed.session);
         } else editLatestAssistantForRetry(managed.session);
         if (agent.state.messages.at(-1)?.role === 'assistant') {
+          // 重启前持有 Run 在等后台任务的子代理：任务的消息（含因重启中断）还没交给它，接着原 Run 继续等 / 交给它
+          if (managed.childIdentity && command.requestBudget && this.awaitsOwnTasks(managed)) {
+            this.releaseRun(managed);
+            const run: AgentRunHold = { id: command.turnId ?? randomUUID() };
+            managed.agentRun = run;
+            managed.requestBudget?.arm(command.requestsUsed);
+            this.holdRun(managed, run);
+            this.flushPendingReminders(managed);
+            this.fireDueReminders(managed);
+            return;
+          }
           this.emitRetrySkipped(managed, 'nothing-to-retry');
           return;
         }
         ensureAssistantUsage(agent.state.messages as unknown[]);
         managed.currentTurnId = command.turnId ?? randomUUID();
+        this.releaseRun(managed);
+        if (command.requestBudget) managed.agentRun = { id: managed.currentTurnId };
         if (command.requestBudget) managed.requestBudget?.arm(command.requestsUsed);
         resetOauthPoolActivity(managed.session);
         void continueSessionActivity(managed.session).catch((error) =>
@@ -2316,6 +2467,8 @@ export class SessionSupervisor {
           ...(command.images?.length ? { images: command.images } : {}),
           deliverAs: command.deliverAs,
           triggerTurn: command.triggerTurn,
+          ...(command.origin ? { origin: command.origin } : {}),
+          ...(command.sender ? { sender: command.sender } : {}),
         });
         if (!delivered?.ok) {
           console.warn('[plugin-inject]', delivered?.error ?? '会话未接受注入');
@@ -2364,7 +2517,7 @@ export class SessionSupervisor {
           managed.session.sessionManager.getBranch(),
           command.entryId
             ? { entryId: command.entryId }
-            : { userIndexFromEnd: command.userIndexFromEnd ?? 0 }
+            : { turnIndexFromEnd: command.turnIndexFromEnd ?? 0 }
         );
         if (!entryId) {
           this.options.emit({
@@ -2493,6 +2646,7 @@ export class SessionSupervisor {
         // 重试倒计时中 pi 只发 auto_retry_end、不再有 agent_end：须按取消重试同口径收口，
         // 否则 renderer 的中断标记吞掉下一轮收束（队列不再泵），排队压缩永远停在 queued
         const retrying = managed.session.isRetrying;
+        if (managed.status === 'running') this.withdrawQueuedPrompts(managed);
         managed.gate.cancelAll();
         managed.asks.cancelAll();
         cancelContinuousMemory(managed.session.sessionManager);
@@ -2501,6 +2655,8 @@ export class SessionSupervisor {
         managed.delegation?.cancelAll('Delegation action aborted');
         const abortedTurnId = managed.currentTurnId;
         managed.currentTurnId = undefined;
+        // 进入过持有的 Run 被叫停：它在等的任务没人再等，一并停掉
+        if (managed.agentRun?.holdTimer) this.stopAwaitedTasks(managed);
         // 用户中止：预算 Run 就此结束，不再补交报告，之后的回合也不再计数
         managed.requestBudget?.disarm();
         managed.computer?.cancelAll('Computer action aborted');
@@ -2518,6 +2674,17 @@ export class SessionSupervisor {
           if (managed.status === 'running') {
             managed.turnAborted = true;
             managed.abortedTurnId = abortedTurnId;
+          } else if (managed.agentRun) {
+            // 持有中空闲：没有在跑的回合可收口，单独发一个接上原 Run 的终态，否则 Run 永远收不了口
+            this.options.emit({
+              type: 'turn-completed',
+              identity: managed.identity,
+              seq: ++managed.seq,
+              turnId: randomUUID(),
+              aborted: true,
+              continues: managed.agentRun.id,
+            });
+            this.releaseRun(managed);
           }
           managed.turnRetried = false;
           managed.status = 'idle';
@@ -2594,7 +2761,8 @@ export class SessionSupervisor {
     instanceId?: string,
     workflowPresetFiles: readonly string[] = [],
     secretaryToolDescriptors: readonly SecretaryToolDescriptor[] = [],
-    askRelay?: { name: string }
+    askRelay?: { name: string },
+    dcgExemptRules: readonly string[] = []
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -2761,7 +2929,9 @@ export class SessionSupervisor {
         protectedFloor: botMode || protectedActions,
         autoReject: autoRejectApprovals,
         ...(botMode ? { exemptFull: true, humanTimeoutMs: HUMAN_REQUEST_TIMEOUT_MS } : {}),
-        ...(dcgPath ? { commandGuard: createDcgGuard(dcgPath) } : {}),
+        commandGuard: withTempRootGuard(
+          dcgPath ? withDcgExemptions(createDcgGuard(dcgPath), dcgExemptRules) : undefined
+        ),
       }
     );
     const checkpoints = new CheckpointManager(
@@ -3049,13 +3219,24 @@ export class SessionSupervisor {
             : Promise.resolve([]);
         const selectedModel = modelOverride ?? resolved?.model ?? agentType?.model ?? model;
         const base = await resolveSessionModel(runtime, selectedModel);
-        // 派发 thinking > 类型预设 > 模型条目预设 > 父会话。
+        // 派发 thinking > 类型预设 > 父会话 > 模型条目预设：默认值不压过用户当下的选择。
         // 类型预设来源：typed-spawn 用 resolved（Main 组装的类型配置），
         // coworker 直雇用 agentType（worker 侧快照）——此前 typed-spawn 不传，类型档被静默丢弃。
+        // 父会话读实时状态：会话中途改档走 set-thinking/set-reasoning，闭包里的 spawn 参数已过期。
+        const parentSession = this.sessions.get(identity.sessionId)?.session;
+        const parentLevel = parentSession
+          ? parentSession.thinkingLevel
+          : reasoningEnabled
+            ? thinkingLevel
+            : 'off';
+        const parentEnabled = parentSession
+          ? parentSession.model?.reasoning === true && parentLevel !== 'off'
+          : reasoningEnabled;
         const childReasoning = resolveChildReasoning(
-          pickChildReasoningOverride(thinkingOverride, resolved ?? agentType, selectedModel),
-          reasoningEnabled,
-          thinkingLevel
+          pickChildReasoningOverride(thinkingOverride, resolved ?? agentType),
+          parentEnabled,
+          parentLevel === 'off' ? undefined : parentLevel,
+          selectedModel
         );
         const fittedReasoning = fitChildReasoningToModel(childReasoning, base);
         const subModel = applyReasoningToModel(
@@ -3132,7 +3313,23 @@ export class SessionSupervisor {
           resolved?.tools === 'readonly' ||
           agentType?.tools === 'readonly'
             ? readOnlyTools(childGate)
-            : buildBaseTools(childGate, undefined, agentType?.writeScope, taskOwnerId)),
+            : [
+                ...buildBaseTools(childGate, undefined, agentType?.writeScope, taskOwnerId),
+                // 子代理要能读、停、表态自己起的任务，否则常驻任务会让持有中的 Run 收不了口
+                ...(taskOwnerId
+                  ? [
+                      ...createTaskTools(this.bgTasks, taskOwnerId),
+                      // 子代理的提醒只叫醒它自己，最长不超过 Run 持有上限
+                      ...createReminderTools(this.reminders, taskOwnerId, {
+                        maxDelayMs: AGENT_RUN_HOLD_LIMIT_MS,
+                        unavailable: () =>
+                          this.sessions.get(taskOwnerId)?.agentRun
+                            ? undefined
+                            : 'Reminders only work while you run a subagent Run for your parent.',
+                      }),
+                    ]
+                  : []),
+              ]),
           ...(typed ? typeMcpTools : wrapMcpTools(childGate)),
           ...childPluginTools,
           ...(extraTools as Def[]),
@@ -3485,10 +3682,13 @@ export class SessionSupervisor {
       ]),
       ...(exploreFold ? createExploreFoldTools(exploreFold) : []),
       ...builtin('turn_discard', createTurnDiscardTools(turnDiscard)),
-      ...builtin('background_tasks', createTaskTools(this.bgTasks, sessionId)),
+      ...builtin('background_tasks', [
+        ...createTaskTools(this.bgTasks, sessionId),
+        ...createReminderTools(this.reminders, sessionId, { maxDelayMs: REMINDER_MAX_DELAY_MS }),
+      ]),
       ...(toolEnabled('goal')
         ? createGoalTools(
-            (kind, note) => {
+            (kind, note, result) => {
               const managed = managedRef ?? this.sessions.get(sessionId);
               if (!managed) return;
               this.options.emit({
@@ -3497,6 +3697,7 @@ export class SessionSupervisor {
                 seq: ++managed.seq,
                 kind,
                 note,
+                ...(result ? { result } : {}),
               });
             },
             async (summary, signal) => {
@@ -3516,13 +3717,17 @@ export class SessionSupervisor {
     const readonlyAgentTypes = new Set(
       agentTypes.filter((type) => type.tools === 'readonly').map((type) => type.name)
     );
+    const ownerGate = new OwnerGate();
     const planGated = (tools: Def[]): Def[] =>
       tools.map((tool) =>
-        withPlanGate(tool, {
-          host: planHost,
-          readonlyAgentTypes,
-          agentTypeOf: (agentId) => spawnedAgentTypes.get(agentId),
-        })
+        withOwnerGate(
+          withPlanGate(tool, {
+            host: planHost,
+            readonlyAgentTypes,
+            agentTypeOf: (agentId) => spawnedAgentTypes.get(agentId),
+          }),
+          ownerGate
+        )
       );
     // 秘书按名字做允许列表：黑名单只能关掉已知分组，核心工具、插件工具与自造工具都不在其中。
     // 插件工具与自造工具的名字只认 Main 本次下发的描述符，不按前缀放行
@@ -3561,6 +3766,7 @@ export class SessionSupervisor {
         ? SessionManager.open(resumeFile, this.options.sessionDir, cwd)
         : SessionManager.create(cwd, this.options.sessionDir),
     });
+    ownerGate.syncFromMessages(session.messages);
     installLongCacheRetention(session.agent, this.isLongCacheRetention);
     const codemodeTools = codemodeHost.activeToolNames();
     const cursorBridge = isCursorModel(piModel)
@@ -3584,6 +3790,7 @@ export class SessionSupervisor {
       checkpoints,
       runawayGuard: runaway,
     });
+    managedRef.ownerGate = ownerGate;
     // 秘书不订阅 MCP 热插拔：之后连上的 MCP 工具不走装配时的允许列表
     this.rememberMcpHotplug(
       sessionId,
@@ -3690,6 +3897,7 @@ export class SessionSupervisor {
       (requestId, resolution) => {
         const managed = this.sessions.get(identity.sessionId);
         if (managed && isSameGeneration(managed.identity, identity)) {
+          applyOwnerAskResolution(managed.ownerGate, resolution);
           this.options.emit({
             type: 'ask-resolved',
             identity: managed.identity,
@@ -3766,6 +3974,7 @@ export class SessionSupervisor {
       ...(opts.requestBudget ? { requestBudget: opts.requestBudget } : {}),
       timings: [],
       toolStartAt: new Map(),
+      toolNames: new Map(),
       toolDurations: new Map(),
       gate,
       asks: opts.asks ?? this.createAskManager(identity, gate.humanTimeoutMs),
@@ -4410,6 +4619,9 @@ export class SessionSupervisor {
     const parent = this.mustCurrent(parentId);
     const managed = this.sessions.get(coworkerId);
     if (managed) {
+      if (managed.agentRun?.holdTimer) this.stopAwaitedTasks(managed);
+      this.releaseRun(managed);
+      this.reminders.cancelAll(coworkerId);
       this.closeChildPlugins(managed, 'dismissed');
       managed.gate.cancelAll();
       managed.asks.cancelAll();
@@ -4742,6 +4954,7 @@ export class SessionSupervisor {
         return;
       }
       case 'message_start': {
+        managed.ownerGate?.observeMessage(event.message);
         const index = managed.messages.length;
         const message = projectMessage(event.message);
         if (message?.role === 'assistant') {
@@ -4832,8 +5045,10 @@ export class SessionSupervisor {
       case 'tool_execution_start': {
         // codemode 嵌套调用只进脚本，不上时间线
         if (event.parentToolCallId) return;
-        // 有工具开跑就不能停在边界上等：被挂起的会话可能正是这个工具在等的对象
-        if (this.restart && !this.restart.committed) this.releaseRestartHolds();
+        // 父会话的工具（subagent / send 等结果）可能正等着自己的子会话：放开它们的挂起
+        if (this.restart && !this.restart.committed && !this.parentOf(managed))
+          this.releaseChildHolds(managed.identity.sessionId);
+        managed.toolNames.set(event.toolCallId, event.toolName);
         // 耗时只从真正开始执行算：同轮后发工具不能把前面 bash 的排队算进去
         if (!managed.toolStartAt.has(event.toolCallId)) {
           const startedAt = Date.now();
@@ -4884,6 +5099,7 @@ export class SessionSupervisor {
         if (event.parentToolCallId) return;
         const start = managed.toolStartAt.get(event.toolCallId);
         managed.toolStartAt.delete(event.toolCallId);
+        managed.toolNames.delete(event.toolCallId);
         managed.lastCompletedToolCallId = event.toolCallId;
         if (start !== undefined) {
           managed.toolDurations.set(event.toolCallId, Date.now() - start);
@@ -5009,11 +5225,12 @@ export class SessionSupervisor {
           // pi 回合内自动重试已用尽、最终仍是它判定的瞬态错误（网络 / 限流 / 5xx）：标给 Main 做外层自动重试
           const exhausted =
             managed.turnRetried === true &&
-            isRetryableAssistantError({
+            (isRetryableAssistantError({
               stopReason: 'error',
               errorMessage: lastAssistant.errorMessage,
-            } as AssistantMessage);
-          this.failTurn(managed, lastAssistant.errorMessage ?? 'Turn failed.', false, exhausted);
+            } as AssistantMessage) ||
+              classifyUpstreamError({ error: lastAssistant.errorMessage }).kind === 'transient');
+          this.failTurn(managed, lastAssistant.errorMessage ?? 'Turn failed.', exhausted);
           return;
         }
         if (this.tryRefusalRetry(managed, lastAssistant)) return;
@@ -5026,16 +5243,39 @@ export class SessionSupervisor {
     }
   }
 
+  /**
+   * 收尾中止的是子代理 Run 的回合：照常收口（断点要它空闲），但不发回合结局，
+   * 否则 Main 把被打断的 Run 记成已完成。Run 留在 running，Main 按 worker 退出记成被打断，重启后接着跑。
+   */
+  private exitingRun(managed: ManagedSession): boolean {
+    return this.exiting && managed.agentRun !== undefined;
+  }
+
   /** 本轮成功收口。budget：子代理因请求预算被强制停止，带上标记（及补报告的错误）交回已有输出。 */
   private completeTurn(managed: ManagedSession, budget?: { error?: string }): void {
+    const sessionId = managed.identity.sessionId;
+    const quiet = this.exitingRun(managed);
     const turnId = managed.currentTurnId ?? managed.abortedTurnId ?? randomUUID();
     const aborted = managed.turnAborted === true;
+    const run = managed.agentRun;
+    const continues = run && run.id !== turnId ? run.id : undefined;
+    const awaitingTasks =
+      run !== undefined &&
+      run.expiry !== 'told' &&
+      !aborted &&
+      !budget &&
+      this.awaitsOwnTasks(managed);
+    if (awaitingTasks) this.holdRun(managed, run);
+    else this.releaseRun(managed);
+    // 子代理 Run 真正收口：它的提醒没人再等；退出收尾打断的 Run 重启后接着跑，提醒留着
+    if (!awaitingTasks && !quiet && sessionId.includes('::')) this.reminders.cancelAll(sessionId);
+    const awaitingReminder = !sessionId.includes('::') && this.reminders.list(sessionId).length > 0;
     managed.currentTurnId = undefined;
     managed.abortedTurnId = undefined;
     managed.turnAborted = false;
     managed.turnRetried = false;
-    // 预算只管一次 Run：收口即清零，之后用户自己发起的回合不计数
-    managed.requestBudget?.disarm();
+    // 预算只管一次 Run：收口即清零，之后用户自己发起的回合不计数；持有中的 Run 还没收口
+    if (!awaitingTasks) managed.requestBudget?.disarm();
     managed.status = 'idle';
     this.emitStatus(managed);
     this.flushPendingBuiltinTools(managed);
@@ -5049,24 +5289,97 @@ export class SessionSupervisor {
     managed.turnStartIndex = managed.messages.length;
     this.workspaceClaims.release(managed.identity.sessionId);
     if (!aborted && !budget) this.nudgeTaskWrapUp(managed);
-    this.options.emit({
-      type: 'turn-completed',
-      identity: managed.identity,
-      seq: ++managed.seq,
-      turnId,
-      ...(digest ? { digest } : {}),
-      ...(report ? { report } : {}),
-      ...(silent ? { silent: true as const } : {}),
-      ...(aborted ? { aborted: true as const } : {}),
-      ...(budget ? { requestBudgetStop: true } : {}),
-      ...(budget?.error ? { requestBudgetError: budget.error } : {}),
-    });
+    if (!quiet)
+      this.options.emit({
+        type: 'turn-completed',
+        identity: managed.identity,
+        seq: ++managed.seq,
+        turnId,
+        ...(digest ? { digest } : {}),
+        ...(report ? { report } : {}),
+        ...(silent ? { silent: true as const } : {}),
+        ...(aborted ? { aborted: true as const } : {}),
+        ...(budget ? { requestBudgetStop: true } : {}),
+        ...(budget?.error ? { requestBudgetError: budget.error } : {}),
+        ...(continues ? { continues } : {}),
+        ...(awaitingTasks ? { awaitingTasks: true as const } : {}),
+        ...(awaitingReminder ? { awaitingReminder: true as const } : {}),
+        ...(managed.session.model?.provider ? { provider: managed.session.model.provider } : {}),
+      });
+    if (awaitingTasks) {
+      // 常驻任务没有完成事件：第一次因这批任务持有时唤醒一次
+      const fresh = this.takeUnnudged(managed);
+      if (fresh) this.queueReminder(managed, awaitChecklist(fresh, Date.now()));
+      // 忙时攒下、没等到工具结果的完成通知：持有中就开新一轮交给它
+      for (const text of managed.childTaskNotices?.splice(0) ?? [])
+        this.queueReminder(managed, text);
+    }
+    // 到时限时它正忙：这一轮结束再要它表态交报告
+    if (awaitingTasks && run.expiry === 'due')
+      this.queueReminder(managed, this.tellHoldExpired(managed, run));
     if (managed.pendingCompact) {
       const queued = managed.pendingCompact;
       managed.pendingCompact = undefined;
       void this.runCompaction(managed, queued.instructions);
     }
     this.flushPendingReminders(managed);
+    this.fireDueReminders(managed);
+  }
+
+  /** 子代理还有自己起的、在跑、没表态的后台任务，或还有没交给它的完成通知 */
+  private awaitsOwnTasks(managed: ManagedSession): boolean {
+    return (
+      this.bgTasks.undeclared(managed.identity.sessionId).length > 0 ||
+      (managed.childTaskNotices?.length ?? 0) > 0 ||
+      managed.pendingTaskReminders.length > 0 ||
+      this.reminders.list(managed.identity.sessionId).length > 0
+    );
+  }
+
+  /** 第一次持有起算时限：常驻服务、挂死的任务永远等不到完成，Run 不能跟着一直挂 */
+  private holdRun(managed: ManagedSession, run: AgentRunHold): void {
+    if (run.holdTimer) return;
+    run.holdTimer = setTimeout(() => {
+      if (managed.agentRun !== run || this.sessions.get(managed.identity.sessionId) !== managed)
+        return;
+      run.expiry = 'due';
+      if (managed.status !== 'running' && !managed.roundPending)
+        this.deliverNotification(managed.identity.sessionId, this.tellHoldExpired(managed, run));
+    }, AGENT_RUN_HOLD_LIMIT_MS);
+    run.holdTimer.unref?.();
+  }
+
+  /** 到时限的要求：不再等，给任务表态并在这一轮交报告；这一轮结束 Run 就收口 */
+  private tellHoldExpired(managed: ManagedSession, run: AgentRunHold): string {
+    run.expiry = 'told';
+    return [
+      `This Run has waited ${AGENT_RUN_HOLD_LIMIT_MS / 60_000} minutes for your background tasks and will not wait any longer. Give your final report in this turn; the Run ends when this turn ends.`,
+      settleChecklist(this.bgTasks.undeclared(managed.identity.sessionId), Date.now()),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  private releaseRun(managed: ManagedSession): void {
+    clearTimeout(managed.agentRun?.holdTimer);
+    managed.agentRun = undefined;
+  }
+
+  /** 被持有的 Run 等着的任务（自己起的、在跑、没表态的）：Run 被叫停或子代理被回收时一并停掉 */
+  private stopAwaitedTasks(managed: ManagedSession): void {
+    for (const task of this.bgTasks.undeclared(managed.identity.sessionId))
+      this.bgTasks.stop(task.taskId, true);
+    this.reminders.cancelAll(managed.identity.sessionId);
+  }
+
+  /** 没表态的任务里有没提醒过的：整批记为已提醒并返回，同一批任务只提醒一次 */
+  private takeUnnudged(managed: ManagedSession): BackgroundTaskInfo[] | undefined {
+    const open = this.bgTasks.undeclared(managed.identity.sessionId);
+    managed.taskWrapUpNudged ??= new Set();
+    const nudged = managed.taskWrapUpNudged;
+    if (!open.some((task) => !nudged.has(task.taskId))) return undefined;
+    for (const task of open) nudged.add(task.taskId);
+    return open;
   }
 
   /** 收尾清单：根会话自己起的、还在跑、没表态的后台任务（子代理起的归子代理，不要求父会话表态） */
@@ -5080,13 +5393,9 @@ export class SessionSupervisor {
    * 不为此另起一轮；同一批任务只提醒一次。
    */
   private nudgeTaskWrapUp(managed: ManagedSession): void {
-    const sessionId = managed.identity.sessionId;
-    if (sessionId.includes('::')) return;
-    const open = this.bgTasks.undeclared(sessionId);
-    managed.taskWrapUpNudged ??= new Set();
-    const nudged = managed.taskWrapUpNudged;
-    if (!open.some((task) => !nudged.has(task.taskId))) return;
-    for (const task of open) nudged.add(task.taskId);
+    if (managed.identity.sessionId.includes('::')) return;
+    const open = this.takeUnnudged(managed);
+    if (!open) return;
     managed.taskWrapUpPending = true;
     const entry: AgentSessionCustomEntry = {
       kind: 'task-wrap-up-nudge',
@@ -5349,9 +5658,19 @@ export class SessionSupervisor {
 
   /** 重试倒计时中则打断并等待本轮收尾；返回是否发生了打断（用户输入接管重试） */
   private async interruptRetryIfAny(managed: ManagedSession): Promise<boolean> {
-    if (!managed.session.isRetrying) return false;
-    managed.session.abortRetry();
+    if (!this.cancelRetry(managed)) return false;
     await managed.session.waitForIdle();
+    return true;
+  }
+
+  /**
+   * 取消重试即放弃这一轮，auto_retry_end(false) 按失败收口。pi 取消重试后见到排队消息会在同一轮
+   * 续跑，所以先撤回排进来的 prompt。返回是否真的取消了重试。
+   */
+  private cancelRetry(managed: ManagedSession): boolean {
+    if (!managed.session.isRetrying) return false;
+    this.withdrawQueuedPrompts(managed);
+    managed.session.abortRetry();
     return true;
   }
 
@@ -5373,12 +5692,26 @@ export class SessionSupervisor {
     managed.turnAborted = false;
     ensureAssistantUsage(managed.session.messages as unknown[]);
     const body = consumeRole(managed, text);
-    const options = { ...(images ? { images } : {}), streamingBehavior: 'followUp' as const };
+    const options = {
+      ...(images ? { images } : {}),
+      streamingBehavior: 'followUp' as const,
+      preflightResult: (disposition: PromptDisposition) => {
+        if (disposition === 'queued') this.noteQueuedPrompt(managed, deliveryId);
+      },
+    };
     const state: PromptDeliveryState = { dispatched: false, queued: false };
     const submit = () => this.promptTracked(managed, body, options, deliveryId, state);
     // 没开出新轮（被拒收或排进活轮）就把轮次号还给正在跑的那一轮
     const restoreTurn = () => {
       if (!state.dispatched || state.queued) managed.currentTurnId = previousTurnId;
+    };
+    // 拒收回执必须最后发：消费者收到回执就让出会话，之后才到的失败终态会被记到下一条投递头上。
+    // 活轮还在时这条本该排在它后面，被拒只回执，不能把活轮打成失败
+    const reject = (error: string) => {
+      if (previousTurnId === undefined && !managed.session.isStreaming)
+        this.failTurn(managed, error);
+      else restoreTurn();
+      if (!state.dispatched) this.emitDeliveryRejected(managed, deliveryId);
     };
     void submit()
       .then(restoreTurn)
@@ -5410,13 +5743,11 @@ export class SessionSupervisor {
             restoreTurn();
             return;
           } catch (retryError) {
-            if (!state.dispatched) this.emitDeliveryRejected(managed, deliveryId);
-            this.failTurn(managed, toErrorMessage(retryError));
+            reject(toErrorMessage(retryError));
             return;
           }
         }
-        if (!state.dispatched) this.emitDeliveryRejected(managed, deliveryId);
-        this.failTurn(managed, message);
+        reject(message);
       });
   }
 
@@ -5457,14 +5788,40 @@ export class SessionSupervisor {
   }
 
   /** 投递被拒收：交回执让上游重排，不把会话标成失败 */
-  private emitDeliveryRejected(managed: ManagedSession, deliveryId?: string): void {
+  private emitDeliveryRejected(
+    managed: ManagedSession,
+    deliveryId?: string,
+    reason?: 'turn-stuck'
+  ): void {
     if (!deliveryId) return;
     this.options.emit({
       type: 'delivery-rejected',
       identity: managed.identity,
       seq: ++managed.seq,
       deliveryId,
+      ...(reason ? { reason } : {}),
     });
+  }
+
+  /** pi 刚把这条 prompt 排进 followUp 队列，队尾就是它；已被 pi 取走的记录顺手丢掉 */
+  private noteQueuedPrompt(managed: ManagedSession, deliveryId?: string): void {
+    const labels = managed.session.getFollowUpMessages();
+    const text = labels.at(-1);
+    if (text === undefined) return;
+    managed.queuedPrompts = [
+      ...stillQueued(managed.queuedPrompts ?? [], labels.slice(0, -1)),
+      { text, ...(deliveryId ? { deliveryId } : {}) },
+    ];
+  }
+
+  /**
+   * 用户叫停时排进活轮的 prompt 不会再跑：pi 的 abort 不清 followUp 队列，留着就夹在下一次 prompt
+   * 后面送达。撤出队列，按 deliveryId 回执；回执不是终态，原轮照常由 agent_settled 收口。
+   */
+  private withdrawQueuedPrompts(managed: ManagedSession): void {
+    const withdrawn = stillQueued(managed.queuedPrompts ?? [], withdrawFollowUps(managed.session));
+    managed.queuedPrompts = undefined;
+    for (const { deliveryId } of withdrawn) this.emitDeliveryRejected(managed, deliveryId);
   }
 
   private async steerActive(
@@ -5562,14 +5919,15 @@ export class SessionSupervisor {
     });
   }
 
-  private failTurn(
-    managed: ManagedSession,
-    error: string,
-    undelivered = false,
-    retryExhausted = false
-  ): void {
+  private failTurn(managed: ManagedSession, error: string, retryExhausted = false): void {
+    const quiet = this.exitingRun(managed);
     const turnId = managed.currentTurnId ?? managed.abortedTurnId ?? randomUUID();
     const aborted = managed.turnAborted === true;
+    const run = managed.agentRun;
+    const continues = run && run.id !== turnId ? run.id : undefined;
+    this.releaseRun(managed);
+    if (!quiet && managed.identity.sessionId.includes('::'))
+      this.reminders.cancelAll(managed.identity.sessionId);
     managed.currentTurnId = undefined;
     managed.abortedTurnId = undefined;
     managed.turnRetried = false;
@@ -5596,17 +5954,20 @@ export class SessionSupervisor {
     }
     this.emitStatus(managed, error);
     this.workspaceClaims.release(managed.identity.sessionId);
-    this.options.emit({
-      type: 'turn-failed',
-      identity: managed.identity,
-      seq: ++managed.seq,
-      turnId,
-      error,
-      ...(undelivered ? { undelivered: true } : {}),
-      ...(retryExhausted ? { retryExhausted: true } : {}),
-      ...(aborted ? { aborted: true as const } : {}),
-    });
+    if (!quiet)
+      this.options.emit({
+        type: 'turn-failed',
+        identity: managed.identity,
+        seq: ++managed.seq,
+        turnId,
+        error,
+        ...(retryExhausted ? { retryExhausted: true } : {}),
+        ...(aborted ? { aborted: true as const } : {}),
+        ...(continues ? { continues } : {}),
+        ...(managed.session.model?.provider ? { provider: managed.session.model.provider } : {}),
+      });
     this.flushPendingReminders(managed);
+    this.fireDueReminders(managed);
   }
 
   private emitStatus(managed: ManagedSession, error?: string): void {
@@ -5952,6 +6313,7 @@ export class SessionSupervisor {
           identity: managed.identity,
           reason: gate.reason,
           toolsInFlight,
+          ...(managed.toolNames.size > 0 ? { toolNames: [...managed.toolNames.values()] } : {}),
           ...(keep && blockingTasks.length > 0 ? { undetachableTasks: blockingTasks } : {}),
           ...(toolsInFlight.length === 0 && managed.replyProgress
             ? { reply: { ...managed.replyProgress } }
@@ -5986,6 +6348,14 @@ export class SessionSupervisor {
           `[graceful-restart] ${managed.identity.sessionId.slice(0, 8)} 回复写到一半被重启中止，断点记成 model-request，新进程续跑`
         );
     }
+    // 还没注册的会话正在 spawn：等它落定，否则新进程里没有它；报出来，超时日志与弹层才知道在等谁
+    for (const identity of this.spawning.values()) {
+      if (!this.sessions.has(identity.sessionId))
+        deferred.push({ identity, reason: 'session-starting', toolsInFlight: [] });
+    }
+    // 只剩等人回答的提问 / 审批挡着：取消它们，会话停到下一次模型请求前，重启后模型看到结果再问
+    if (deferred.length > 0 && deferred.every((entry) => this.waitsOnlyForHuman(entry.identity)))
+      for (const entry of deferred) this.cancelHumanWaits(entry.identity);
     if (deferred.length > 0) {
       // 回复在写时每个 token 都会触发检查：出 token 时刻按秒去抖，Main 据此顺延等待
       const key = JSON.stringify(deferred, (field, value) =>
@@ -5997,7 +6367,6 @@ export class SessionSupervisor {
       }
       return;
     }
-    // 还没注册的会话正在 spawn：等它落定，否则新进程里没有它
     if ([...this.pendingCommands.keys()].some((id) => !this.sessions.has(id))) return;
     const checkpoint = {
       version: 1 as const,
@@ -6042,34 +6411,58 @@ export class SessionSupervisor {
     });
   }
 
-  private releaseRestartHolds(): void {
-    for (const managed of this.sessions.values()) managed.restartHold?.();
+  private parentOf(managed: ManagedSession): string | undefined {
+    return managed.parentId ?? managed.childIdentity?.parent.sessionId;
+  }
+
+  private releaseChildHolds(parentId: string): void {
+    for (const managed of this.sessions.values())
+      if (this.parentOf(managed) === parentId) managed.restartHold?.();
+  }
+
+  /** 会话在跑的工具都在等人（ask_user 提问、审批），没有转后台的命令 */
+  private waitsOnlyForHuman(identity: SessionIdentity): boolean {
+    const managed = this.sessions.get(identity.sessionId);
+    if (!managed || managed.toolStartAt.size === 0) return false;
+    const waiting = managed.asks.snapshot().length + managed.gate.snapshot().length;
+    return (
+      waiting >= managed.toolStartAt.size &&
+      this.bgTasks.runningYielded(identity.sessionId, {
+        exceptDetachable: this.restart?.keepBackground === true,
+      }).length === 0
+    );
+  }
+
+  private cancelHumanWaits(identity: SessionIdentity): void {
+    const managed = this.sessions.get(identity.sessionId);
+    managed?.asks.cancelAll(RESTART_ASK_CANCELLED);
+    managed?.gate.cancelAll();
   }
 
   /**
-   * pi 在工具批全部返回、turn_end 之后，下一次模型请求（turn_start）之前调 prepareNextTurnWithContext。
-   * 有重启请求时父会话停在这里；只在全局没有工具在跑时才停，避免停住的会话正被别的工具等着。
+   * pi 在每次模型请求前调 prepareRequest：新一轮的首个请求（用户消息已写进 jsonl），或工具批全部返回、
+   * 插话也已写入之后。有重启请求时会话停在这里，新消息、通知、goal 续跑都只落盘不出请求，新进程接着发。
+   * 子会话在父会话有工具在跑时不停（父会话的 subagent / send 可能正等它）。
    */
   private installRestartBoundary(managed: ManagedSession): void {
     const agent = managed.session.agent as AgentSession['agent'] | undefined;
-    const next = agent?.prepareNextTurnWithContext;
-    if (!agent || typeof next !== 'function') return;
-    agent.prepareNextTurnWithContext = async (turn, signal) => {
+    if (!agent) return;
+    const next = agent.prepareRequest;
+    agent.prepareRequest = async (request, signal) => {
       await this.holdForRestart(managed);
-      return next.call(agent, turn, signal);
+      return (await next?.call(agent, request, signal)) ?? undefined;
     };
   }
 
   private holdForRestart(managed: ManagedSession): Promise<void> {
     const restart = this.restart;
+    const parentId = this.parentOf(managed);
     if (
       !restart ||
       restart.committed ||
-      managed.childIdentity ||
-      managed.parentId ||
       managed.session.pendingMessageCount > 0 ||
       this.sessions.get(managed.identity.sessionId) !== managed ||
-      [...this.sessions.values()].some((session) => session.toolStartAt.size > 0)
+      (parentId !== undefined && (this.sessions.get(parentId)?.toolStartAt.size ?? 0) > 0)
     )
       return Promise.resolve();
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -6092,9 +6485,9 @@ export class SessionSupervisor {
       endsWithAbortedReply(managed.session.agent.state.messages) &&
       editUnfinishedAssistantForResume(managed.session);
     const tail = managed.session.agent.state.messages.at(-1)?.role;
-    if (tail !== 'toolResult' && !(abortedReply && tail === 'user')) {
+    if (tail === undefined || tail === 'assistant') {
       console.warn(
-        `[graceful-restart] ${entry.sessionId.slice(0, 8)} 会话文件不在工具结果上，不续跑，等用户下一条`
+        `[graceful-restart] ${entry.sessionId.slice(0, 8)} 会话文件停在回复上，不续跑，等用户下一条`
       );
       return;
     }
@@ -6131,7 +6524,9 @@ export class SessionSupervisor {
 
   async shutdown(): Promise<void> {
     clearInterval(this.evictionTimer);
+    this.reminders.dispose();
     this.workspaceSwitch.clear();
+    this.recordInterruptedTasks();
     this.bgTasks.stopAll();
     // 还在等安全点（等转后台的命令时被强制退出 / 超时）：给刚停掉的命令一点时间收口，
     // 完成通知进持久化队列、停在边界的会话落下断点，Main 据此补写恢复清单
@@ -6141,6 +6536,7 @@ export class SessionSupervisor {
     // 中止后断点记成同一轮的模型请求，冷启动续跑，而不是只留一句 This operation was aborted
     if (restartPending)
       for (const managed of this.sessions.values()) this.markRestartAbort(managed);
+    this.exiting = true;
     const aborts: Promise<unknown>[] = [];
     for (const managed of this.sessions.values()) {
       cancelContinuousMemory(managed.session.sessionManager);
@@ -6167,6 +6563,31 @@ export class SessionSupervisor {
       this.checkRestart();
     }
     return this.mcp.closeAll();
+  }
+
+  /**
+   * 收尾会停掉所有还在跑的后台任务（空闲会话的也是）：先记进台账，新一代通知所属会话一次。
+   * 写不下就退回本代照常发完成通知（多半丢在退出路上，但不会重复）
+   */
+  private recordInterruptedTasks(): void {
+    // 断点已落盘时，持有 Run 的子代理重启后会被续跑：它的任务记给它本身
+    const records = this.bgTasks.interruptedOnShutdown(
+      Date.now(),
+      (sessionId) =>
+        this.restart?.committed === true && this.sessions.get(sessionId)?.agentRun !== undefined
+    );
+    if (records.length === 0) return;
+    try {
+      appendInterruptedTasks(path.join(this.restartDataDir(), INTERRUPTED_TASKS_FILE), records);
+      this.bgTasks.handOverNotices(records.map((record) => record.taskId));
+      console.log(
+        `[graceful-restart] 收尾停掉 ${records.length} 个后台任务，记入台账待新进程通知：${records
+          .map((record) => `${record.sessionId.slice(0, 8)}/${record.taskId}`)
+          .join(' ')}`
+      );
+    } catch (error) {
+      console.warn('[graceful-restart] failed to record interrupted background tasks:', error);
+    }
   }
 
   private markRestartAbort(managed: ManagedSession): void {
@@ -6666,10 +7087,15 @@ export class SessionSupervisor {
 
 /** 投影 idle 但 pi 仍 streaming 时，等它真正空闲的上限；超时视为僵尸轮 */
 const ZOMBIE_TURN_WAIT_MS = 5_000;
+/** 子代理 Run 等自己后台任务的时限，从第一次持有起算 */
+export const AGENT_RUN_HOLD_LIMIT_MS = 10 * 60_000;
 /** 流式增量下发间隔：约 20 帧/秒，肉眼连贯，长回复的 IPC 与 markdown 重算降一个量级 */
 const STREAM_UPSERT_WINDOW_MS = 50;
 /** 重启等安全点时回复在写：出 token 时刻按这个粒度重报给 Main（空闲阈值 20s，误差可忽略） */
 const RESTART_PROGRESS_REPORT_MS = 1_000;
+/** 重启时取消只剩等人回答的提问：告诉模型是重启打断的，不是用户拒绝 */
+const RESTART_ASK_CANCELLED =
+  'The app restarted before the user answered this question. Ask again if you still need the answer.';
 /** 重启收尾中止回复后等它落进会话文件的上限：加上等转后台命令的 1s 仍在 Main 终止 worker 的 3s 内 */
 const RESTART_ABORT_SETTLE_MS = 1_500;
 
@@ -6792,6 +7218,22 @@ interface PromptDeliveryState {
 /** pi 在活轮里拒收不带 streamingBehavior 的 prompt：会话仍在跑，不是失败 */
 function isAlreadyProcessing(message: string): boolean {
   return message.includes('Agent is already processing');
+}
+
+/** 记录里仍在 pi 队列中的那些。pi 从队首取，同文本从队尾往前对账 */
+function stillQueued<T extends { text: string }>(
+  entries: readonly T[],
+  labels: readonly string[]
+): T[] {
+  const left = [...labels];
+  const kept: T[] = [];
+  for (const entry of [...entries].reverse()) {
+    const index = left.lastIndexOf(entry.text);
+    if (index < 0) continue;
+    left.splice(index, 1);
+    kept.unshift(entry);
+  }
+  return kept;
 }
 
 /** 回复里的可见正文，不含 thinking 与工具调用 */

@@ -1,12 +1,12 @@
 import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { app } from '@platform';
-import { projectNameFromPath } from '@shared/projectName';
 import type { DispatchRecord, SecretaryDeletePreview } from '@shared/types/secretary';
 import { appendAudit } from './audit';
 import type { ContactService } from './contact/service';
 import { managerOfSync } from './crossSecretary';
 import { forgetSecretaryProfile } from './profile';
+import { projectAliasesFromSettings, secretaryProjectName } from './projectLabel';
 import { DEFAULT_SECRETARY_ID } from './registry';
 import { dropRelaysFor } from './relay';
 import { enqueueUpdate } from './results';
@@ -42,14 +42,13 @@ function titleOf(row: Record<string, unknown> | undefined, fallback: string): st
 
 async function memoryCount(projectId: string | null): Promise<number> {
   if (!projectId) return 0;
-  const { listMemoriesForAdmin, openExistingMemoryDb } = await import('../memoryAdmin');
-  const db = openExistingMemoryDb(path.join(app.getPath('userData'), 'memory', 'memory.db'));
-  if (!db) return 0;
-  try {
-    return listMemoriesForAdmin(db, { spaceId: `proj:${projectId}`, limit: 1, offset: 0 }).total;
-  } finally {
-    db.close();
-  }
+  const { isMissingDb, memoryServiceOp } = await import('../memoryHost');
+  const result = await memoryServiceOp<{ total: number } | { missing: true }>('list', {
+    spaceId: `proj:${projectId}`,
+    limit: 1,
+    offset: 0,
+  });
+  return isMissingDb(result) ? 0 : result.total;
 }
 
 /** 删除前的提醒：它正在管的会话、待办、定时、联系方式绑定与记忆条数 */
@@ -58,10 +57,11 @@ export async function deletePreview(
   contact: ContactService | undefined
 ): Promise<SecretaryDeletePreview> {
   const store = new SecretaryStore(ctx.dir);
-  const { readPersistedConversations } = await import('../../ipc/settings');
+  const { readPersistedConversations, readSettings } = await import('../../ipc/settings');
   const { getSourceAuthorityRegistry } = await import('../../ipc/agent');
   const rows = readPersistedConversations();
   const projects = getSourceAuthorityRegistry()?.projection().projects ?? [];
+  const aliases = projectAliasesFromSettings(readSettings());
   const sessions = Object.values(store.dispatch().dispatched)
     .filter((record) => rows[record.conversationId]?.archived !== true)
     .map((record) => {
@@ -69,7 +69,7 @@ export async function deletePreview(
       return {
         conversationId: record.conversationId,
         title: titleOf(rows[record.conversationId], record.conversationId),
-        projectName: project ? projectNameFromPath(project.canonicalPath) : '',
+        projectName: secretaryProjectName(project, aliases),
         takeover: record.takeover !== undefined,
       };
     });

@@ -118,6 +118,25 @@ describe('agent control tool protocol', () => {
         response: { ok: true, value: { runId: 'run-1' } },
       })
     ).not.toBeNull();
+    // 找不到 Run / Agent 的细分错误码要能过 worker 边界，否则模型只看到协议错误
+    for (const code of ['restart-lost', 'other-owner', 'not-found']) {
+      expect(
+        parseAgentCommand({
+          type: 'agent-control-result',
+          identity: parent,
+          requestId: 'rpc-1',
+          response: { ok: false, code, error: 'why and what next' },
+        })
+      ).not.toBeNull();
+    }
+    expect(
+      parseAgentCommand({
+        type: 'agent-control-result',
+        identity: parent,
+        requestId: 'rpc-1',
+        response: { ok: false, code: 'made-up', error: 'x' },
+      })
+    ).toBeNull();
     expect(parseAgentWorkerEvent({ ...invoke, identity: { sessionId: 'parent' } })).toBeNull();
     expect(parseAgentWorkerEvent({ ...invoke, requestId: '' })).toBeNull();
     expect(parseAgentCommand({ ...invoke, type: 'agent-control-result' })).toBeNull();
@@ -161,7 +180,6 @@ describe('agent control tool protocol', () => {
   it.each(['prompt', 'steer'])('%s 命令可带有界的 deliveryId', (type) => {
     const command = { type, identity: parent, text: 'hi', deliveryId: 'delivery-1' };
     expect(parseAgentCommand(command)).toEqual(command);
-    expect(parseAgentCommand({ type, identity: parent, text: 'hi' })).not.toBeNull();
     for (const deliveryId of ['', 42, 'x'.repeat(129)]) {
       expect(parseAgentCommand({ ...command, deliveryId })).toBeNull();
     }
@@ -189,10 +207,18 @@ describe('agent control tool protocol', () => {
     const command = { type: 'prompt', identity: parent, text: 'hi', deliveryId: 'd', resume: true };
     expect(parseAgentCommand(command)).toEqual(command);
     expect(
-      parseAgentCommand({ type: 'prompt', identity: parent, text: 'hi', resume: true })
+      parseAgentCommand({ type: 'steer', identity: parent, text: 'hi', deliveryId: 'd' })
     ).not.toBeNull();
     for (const patch of [{ type: 'steer' }, { resume: false }, { resume: 'true' }, { resume: 1 }])
       expect(parseAgentCommand({ ...command, ...patch })).toBeNull();
+  });
+
+  it('prompt 必须带 deliveryId：未送达时 worker 只能按它回执；steer 仍可不带', () => {
+    const steer = { type: 'steer', identity: parent, text: 'hi' };
+    expect(parseAgentCommand(steer)).toEqual(steer);
+    expect(parseAgentCommand({ ...steer, type: 'prompt' })).toBeNull();
+    expect(parseAgentCommand({ ...steer, type: 'prompt', deliveryId: '' })).toBeNull();
+    expect(parseAgentCommand({ ...steer, type: 'prompt', deliveryId: 'd' })).not.toBeNull();
   });
 
   it('subagent resume 只接受非空 agentId，不带其他字段', () => {
@@ -260,6 +286,19 @@ describe('agent control tool protocol', () => {
       }
     }
   );
+
+  it('delivery-rejected 只认 turn-stuck 这一种原因', () => {
+    const event = {
+      type: 'delivery-rejected',
+      identity: parent,
+      seq: 3,
+      deliveryId: 'delivery-1',
+      reason: 'turn-stuck',
+    };
+    expect(parseAgentWorkerEvent(event)).toEqual(event);
+    expect(parseAgentWorkerEvent({ ...event, reason: 'other' })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...event, deliveryId: '' })).toBeNull();
+  });
 
   it('formats branch background as quoted data, not a new task', () => {
     const note = workspaceBranchChangedNote('feature/branch');
@@ -712,6 +751,14 @@ describe('后台任务控制命令', () => {
       })
     ).toBeNull();
     expect(parseAgentCommand({ type: 'task-keep', sessionId: 's1', taskId: 't1' })).toBeNull();
+  });
+
+  it('提醒命令按会话 id 寻址', () => {
+    for (const type of ['reminders-fire', 'reminders-clear']) {
+      expect(parseAgentCommand({ type, sessionId: 's1' })).toEqual({ type, sessionId: 's1' });
+      expect(parseAgentCommand({ type, sessionId: '' })).toBeNull();
+      expect(parseAgentCommand({ type, sessionId: 's1', extra: 1 })).toBeNull();
+    }
   });
 
   it('收尾提醒条目校验计数', () => {

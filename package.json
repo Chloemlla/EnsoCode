@@ -1,6 +1,6 @@
 {
   "name": "enso-code",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "EnsoCode - Electron Multi-Window Scaffold",
   "main": "./out/main/index.js",
   "bin": {
@@ -35,8 +35,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "test": "node --test scripts/rtk.test.mjs scripts/harbor-eval.test.mjs scripts/verify-secretary-isolation.test.mjs scripts/verify-electron.test.mjs scripts/beta-release.test.mjs && vitest run",
-    "test:formal": "ENSO_FORMAL_FULL=1 vitest run src/renderer/stores/sessions/deliveryEcho.formal.test.ts",
+    "test": "node scripts/test.mjs",
+    "test:changed": "node scripts/test-changed.mjs",
+    "test:formal": "ENSO_FORMAL_FULL=1 vitest run src/renderer/stores/sessions/deliveryEcho.formal.test.ts src/agent/turnPhase.formal.test.ts src/main/services/agentService.formal.test.ts",
     "test:e2e:server": "ENSO_RUN_E2E=1 vitest run src/server/run/cli.e2e.test.ts",
     "test:watch": "vitest",
     "format": "biome format --write .",
@@ -158,7 +159,8 @@
     "patchedDependencies": {
       "@earendil-works/pi-ai@1.5.1": "patches/@earendil-works__pi-ai@1.5.1.patch",
       "@rahularya01/pi-cursor@1.4.39": "patches/@rahularya01__pi-cursor@1.4.39.patch",
-      "@earendil-works/pi-coding-agent@1.5.1": "patches/@earendil-works__pi-coding-agent@1.5.1.patch"
+      "@earendil-works/pi-coding-agent@1.5.1": "patches/@earendil-works__pi-coding-agent@1.5.1.patch",
+      "electron-vite@5.0.0": "patches/electron-vite@5.0.0.patch"
     }
   },
   "optionalDependencies": {

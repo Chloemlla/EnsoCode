@@ -14,7 +14,11 @@ import {
   archiveSecretaryIds,
   filterArchivedByScope,
 } from '@shared/archiveScope';
-import { conversationDotTone } from '@shared/conversationDotTone';
+import {
+  conversationDotTone,
+  type PendingAskMark,
+  userAskCount,
+} from '@shared/conversationDotTone';
 import {
   ALL_GROUP_ID,
   filterProjectsByGroup,
@@ -26,6 +30,11 @@ import { projectDisplayName, projectNameFromPath } from '@shared/projectName';
 import { conversationThemeState } from '@shared/theme/themeState';
 import type { Project } from '@shared/types';
 import type { SessionWorktree, WorktreeStatus } from '@shared/types/worktree';
+import {
+  formatRetryClock,
+  type GoalUpstreamRetry,
+  isUpstreamWaitingGoal,
+} from '@shared/upstreamRecovery';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Archive,
@@ -38,6 +47,7 @@ import {
   Eraser,
   FileText,
   FolderGit2,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   Folders,
@@ -84,6 +94,7 @@ import {
 } from '@/components/chat/dragDrop';
 import { GroupChips } from '@/components/chat/GroupChips';
 import { GroupEditorDialog } from '@/components/chat/GroupEditorDialog';
+import { ImportProjectSessionsDialog } from '@/components/chat/ImportProjectSessionsDialog';
 import { ImportSessionDialog } from '@/components/chat/ImportSessionDialog';
 import {
   canMoveConversationFrom,
@@ -707,6 +718,7 @@ export function Sidebar({
   };
 
   const [importProject, setImportProject] = useState<Project | null>(null);
+  const [importSessionsProject, setImportSessionsProject] = useState<Project | null>(null);
   // 项目行展开了次级操作(设置/导入/归档/删除)的项目 id
   // 待确认的删除动作(项目连带其对话 / 单个对话)
   const [pendingRemove, setPendingRemove] = useState<
@@ -1618,6 +1630,17 @@ export function Sidebar({
                     icon: <HardDriveDownload />,
                     onSelect: () => setImportProject(project),
                   },
+                  ...(project.kind !== 'scratch' && project.kind !== 'secretary'
+                    ? [
+                        {
+                          kind: 'item' as const,
+                          key: 'import-project-sessions',
+                          label: t('Import conversations from another project…'),
+                          icon: <FolderInput />,
+                          onSelect: () => setImportSessionsProject(project),
+                        },
+                      ]
+                    : []),
                   { kind: 'separator', key: 'sep-group' },
                   // 分组列表是动态的,收进二级菜单,否则分组一多主菜单就被撑长
                   {
@@ -2247,6 +2270,10 @@ export function Sidebar({
         }}
       />
       <ImportSessionDialog project={importProject} onClose={() => setImportProject(null)} />
+      <ImportProjectSessionsDialog
+        project={importSessionsProject}
+        onClose={() => setImportSessionsProject(null)}
+      />
       <ConfirmDialog
         open={pendingWorktreeAction !== null}
         onOpenChange={(open) => {
@@ -2760,7 +2787,7 @@ interface ConversationRowProps {
     messages: { timestamp?: number }[];
     forkedFromConversationId?: string;
     unread?: boolean;
-    pendingAsks?: readonly { requestId: string }[];
+    pendingAsks?: readonly PendingAskMark[];
     pendingApprovals?: readonly unknown[];
     /** 标题总结在飞（标题后转圈） */
     titleSummaryPending?: boolean;
@@ -2770,6 +2797,8 @@ interface ConversationRowProps {
     reloading?: boolean;
     /** 由秘书派出；只用于显示标记，权限判断不读它 */
     secretaryOrigin?: { secretaryConversationId: string; secretaryId?: string };
+    /** 会话目标：侧栏用于标识等待上游恢复 */
+    goal?: { status: string; retry?: GoalUpstreamRetry };
   };
   active: boolean;
   locale: Parameters<typeof formatRelativeTime>[1];
@@ -2959,6 +2988,40 @@ function ConversationRow({
         <SessionTabCounts conversationId={id} />
         <BackgroundTaskMarker conversationId={id} />
         <SecretaryDispatchBadge count={dispatchRunning} />
+        {!renaming && isUpstreamWaitingGoal(conversation.goal) && (
+          <span
+            data-enso="sidebar-upstream-waiting"
+            className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/15 px-1 py-px text-[10px] text-amber-600 dark:text-amber-400"
+            title={
+              conversation.goal.retry.kind === 'quota'
+                ? t('Quota exhausted · next {{time}}', {
+                    time: formatRetryClock(conversation.goal.retry.at),
+                  })
+                : t('Waiting for upstream recovery · next {{time}}', {
+                    time: formatRetryClock(conversation.goal.retry.at),
+                  })
+            }
+          >
+            <span>
+              {conversation.goal.retry.kind === 'quota'
+                ? t('Quota exhausted')
+                : t('Waiting for upstream recovery')}
+            </span>
+            <button
+              type="button"
+              data-enso="upstream-retry-now"
+              title={t('Retry now')}
+              aria-label={t('Retry now')}
+              onClick={(e) => {
+                e.stopPropagation();
+                void useSessionsStore.getState().retryUpstreamNow(id);
+              }}
+              className="rounded p-0.5 transition-colors hover:bg-amber-500/20"
+            >
+              <RotateCcw className="h-2.5 w-2.5" />
+            </button>
+          </span>
+        )}
         {!renaming && (
           <TitleSummaryBadge
             pending={conversation.titleSummaryPending}
@@ -3382,25 +3445,50 @@ function ConversationDot({
   conversation,
 }: {
   conversation: {
+    id?: string;
     status: string;
     spawning: boolean;
     unread?: boolean;
-    pendingAsks?: readonly { requestId: string }[];
+    pendingAsks?: readonly PendingAskMark[];
     pendingApprovals?: readonly unknown[];
     hasRunningChild?: boolean;
+    queued?: boolean;
+    queuePosition?: number;
+    queueFailed?: string;
+    goal?: { status: string; retry?: GoalUpstreamRetry };
   };
 }) {
+  const { t } = useI18n();
+  const upstreamRetry = isUpstreamWaitingGoal(conversation.goal)
+    ? conversation.goal.retry
+    : undefined;
   // 待审批与 coworker tab 同为 attention；它们也按「等你处理」排在分组最前
   const tone =
     (conversation.pendingApprovals?.length ?? 0) > 0
       ? 'attention'
       : conversationDotTone({
-          status: conversation.status,
+          status: conversation.queueFailed ? 'failed' : conversation.status,
           spawning: conversation.spawning,
           unread: conversation.unread,
-          pendingAskCount: conversation.pendingAsks?.length ?? 0,
+          pendingAskCount: userAskCount(conversation.pendingAsks),
           hasRunningChild: conversation.hasRunningChild,
+          queued:
+            (conversation.queued === true && !conversation.queueFailed) ||
+            upstreamRetry !== undefined,
         });
+  const title = conversation.queueFailed
+    ? conversation.queueFailed
+    : upstreamRetry
+      ? upstreamRetry.kind === 'quota'
+        ? t('Quota exhausted · next {{time}}', { time: formatRetryClock(upstreamRetry.at) })
+        : t('Waiting for upstream recovery · next {{time}}', {
+            time: formatRetryClock(upstreamRetry.at),
+          })
+      : conversation.queued
+        ? t('Queued · #{{n}}, starts automatically when a slot opens', {
+            n: conversation.queuePosition ?? 1,
+          })
+        : undefined;
   // 锁进与项目行同宽的图标列:圆点/图标两种形态切换时标题不再左右跳动。
   // 空闲不画点:满列空心圈没有信息量,只有运行/待回答/失败/未读才需要被看见
   return (
@@ -3408,9 +3496,11 @@ function ConversationDot({
       {tone !== 'idle' && (
         <ConversationStatusIndicator
           tone={tone}
+          title={title}
           size="sm"
           data-enso="session-status"
           data-status={conversationThemeState(conversation)}
+          conversationId={conversation.id}
         />
       )}
     </span>

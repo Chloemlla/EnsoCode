@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => ({
   dialog: [] as string[],
   needsCheckpoint: false,
   setAsDefaultProtocolClient: vi.fn(),
+  rebuildTrayMenu: vi.fn(),
+  installAppMenu: vi.fn(),
+  desktopHooks: null as null | { app?: { syncAppLanguage?: () => void } },
 }));
 
 vi.mock('electron', () => ({
@@ -74,7 +77,10 @@ vi.mock('./desktop/localImageScheme', () => ({
 }));
 vi.mock('./services/remoteRenderer', () => ({ setupRemoteRenderer: vi.fn() }));
 vi.mock('./services/nodeRemote', () => ({ registerNodeSettingsProtocolHandler: vi.fn() }));
-vi.mock('./services/appMenu', () => ({ installAppMenu: vi.fn(), setAppMenuActions: vi.fn() }));
+vi.mock('./services/appMenu', () => ({
+  installAppMenu: mocks.installAppMenu,
+  setAppMenuActions: vi.fn(),
+}));
 vi.mock('./services/computerHost', () => ({ computerHost: { closeAll: vi.fn() } }));
 vi.mock('./services/pairHost', () => ({
   startPairHost: vi.fn(() => mocks.order.push('pair')),
@@ -94,7 +100,10 @@ vi.mock('./services/agentHost', () => ({
   recordAgentWorkerGone: vi.fn(),
   agentDataDir: () => '/tmp/enso-index-test/agent',
 }));
-vi.mock('./ipc/agent', () => ({ resumeRootFromRestartManifest: vi.fn() }));
+vi.mock('./ipc/agent', () => ({
+  resumeRootFromRestartManifest: vi.fn(),
+  wakeInterruptedRunOwners: vi.fn(),
+}));
 vi.mock('./ipc/appRestart', () => ({
   clearRestartOverlay: vi.fn(),
   registerAppRestartHandlers: mocks.registerForce,
@@ -152,18 +161,43 @@ vi.mock('./services/appServerMode', () => ({
   enterServerMode: vi.fn(),
   isServerMode: () => false,
   restoreFromSecondInstance: vi.fn(),
+  rebuildTrayMenu: mocks.rebuildTrayMenu,
+  setTrayRestartActions: vi.fn(),
   shouldQuitOnWindowAllClosed: () => false,
   scheduleReenterServerMode: (...args: unknown[]) => mocks.scheduleReenter(...args),
   toggleTrayMode: vi.fn(),
+}));
+vi.mock('./services/desktopHooks', () => ({
+  installDesktopHooks: (hooks: { app?: { syncAppLanguage?: () => void } }) => {
+    mocks.desktopHooks = hooks;
+  },
 }));
 vi.mock('./services/trayToggleShortcut', () => ({
   setTrayToggleHandler: vi.fn(),
   syncTrayToggleShortcut: vi.fn(),
   stopTrayToggleShortcut: vi.fn(),
 }));
+// 下面几个只被入口接线调用，真实加载占冷启动大头（会话历史连带整个 pi-coding-agent、浏览器宿主、配置 CLI 服务）
+vi.mock('./services/exitInterruptHost', () => ({
+  recordRunningSessionsAtExit: vi.fn(),
+  startExitInterruptRecovery: vi.fn(),
+  startRunningSessionsHeartbeat: vi.fn(),
+}));
+vi.mock('./services/browserHost', () => ({
+  browserHost: { setHostWindow: vi.fn(), dispose: vi.fn(async () => undefined) },
+}));
+vi.mock('./services/configCli', () => ({
+  startDesktopConfigCli: vi.fn(async () => undefined),
+  stopDesktopConfigCli: vi.fn(),
+}));
+vi.mock('./desktop/revealExternalConfirm', () => ({ confirmRevealExternal: vi.fn() }));
 
 const originalUserDataOverride = process.env.ENSO_USER_DATA_DIR;
 const originalVerify = process.env.ENSO_VERIFY;
+
+// 入口依赖图在收集阶段加载一次；用例里 resetModules 之后只重新求值
+await import('./index');
+for (let i = 0; i < 2; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 
 beforeEach(() => {
   vi.resetModules();
@@ -217,6 +251,16 @@ describe('Main startup order', () => {
     await settle();
     expect(mocks.createMainWindow).toHaveBeenCalledOnce();
     expect(mocks.scheduleReenter).toHaveBeenCalledOnce();
+  });
+
+  it('切换语言时同时刷新应用菜单与托盘菜单', async () => {
+    await import('./index');
+    await settle();
+    mocks.installAppMenu.mockClear();
+    mocks.rebuildTrayMenu.mockClear();
+    mocks.desktopHooks?.app?.syncAppLanguage?.();
+    expect(mocks.installAppMenu).toHaveBeenCalledOnce();
+    expect(mocks.rebuildTrayMenu).toHaveBeenCalledOnce();
   });
 });
 

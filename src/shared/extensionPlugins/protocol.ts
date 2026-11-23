@@ -4,6 +4,8 @@ import type { PluginEventName } from './events';
 
 /** 注入消息与工具进度的字符上限；gate、Main、worker 共用 */
 export const PLUGIN_INJECT_MAX_CHARS = 32 * 1024;
+/** 宿主包上不可信包裹（含转义）后送进 worker 的上限：正文上限再留出余量 */
+export const PLUGIN_INJECT_WIRE_MAX_CHARS = PLUGIN_INJECT_MAX_CHARS + 4 * 1024;
 export const PLUGIN_PROGRESS_MAX_CHARS = 16 * 1024;
 /** 注入消息可附带的图片：数量与单张 base64 长度上限 */
 export const PLUGIN_INJECT_MAX_IMAGES = 4;
@@ -34,6 +36,62 @@ export function parsePluginInjectImages(value: unknown): PluginInjectImage[] | n
     images.push({ data, mimeType });
   }
   return images;
+}
+
+/** 插件投递里的外部发送者。只保留这四个字段，插件自报的 owner / role 一律丢掉 */
+export interface PluginInjectSender {
+  channel: string;
+  chatId?: string;
+  userId?: string;
+  displayName?: string;
+}
+
+export type PluginInjectOrigin = 'owner' | 'external';
+
+const SENDER_CHANNEL = /^[a-zA-Z0-9._:-]{1,64}$/;
+
+function isSenderRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 缺省表示没填；空串、超长和非安全数字都是非法 */
+function parseSenderId(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) return null;
+    return String(value);
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 128) return null;
+  return trimmed;
+}
+
+/**
+ * 边界解析插件自报的发送者。undefined 是没传；null 是传了但不合法。
+ * 只抄 channel / chatId / userId / displayName。
+ */
+export function parsePluginInjectSender(value: unknown): PluginInjectSender | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isSenderRecord(value)) return null;
+  if (typeof value.channel !== 'string' || !SENDER_CHANNEL.test(value.channel.trim())) return null;
+  const userId = parseSenderId(value.userId);
+  if (userId === null) return null;
+  const chatId = parseSenderId(value.chatId);
+  if (chatId === null) return null;
+  if (value.displayName !== undefined && typeof value.displayName !== 'string') return null;
+  const displayName =
+    typeof value.displayName === 'string' ? value.displayName.trim().slice(0, 128) : '';
+  return {
+    channel: value.channel.trim(),
+    ...(userId ? { userId } : {}),
+    ...(chatId ? { chatId } : {}),
+    ...(displayName ? { displayName } : {}),
+  };
+}
+
+export function parsePluginInjectOrigin(value: unknown): PluginInjectOrigin | undefined {
+  return value === 'owner' || value === 'external' ? value : undefined;
 }
 /** 插件注入消息在会话里的 customType */
 export const PLUGIN_MESSAGE_TYPE = 'enso-plugin-message';
@@ -223,7 +281,7 @@ export const PLUGIN_HOST_APIS = [
   'tool.progress',
   /** 写一份产出文件；args { name, text | base64, mime? }，返回 { id, name, size, mime } */
   'artifact.write',
-  /** 向会话注入消息；args { sessionId?, text, images?, deliverAs?, triggerTurn? } */
+  /** 向会话注入消息；args { sessionId?, text, images?, deliverAs?, triggerTurn?, trusted? } */
   'session.inject',
   /** 中止会话当前一轮；args { sessionId? }，权限同 session.inject */
   'session.abort',

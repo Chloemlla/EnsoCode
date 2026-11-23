@@ -1,3 +1,4 @@
+import type { ExtensionPluginSummary } from '@shared/extensionPlugins/types';
 import {
   isWorkflowAvailable,
   projectDisabledBuiltinTools,
@@ -21,6 +22,7 @@ import {
 import { getPluginViews, pluginViewsReady, subscribePluginViews } from '../plugins/viewBridge';
 import { isRemoteClient } from './remoteClient';
 import { resolveSidePanelDockConversationId } from './sidePanelDockId';
+import { releaseTerminal } from './terminalInstances';
 
 const docks = new Map<string, DockviewApi>();
 const dockRemoveDisposers = new Map<string, { dispose: () => void }>();
@@ -324,6 +326,52 @@ export function setPluginPanelScope(
     pluginOpenedGlobal.delete(panelId);
     closeGlobalTab(panelId, conversationId);
   }
+}
+
+/**
+ * 插件升级后清单里没了的视图：从 globalTabs、已挂载 dock 和没挂载会话的已存布局里摘掉。
+ * 只认列表里 enabled 的插件；禁用、崩溃、清单读不出或已卸载的状态未知，一律不动。
+ */
+export function pruneUndeclaredPluginTabs(
+  plugins: readonly Pick<ExtensionPluginSummary, 'id' | 'state' | 'views'>[]
+): void {
+  const declared = new Map(
+    plugins
+      .filter((plugin) => plugin.state === 'enabled')
+      .map((plugin) => [`plugin:${plugin.id}:`, new Set(plugin.views.map((view) => view.id))])
+  );
+  const stale = (panelId: string) => {
+    const end = panelId.lastIndexOf(':');
+    const views = declared.get(panelId.slice(0, end + 1));
+    return views !== undefined && !views.has(panelId.slice(end + 1));
+  };
+  const store = useSidePanelStore.getState();
+  const ids = new Set([
+    ...store.globalTabs,
+    ...[...docks.values()].flatMap((api) => api.panels.map((panel) => panel.id)),
+    ...Object.values(store.layouts).flatMap((layout) => Object.keys(layout?.panels ?? {})),
+  ]);
+  const doomed = [...ids].filter(stale);
+  if (doomed.length === 0) return;
+  globalSync.run(() => {
+    for (const api of docks.values()) {
+      for (const panelId of doomed) {
+        const panel = api.getPanel(panelId);
+        if (!panel) continue;
+        if (api.activePanel?.id === panelId) {
+          const siblings = panel.group.panels;
+          const at = siblings.indexOf(panel);
+          [...siblings.slice(0, at).reverse(), ...siblings.slice(at + 1)]
+            .find((other) => !doomed.includes(other.id))
+            ?.api.setActive();
+        }
+        panel.api.close();
+      }
+    }
+  });
+  store.setGlobalTabs(store.globalTabs.filter((id) => !doomed.includes(id)));
+  const keep = new Set(docks.keys());
+  for (const panelId of doomed) store.dropPanelFromLayouts(panelId, keep);
 }
 
 function activeDock(): { api: DockviewApi; conversationId: string; projectId: string } | null {
@@ -695,8 +743,7 @@ export function disposeConversationResources(conversationId: string): void {
       if (panel.id === 'changes' || panel.id === 'files') continue;
       if (panel.id === 'secretary') continue;
       if (panel.id === 'browser' || panel.id.startsWith('browser:')) continue;
-      // xterm 只在打开过终端时才加载
-      void import('@/lib/terminalRegistry').then((m) => m.releaseTerminal(panel.id));
+      releaseTerminal(panel.id);
       void window.electronAPI?.terminal?.dispose(panel.id);
     }
   }

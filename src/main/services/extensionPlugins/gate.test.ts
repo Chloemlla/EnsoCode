@@ -1006,7 +1006,12 @@ describe('PluginHostGate', () => {
   });
 
   it('注入参数不合法或目标未授权时不消耗频率配额', async () => {
-    const inject = vi.fn(() => ({ ok: true as const }));
+    const inject = vi.fn(
+      (_pluginId: string, input: { sender?: { channel: string; userId?: string } }) => ({
+        ok: true as const,
+        sender: input.sender,
+      })
+    );
     deps.inject = inject;
     deps.manifest = () => manifest({ permissions: ['agent.inject'] });
     gate = new PluginHostGate(deps);
@@ -1026,6 +1031,46 @@ describe('PluginHostGate', () => {
       gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall())
     ).rejects.toMatchObject({ code: 'RATE_LIMITED' });
     expect(inject).toHaveBeenCalledTimes(5);
+  });
+
+  it('trusted 只收布尔值，原样交给注入，是否生效由服务按权限判', async () => {
+    const inject = vi.fn((_pluginId: string, _input: { trusted: boolean }) => ({
+      ok: true as const,
+    }));
+    deps.inject = inject;
+    deps.manifest = () => manifest({ permissions: ['agent.inject'] });
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', trusted: 'yes' }, agentCall())
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await gate.handle('a.b', 'session.inject', { text: 'hi', trusted: true }, agentCall());
+    await gate.handle('a.b', 'session.inject', { text: 'hi' }, agentCall());
+    expect(inject.mock.calls.map(([, input]) => input.trusted)).toEqual([true, false]);
+  });
+
+  it('sender 非法拒绝，合法字段原样交给注入并丢掉自报的 owner', async () => {
+    const inject = vi.fn((_pluginId: string, input: { sender?: { userId?: string } }) => ({
+      ok: true as const,
+      echoed: input,
+    }));
+    deps.inject = inject;
+    deps.manifest = () => manifest({ permissions: ['agent.inject'] });
+    gate = new PluginHostGate(deps);
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sender: { channel: '' } }, agentCall())
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sender: [] }, agentCall())
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await gate.handle(
+      'a.b',
+      'session.inject',
+      { text: 'hi', sender: { channel: 'telegram', userId: 7, isOwner: true, role: 'owner' } },
+      agentCall()
+    );
+    expect(inject.mock.calls.map(([, input]) => input.sender)).toEqual([
+      { channel: 'telegram', userId: '7' },
+    ]);
   });
 
   it('拒绝跨会话注入时带上插件 id，同一会话或已授权不通知', async () => {
@@ -1329,6 +1374,56 @@ describe('常驻进程里的会话操作', () => {
     ).resolves.toBeNull();
     expect(inject).toHaveBeenCalledTimes(1);
     expect(abort).toHaveBeenCalledWith('a.b', 's1');
+  });
+
+  it('调用结束后带回来的 id 按无调用处理；别的插件的 id、已取消的调用照样拒绝', async () => {
+    const inject = vi.fn(() => ({ ok: true as const }));
+    deps.inject = inject;
+    deps.writeArtifact = vi.fn();
+    deps.manifest = (id) => (id === 'a.b' ? manifest({ permissions: ['agent.inject'] }) : null);
+    gate = new PluginHostGate(deps);
+    const ended = agentCall();
+    gate.invocations.finish(ended);
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 's1' }, ended)
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(gate.handle('a.b', 'session.inject', { text: 'hi' }, ended)).rejects.toMatchObject(
+      { code: 'NO_SESSION' }
+    );
+    await expect(
+      gate.handle('a.b', 'artifact.write', { name: 'a.txt', text: 'x' }, ended)
+    ).rejects.toMatchObject({ code: 'NO_INVOCATION' });
+    expect(inject).not.toHaveBeenCalled();
+
+    const foreign = gate.invocations.create({
+      pluginId: 'c.d',
+      sessionId: 's1',
+      projectRoot: root,
+      gesture: false,
+    });
+    const cancelled = agentCall();
+    gate.invocations.cancel(cancelled);
+    const retained = uiCall();
+    gate.invocations.finish(retained);
+    deps.crossSessionInject = () => true;
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 's1' }, foreign)
+    ).rejects.toMatchObject({ code: 'NO_INVOCATION' });
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 's1' }, cancelled)
+    ).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(inject).not.toHaveBeenCalled();
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi', sessionId: 's1' }, ended)
+    ).resolves.toBeNull();
+    // 手势调用结束后保留到令牌过期，仍算发起会话里的调用
+    await expect(
+      gate.handle('a.b', 'session.inject', { text: 'hi' }, retained)
+    ).resolves.toBeNull();
+    expect(inject.mock.calls.map((call) => (call as unknown[])[1])).toEqual([
+      expect.objectContaining({ sessionId: 's1' }),
+      expect.objectContaining({ sessionId: 's1' }),
+    ]);
   });
 });
 

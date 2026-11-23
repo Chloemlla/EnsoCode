@@ -1,5 +1,5 @@
 import type { AgentTypeKey } from '@shared/builtinAgents';
-import { coalesceRuns, mapLimited } from '@shared/coalesceRuns';
+import { coalesceRuns } from '@shared/coalesceRuns';
 import { parseCompactCommand } from '@shared/compactCommand';
 import { conversationCwd } from '@shared/conversationCwd';
 import { diffConversations } from '@shared/conversationsPatch';
@@ -12,12 +12,15 @@ import {
 } from '@shared/defaultModel';
 import { isPluginPresetId } from '@shared/extensionPlugins/preset';
 import { normalizeLocale, translate } from '@shared/i18n';
+import type { CopiedFrom } from '@shared/moveConversation';
 import {
   EMPTY_PLAN_STATE,
   type PlanRespondAction,
   planPhase,
   splitPlanPrefix,
 } from '@shared/planMode';
+import type { QueuedStart } from '@shared/secretary/queuedSession';
+import { unwrapUntrustedForDisplay } from '@shared/secretary/transcript';
 import { isContinuationTurn } from '@shared/titleContinuation';
 import type {
   AgentActionResult,
@@ -44,6 +47,12 @@ import type {
   WorktreeStatus,
 } from '@shared/types/worktree';
 import { splitUnattendedPrefix } from '@shared/unattendedNote';
+import {
+  type GoalUpstreamRetry,
+  isUpstreamWaitingGoal,
+  type ProviderHealthSnapshot,
+  upstreamContinuationText,
+} from '@shared/upstreamRecovery';
 // 纯逻辑模块(仅类型级依赖),store 引用不破坏 node 环境测试
 import {
   cleanTitleSummarySource,
@@ -63,6 +72,8 @@ export interface SessionGoal {
   noProgressRuns: number;
   /** 上一轮最终 assistant 文本的归一化指纹 */
   lastOutput?: string;
+  /** 上游瞬态/配额故障自动退避等待元数据；仅 status === 'waiting' 时有值 */
+  retry?: GoalUpstreamRetry;
 }
 
 /** 排队待发的用户消息(agent running 时入队,轮次结束自动投递) */
@@ -76,6 +87,7 @@ import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { isBuiltinToolEnabledForProject } from '@shared/types/builtinTools';
 import { create } from 'zustand';
 import { persist, type StorageValue } from 'zustand/middleware';
+import { startQueuedSession } from '@/lib/queuedSessionApi';
 import { isLeaderRenderer } from '@/lib/rendererRole';
 import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
@@ -86,6 +98,9 @@ import { shouldFocusChildReservation } from './childReservationFocus';
 import {
   canWakeConversationForRewind,
   extractRewindDraft,
+  forkAnchorForTurnKey,
+  forkDepth,
+  MAX_FORK_DEPTH,
   resolveRewindTarget,
   rewindKeepCount,
   rewindWorkerPhase,
@@ -178,7 +193,6 @@ function hotSessionIds(
   for (const id of peekedIds.keys()) ids.add(id);
   return ids;
 }
-const WORKTREE_STATUS_CONCURRENCY = 6;
 const parentTailInFlight = new Set<string>();
 const olderHistoryInFlight = new Set<string>();
 /** 冷缓存清掉的 child 再被看到时补历史。实现在 store 创建后赋值。 */
@@ -324,6 +338,8 @@ export interface Conversation extends SessionProjection {
   compactionNoticeAt?: number;
   forkedFromConversationId?: string;
   forkedFromEntryId?: string;
+  /** 整项目复制出的副本：来源项目与会话，弹窗据此提示已复制过几次 */
+  copiedFrom?: CopiedFrom;
   /** 上次使用的模型，resume 时沿用 */
   lastProviderId?: string;
   lastModelId?: string;
@@ -367,6 +383,11 @@ export interface Conversation extends SessionProjection {
   activeRenewedAt?: number;
   /** 排队待发消息(running 时用户消息先入队) */
   queuedMessages?: QueuedMessage[];
+  /**
+   * 秘书派发超过同时派发上限：会话已建出但未启动，首条消息在这里。
+   * Main 写入，启动成功后整段删除。渲染层不 spawn、不 attach、不本地 prompt。
+   */
+  queuedStart?: QueuedStart;
   /** 会话目标(设定后空闲自动续跑) */
   goal?: SessionGoal;
   /** Main 驱动的派出会话：续跑与队列泵由 Main 负责，本窗口只显示与转发指令 */
@@ -546,6 +567,8 @@ interface SessionsState {
   enqueueMessage(conversationId: string, text: string, images?: AttachedImage[]): void;
   removeQueuedMessage(conversationId: string, messageId: string): void;
   withdrawMessage(conversationId: string, target: { kind: 'queue' | 'delivery'; id: string }): void;
+  /** 拒收的气泡原样重发：收回旧气泡，按「立即发送」以新投递号发出 */
+  resendMessage(conversationId: string, deliveryId: string): void;
   updateQueuedMessage(conversationId: string, messageId: string, text: string): void;
   /** 立即发送队列中某条(running 时 steer 插入,否则直接 prompt) */
   sendQueuedNow(conversationId: string, messageId: string): void;
@@ -561,8 +584,10 @@ interface SessionsState {
   compact(conversationId: string, instructions?: string, options?: { quiet?: boolean }): void;
   /** UI 提示过压缩失败后清掉错误，避免重复弹提示 */
   clearCompactionError(conversationId: string): void;
-  forkFromMessage(conversationId: string, userIndexFromEnd: number): Promise<string | null>;
+  forkFromMessage(conversationId: string, turnIndexFromEnd: number): Promise<string | null>;
   forkFromEntry(conversationId: string, entryId: string): Promise<string | null>;
+  /** 时间线轮末行分叉：按本轮 user entryId 定位（压缩前的早期轮次也可用） */
+  forkFromTurn(conversationId: string, turnKey: number): Promise<string | null>;
   /** 终态失败后不新增 user 消息，从当前上下文续跑 */
   retry(conversationId: string): void;
   /** 被应用退出打断的一轮：冷会话先唤醒，再从断点续跑（只续未完成的回合） */
@@ -575,6 +600,10 @@ interface SessionsState {
   pauseGoal(conversationId: string): void;
   resumeGoal(conversationId: string): void;
   clearGoal(conversationId: string): void;
+  /** 各 provider 上游健康快照（仅包含降级或探测中的 provider） */
+  upstreamHealth: ProviderHealthSnapshot[];
+  /** 立即重试等待上游恢复的会话或子代理 */
+  retryUpstreamNow(waiterId: string): Promise<void>;
 }
 
 /** 未投递成功的乐观消息回队：文本 + 图片都不丢 */
@@ -636,15 +665,13 @@ function withdrawnDraftPatch(
 
 function userMessageRawText(message: ProjectedMessage): string {
   if (message.role !== 'user' && !message.pluginSource) return '';
-  return splitPlanPrefix(
-    splitUnattendedPrefix(
-      message.content
-        .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
-        .map((part) => part.text)
-        .join(' ')
-        .trim()
-    ).rest
-  ).rest;
+  const text = message.content
+    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+    .map((part) => part.text)
+    .join(' ')
+    .trim();
+  const shown = message.pluginSource ? unwrapUntrustedForDisplay(text) : text;
+  return splitPlanPrefix(splitUnattendedPrefix(shown).rest).rest;
 }
 
 function truncateTitle(text: string): string {
@@ -709,6 +736,42 @@ export const useSessionsStore = create<SessionsState>()(
       const pendingTitleBaselines = new Map<string, string>();
       const rewindInFlight = new Set<string>();
       const forkWakeInFlight = new Set<string>();
+      const queuedStartFlight = new Set<string>();
+
+      /** 排队会话的用户消息是首条之后的 follow-up。被拒时不回显，原文退回输入框。 */
+      async function startQueuedFollowUp(
+        id: string,
+        text: string,
+        images: AttachedImage[] | undefined
+      ): Promise<string | null> {
+        const restore = (error: string) => {
+          set((state) =>
+            patch(state, id, {
+              draftText: text,
+              ...(images?.length ? { draftImages: images } : {}),
+              error,
+            })
+          );
+          return error;
+        };
+        if (queuedStartFlight.has(id)) return restore('queued start in progress');
+        queuedStartFlight.add(id);
+        try {
+          const result = await startQueuedSession(id, {
+            text,
+            ...(images?.length ? { images } : {}),
+          });
+          if (!result.ok) return restore(result.error);
+          set((state) =>
+            state.conversations[id] ? patch(state, id, { error: undefined }) : state
+          );
+          return null;
+        } catch (error) {
+          return restore(error instanceof Error ? error.message : String(error));
+        } finally {
+          queuedStartFlight.delete(id);
+        }
+      }
 
       /** 唤醒后等该会话 worker 真正 ready（spawn ack 后 spawning 仍在，需等其 snapshot） */
       function waitForWorkerReady(
@@ -737,6 +800,7 @@ export const useSessionsStore = create<SessionsState>()(
       /** 冷主会话分叉前先 resume；fork 需要源会话的活 generation */
       async function wakeForFork(conversationId: string): Promise<boolean> {
         const conversation = get().conversations[conversationId];
+        if (forkDepth(get().conversations, conversationId) >= MAX_FORK_DEPTH) return false;
         if (!conversation || conversation.started) return true;
         if (!canWakeConversationForRewind(conversation) || forkWakeInFlight.has(conversationId)) {
           return false;
@@ -1201,6 +1265,43 @@ export const useSessionsStore = create<SessionsState>()(
         });
       });
 
+      /** 上一轮收束时会话还挂着自定提醒：goal 先不续跑，等提醒叫醒的那一轮收束再刷新 */
+      const awaitingReminder = new Set<string>();
+      window.electronAPI.agent.onUpstreamHealth?.((snapshots) => {
+        set({ upstreamHealth: snapshots });
+      });
+      void window.electronAPI.agent
+        .listUpstreamHealth?.()
+        .then((snapshots) => {
+          if (Array.isArray(snapshots)) set({ upstreamHealth: snapshots });
+        })
+        .catch(() => {});
+      window.electronAPI.agent.onUpstreamWake?.(({ conversationId }) => {
+        if (!isLeaderRenderer()) return;
+        const conversation = get().conversations[conversationId];
+        if (!conversation || conversation.driver === 'main') return;
+        if (conversation.abortRequested || conversation.status !== 'idle') return;
+        const goal = conversation.goal;
+        if (!isUpstreamWaitingGoal(goal)) return;
+        if (!conversation.started) return;
+        const text = upstreamContinuationText(goal.text);
+        const deliveryId = crypto.randomUUID();
+        set((state) =>
+          state.conversations[conversationId]
+            ? patch(state, conversationId, {
+                error: undefined,
+                messages: [
+                  ...state.conversations[conversationId].messages,
+                  optimisticUserMessage(text, undefined, deliveryId),
+                ],
+              })
+            : state
+        );
+        void deliver(conversationId, text, undefined, 'prompt', {
+          deliveryId,
+          restore: { kind: 'goal' },
+        });
+      });
       window.electronAPI.agent.onEvent((event) => {
         if (event.type === 'worker-exited') {
           set((state) => {
@@ -1913,21 +2014,6 @@ export const useSessionsStore = create<SessionsState>()(
                   )
                 )
               : {}),
-            // 未提交的消息被 reducer 收回乐观回显（最早一条）：连同图片回到队首，
-            // 多条连续失败也不互相覆盖；队列区可编辑/删除/立即发送
-            ...(event.type === 'turn-failed' &&
-            event.undelivered &&
-            next.messages.length < conversation.messages.length
-              ? {
-                  // 追加到队尾：连续多条失败按 FIFO 回流，保持原发送顺序（A,B → [A,B]）
-                  queuedMessages: [
-                    ...(conversation.queuedMessages ?? []),
-                    toQueuedMessage(
-                      conversation.messages.find((m) => m.optimistic && !m.deliveryRejected)!
-                    ),
-                  ],
-                }
-              : {}),
             ...(event.type === 'parent-ready'
               ? {
                   started: true,
@@ -1984,16 +2070,91 @@ export const useSessionsStore = create<SessionsState>()(
           void recoverStaleSession(id, event.reason, event.identity.generation);
         }
         if (event.type === 'turn-completed' || event.type === 'turn-failed') {
+          if (event.type === 'turn-completed' && event.awaitingReminder) awaitingReminder.add(id);
+          else awaitingReminder.delete(id);
           // 用户中断的轮次不自动续跑：清掉一次性标记后直接收口。
           // 中断标记只在发起窗口本地，别的窗口（如 PWA 完整模式）发起的中断靠 worker 的 aborted 认出
-          const aborted = event.type === 'turn-completed' && event.aborted === true;
+          const aborted = event.aborted === true;
           if (get().conversations[id]?.abortRequested || aborted) {
             if (get().conversations[id]?.abortRequested) {
               set((state) => patch(state, id, { abortRequested: false }));
             }
             return;
           }
-          if (event.type !== 'turn-completed') return;
+          if (event.type === 'turn-failed') {
+            if (!isLeaderRenderer() || event.interrupted) return;
+            const current = get().conversations[id];
+            if (!current || current.driver === 'main') return;
+            const goal = current.goal;
+            const eligible = goal?.status === 'active' || isUpstreamWaitingGoal(goal);
+            if (!eligible || !goal) return;
+            const report = window.electronAPI.agent.reportUpstreamFailure;
+            if (!report) return;
+            void report({
+              sessionId: id,
+              error: event.error,
+              ...((event.provider ?? current.lastProviderId)
+                ? { provider: event.provider ?? current.lastProviderId }
+                : {}),
+              ...(event.retryExhausted ? { retryExhausted: true } : {}),
+              ...(goal.retry
+                ? { since: goal.retry.since, previousAttempt: goal.retry.attempt }
+                : {}),
+            })
+              .then((decision) => {
+                set((state) => {
+                  const latest = state.conversations[id];
+                  if (!latest || latest.abortRequested || !latest.goal) return state;
+                  if (latest.goal.status !== 'active' && !isUpstreamWaitingGoal(latest.goal)) {
+                    return state;
+                  }
+                  if (decision.action === 'wait') {
+                    return patch(state, id, {
+                      status: 'idle',
+                      error: undefined,
+                      goal: {
+                        ...latest.goal,
+                        status: 'waiting',
+                        note: undefined,
+                        retry: decision.retry,
+                      },
+                    });
+                  }
+                  const note =
+                    decision.action === 'exhausted'
+                      ? decision.note
+                      : decision.hint
+                        ? `${event.error}\n${decision.hint}`
+                        : event.error;
+                  return patch(state, id, {
+                    goal: {
+                      ...latest.goal,
+                      status: 'paused',
+                      note,
+                      retry: undefined,
+                    },
+                  });
+                });
+              })
+              .catch(() => {});
+            return;
+          }
+          // 探测/恢复成功：把 waiting(upstream) 还原为 active 并清掉 retry
+          const currentGoal = get().conversations[id]?.goal;
+          if (isUpstreamWaitingGoal(currentGoal)) {
+            set((state) =>
+              state.conversations[id]?.goal
+                ? patch(state, id, {
+                    goal: {
+                      ...state.conversations[id].goal!,
+                      status: 'active',
+                      note: undefined,
+                      retry: undefined,
+                    },
+                  })
+                : state
+            );
+          }
           // 留下本轮摘要供侧栏红叹号的手动重试用；在发起滚动总结之前写，重试拿到的是最新一轮
           if (event.digest) {
             const digest = event.digest;
@@ -2169,6 +2330,7 @@ export const useSessionsStore = create<SessionsState>()(
         )
           return;
         if (goal?.status !== 'active') return;
+        if (awaitingReminder.has(id)) return;
         if ((conversation.queuedMessages ?? []).length > 0) return;
         // 规划与待审期间不自动推进：计划需要用户审批
         const phase = planPhase(conversation.planState);
@@ -2280,6 +2442,7 @@ export const useSessionsStore = create<SessionsState>()(
         activeId: null,
         worktreeStatuses: {},
         workspaceRevisionByConversation: {},
+        upstreamHealth: [],
 
         async switchWorkspaceBranch(id, branch, create = false) {
           const conversation = get().conversations[id];
@@ -2610,18 +2773,16 @@ export const useSessionsStore = create<SessionsState>()(
           );
         },
 
-        // 启动、侧栏挂载、回焦会同时触发：合并成一次尾随刷新；每个状态要跑几次 git，限并发免得压垮宿主
+        // 启动、侧栏挂载、回焦会同时触发：合并成一次尾随刷新；状态一次批量取（宿主限并发跑 git）
         refreshWorktreeStatuses: coalesceRuns(async () => {
           const targets = get().conversations;
-          const records = await window.electronAPI.worktree.list();
-          const entries = await mapLimited(
-            records.filter((record) => targets[record.conversationId]),
-            WORKTREE_STATUS_CONCURRENCY,
-            async (record) => {
-              const result = await window.electronAPI.worktree.status(record.conversationId);
-              return { record, status: result.ok ? result.value : undefined };
-            }
-          );
+          const [records, statuses] = await Promise.all([
+            window.electronAPI.worktree.list(),
+            window.electronAPI.worktree.statuses(),
+          ]);
+          const entries = records
+            .filter((record) => targets[record.conversationId])
+            .map((record) => ({ record, status: statuses[record.conversationId] }));
           set((state) => {
             const conversations = { ...state.conversations };
             const worktreeStatuses = { ...state.worktreeStatuses };
@@ -3293,6 +3454,8 @@ export const useSessionsStore = create<SessionsState>()(
           if (!id) return 'no conversation';
           const conversation = get().conversations[id];
           if (!conversation) return 'no conversation';
+          // 排队会话还没有 worker。必须在任何回显之前改走立即开始。
+          if (conversation.queuedStart) return startQueuedFollowUp(id, submittedText, images);
           // /compact 应用级命令:压缩上下文,不发给 agent。工作区操作中/未启动由 compact() 提示原因
           const compactCommand = parseCompactCommand(text);
           if (conversation.workspaceMigrating && !compactCommand) {
@@ -3539,6 +3702,7 @@ export const useSessionsStore = create<SessionsState>()(
           const conversation = get().conversations[id];
           if (
             !conversation ||
+            conversation.queuedStart ||
             conversation.btwParentId ||
             conversation.started ||
             conversation.spawning ||
@@ -3901,19 +4065,33 @@ export const useSessionsStore = create<SessionsState>()(
             })();
           if (!id) return;
           const conversation = get().conversations[id];
-          if (!conversation?.started) return;
-          // 停止 = 用户接管：本轮收束不再自动续跑，活动目标一并暂停（可手动恢复）
+          if (!conversation) return;
+          const waitingUpstream = isUpstreamWaitingGoal(conversation.goal);
+          if (!conversation.started && !waitingUpstream) return;
+          // 停止 = 用户接管：本轮收束不再自动续跑，活动目标一并暂停（可手动恢复），在跑的子代理一并停掉
           // 只有在跑的轮次会回流收束来消费中断标记；空闲压缩中停止不置，否则标记残留吞掉下一轮
           const goal = conversation.goal;
           set((state) =>
             patch(state, id, {
               ...(conversation.status === 'running' ? { abortRequested: true } : {}),
-              ...(goal?.status === 'active'
-                ? { goal: { ...goal, status: 'paused' as const, note: 'stopped by user' } }
+              ...(goal && (goal.status === 'active' || waitingUpstream)
+                ? {
+                    goal: {
+                      ...goal,
+                      status: 'paused' as const,
+                      note: 'stopped by user',
+                      retry: undefined,
+                    },
+                  }
                 : {}),
             })
           );
-          await window.electronAPI.agent.abort(id);
+          if (waitingUpstream) {
+            void window.electronAPI.agent.cancelUpstreamWait?.(id);
+          }
+          if (!conversation.started) return;
+          // 用户停止：一并停子代理、取消会话自己定的提醒
+          await window.electronAPI.agent.abort(id, { stopSubagents: true, cancelReminders: true });
         },
 
         setGoal(conversationId, text) {
@@ -3923,6 +4101,7 @@ export const useSessionsStore = create<SessionsState>()(
             mainGoalAction(conversationId, 'set', text.trim());
             return;
           }
+          void window.electronAPI.agent.cancelUpstreamWait?.(conversationId);
           set((state) =>
             patch(state, conversationId, {
               goal: {
@@ -3960,8 +4139,11 @@ export const useSessionsStore = create<SessionsState>()(
             mainGoalAction(conversationId, 'pause');
             return;
           }
+          void window.electronAPI.agent.cancelUpstreamWait?.(conversationId);
           set((state) =>
-            patch(state, conversationId, { goal: { ...goal, status: 'paused', note: undefined } })
+            patch(state, conversationId, {
+              goal: { ...goal, status: 'paused', note: undefined, retry: undefined },
+            })
           );
         },
 
@@ -3974,6 +4156,7 @@ export const useSessionsStore = create<SessionsState>()(
             mainGoalAction(conversationId, 'resume');
             return;
           }
+          void window.electronAPI.agent.cancelUpstreamWait?.(conversationId);
           // 恢复即重置安全计数(与 pi-goal 的 guided review 语义一致:人已过目)
           set((state) =>
             patch(state, conversationId, {
@@ -3981,6 +4164,7 @@ export const useSessionsStore = create<SessionsState>()(
                 ...goal,
                 status: 'active',
                 note: undefined,
+                retry: undefined,
                 autoTurns: 0,
                 noProgressRuns: 0,
               },
@@ -4013,7 +4197,12 @@ export const useSessionsStore = create<SessionsState>()(
             mainGoalAction(conversationId, 'clear');
             return;
           }
+          void window.electronAPI.agent.cancelUpstreamWait?.(conversationId);
           set((state) => patch(state, conversationId, { goal: undefined }));
+        },
+
+        async retryUpstreamNow(waiterId) {
+          await window.electronAPI.agent.retryUpstreamNow?.(waiterId);
         },
 
         selectTab(parentId, tabId) {
@@ -4187,14 +4376,21 @@ export const useSessionsStore = create<SessionsState>()(
           })();
         },
 
-        async forkFromMessage(conversationId, userIndexFromEnd) {
+        async forkFromMessage(conversationId, turnIndexFromEnd) {
           if (!(await wakeForFork(conversationId))) return null;
-          return forkConversation(get, set, conversationId, { userIndexFromEnd });
+          return forkConversation(get, set, conversationId, { turnIndexFromEnd });
         },
 
         async forkFromEntry(conversationId, entryId) {
           if (!(await wakeForFork(conversationId))) return null;
           return forkConversation(get, set, conversationId, { entryId });
+        },
+
+        async forkFromTurn(conversationId, turnKey) {
+          const conversation = get().conversations[conversationId];
+          const anchor = conversation && forkAnchorForTurnKey(conversation, turnKey);
+          if (!anchor || !(await wakeForFork(conversationId))) return null;
+          return forkConversation(get, set, conversationId, anchor);
         },
 
         retry(conversationId) {
@@ -4292,6 +4488,31 @@ export const useSessionsStore = create<SessionsState>()(
               ...appendDraft(conversation, draft),
             });
           });
+        },
+
+        resendMessage(conversationId, deliveryId) {
+          const conversation = get().conversations[conversationId];
+          const message = conversation?.messages.find((item) => item.deliveryId === deliveryId);
+          if (
+            !conversation ||
+            !message ||
+            withdrawBlocked(conversation) ||
+            !canWithdrawMessage(message)
+          )
+            return;
+          const queued = toQueuedMessage(message);
+          set((state) =>
+            patch(state, conversationId, {
+              messages: state.conversations[conversationId].messages.filter(
+                (item) => item !== message
+              ),
+              queuedMessages: [
+                ...(state.conversations[conversationId].queuedMessages ?? []),
+                queued,
+              ],
+            })
+          );
+          get().sendQueuedNow(conversationId, queued.id);
         },
 
         sendQueuedNow(conversationId, messageId) {
@@ -4642,15 +4863,19 @@ useSessionsStore.subscribe((state) => {
 /**
  * 不切换会话地旁观一条会话（秘书弹窗）：期间正文保热、实时事件照常落地，
  * 打开时按「切进来」的口径补历史与快照。返回释放函数，释放时按离开盖章。
+ * readOnly（已归档）只读 jsonl 历史，不向 worker 要快照。
  */
-export function peekConversation(conversationId: string): () => void {
+export function peekConversation(
+  conversationId: string,
+  options?: { readOnly?: boolean }
+): () => void {
   peekedIds.set(conversationId, (peekedIds.get(conversationId) ?? 0) + 1);
   const state = useSessionsStore.getState();
   const conversation = state.conversations[conversationId];
   if (conversation && viewedFromState(state) !== conversationId) {
     if (conversation.parentId) loadViewedChildHistory(conversationId);
     else if (needsHistoryHydration(conversation)) void hydrateParentHistoryTail(conversationId);
-    if (needsWorkerSnapshot(conversation))
+    if (!options?.readOnly && needsWorkerSnapshot(conversation))
       void window.electronAPI.agent.requestSnapshot(conversationId);
   }
   let released = false;
@@ -4679,16 +4904,22 @@ async function forkConversation(
   },
   _set: unknown,
   sourceId: string,
-  anchor: { entryId: string } | { userIndexFromEnd: number }
+  anchor: { entryId: string } | { turnIndexFromEnd: number }
 ): Promise<string | null> {
   const source = get().conversations[sourceId];
-  if (!source?.started || source.status !== 'idle' || source.parentId || source.historyOnly) {
+  if (
+    !source?.started ||
+    source.status !== 'idle' ||
+    source.parentId ||
+    source.historyOnly ||
+    forkDepth(get().conversations, sourceId) >= MAX_FORK_DEPTH
+  ) {
     return null;
   }
   const targetId = await get().newConversation(source.projectId, {
     forkedFrom: {
       conversationId: source.id,
-      entryId: 'entryId' in anchor ? anchor.entryId : `user:${anchor.userIndexFromEnd}`,
+      entryId: 'entryId' in anchor ? anchor.entryId : `turn:${anchor.turnIndexFromEnd}`,
     },
   });
   if (!targetId) return null;

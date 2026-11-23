@@ -7,6 +7,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import type { OauthUsageWindow } from '@shared/types';
+import { toolSchemaForModel } from './antigravity';
 import { startOauthCallbackServer } from './callbackServer';
 import {
   CacheControlType,
@@ -628,7 +629,7 @@ function buildDevinChatRequest(
       create(ChatToolDefinitionSchema, {
         name: tool.name,
         description: tool.description || '',
-        jsonSchemaString: JSON.stringify(tool.parameters ?? {}),
+        jsonSchemaString: JSON.stringify(toolSchemaForModel(model.id, tool.parameters ?? {})),
         strict: 'strict' in tool && tool.strict === true,
       })
     ),

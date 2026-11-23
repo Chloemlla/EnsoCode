@@ -11,7 +11,6 @@ import { normalizeLocale } from '@shared/i18n';
 import { type PersistedPairConversation, planPairResume } from '@shared/pair/headlessResume';
 import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { appendInboundImageLines } from '@shared/secretary/inboundImages';
-import { wrapUntrusted } from '@shared/secretary/transcript';
 import { resolveSshTarget } from '@shared/ssh';
 import {
   cleanToolBatchLabel,
@@ -20,52 +19,54 @@ import {
   toolBatchLabelPrompt,
 } from '@shared/toolBatchLabel';
 import {
-  IPC_CHANNELS,
-  projectDisabledBuiltinTools,
-  resolveDisabledBuiltinTools,
-} from '@shared/types';
-import type {
-  AgentActionResult,
-  AgentControlContext,
-  AgentControlToolResponse,
-  AgentRemoteConfig,
-  AgentSpawnRequest,
-  AgentWorkerEvent,
-  ApprovalMode,
-  AttachedImage,
-  ChildHistoryResult,
-  ChildRunListResult,
-  ConversationReloadResult,
-  McpStatusPush,
-  ParentHistoryTailResult,
-  ProjectedMessage,
-  RendererAgentEvent,
-  SpawnModelConfig,
-  ThinkingLevel,
-  TitleSummaryInput,
-  WorkerExitedEvent,
-} from '@shared/types/agent';
-import {
-  APPROVAL_MODES,
+  type AgentActionResult,
+  type AgentControlContext,
+  type AgentControlToolResponse,
+  type AgentRemoteConfig,
+  type AgentSpawnRequest,
+  type AgentWorkerEvent,
+  type ApprovalMode,
+  type AttachedImage,
+  type ChildHistoryResult,
+  type ChildRunListResult,
+  type ConversationReloadResult,
   isApprovalDecision,
   isDeliveryId,
+  type McpStatusPush,
+  type ParentHistoryTailResult,
+  type ProjectedMessage,
   parseAgentCommand,
   parseConversationAuthorityRequest,
   parseCreateConversationAuthorityRequest,
   parseTitleSummaryInput,
   parseUpdateConversationSelectionRequest,
+  type RendererAgentEvent,
+  type SpawnModelConfig,
   STALE_SESSION_ERROR,
   TASK_KEEP_REASON_MAX,
-  THINKING_LEVELS,
+  type ThinkingLevel,
+  type TitleSummaryInput,
+  type WorkerExitedEvent,
 } from '@shared/types/agent';
+import { APPROVAL_MODES, THINKING_LEVELS } from '@shared/types/agentConstants';
 import { DELEGATION_NOTE_MAX, parseTaskCheck } from '@shared/types/bot';
-import { effectiveSubagentAllowedModes } from '@shared/types/builtinTools';
+import {
+  effectiveSubagentAllowedModes,
+  projectDisabledBuiltinTools,
+  resolveDisabledBuiltinTools,
+} from '@shared/types/builtinTools';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 import {
   parseAgentDispatchRequest,
   parseParentModelSelectionRequest,
   parseParentSourceBindingRequest,
 } from '@shared/types/mentions';
 import type { SecretaryProfile, SecretaryToolDescriptor } from '@shared/types/secretary';
+import {
+  classifyUpstreamError,
+  type GoalUpstreamRetry,
+  type ProviderHealthSnapshot,
+} from '@shared/upstreamRecovery';
 import { EnsoSafeJournal } from '../../agent/ensoSafeJournal';
 import { isSecretFilePath, isUnderSecretDirectory } from '../../agent/protectedActions';
 import { titleSummaryTimeoutMs } from '../../agent/titleSummary';
@@ -77,10 +78,12 @@ import {
   agentTypeRegistrySnapshot,
   appendSessionCustomEntry,
   backgroundForegroundTool,
+  clearSessionReminders,
   compactSession,
   completeText,
   dismissChildSession,
   dismissCoworkerSession,
+  fireSessionReminders,
   forgetParentToolProfile,
   forkSession,
   isAgentWorkerReady,
@@ -128,6 +131,7 @@ import {
   summarizeConversationTitle,
   withdrawSteerSession,
 } from '../services/agentHost';
+import { fileAgentRunLedger } from '../services/agentRunLedger';
 import { validateAgentRun } from '../services/agentRunValidation';
 import { AgentService } from '../services/agentService';
 import { backgroundTaskStates, type ObservedTask } from '../services/backgroundTaskTracker';
@@ -139,9 +143,16 @@ import {
   setBrowserFileRootResolver,
 } from '../services/browserFileRoot';
 import type { BrowserActor } from '../services/browserTabClaims';
-import { chatModelsRoot } from '../services/chatModels';
 import { listChildRuns, resolveChildRunFile } from '../services/childRunCatalog';
-import { coldResumeReady, failColdResume, wakeColdRestartSession } from '../services/coldRestart';
+import {
+  CONVERSATION_UNAVAILABLE,
+  type ColdRestartPlan,
+  coldRestartChildren,
+  coldResumeReady,
+  failColdResume,
+  wakeColdRestartOwners,
+  wakeColdRestartSession,
+} from '../services/coldRestart';
 import { reloadConversation } from '../services/conversationReload';
 import { spawnCwdFromAuthority } from '../services/conversationSpawnCwd';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
@@ -150,14 +161,15 @@ import { exitInterruptionOf } from '../services/exitWindow';
 import {
   getExtensionPlugins,
   peekExtensionPlugins,
+  pluginOwnerBindings,
   setPluginSessionDirectory,
 } from '../services/extensionPlugins';
+import { resolvePluginInjectDelivery } from '../services/extensionPlugins/injectTrust';
 import { SessionStateTracker, turnEndSessionId } from '../services/extensionPlugins/sessionState';
 import { listAllSessions, listProjectSessions } from '../services/extensionPlugins/sessions';
 import { resolveExternalRevealTarget, sessionWrittenPaths } from '../services/externalFileReveal';
 import { searchFiles } from '../services/fileSearch';
 import { resolveLocalUnderCwd } from '../services/filesWorkspace';
-import { memoryCompleteFromSettings } from '../services/llama/chat';
 import { setSecretaryReportResolver } from '../services/localImageProtocol';
 import { clearMcpStatuses, recordMcpStatus } from '../services/mcpStatusCache';
 import { type Complete, redactSecrets } from '../services/memory/distill';
@@ -174,6 +186,7 @@ import {
   configurePairSessionHost,
   handlePairHeadlessAgentEvent,
 } from '../services/pairSessionHost';
+import { planReminderWake } from '../services/reminderWake';
 import { remoteCandidates } from '../services/remoteModels';
 import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
@@ -217,12 +230,13 @@ import {
   type SessionToolActivity,
 } from '../services/sessionActivity';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
+import { createFileMemo } from '../services/sessionHistoryCache';
 import {
+  displayMessages,
   findHistoryMessage,
   type HistoryProjectionOptions,
-  projectParentHistoryAll,
-  projectParentHistoryPage,
-  projectParentHistoryTail,
+  projectAll,
+  projectWindow,
   resolveParentHistoryFile,
 } from '../services/sessionHistoryTail';
 import {
@@ -235,6 +249,10 @@ import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { SubagentProgressPush } from '../services/subagentProgressPush';
 import { titleModelCandidates } from '../services/titleSummary';
+import {
+  createUpstreamRecoveryService,
+  type UpstreamRecoveryService,
+} from '../services/upstreamRecovery';
 import { ingestSessionJsonl } from '../services/usage/ledgerStore';
 import {
   botModeEnabled,
@@ -246,7 +264,12 @@ import {
   sendImageTool,
 } from './bots';
 import { agentSessionIndex } from './sessionIndex';
-import { readPersistedConversation, readSettings, readSshTimeoutSeconds } from './settings';
+import {
+  onConversationsRemoved,
+  readPersistedConversation,
+  readSettings,
+  readSshTimeoutSeconds,
+} from './settings';
 import {
   removeRegisteredWorktree,
   sessionWorktree,
@@ -289,6 +312,10 @@ const isValidMessageInput = (sessionId: unknown, text: unknown, images: unknown)
 
 let dispatchService: AgentDispatchService | null = null;
 let agentService: AgentService | null = null;
+let upstreamRecovery: UpstreamRecoveryService | null = null;
+let upstreamSessionWakeHandler:
+  | ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean)
+  | null = null;
 const pendingAgentControl = new Map<string, AbortController>();
 const pendingComputer = new Map<string, AbortController>();
 const pendingPluginTools = new Map<string, AbortController>();
@@ -318,6 +345,16 @@ export function getAgentDispatchService(): AgentDispatchService | null {
 
 export function getAgentService(): AgentService | null {
   return agentService;
+}
+
+export function getUpstreamRecoveryService(): UpstreamRecoveryService | null {
+  return upstreamRecovery;
+}
+
+export function setUpstreamSessionWakeHandler(
+  handler: ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean) | null
+): void {
+  upstreamSessionWakeHandler = handler;
 }
 
 export function getSourceAuthorityRegistry(): SourceAuthorityRegistry | null {
@@ -757,7 +794,7 @@ export async function resumeRootFromRestartManifest(
 ): Promise<AgentActionResult> {
   const conversation = sourceAuthority?.conversation(entry.sessionId);
   if (!conversation || conversation.bot || conversation.lifecycle === 'ended')
-    return { ok: false, error: 'conversation unavailable' };
+    return { ok: false, error: CONVERSATION_UNAVAILABLE };
   if (exactIdentity(entry.sessionId)) return { ok: false, error: 'session already spawned' };
   const cwd = authoritativeSpawnCwd(entry.sessionId);
   const parsed =
@@ -781,6 +818,16 @@ export async function resumeRootFromRestartManifest(
     return { ok: false, error: 'model credentials unavailable' };
   }
   return spawnBoundSession(identity, { ...parsed, resumeFile: resume.file }, credentialKeys);
+}
+
+/** 冷启动：叫醒子代理 Run 被重启打断、却不在续跑名单里的父会话，就绪后由 recoverOwner 补通知 */
+export function wakeInterruptedRunOwners(current: ColdRestartPlan): Promise<void> {
+  return wakeColdRestartOwners(
+    agentService?.restartInterruptedOwners() ?? [],
+    resumeRootFromRestartManifest,
+    current,
+    (ownerId) => agentService?.abandonOwner(ownerId)
+  );
 }
 
 /** Main 侧给根会话发消息：deliveryId 由 Main 生成，供回执去重 */
@@ -873,8 +920,41 @@ export function setAskRelayFromMain(
 }
 
 export function abortRootFromMain(sessionId: string): void {
+  // 秘书 session_stop 是叫停：会话自己定的提醒一并取消
+  clearSessionReminders(sessionId);
   const identity = exactIdentity(sessionId);
-  if (identity) abortSession(identity);
+  if (identity) stopWithSubagents(identity);
+}
+
+/** 用户（或替用户的秘书）停止：根会话名下在跑的子代理一并停掉；插话立即发送 / 卡死重试只断当前轮 */
+function stopWithSubagents(identity: SessionIdentity): AgentActionResult {
+  const result = abortSession(identity);
+  if (!('parent' in identity)) void agentService?.cancelOwner(identity.sessionId);
+  return result;
+}
+
+/** 根会话的自定提醒到点：会话不在了就清掉，活着就触发，冷会话先打开，就绪后 worker 自己补发 */
+async function wakeForReminder(sessionId: string): Promise<void> {
+  const plan = planReminderWake({
+    row: readPersistedConversation(sessionId),
+    alive: agentSessionIndex.isAlive(sessionId),
+    lifecycle: sourceAuthority?.conversation(sessionId)?.lifecycle,
+  });
+  const tag = `[reminder] due ${sessionId.slice(0, 8)}`;
+  if (plan === 'clear') {
+    clearSessionReminders(sessionId);
+    console.log(`${tag}: conversation gone or archived, reminders cleared`);
+    return;
+  }
+  if (plan === 'fire') {
+    fireSessionReminders(sessionId);
+    return;
+  }
+  // 在重启清单里的按清单打开，保住 generation；不在清单里的按持久化元数据恢复
+  let result = await wakeColdRestartSession(sessionId, resumeRootFromRestartManifest);
+  if (result.error === 'not in restart manifest' || result.error === 'already woken')
+    result = await resumeRootFromMain(sessionId);
+  console.log(`${tag}: resume ${result.ok ? 'ok' : `skipped: ${result.error}`}`);
 }
 
 /** 秘书停后台任务：身份由 Main 按会话 id 解析，模型只能给任务 id */
@@ -1245,17 +1325,14 @@ async function readRegisteredChildRun(
 }
 
 /**
- * 记忆蒸馏的 LLM 入口。设置为本地 GGUF 时走 llama.cpp；否则复用标题总结的远程回退链。
- * worker 不在线 / 本地权重未就绪返 null，让任务保留 pending 到下次开库续跑。
+ * 记忆服务的远程 LLM 补全入口（本地 GGUF chat 在服务进程内走 llama.cpp，不经 Main）。
+ * worker 不在线 / 无候选模型时返回 null：服务侧任务保留 pending 到下次开库续跑。
  */
 async function distillCompletion(): Promise<Complete | null> {
   const state = (
     readSettings()?.['enso-settings'] as { state?: Record<string, unknown> } | undefined
   )?.state;
-  return memoryCompleteFromSettings(state, {
-    modelsRoot: chatModelsRoot(),
-    remoteComplete: () => remoteDistillCompletion(state),
-  });
+  return remoteDistillCompletion(state);
 }
 
 async function remoteDistillCompletion(
@@ -1287,6 +1364,29 @@ async function readParentHistoryTail(
   return readSessionHistoryFile(sessionFile, beforeIndex);
 }
 
+const historyMemo = createFileMemo<unknown[]>({
+  stat: (file) => {
+    try {
+      const { mtimeMs, size } = statSync(file);
+      return { mtimeMs, size };
+    } catch {
+      return null;
+    }
+  },
+});
+
+/** 整文件解析结果按文件签名复用：远端上翻分页、秘书逐条读不再每次重新解析几十 MB */
+async function displayHistory(
+  file: string,
+  sessionDir: string,
+  options?: HistoryProjectionOptions
+): Promise<unknown[]> {
+  const { SessionManager } = await import('@earendil-works/pi-coding-agent');
+  return historyMemo.get(file, options?.messageIds ? 'ids' : 'plain', () =>
+    displayMessages(SessionManager.open(file, sessionDir).getBranch(), options)
+  );
+}
+
 /** 根会话 pi jsonl 的尾窗 / 分页投影；路径须落在 sessions 目录内 */
 export async function readSessionHistoryFile(
   sessionFile: string | undefined,
@@ -1306,15 +1406,8 @@ export async function readSessionHistoryFile(
     return { ok: false, code: 'not-found', error: 'History file is missing.' };
   }
   try {
-    const { SessionManager } = await import('@earendil-works/pi-coding-agent');
-    const manager = SessionManager.open(resolved, sessionDir);
-    const branch = manager.getBranch();
-    return {
-      ok: true,
-      ...(beforeIndex === undefined
-        ? projectParentHistoryTail(branch, options)
-        : projectParentHistoryPage(branch, beforeIndex, options)),
-    };
+    const raw = await displayHistory(resolved, sessionDir, options);
+    return { ok: true, ...projectWindow(raw, beforeIndex ?? raw.length) };
   } catch (error) {
     return {
       ok: false,
@@ -1336,9 +1429,7 @@ async function readFullSessionHistory(
   const resolved = resolveParentHistoryFile(sessionDir, sessionFile);
   if (!resolved || !existsSync(resolved)) return [];
   try {
-    const { SessionManager } = await import('@earendil-works/pi-coding-agent');
-    const manager = SessionManager.open(resolved, sessionDir);
-    return projectParentHistoryAll(manager.getBranch(), options);
+    return projectAll(await displayHistory(resolved, sessionDir, options));
   } catch {
     return [];
   }
@@ -1445,7 +1536,7 @@ function wirePairAgentBridge(): void {
       const rejected = botControlError(sessionId);
       if (rejected) return rejected;
       const identity = exactIdentity(sessionId);
-      if (identity) promptSession(identity, text, images);
+      if (identity) promptSession(identity, text, images, randomUUID());
     },
     steer: (sessionId, text, images) => {
       const rejected = botControlError(sessionId);
@@ -1454,8 +1545,10 @@ function wirePairAgentBridge(): void {
       if (identity) steerSession(identity, text, images);
     },
     abort: (sessionId) => {
+      // 手机端停止：会话自己定的提醒一并取消
+      clearSessionReminders(sessionId);
       const identity = exactIdentity(sessionId);
-      if (identity) abortSession(identity);
+      if (identity) stopWithSubagents(identity);
     },
     respondApproval: (sessionId, requestId, decision) => {
       const identity = exactIdentity(sessionId);
@@ -1549,7 +1642,7 @@ function wirePairSessionHost(): void {
       const rejected = botControlError(sessionId);
       if (rejected) return rejected;
       const identity = exactIdentity(sessionId);
-      if (identity) promptSession(identity, text, images);
+      if (identity) promptSession(identity, text, images, randomUUID());
     },
     steer: (sessionId, text, images) => {
       const rejected = botControlError(sessionId);
@@ -1751,13 +1844,15 @@ export function registerAgentHandlers(): void {
         return undefined;
       return identity;
     },
-    // 插件消息进秘书会话一律按不可信内容包起来：插件能读到外部消息，也能被外部消息诱导
-    (sessionId, pluginId, text) => {
+    (sessionId, input) => {
       const conversation = sourceAuthority?.conversation(sessionId);
       const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
-      return isSecretaryProject(project)
-        ? wrapUntrusted(`plugin:${pluginId}`, redactSecrets(text))
-        : text;
+      return resolvePluginInjectDelivery({
+        ...input,
+        isSecretarySession: isSecretaryProject(project),
+        ownerBindings: pluginOwnerBindings(),
+        redact: redactSecrets,
+      });
     }
   );
   const sessionSource = () => ({
@@ -1848,6 +1943,7 @@ export function registerAgentHandlers(): void {
   dispatchService = new AgentDispatchService({
     sourceRegistry: sourceBindings,
     sessionIndex: agentSessionIndex,
+    restoreClaimed: (childSessionId) => agentService?.claimsRestartChild(childSessionId) ?? false,
     readStoredOauthCredentialKeys,
     emitRendererEvent: broadcastAgentEvent,
     emitDispatchEvent: (ownerWebContentsId, dispatchEvent) => {
@@ -1895,7 +1991,38 @@ export function registerAgentHandlers(): void {
     },
   });
 
+  upstreamRecovery?.dispose();
+  upstreamRecovery = createUpstreamRecoveryService({
+    onWake(event) {
+      if (event.waiter.kind === 'subagent') {
+        void agentService?.wakeUpstream(event.waiter.id);
+        return;
+      }
+      const handledByMain = upstreamSessionWakeHandler?.(event.waiter.id, event.reason) === true;
+      if (!handledByMain) {
+        try {
+          broadcastToRenderers(IPC_CHANNELS.AGENT_UPSTREAM_WAKE_EVENT, {
+            conversationId: event.waiter.id,
+            reason: event.reason,
+          });
+        } catch {
+          // renderer 已销毁
+        }
+      }
+    },
+    onHealthChange(snapshots: ProviderHealthSnapshot[]) {
+      try {
+        broadcastToRenderers(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_EVENT, snapshots);
+      } catch {
+        // renderer 已销毁
+      }
+    },
+  });
+
   agentService = new AgentService({
+    ledger: fileAgentRunLedger(path.join(app.getPath('userData'), 'agent', 'subagent-runs.json')),
+    restartCheckpoint: coldRestartChildren(),
+    upstreamRecovery,
     notify: (context, text, urgent) => {
       // 投给父会话当前 generation：换代前派出的 Run 结束后照样通知接续的会话
       const identity = rootIdentity(context.owner.ownerId);
@@ -1950,7 +2077,11 @@ export function registerAgentHandlers(): void {
       stop: async (input) => abortSession(input.identity),
       dismiss: async (input) => dismissChildSession(input.identity.parent, input.identity, false),
       resume: (input) =>
-        dispatchService!.resumeControlledAgent(input.context.owner.ownerId, input.identity),
+        dispatchService!.resumeControlledAgent(
+          input.context.owner.ownerId,
+          input.identity,
+          input.spawn
+        ),
       retry: async (input) =>
         retrySession(input.identity, true, {
           turnId: input.runId,
@@ -1970,6 +2101,9 @@ export function registerAgentHandlers(): void {
       },
     },
   });
+  onConversationsRemoved((ids) => {
+    for (const id of ids) agentService?.abandonOwner(id);
+  });
 
   const humanTimeouts = new HumanRequestTimeouts({
     now: Date.now,
@@ -1981,6 +2115,11 @@ export function registerAgentHandlers(): void {
   powerMonitor.on('resume', () => humanTimeouts.check());
 
   setAgentEventListener((incomingEvent) => {
+    // 换代（Main 不退）：会话不算失败、不进会话广播；只有子代理服务按断点把被打断的 Run 接着跑
+    if (incomingEvent.type === 'worker-swapped') {
+      agentService?.observe({ type: 'worker-exited' });
+      return;
+    }
     const workerEvent = markExitInterrupted(incomingEvent);
     // MCP 旁路事件不属于任何会话：只转发到独立通道 / 落 token，不进 dispatch 与会话广播
     if (workerEvent.type === 'mcp-status') {
@@ -2017,6 +2156,15 @@ export function registerAgentHandlers(): void {
       );
       return;
     }
+    if (workerEvent.type === 'session-reminder-due') {
+      void wakeForReminder(workerEvent.sessionId).catch((error: unknown) =>
+        console.warn('[reminder] wake failed:', error instanceof Error ? error.message : error)
+      );
+      return;
+    }
+    // 断点已落盘：记下停在安全点的子会话，worker 退出时它们的 Run 等父会话就绪后接着跑
+    if (workerEvent.type === 'graceful-restart-ready')
+      agentService?.noteRestartCheckpoint(workerEvent.checkpoint.sessions);
     if (
       workerEvent.type === 'session-reloaded' ||
       workerEvent.type === 'workspace-lock-result' ||
@@ -2035,6 +2183,14 @@ export function registerAgentHandlers(): void {
     agentService?.observe(workerEvent);
     botWorkerObserver?.(workerEvent);
     humanTimeouts.observe(workerEvent);
+    if (
+      workerEvent.type === 'turn-completed' &&
+      !workerEvent.aborted &&
+      !('parent' in workerEvent.identity) &&
+      workerEvent.provider
+    ) {
+      upstreamRecovery?.reportSuccess(workerEvent.provider, workerEvent.identity.sessionId);
+    }
     if (workerEvent.type === 'turn-completed' || workerEvent.type === 'turn-failed') {
       const file = agentSessionIndex.sessionFile(workerEvent.identity);
       if (file) {
@@ -2046,6 +2202,9 @@ export function registerAgentHandlers(): void {
     }
     if (workerEvent.type === 'parent-ready') {
       coldResumeReady(workerEvent.identity.sessionId);
+      // 重启 / worker 退出打断、父会话还不知情的子代理 Run：父会话回来后补一次通知
+      const context = agentControlContext(workerEvent.identity);
+      if (context) agentService?.recoverOwner(context);
       sourceAuthority?.markReady(
         workerEvent.identity.sessionId,
         workerEvent.sessionFile,
@@ -2128,6 +2287,7 @@ export function registerAgentHandlers(): void {
       sessionDesktop().releaseBrowserActor(workerEvent.identity.sessionId);
     }
     if (workerEvent.type === 'parent-ended') {
+      upstreamRecovery?.cancel(workerEvent.identity.sessionId);
       forgetParentToolProfile(workerEvent.identity.sessionId);
       sessionDesktop().forgetBrowserActor(workerEvent.identity.sessionId);
       if (!sharesBrowser(workerEvent.identity.sessionId))
@@ -2593,6 +2753,8 @@ export function registerAgentHandlers(): void {
     if (result.accepted) {
       sourceBindings!.invalidateConversation(parsed.conversationId);
       removeConversationFiles(result.value);
+      // 会话删了就不会再有人等它定的提醒
+      clearSessionReminders(parsed.conversationId);
       // 会话删了就不会再有结果：手机关注里的这一条一并移除
       void unfollowTargetEverywhere(parsed.conversationId);
     }
@@ -2826,11 +2988,7 @@ export function registerAgentHandlers(): void {
       const rejected = botControlError(sessionId);
       if (rejected) return rejected;
       const identity = exactIdentity(sessionId);
-      if (
-        !identity ||
-        !isValidMessageInput(sessionId, text, images) ||
-        (deliveryId !== undefined && !isDeliveryId(deliveryId))
-      ) {
+      if (!identity || !isValidMessageInput(sessionId, text, images) || !isDeliveryId(deliveryId)) {
         return { ok: false, error: 'invalid prompt or stale session generation' };
       }
       if (agentSessionIndex.isDetached(identity))
@@ -2888,21 +3046,148 @@ export function registerAgentHandlers(): void {
     }
   );
 
-  ipcMain.handle(IPC_CHANNELS.AGENT_ABORT, (_event, sessionId: unknown): AgentActionResult => {
-    const identity = exactIdentity(sessionId);
-    return identity
-      ? abortSession(identity)
-      : { ok: false, error: 'invalid abort or stale session generation' };
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_ABORT,
+    (_event, sessionId: unknown, options: unknown): AgentActionResult => {
+      if (typeof sessionId === 'string' && sessionId.length > 0) {
+        upstreamRecovery?.cancel(sessionId);
+      }
+      const identity = exactIdentity(sessionId);
+      if (!identity) return { ok: false, error: 'invalid abort or stale session generation' };
+      const flag = (key: 'stopSubagents' | 'cancelReminders') =>
+        typeof options === 'object' && options !== null && Reflect.get(options, key) === true;
+      // 用户停止才带 cancelReminders；卡死重试、插话立即发送不带，提醒照留
+      if (flag('cancelReminders')) clearSessionReminders(identity.sessionId);
+      const stopSubagents = flag('stopSubagents');
+      return stopSubagents ? stopWithSubagents(identity) : abortSession(identity);
+    }
+  );
 
   ipcMain.handle(
     IPC_CHANNELS.AGENT_ABORT_RETRY,
     (_event, sessionId: unknown): AgentActionResult => {
+      if (typeof sessionId === 'string' && sessionId.length > 0) {
+        upstreamRecovery?.cancel(sessionId);
+      }
       const identity = exactIdentity(sessionId);
       return identity
         ? abortRetrySession(identity)
         : { ok: false, error: 'invalid abort-retry or stale session generation' };
     }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_UPSTREAM_REPORT_FAILURE,
+    (
+      _event,
+      raw: unknown
+    ):
+      | { action: 'wait'; retry: GoalUpstreamRetry }
+      | { action: 'exhausted'; note: string }
+      | { action: 'permanent'; hint?: string } => {
+      if (!raw || typeof raw !== 'object') {
+        return { action: 'permanent', hint: 'Invalid upstream failure payload' };
+      }
+      const input = raw as Record<string, unknown>;
+      if (!isNonEmptyString(input.sessionId) || !isNonEmptyString(input.error)) {
+        return { action: 'permanent', hint: 'Invalid upstream failure payload' };
+      }
+      const retryExhausted = input.retryExhausted === true;
+      const classified = classifyUpstreamError({
+        error: input.error,
+        retryExhausted,
+      });
+      if (classified.kind === 'permanent' || !upstreamRecovery) {
+        return {
+          action: 'permanent',
+          ...(classified.hint ? { hint: classified.hint } : {}),
+        };
+      }
+      const provider = isNonEmptyString(input.provider)
+        ? input.provider
+        : (sourceAuthority?.conversation(input.sessionId)?.selection?.providerId ?? 'default');
+      const since =
+        typeof input.since === 'number' && Number.isFinite(input.since) ? input.since : undefined;
+      const previousAttempt =
+        typeof input.previousAttempt === 'number' &&
+        Number.isInteger(input.previousAttempt) &&
+        input.previousAttempt >= 1
+          ? input.previousAttempt
+          : undefined;
+      const decision = upstreamRecovery.reportFailure({
+        id: input.sessionId,
+        kind: 'session',
+        provider,
+        errorKind: classified.kind,
+        lastError: input.error,
+        ...(classified.resetAt !== undefined ? { resetAt: classified.resetAt } : {}),
+        ...(since !== undefined ? { since } : {}),
+        ...(previousAttempt !== undefined ? { previousAttempt } : {}),
+      });
+      if (decision.action === 'wait') {
+        return {
+          action: 'wait',
+          retry: {
+            reason: 'upstream',
+            kind: decision.waiter.errorKind,
+            provider: decision.waiter.provider,
+            attempt: decision.waiter.attempt,
+            since: decision.waiter.since,
+            at: decision.waiter.nextAt,
+            lastError: decision.waiter.lastError,
+            ...(decision.waiter.resetAt !== undefined ? { resetAt: decision.waiter.resetAt } : {}),
+          },
+        };
+      }
+      return {
+        action: 'exhausted',
+        note: `${input.error} (upstream auto-retry window exhausted after ${decision.attempt} attempts)`,
+      };
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_UPSTREAM_RETRY_NOW,
+    (_event, raw: unknown): AgentActionResult => {
+      const waiterId =
+        typeof raw === 'string'
+          ? raw
+          : raw &&
+              typeof raw === 'object' &&
+              isNonEmptyString((raw as Record<string, unknown>).waiterId)
+            ? ((raw as Record<string, unknown>).waiterId as string)
+            : null;
+      if (!waiterId) return { ok: false, error: 'invalid waiterId' };
+      const woke = upstreamRecovery?.retryNow(waiterId);
+      if (woke) return { ok: true };
+      // 闸门内存中没有（例如冷重启后仍留在磁盘上的 waiting goal）：直接触发一次手动唤醒
+      const handledByMain = upstreamSessionWakeHandler?.(waiterId, 'manual') === true;
+      if (!handledByMain) {
+        try {
+          broadcastToRenderers(IPC_CHANNELS.AGENT_UPSTREAM_WAKE_EVENT, {
+            conversationId: waiterId,
+            reason: 'manual',
+          });
+        } catch {
+          return { ok: false, error: 'renderer unavailable' };
+        }
+      }
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_UPSTREAM_CANCEL,
+    (_event, sessionId: unknown): AgentActionResult => {
+      if (!isNonEmptyString(sessionId)) return { ok: false, error: 'invalid sessionId' };
+      upstreamRecovery?.cancel(sessionId);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_LIST,
+    (): ProviderHealthSnapshot[] => upstreamRecovery?.snapshots() ?? []
   );
 
   ipcMain.handle(
@@ -3182,8 +3467,8 @@ export function registerAgentHandlers(): void {
       const identity = exactIdentity(sessionId);
       const record = asRecord(anchor);
       const entryId = typeof record?.entryId === 'string' ? record.entryId : undefined;
-      const userIndexFromEnd =
-        typeof record?.userIndexFromEnd === 'number' ? record.userIndexFromEnd : undefined;
+      const turnIndexFromEnd =
+        typeof record?.turnIndexFromEnd === 'number' ? record.turnIndexFromEnd : undefined;
       if (
         !isMainRenderer(event.sender.id) ||
         !identity ||
@@ -3191,8 +3476,8 @@ export function registerAgentHandlers(): void {
         typeof targetConversationId !== 'string' ||
         !/^[0-9a-f-]{36}$/i.test(targetConversationId) ||
         (entryId
-          ? userIndexFromEnd !== undefined
-          : userIndexFromEnd === undefined || userIndexFromEnd < 0)
+          ? turnIndexFromEnd !== undefined
+          : turnIndexFromEnd === undefined || turnIndexFromEnd < 0)
       ) {
         return { ok: false, error: 'invalid fork or stale generation' };
       }
@@ -3220,7 +3505,7 @@ export function registerAgentHandlers(): void {
         const result = forkSession(
           identity,
           targetConversationId,
-          entryId ? { entryId } : { userIndexFromEnd: userIndexFromEnd as number }
+          entryId ? { entryId } : { turnIndexFromEnd: turnIndexFromEnd as number }
         );
         if (!result.ok) discardForkWorktree(targetConversationId);
         return result;

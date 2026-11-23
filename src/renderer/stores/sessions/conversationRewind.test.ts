@@ -4,12 +4,14 @@ import {
   canShowConversationRewind,
   canWakeConversationForRewind,
   extractRewindDraft,
+  forkAnchorForTurnKey,
+  forkDepth,
+  MAX_FORK_DEPTH,
   resolveRewindConfirm,
   rewindKeepCount,
   rewindWorkerPhase,
   shouldSendRewindCommand,
   userIndexFromEndForTimelineKey,
-  userIndexFromEndForTurnKey,
 } from './conversationRewind';
 
 const root = (overrides: Record<string, unknown> = {}) => ({
@@ -56,6 +58,13 @@ describe('canShowConversationRewind', () => {
 
   it('已 spawn 的 coworker 仍显示', () => {
     expect(canShowConversationRewind(root({ started: true, parentId: 'parent' }))).toBe(true);
+  });
+
+  it('分支会话（热/冷）显示回退', () => {
+    expect(canShowConversationRewind(root({ forkedFromConversationId: 'origin' }))).toBe(true);
+    expect(
+      canShowConversationRewind(root({ started: true, forkedFromConversationId: 'origin' }))
+    ).toBe(true);
   });
 
   it('远程宿主关闭回退时不显示', () => {
@@ -118,6 +127,41 @@ describe('canShowConversationFork', () => {
     expect(canShowConversationFork(root(), { canRewind: true, canFork: false })).toBe(false);
     expect(canShowConversationFork(root(), { canRewind: false })).toBe(false);
     expect(canShowConversationFork(root(), { canRewind: true })).toBe(true);
+  });
+
+  it('层级未到上限显示，到第 3 层不显示', () => {
+    expect(MAX_FORK_DEPTH).toBe(3);
+    expect(canShowConversationFork(root({ started: true }), null, 1)).toBe(true);
+    expect(canShowConversationFork(root({ started: true }), null, 2)).toBe(true);
+    expect(canShowConversationFork(root({ started: true }), null, 3)).toBe(false);
+    expect(canShowConversationFork(root(), null, 3)).toBe(false);
+  });
+});
+
+describe('forkDepth', () => {
+  it('沿 forkedFrom 链计层：root 为 1', () => {
+    const conversations = {
+      root: {},
+      second: { forkedFromConversationId: 'root' },
+      third: { forkedFromConversationId: 'second' },
+    };
+    expect(forkDepth(conversations, 'root')).toBe(1);
+    expect(forkDepth(conversations, 'second')).toBe(2);
+    expect(forkDepth(conversations, 'third')).toBe(3);
+    expect(forkDepth(conversations, 'unknown')).toBe(1);
+  });
+
+  it('来源会话已删除时仍计入该层', () => {
+    expect(forkDepth({ orphan: { forkedFromConversationId: 'deleted' } }, 'orphan')).toBe(2);
+  });
+
+  it('成环时终止', () => {
+    expect(forkDepth({ self: { forkedFromConversationId: 'self' } }, 'self')).toBe(1);
+    const loop = {
+      a: { forkedFromConversationId: 'b' },
+      b: { forkedFromConversationId: 'a' },
+    };
+    expect(forkDepth(loop, 'a')).toBe(2);
   });
 });
 
@@ -240,22 +284,87 @@ describe('userIndexFromEndForTimelineKey', () => {
   });
 });
 
-describe('userIndexFromEndForTurnKey', () => {
-  it('从轮末行 key 回溯到本轮 user，按 historyBaseIndex 换算', () => {
-    const tail = {
-      messages: [{ role: 'user' }, { role: 'assistant' }, { role: 'user' }, { role: 'assistant' }],
-      historyBaseIndex: 40,
-    };
-    expect(userIndexFromEndForTurnKey(tail, 41)).toBe(1);
-    expect(userIndexFromEndForTurnKey(tail, 43)).toBe(0);
-    expect(userIndexFromEndForTurnKey({ messages: tail.messages }, 3)).toBe(0);
+describe('forkAnchorForTurnKey', () => {
+  // 两次压缩后的完整记录：被摘要掉的早期轮次仍在列表里，user 带 jsonl entryId
+  const compacted = [
+    { role: 'user', entryId: 'u1' },
+    { role: 'assistant' },
+    { role: 'compactionSummary' },
+    { role: 'user', entryId: 'u2' },
+    { role: 'assistant' },
+    { role: 'toolResult' },
+    { role: 'assistant' },
+    { role: 'compactionSummary' },
+    { role: 'user', entryId: 'u3' },
+    { role: 'assistant' },
+  ];
+
+  it('压缩前的早期轮次按本轮 user 的 entryId 定位', () => {
+    expect(forkAnchorForTurnKey({ messages: compacted }, 1)).toEqual({ entryId: 'u1' });
+    expect(forkAnchorForTurnKey({ messages: compacted }, 6)).toEqual({ entryId: 'u2' });
+    expect(forkAnchorForTurnKey({ messages: compacted }, 9)).toEqual({ entryId: 'u3' });
   });
 
-  it('本轮 user 在尾窗之外或 key 非法返回 null', () => {
-    const tail = { messages: [{ role: 'assistant' }], historyBaseIndex: 40 };
-    expect(userIndexFromEndForTurnKey(tail, 40)).toBe(null);
-    expect(userIndexFromEndForTurnKey(tail, 3)).toBe(null);
-    expect(userIndexFromEndForTurnKey(tail, Number.NaN)).toBe(null);
+  it('按 historyBaseIndex 换算绝对下标', () => {
+    const tail = { messages: compacted.slice(3), historyBaseIndex: 3 };
+    expect(forkAnchorForTurnKey(tail, 6)).toEqual({ entryId: 'u2' });
+    expect(forkAnchorForTurnKey(tail, 2)).toBe(null);
+  });
+
+  it('本轮 user 还在未加载的更早页：按其后 user 数从末尾定位，交 worker 校验', () => {
+    const tail = { messages: compacted.slice(4), historyBaseIndex: 4 };
+    expect(forkAnchorForTurnKey(tail, 6)).toEqual({ turnIndexFromEnd: 1 });
+    expect(forkAnchorForTurnKey({ ...tail, historyBaseIndex: 40 }, 41)).toEqual({
+      turnIndexFromEnd: 1,
+    });
+    expect(forkAnchorForTurnKey(tail, 3)).toBe(null);
+  });
+
+  it('user 无 entryId 时退回从末尾计数；乐观回显不在 jsonl，不算轮次也不计数', () => {
+    const messages = [
+      { role: 'user' },
+      { role: 'assistant' },
+      { role: 'user', entryId: 'u2', optimistic: true },
+      { role: 'assistant' },
+    ];
+    expect(forkAnchorForTurnKey({ messages }, 1)).toEqual({ turnIndexFromEnd: 0 });
+    expect(forkAnchorForTurnKey({ messages }, 3)).toEqual({ turnIndexFromEnd: 0 });
+  });
+
+  it('本轮 user 未加载时，尾部被拒的未发送气泡不计入从末尾计数', () => {
+    const tail = {
+      messages: [
+        { role: 'assistant' },
+        { role: 'user', entryId: 'u9' },
+        { role: 'assistant' },
+        { role: 'user', optimistic: true },
+      ],
+      historyBaseIndex: 30,
+    };
+    expect(forkAnchorForTurnKey(tail, 30)).toEqual({ turnIndexFromEnd: 1 });
+  });
+
+  it('插件投递触发的轮次按轮次输入从末尾计数；隐藏 custom 不算轮次输入', () => {
+    const pluginSource = { pluginId: 'enso.github', pluginName: 'GitHub' };
+    const messages = [
+      { role: 'user', entryId: 'u1' },
+      { role: 'assistant' },
+      { role: 'custom' },
+      { role: 'custom', pluginSource },
+      { role: 'assistant' },
+      { role: 'custom', pluginSource },
+      { role: 'user', entryId: 'u2' },
+      { role: 'assistant' },
+    ];
+    expect(forkAnchorForTurnKey({ messages }, 1)).toEqual({ entryId: 'u1' });
+    expect(forkAnchorForTurnKey({ messages }, 4)).toEqual({ turnIndexFromEnd: 2 });
+    expect(forkAnchorForTurnKey({ messages }, 7)).toEqual({ entryId: 'u2' });
+  });
+
+  it('从头就没有 user 或 key 非法返回 null', () => {
+    expect(forkAnchorForTurnKey({ messages: [{ role: 'assistant' }] }, 0)).toBe(null);
+    expect(forkAnchorForTurnKey({ messages: compacted }, Number.NaN)).toBe(null);
+    expect(forkAnchorForTurnKey({ messages: compacted }, 99)).toBe(null);
   });
 });
 

@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ModelRuntime, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { childProfileShell, childProfileToolIds } from '@shared/childProfileTools';
+import { toolSchemaForModel } from '@shared/providers/antigravity';
 import { DEFAULT_PERSONA_PROMPT } from '@shared/systemPrompt';
+import { geminiSchemaIssues, portableSchemaIssues } from '@shared/tools/portableSchema';
 import type { AgentCommand, AgentWorkerEvent } from '@shared/types/agent';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -121,6 +123,7 @@ function session(options: Record<string, unknown>) {
   const labels: string[] = [];
   const value = {
     model: options.model,
+    thinkingLevel: options.thinkingLevel as string | undefined,
     resourceLoader: options.resourceLoader,
     sessionManager: options.sessionManager,
     messages: [],
@@ -144,6 +147,7 @@ function session(options: Record<string, unknown>) {
     ),
     agent: { steeringQueue: { messages: [] as unknown[] } },
     getSteeringMessages: () => labels,
+    getFollowUpMessages: () => [],
     _emitQueueUpdate: vi.fn(),
     _queueSteer: async (text: string) => {
       labels.push(text);
@@ -159,7 +163,9 @@ function session(options: Record<string, unknown>) {
     abort: vi.fn(async () => undefined),
     waitForIdle: vi.fn(async () => undefined),
     dispose: vi.fn(),
-    setThinkingLevel: vi.fn(),
+    setThinkingLevel: vi.fn((level: string) => {
+      value.thinkingLevel = level;
+    }),
     activeTools: ((options.customTools as Array<{ name: string }> | undefined) ?? []).map(
       (tool) => tool.name
     ),
@@ -267,7 +273,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       internals.evictIdleSessions();
       await vi.waitFor(() => expect(current.abort).toHaveBeenCalledTimes(1));
       events.length = 0;
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'in-flight' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        deliveryId: 'd-270',
+        identity: parent,
+        text: 'in-flight',
+      });
       supervisor.handleCommand({ type: 'abort', identity: parent });
       expect(events).toContainEqual(expect.objectContaining({ type: 'status', status: 'idle' }));
       release.resolve();
@@ -302,7 +313,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         cwd: '/workspace',
         model,
       });
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'first' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        deliveryId: 'd-305',
+        identity: parent,
+        text: 'first',
+      });
       await vi.waitFor(() =>
         expect(events.filter((event) => event.type === 'parent-rejected')).toHaveLength(2)
       );
@@ -354,6 +370,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         });
         supervisor.handleCommand({
           type: 'prompt',
+          deliveryId: 'd-355',
           identity: parent,
           text: 'first',
           instanceId: first,
@@ -423,6 +440,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         await vi.waitFor(() => expect(current.abort).toHaveBeenCalledTimes(1));
         supervisor.handleCommand({
           type: 'prompt',
+          deliveryId: 'd-424',
           identity: parent,
           text: 'in-flight',
           instanceId: first,
@@ -449,7 +467,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
           instanceId: first,
         });
         supervisor.handleCommand({ type: 'retry', identity: parent, instanceId: second });
-        supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'desktop' });
+        supervisor.handleCommand({
+          type: 'prompt',
+          deliveryId: 'd-452',
+          identity: parent,
+          text: 'desktop',
+        });
         await vi.waitFor(() => expect(ends(events)).toHaveLength(3));
         expect(ends(events)).toEqual([
           { type: 'parent-rejected', instanceId: first },
@@ -474,6 +497,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
         );
         supervisor.handleCommand({
           type: 'prompt',
+          deliveryId: 'd-475',
           identity: parent,
           text: 'deferred',
           instanceId: first,
@@ -567,6 +591,95 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       await supervisor.shutdown();
     }
   );
+
+  it('各会话形态注册的工具参数 schema 都可移植，经 Gemini 清洗后仍合法', async () => {
+    const variants: Array<Partial<Extract<AgentCommand, { type: 'spawn-parent' }>>> = [
+      { editMode: 'replace', exploreFoldEnabled: true, compactStrategy: 'continuous-memory' },
+      {
+        editMode: 'apply_patch',
+        botMode: true,
+        botGroupTasks: true,
+        botRoutines: true,
+        botDelegationTask: true,
+      },
+      { secretaryMode: true },
+    ];
+    for (const extra of variants) {
+      const events: AgentWorkerEvent[] = [];
+      const supervisor = new SessionSupervisor({
+        emit: (event) => events.push(event),
+        agentDir: '/tmp/agent',
+        sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-schema-')),
+      });
+      supervisor.handleCommand({
+        type: 'spawn-parent',
+        identity: parent,
+        cwd: '/workspace',
+        model,
+        ...extra,
+      });
+      await waitFor(events, 'parent-ready');
+      if (extra.editMode === 'replace') {
+        supervisor.handleCommand({
+          type: 'spawn-child',
+          identity: { ...child, typeKey: 'builtin:worker' },
+          cwd: '/workspace',
+          config: {
+            typeKey: 'builtin:worker',
+            displayName: 'worker',
+            description: 'Worker',
+            spawnSpecId: 'spawn-worker',
+            systemPrompt: 'worker role',
+            model,
+            tools: 'all',
+            skillPaths: [],
+            skillBindingIds: [],
+            mcpServers: [],
+            mcpBindingIds: [],
+            systemPromptHash: 'worker-hash',
+          },
+        });
+        await waitFor(events, 'child-ready');
+      }
+      await supervisor.shutdown();
+    }
+    const tools: ToolDefinition[] = [];
+    const pi = {
+      registerTool: (tool: ToolDefinition) => tools.push(tool),
+      on: () => undefined,
+      getActiveTools: () => [],
+      getAllTools: () => tools,
+      appendEntry: () => undefined,
+      sendMessage: () => undefined,
+      getSettings: () => ({}),
+    };
+    for (const options of mocks.loaderOptions) {
+      const factories = (options.extensionFactories ?? []) as Array<{
+        factory?: (api: typeof pi) => void;
+      }>;
+      for (const extension of factories) extension.factory?.(pi);
+    }
+    for (const [options] of mocks.createAgentSession.mock.calls) {
+      tools.push(...((options as { customTools?: ToolDefinition[] }).customTools ?? []));
+    }
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        'subagent',
+        'codemode',
+        'recall',
+        'edit',
+        'apply_patch',
+        'delegate',
+        'session_send',
+      ])
+    );
+    expect(
+      tools.flatMap((tool) => [
+        ...portableSchemaIssues(tool.parameters, tool.name),
+        ...geminiSchemaIssues(toolSchemaForModel('gemini', tool.parameters), tool.name),
+      ])
+    ).toEqual([]);
+  });
 
   it('内置工具热开关：禁用的只注册不激活，set-builtin-tools 增删激活集并联动 plan', async () => {
     const events: AgentWorkerEvent[] = [];
@@ -1150,7 +1263,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     });
     await settleUntil(() => mocks.sessions.length > 0);
     const parentSession = mocks.sessions[0] as ReturnType<typeof session>;
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'ordinary coding task' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-1153',
+      identity: parent,
+      text: 'ordinary coding task',
+    });
     await settle();
     expect(parentSession.prompt).toHaveBeenCalledWith(
       'ordinary coding task',
@@ -1308,6 +1426,93 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     };
     // 无预设 → 跟随父会话：父 spawn 未开推理 → reasoningEnabled=false → 档位恒 'off'
     expect(childOptions.thinkingLevel).toBe('off');
+  });
+
+  describe('父会话当前思考档优先于模型条目预设', () => {
+    const entryMax = { ...model, reasoning: 'on' as const, thinkingLevel: 'max' as const };
+    const spawnChild = async (
+      supervisor: SessionSupervisor,
+      childModel: typeof model & { reasoning?: 'on' | 'off'; thinkingLevel?: 'max' },
+      preset: { reasoning?: 'on' | 'off'; thinkingLevel?: 'medium' } = {}
+    ) => {
+      const before = mocks.createAgentSession.mock.calls.length;
+      supervisor.handleCommand({
+        type: 'spawn-child',
+        identity: {
+          sessionId: `parent::cw-${before}`,
+          generation: '44444444-4444-4444-8444-444444444444',
+          parent,
+          instanceId: '55555555-5555-4555-8555-555555555555',
+          instanceName: `Scout-${before}`,
+          typeKey: 'builtin:scout' as const,
+        },
+        cwd: '/workspace',
+        config: {
+          typeKey: 'builtin:scout',
+          displayName: 'Scout',
+          description: 'Read-only scout',
+          spawnSpecId: 'spawn-scout',
+          systemPrompt: 'scout role',
+          model: childModel,
+          tools: 'readonly',
+          skillPaths: [],
+          skillBindingIds: [],
+          mcpServers: [],
+          mcpBindingIds: [],
+          systemPromptHash: 'scout-hash',
+          ...preset,
+        },
+      });
+      await settleUntil(() => mocks.createAgentSession.mock.calls.length > before);
+      return (mocks.createAgentSession.mock.calls[before][0] as { thinkingLevel?: string })
+        .thinkingLevel;
+    };
+    const spawnParent = async (reasoning?: { thinkingLevel: 'high' | 'low' | 'xhigh' }) => {
+      const supervisor = new SessionSupervisor({
+        emit: vi.fn(),
+        agentDir: '/tmp/agent',
+        sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
+      });
+      supervisor.handleCommand({
+        type: 'spawn-parent',
+        identity: parent,
+        cwd: '/workspace',
+        model,
+        ...(reasoning ? { reasoningEnabled: true, thinkingLevel: reasoning.thinkingLevel } : {}),
+        editMode: 'apply_patch',
+      });
+      await settleUntil(() => mocks.sessions.length > 0);
+      return supervisor;
+    };
+
+    it('模型条目 max、父会话 high → 子代理 high', async () => {
+      const supervisor = await spawnParent({ thinkingLevel: 'high' });
+      expect(await spawnChild(supervisor, entryMax)).toBe('high');
+    });
+
+    it('父会话中途改档后子代理跟随当前档，而非 spawn 时的旧档', async () => {
+      const supervisor = await spawnParent({ thinkingLevel: 'low' });
+      supervisor.handleCommand({ type: 'set-thinking', identity: parent, level: 'high' });
+      await settle();
+      expect(await spawnChild(supervisor, entryMax)).toBe('high');
+    });
+
+    it('父会话未开推理 → 回落模型条目 max', async () => {
+      const supervisor = await spawnParent();
+      expect(await spawnChild(supervisor, entryMax)).toBe('max');
+    });
+
+    it('类型预设 medium 仍高于父会话 high', async () => {
+      const supervisor = await spawnParent({ thinkingLevel: 'high' });
+      expect(await spawnChild(supervisor, entryMax, { thinkingLevel: 'medium' })).toBe('medium');
+    });
+
+    it('父会话 xhigh、子模型不支持思考 → 降为 off，spawn 不失败', async () => {
+      const supervisor = await spawnParent({ thinkingLevel: 'xhigh' });
+      expect(
+        await spawnChild(supervisor, { ...model, modelId: 'plain', reasoning: 'off' as const })
+      ).toBe('off');
+    });
   });
 
   it('follow 类型档覆盖父会话思考档（spawn-child / 子代理）', async () => {
@@ -1655,7 +1860,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       parentSession.isStreaming = false;
       return undefined;
     });
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'follow up' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-1658',
+      identity: parent,
+      text: 'follow up',
+    });
     await vi.waitFor(() =>
       expect(parentSession.prompt).toHaveBeenCalledWith(
         'follow up',
@@ -1665,7 +1875,7 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     expect(parentSession.steer).not.toHaveBeenCalled();
   });
 
-  it('idle 投影但 pi 僵尸轮永不空闲：限时后按失败收口，绝不静默 steer', async () => {
+  it('idle 投影但 pi 僵尸轮永不空闲：限时后按 deliveryId 回执，不发终态、不静默 steer', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const events: AgentWorkerEvent[] = [];
@@ -1684,17 +1894,33 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       const parentSession = mocks.sessions[0] as ReturnType<typeof session>;
       parentSession.isStreaming = true;
       parentSession.waitForIdle = vi.fn(() => new Promise<undefined>(() => {}));
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'follow up' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        identity: parent,
+        text: 'follow up',
+        deliveryId: 'zombie-follow-up',
+      });
       await settle();
       expect(parentSession.steer).not.toHaveBeenCalled();
       await vi.runAllTimersAsync();
       await settle();
       expect(parentSession.steer).not.toHaveBeenCalled();
       expect(parentSession.prompt).not.toHaveBeenCalled();
-      expect(events.find((event) => event.type === 'turn-failed')).toBeDefined();
       expect(
-        events.find((event) => event.type === 'status' && event.status === 'failed' && event.error)
-      ).toBeDefined();
+        events.filter(
+          (event) =>
+            event.type === 'delivery-rejected' ||
+            event.type === 'turn-failed' ||
+            event.type === 'turn-completed' ||
+            (event.type === 'status' && event.status === 'failed')
+        )
+      ).toEqual([
+        expect.objectContaining({
+          type: 'delivery-rejected',
+          deliveryId: 'zombie-follow-up',
+          reason: 'turn-stuck',
+        }),
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -1715,7 +1941,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
             };
           })
       );
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        deliveryId: 'd-1718',
+        identity: parent,
+        text: 'queued',
+      });
       await vi.advanceTimersByTimeAsync(4_000);
       piSession.emit({ type: 'turn_start' });
       await vi.advanceTimersByTimeAsync(2_000);
@@ -1735,26 +1966,31 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     }
   });
 
-  it('误判僵尸失败后，已见 agent_end 的原轮收束会清掉失败横幅', async () => {
+  it('误判僵尸只回执那条 prompt：已见 agent_end 的原轮照常收束，只有一个终态', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const { events, supervisor, piSession } = await spawnParent();
       piSession.isStreaming = true;
       piSession.waitForIdle = vi.fn(() => new Promise<undefined>(() => {}));
       piSession.emit({ type: 'agent_end', willRetry: false });
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        identity: parent,
+        text: 'queued',
+        deliveryId: 'd2',
+      });
       await vi.advanceTimersByTimeAsync(5_000);
       await settle();
-      expect(events.some((event) => event.type === 'turn-failed')).toBe(true);
+      expect(events.some((event) => event.type === 'delivery-rejected')).toBe(true);
 
       piSession.isStreaming = false;
       piSession.emit({ type: 'agent_settled' });
       await settle();
-      const failedAt = events.findIndex((event) => event.type === 'turn-failed');
-      const completedAt = events.findIndex(
-        (event, index) => index > failedAt && event.type === 'turn-completed'
-      );
-      expect(completedAt).toBeGreaterThan(failedAt);
+      expect(
+        events.flatMap((event) =>
+          event.type === 'turn-completed' || event.type === 'turn-failed' ? [event.type] : []
+        )
+      ).toEqual(['turn-completed']);
       const status = events.filter((event) => event.type === 'status').at(-1);
       expect(status).toMatchObject({ status: 'idle' });
       if (status?.type === 'status') expect(status.error).toBeUndefined();
@@ -1794,7 +2030,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
   it('轮次收束后压缩进行中收到 prompt：等压完再按新轮 prompt，不报错', async () => {
     const { events, supervisor, piSession } = await spawnParent();
     const finish = holdCompaction(piSession);
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-1797',
+      identity: parent,
+      text: 'queued',
+    });
     await settle();
     expect(piSession.prompt).not.toHaveBeenCalled();
 
@@ -1813,7 +2054,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
     try {
       const { events, supervisor, piSession } = await spawnParent();
       const finish = holdCompaction(piSession, true);
-      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+      supervisor.handleCommand({
+        type: 'prompt',
+        deliveryId: 'd-1816',
+        identity: parent,
+        text: 'queued',
+      });
       await vi.advanceTimersByTimeAsync(30_000);
       expect(events.some((event) => event.type === 'turn-failed')).toBe(false);
       expect(piSession.prompt).not.toHaveBeenCalled();
@@ -1842,7 +2088,12 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       }, 0);
       return undefined;
     });
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'after abort' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-1845',
+      identity: parent,
+      text: 'after abort',
+    });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(piSession.prompt).not.toHaveBeenCalled();
 
@@ -2031,6 +2282,47 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       }
     );
 
+    it('预检拒收：先发本轮失败终态，拒收回执最后到——收到回执即让出会话的消费者不会把失败记到下一条头上', async () => {
+      const { events, supervisor, piSession } = await spawned();
+      piSession.prompt.mockImplementationOnce(async () => {
+        throw new Error('No API key');
+      });
+      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'hi', deliveryId: 'd1' });
+      await settle();
+      expect(
+        events.flatMap((event) =>
+          event.type === 'delivery-rejected' || event.type === 'turn-failed'
+            ? [event.type]
+            : event.type === 'status' && event.status === 'failed'
+              ? ['failed']
+              : []
+        )
+      ).toEqual(['failed', 'turn-failed', 'delivery-rejected']);
+      await supervisor.shutdown();
+    });
+
+    it('活轮中预检拒收：这条本该排在活轮之后，只回执，不把活轮打成失败', async () => {
+      const { events, supervisor, piSession } = await spawned();
+      piSession.isStreaming = true;
+      piSession.emit({ type: 'agent_start' });
+      await settle();
+      piSession.prompt.mockImplementationOnce(async () => {
+        throw new Error('No API key');
+      });
+      supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'hi', deliveryId: 'd1' });
+      await settle();
+      expect(
+        events.flatMap((event) =>
+          event.type === 'delivery-rejected' || event.type === 'turn-failed'
+            ? [event.type]
+            : event.type === 'status'
+              ? [event.status]
+              : []
+        )
+      ).toEqual(['idle', 'running', 'delivery-rejected']);
+      await supervisor.shutdown();
+    });
+
     it('prompt 的 user 消息上屏后回执 deliveryId，且排在该 upsert 之后', async () => {
       const { events, supervisor, userMessage } = await spawned();
       supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'hi', deliveryId: 'd1' });
@@ -2122,13 +2414,23 @@ describe('SessionSupervisor deterministic child lifecycle', () => {
       agentDir: '/tmp/agent',
       sessionDir: mkdtempSync(path.join(tmpdir(), 'enso-dispatch-')),
     });
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'hello' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-2125',
+      identity: parent,
+      text: 'hello',
+    });
     await settle();
     const rejected = events.find((event) => event.type === 'parent-rejected');
     expect(rejected).toMatchObject({ identity: parent, seq: 0 });
     expect((rejected as { reason: string }).reason).toContain('parent');
 
-    supervisor.handleCommand({ type: 'prompt', identity: child, text: 'hello' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-2131',
+      identity: child,
+      text: 'hello',
+    });
     await settle();
     expect(events.find((event) => event.type === 'child-rejected')).toMatchObject({
       identity: child,
@@ -2557,7 +2859,12 @@ describe('SessionSupervisor idle eviction', () => {
     const managed = internals.sessions.get(parent.sessionId)!;
     managed.lastActivityAt = Date.now() - 31 * 60_000;
     internals.evictIdleSessions();
-    supervisor.handleCommand({ type: 'prompt', identity: parent, text: 'queued' });
+    supervisor.handleCommand({
+      type: 'prompt',
+      deliveryId: 'd-2560',
+      identity: parent,
+      text: 'queued',
+    });
     // 排除 lastActivityAt 刷新的影响，只验证「队列里有待处理命令」这一条
     managed.lastActivityAt = Date.now() - 31 * 60_000;
     hold.resolve();

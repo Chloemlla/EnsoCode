@@ -22,8 +22,8 @@ import type {
   ConfigSyncPreviewResult,
   ConfigSyncSummary,
 } from '@shared/types';
-import { resolveEditMode } from '@shared/types';
 import { persistedSettingsState } from '@shared/types/builtinTools';
+import { resolveEditMode } from '@shared/types/editMode';
 import {
   commitSettingsTransaction,
   readSettings,
@@ -138,11 +138,16 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   expandLiveEdits: { mode: 'portable' },
   expandLiveReasoning: { mode: 'portable' },
   autoCollapseTurns: { mode: 'portable' },
+  quoteSelectionButton: { mode: 'portable' },
   collapseCompletedActivity: { mode: 'portable' },
   collapseLiveActivity: { mode: 'portable' },
   liveActivityFoldDelaySec: { mode: 'portable' },
   pinUnfinishedTodos: { mode: 'portable' },
   pinnedModels: { mode: 'excluded', reason: 'starred keys reference device-local provider ids' },
+  recentModels: {
+    mode: 'excluded',
+    reason: 'recent model refs reference device-local provider ids',
+  },
   headerSessionTabs: { mode: 'excluded', reason: 'desktop window chrome layout preference' },
   headerRecentMinutes: { mode: 'excluded', reason: 'desktop window chrome layout preference' },
   chatWide: { mode: 'portable' },

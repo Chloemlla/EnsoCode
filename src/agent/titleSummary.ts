@@ -1,15 +1,16 @@
 /** 会话标题总结：一次性补全的输入与输出处理（纯函数，供 supervisor 调用）。 */
 
+import { withoutQuoteBlocks } from '@shared/quoteBlock';
 import { userTextWithoutSkills } from '@shared/skillCommands';
 import { isContinuationTurn } from '@shared/titleContinuation';
-import {
-  type ProjectedMessage,
-  type SpawnModelConfig,
-  type TitleSummaryInput,
-  TURN_REPORT_MAX_CHARS,
-  type TurnDigest,
-  type TurnReport,
+import type {
+  ProjectedMessage,
+  SpawnModelConfig,
+  TitleSummaryInput,
+  TurnDigest,
+  TurnReport,
 } from '@shared/types/agent';
+import { TURN_REPORT_MAX_CHARS } from '@shared/types/agentConstants';
 
 /** 送给模型的用户消息上限：标题只需要开头，长指令全文只会烧 token */
 const MAX_INPUT_CHARS = 2000;
@@ -114,7 +115,7 @@ const INLINE_UI_REF = /\[Selected UI element "([^"]*)" — path: (.*?); text: (.
 export function buildTitleUserText(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return '';
-  const skills = userTextWithoutSkills(trimmed);
+  const skills = userTextWithoutSkills(withoutQuoteBlocks(trimmed));
 
   const chatLabels: string[] = [];
   for (const match of skills.text.matchAll(INLINE_CHAT_REF)) {

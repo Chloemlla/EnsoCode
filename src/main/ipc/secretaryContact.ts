@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import path from 'node:path';
-import { app, ipcMain } from '@platform';
+import { ipcMain } from '@platform';
 import { normalizeLocale } from '@shared/i18n';
 import {
   type ContactLang,
@@ -8,15 +7,19 @@ import {
   findRouteConflict,
 } from '@shared/secretary/contact';
 import { projectReadableMessages } from '@shared/secretary/transcript';
-import { IPC_CHANNELS } from '@shared/types';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 import type {
   SecretaryContactChannelPrefs,
   SecretaryContactState,
   SecretaryProfile,
 } from '@shared/types/secretary';
-import { getExtensionPlugins, setPluginContactBridge } from '../services/extensionPlugins';
+import {
+  getExtensionPlugins,
+  setPluginContactBridge,
+  setPluginOwnerBindingsProbe,
+} from '../services/extensionPlugins';
+import type { OwnerBindings } from '../services/extensionPlugins/injectTrust';
 import { redactSecrets } from '../services/memory/distill';
-import { listMemoriesForAdmin, openExistingMemoryDb } from '../services/memoryAdmin';
 import { broadcastToRenderers, isMainRenderer, isSettingsRenderer } from '../services/renderers';
 import { appendAudit } from '../services/secretary/audit';
 import { createContactCommands } from '../services/secretary/contact/commands';
@@ -67,7 +70,9 @@ import { readSettingsState } from './settings';
  */
 export interface SecretaryContactDeps {
   /** 这个秘书的回传端口：目标会话解析与投递复用同一口径，且不跨秘书 */
-  delivery(ctx: SecretaryContext): DeliveryPorts;
+  delivery(
+    ctx: SecretaryContext
+  ): DeliveryPorts & Required<Pick<DeliveryPorts, 'startConversation'>>;
   /** 秘书状态推送：联系方式状态变化时一起刷新界面 */
   publish(): void;
   /** 确认卡在手机上确认时用；审批没有这条路径 */
@@ -259,6 +264,34 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
     },
   });
   const services = new Map<string, ContactService>();
+
+  function publishOwnerBindings(): void {
+    setPluginOwnerBindingsProbe(() => {
+      const telegramOwnerIds = new Set<string>();
+      const telegramPrivateChatIds = new Set<string>();
+      const channelOwnerIds = new Map<string, Set<string>>();
+      for (const service of services.values()) {
+        const bindings = service.ownerBindings();
+        if (bindings.telegramOwnerId) telegramOwnerIds.add(bindings.telegramOwnerId);
+        if (bindings.telegramPrivateChatId)
+          telegramPrivateChatIds.add(bindings.telegramPrivateChatId);
+        for (const channel of bindings.channelPeers) {
+          const key = channel.channelId.toLowerCase();
+          const peers = channelOwnerIds.get(key) ?? new Set<string>();
+          for (const peer of channel.peers) peers.add(peer);
+          channelOwnerIds.set(key, peers);
+        }
+      }
+      const bindings: OwnerBindings = {
+        telegramOwnerIds,
+        telegramPrivateChatIds,
+        channelOwnerIds,
+      };
+      return bindings;
+    });
+  }
+
+  publishOwnerBindings();
   let plugins: { handlers: PluginContactBridgeHandlers; dispose(): void; resync(): void } | null =
     null;
 
@@ -287,6 +320,7 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
       notifyMode: () => profileOf(ctx)?.notify ?? null,
       secretaryName: () => nameOf(ctx),
       secretaryConversationId: () => resolveTarget(delivery),
+      startConversation: () => delivery.startConversation(),
       // /last：读秘书会话的 jsonl 尾窗，按轮切好交回去；只读，不进会话
       recentTurns: async (rounds) => {
         const conversationId = resolveTarget(delivery);
@@ -363,18 +397,13 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
       schedules: async () => listSchedules(schedulePortsFor(ctx)),
       memories: async () => {
         const projectId = ctx.projectId;
-        const db = openExistingMemoryDb(path.join(app.getPath('userData'), 'memory', 'memory.db'));
-        if (!db || !projectId) return { titles: [], total: 0 };
-        try {
-          const result = listMemoriesForAdmin(db, {
-            spaceId: `proj:${projectId}`,
-            limit: 20,
-            offset: 0,
-          });
-          return { titles: result.items.map((item) => item.title), total: result.total };
-        } finally {
-          db.close();
-        }
+        if (!projectId) return { titles: [], total: 0 };
+        const { isMissingDb, memoryServiceOp } = await import('../services/memoryHost');
+        const result = await memoryServiceOp<
+          { items: { title: string }[]; total: number } | { missing: true }
+        >('list', { spaceId: `proj:${projectId}`, limit: 20, offset: 0 });
+        if (isMissingDb(result)) return { titles: [], total: 0 };
+        return { titles: result.items.map((item) => item.title), total: result.total };
       },
     });
     service = new ContactService(store, ports);
@@ -423,6 +452,7 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
     },
 
     async start() {
+      publishOwnerBindings();
       // 插件渠道：清单声明的先出卡片，插件 register 后再收发；停用卸载时一起清掉
       if (!plugins) {
         const source = getExtensionPlugins();
@@ -439,6 +469,7 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
 
     async stop() {
       setPluginContactBridge(null);
+      setPluginOwnerBindingsProbe(null);
       plugins?.dispose();
       plugins = null;
       for (const service of services.values()) await service.stop();

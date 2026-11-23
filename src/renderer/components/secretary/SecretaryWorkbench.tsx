@@ -1,3 +1,4 @@
+import { queuedStartOf, queuePositions } from '@shared/secretary/queuedSession';
 import {
   NEEDS_YOU_RESULTS,
   type PendingDispatch,
@@ -6,6 +7,7 @@ import {
   type SecretaryTodoMutate,
   type TodoProblemCode,
 } from '@shared/types/secretary';
+import { formatRetryClock } from '@shared/upstreamRecovery';
 import {
   ArrowUpRight,
   Coffee,
@@ -20,6 +22,7 @@ import {
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { ApprovalBar } from '@/components/chat/ApprovalBar';
 import { AskBar } from '@/components/chat/AskBar';
+import { QueuedSessionButtons } from '@/components/chat/QueuedSessionCard';
 import { HOVER_ROW_CLASS, HoverActions } from '@/components/ui/hover-actions';
 import { useI18n } from '@/i18n';
 import { formatClock, formatRelativeTime } from '@/lib/time';
@@ -68,7 +71,24 @@ const SESSION_STATE_LABEL = {
   error: 'Failed',
   'not-started': 'Not started',
   gone: 'The session was deleted',
+  queued: 'Queued',
 } as const;
+
+function todoStateText(
+  todo: SecretaryBoardTodo,
+  conversations: Record<string, unknown>,
+  t: (key: string, params?: Record<string, string | number>) => string
+): string {
+  if (!todo.sessionState) return '';
+  if (todo.sessionState !== 'queued') return t(SESSION_STATE_LABEL[todo.sessionState]);
+  const row = todo.conversationId ? conversations[todo.conversationId] : undefined;
+  const failed = queuedStartOf(row)?.failed?.error;
+  if (failed) return `${t('Queued')} · ${failed}`;
+  const position = todo.conversationId
+    ? queuePositions(conversations).get(todo.conversationId)
+    : undefined;
+  return position ? t('Queued · #{{n}}', { n: position }) : t('Queued');
+}
 
 const PROBLEM_LABEL: Record<TodoProblemCode, string> = {
   failed: 'The session failed',
@@ -93,7 +113,7 @@ function Stat({ value, label, warn }: { value: number; label: string; warn?: boo
 }
 
 /** 需要你处理的会话：就地审批与提问，主按钮打开会话 */
-/** 等依赖的派发出问题：它没有会话可打开，只说明原因，秘书已经收到同一条结果 */
+/** 等依赖的派发出问题：它没有会话可打开也不能停，只说明原因并可忽略；秘书已经收到同一条结果 */
 function PendingProblemCard({ pending }: { pending: PendingDispatch }) {
   const { t } = useI18n();
   const title = pending.draft.title?.trim() || pending.draft.prompt.split('\n')[0]?.trim() || '';
@@ -113,6 +133,18 @@ function PendingProblemCard({ pending }: { pending: PendingDispatch }) {
       <p className="mt-0.5 text-[12px] text-muted-foreground">
         {t('Waited for {{ids}}', { ids: pending.after.join(', ') })}
       </p>
+      {pending.status === 'failed' && (
+        <div className="mt-2 flex items-center gap-1.5">
+          <button
+            type="button"
+            data-enso="secretary-dismiss-pending"
+            onClick={() => void window.electronAPI.secretary.dismissPending(pending.id)}
+            className="rounded-md px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {t('Ignore')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -133,11 +165,17 @@ function AttentionCard({ card }: { card: SecretarySessionCard }) {
   const [stopping, setStopping] = useState(false);
   const stop = () => {
     setStopping(true);
-    void window.electronAPI.agent.abort(card.conversationId).finally(() => setStopping(false));
+    void window.electronAPI.agent
+      .abort(card.conversationId, { stopSubagents: true, cancelReminders: true })
+      .finally(() => setStopping(false));
   };
   // 实时审批与提问由会话状态决定，清结果不会让它消失，所以只在原因是结果时给「知道了」
   const dismissible =
-    card.state !== 'waiting' && card.result !== undefined && NEEDS_YOU_RESULTS.has(card.result);
+    card.state !== 'waiting' &&
+    card.result !== undefined &&
+    (NEEDS_YOU_RESULTS.has(card.result) ||
+      card.result === 'goal-complete' ||
+      card.result === 'goal-blocked');
   const feed = sessionFeed(card);
   return (
     <div
@@ -167,6 +205,21 @@ function AttentionCard({ card }: { card: SecretarySessionCard }) {
         <span className="shrink-0 rounded bg-muted px-1.5 text-[11px]">{card.projectName}</span>
         {card.lastText && <span className="line-clamp-1">{card.lastText}</span>}
       </div>
+      {(card.state === 'queued' || card.queueFailed) && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <p data-enso="secretary-queued-card" className="text-[12.5px] text-orange-600">
+            {card.queueFailed
+              ? `${t('Queued')} · ${card.queueFailed}`
+              : card.queuePosition
+                ? t('Queued · #{{n}}', { n: card.queuePosition })
+                : t('Queued')}
+          </p>
+          <QueuedSessionButtons
+            conversationId={card.conversationId}
+            failed={Boolean(card.queueFailed)}
+          />
+        </div>
+      )}
       {approvals && approvals.length > 0 && (
         <div className="mt-2">
           <ApprovalBar
@@ -228,6 +281,7 @@ function AttentionCard({ card }: { card: SecretarySessionCard }) {
 
 function TodoRow({ todo, secretaryId }: { todo: SecretaryBoardTodo; secretaryId?: string }) {
   const { t, locale } = useI18n();
+  const conversations = useSessionsStore((state) => state.conversations);
   const [draft, setDraft] = useState<string | null>(null);
   const phase = todo.phase ?? 'todo';
   // 会话已删也打开弹窗：由弹窗说明原因，而不是一个点不动的按钮
@@ -284,7 +338,7 @@ function TodoRow({ todo, secretaryId }: { todo: SecretaryBoardTodo; secretaryId?
             className="mt-0.5 block max-w-full truncate text-left text-[12px] text-muted-foreground hover:text-foreground disabled:cursor-default"
           >
             {todo.sessionTitle || t('Open session')}
-            {todo.sessionState ? ` · ${t(SESSION_STATE_LABEL[todo.sessionState])}` : ''}
+            {todo.sessionState ? ` · ${todoStateText(todo, conversations, t)}` : ''}
           </button>
         )}
         {phase === 'problem' && todo.problem && (
@@ -396,7 +450,9 @@ function FeedEntry({ event }: { event: FeedEvent }) {
   const stop = conversationId
     ? () => {
         setStopping(true);
-        void window.electronAPI.agent.abort(conversationId).finally(() => setStopping(false));
+        void window.electronAPI.agent
+          .abort(conversationId, { stopSubagents: true, cancelReminders: true })
+          .finally(() => setStopping(false));
       }
     : undefined;
   return (
@@ -515,6 +571,7 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
   const ownBoard = useSecretaryStore((s) =>
     secretaryId ? (s.states[secretaryId]?.board ?? s.secretary.board) : s.secretary.board
   );
+  const upstreamHealth = useSessionsStore((s) => s.upstreamHealth) ?? [];
   const secretaries = useSecretaryStore((s) => s.secretaries);
   /** 多个秘书时可以看总看板：全部，或筛到某一个 */
   const [scope, setScope] = useState<'own' | 'all'>('own');
@@ -595,6 +652,27 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
 
   return (
     <div data-enso="secretary-workbench" className="flex flex-col gap-3 px-3 py-3">
+      {upstreamHealth.length > 0 && (
+        <div
+          data-enso="secretary-upstream-health"
+          className="flex flex-col gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[12px] text-amber-700 dark:text-amber-300"
+        >
+          {upstreamHealth.map((item) => (
+            <div key={item.provider} className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate">
+                {t('Upstream unavailable ({{provider}}), retrying automatically', {
+                  provider: item.provider,
+                })}
+              </span>
+              {item.nextProbeAt && (
+                <span className="shrink-0 font-mono text-[11px] tabular-nums">
+                  {formatRetryClock(item.nextProbeAt)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {secretaries.length > 1 && (
         <div className="flex items-center gap-1.5">
           {(['own', 'all'] as const).map((option) => (

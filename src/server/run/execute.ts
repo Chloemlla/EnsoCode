@@ -13,7 +13,7 @@ import type {
   SessionIdentity,
   ThinkingLevel,
 } from '@shared/types/agent';
-import { THINKING_LEVELS } from '@shared/types/agent';
+import { THINKING_LEVELS } from '@shared/types/agentConstants';
 import {
   abortSession,
   agentDataDir,
@@ -327,6 +327,7 @@ export async function executeRun(args: RunArgs, io: RunIO): Promise<number> {
           stop({ code: 1, status: 'error', reason: 'worker-exited' });
           return;
         }
+        if (event.type === 'worker-swapped') return;
         const who = relate(event);
         if (!who) return;
         if (event.type === 'message-upsert') {
@@ -376,7 +377,7 @@ export async function executeRun(args: RunArgs, io: RunIO): Promise<number> {
           writeRunLast(lastFile, cwd, { sessionId, sessionFile });
           const text = initialPrompt(prompt.text, args.goal);
           if (runtime.goal) runtime = { ...runtime, goal: { ...runtime.goal, autoTurns: 1 } };
-          const sent = promptSession(identity, text);
+          const sent = promptSession(identity, text, undefined, randomUUID());
           if (!sent.ok) {
             stop({ code: 1, status: 'error', reason: 'prompt-rejected', error: sent.error });
           }
@@ -413,7 +414,7 @@ export async function executeRun(args: RunArgs, io: RunIO): Promise<number> {
         lastOutput = step.lastOutput;
         noProgressRuns = step.noProgressRuns;
         if (step.deliver && runtime.goal?.status === 'active') {
-          const sent = promptSession(identity, step.deliver.text);
+          const sent = promptSession(identity, step.deliver.text, undefined, randomUUID());
           if (!sent.ok)
             stop({ code: 1, status: 'error', reason: 'prompt-rejected', error: sent.error });
           return;

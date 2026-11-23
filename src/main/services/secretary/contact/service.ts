@@ -94,6 +94,7 @@ import type { TelegramHub } from './hub';
 import {
   type ContactStore,
   channelPrefs,
+  contactOwnerId,
   TELEGRAM_CHANNEL_ID,
   withChannelPrefs,
   withTelegramGroupAdded,
@@ -165,14 +166,6 @@ export interface ContactCardWaitingInput {
   conversationId?: string;
 }
 
-export interface ContactRelayAskInput {
-  conversationId: string;
-  question: string;
-  options?: readonly string[];
-  /** 会话的一句话标签 */
-  label: string;
-}
-
 /** 手机关注里的定时到点了：推一次就结束关注 */
 export interface ContactScheduleFiredInput {
   scheduleId: string;
@@ -191,7 +184,6 @@ export interface SecretaryContactPort {
   onMilestone(input: ContactMilestoneInput): void;
   /** 手机关注里的定时触发：与里程碑同一个出口，推一次就结束关注 */
   onScheduleFired(input: ContactScheduleFiredInput): void;
-  onRelayAsk(input: ContactRelayAskInput): void;
   onAskRequest(conversationId: string, ask: AskRequestInfo): void;
   /** 提问收尾（应用里答了、超时、作废）：手机那条消息跟着标成已回答或已过期 */
   onAskResolved(conversationId: string, requestId: string, resolution?: AskResolvedInfo): void;
@@ -230,6 +222,8 @@ export interface ContactServicePorts {
   secretaryName(): string;
   /** 手机发来的话投给哪个秘书会话；没有可用会话时返回 null */
   secretaryConversationId(): string | null;
+  /** 还没有可用会话：建一条并拉起，与在电脑上第一次打开秘书一样 */
+  startConversation(): Promise<{ ok: true; conversationId: string } | { ok: false; error: string }>;
   /** /last：秘书会话最近的消息，Main 读 jsonl 后交回来；缺省表示读不到 */
   recentTurns?(rounds: number): Promise<readonly RecapMessage[]>;
   deliver(conversationId: string, text: string): Promise<{ ok: boolean; error?: string }>;
@@ -282,6 +276,30 @@ function digest(text: string): string {
 
 function describe(text: string): string {
   return `len=${text.length} hash=${digest(text)}`;
+}
+
+/** 消息没送进秘书会话：说清原因和下一步 */
+function undeliveredText(lang: ContactLang, error?: string): string {
+  const zh = lang === 'zh';
+  if (error === 'no usable model' || error === 'no remembered model') {
+    return zh
+      ? '秘书还没配置可用的模型，这条消息没送到。在电脑上打开 设置 → 模型，添加或选一个默认模型后再发一次。'
+      : "The secretary has no usable model yet, so this message wasn't delivered. On your computer, open Settings → Models, add or pick a default model, then send it again.";
+  }
+  if (error === 'disabled') {
+    return zh
+      ? '秘书功能在电脑上已关闭，这条消息没送到。在 设置 里重新打开秘书后再发。'
+      : "The secretary is turned off on your computer, so this message wasn't delivered. Turn it back on in Settings, then send it again.";
+  }
+  if (error === 'model credentials unavailable') {
+    return zh
+      ? '读不到模型凭据（电脑可能锁屏了），这条消息没送到。解锁电脑后再发一次。'
+      : "Couldn't read the model credentials (the computer may be locked), so this message wasn't delivered. Unlock it and send again.";
+  }
+  const reason = error ? (zh ? `（${error.slice(0, 80)}）` : ` (${error.slice(0, 80)})`) : '';
+  return zh
+    ? `秘书没能启动${reason}，这条消息没送到。稍后再发一次；一直不行就在电脑上打开秘书看看。`
+    : `Couldn't start the secretary${reason}, so this message wasn't delivered. Send it again later; if it keeps failing, open the secretary on your computer.`;
 }
 
 /** 一条发出去的消息：收尾时按渠道能力改掉或留着 */
@@ -423,6 +441,25 @@ export class ContactService implements SecretaryContactPort {
       enabled: file.enabled,
       channels: this.registry.list().map((entry) => this.channelView(entry)),
       telegram: { ...this.telegram.view(), following: followingViews(this.followingList()) },
+    };
+  }
+
+  /** 宿主核验插件投递发送者用：主人 id、私聊 id、已连接插件渠道的 peer */
+  ownerBindings(): {
+    telegramOwnerId?: string;
+    telegramPrivateChatId?: string;
+    channelPeers: Array<{ channelId: string; peers: string[] }>;
+  } {
+    const file = this.store.file();
+    const owner = contactOwnerId(file);
+    const privateChat = file.chat?.id;
+    return {
+      ...(owner !== undefined ? { telegramOwnerId: String(owner) } : {}),
+      ...(privateChat !== undefined ? { telegramPrivateChatId: String(privateChat) } : {}),
+      channelPeers: this.registry
+        .list()
+        .filter((entry) => entry.meta.id !== TELEGRAM_CHANNEL_ID && entry.status === 'connected')
+        .map((entry) => ({ channelId: entry.meta.id, peers: [...entry.peers] })),
     };
   }
 
@@ -1123,21 +1160,6 @@ export class ContactService implements SecretaryContactPort {
     });
   }
 
-  /** 派出会话转给秘书的提问：手机只提示，J 哥回话即进秘书会话 */
-  onRelayAsk(input: ContactRelayAskInput): void {
-    for (const peer of this.pushTargets()) {
-      const text = formatAskMessage(this.ports.lang(), {
-        question: input.question,
-        ...(input.options ? { options: input.options } : {}),
-        title: input.label,
-        ...(this.hasButtons(peer) ? {} : { plain: true }),
-      });
-      void this.post(peer, 'sendText', { text }).then((sent) => {
-        this.audit('contact_relay_ask', sent.ok, sent.ok ? undefined : sent.error);
-      });
-    }
-  }
-
   /** 秘书自己用 ask_user 问 J 哥：所有推送渠道都发，谁先答算谁的 */
   onAskRequest(conversationId: string, ask: AskRequestInfo): void {
     const targets = this.pushTargets();
@@ -1614,11 +1636,15 @@ export class ContactService implements SecretaryContactPort {
 
   private async deliverText(message: Extract<ChannelInbound, { kind: 'text' }>): Promise<void> {
     const { peer, text } = message;
-    const conversationId = this.ports.secretaryConversationId();
+    let conversationId = this.ports.secretaryConversationId();
     if (!conversationId) {
-      this.audit('contact_inbound', false, 'no-secretary');
-      await this.notifyUndelivered(peer);
-      return;
+      const started = await this.ports.startConversation();
+      if (!started.ok) {
+        this.audit('contact_inbound', false, started.error);
+        await this.notifyUndelivered(peer, started.error);
+        return;
+      }
+      conversationId = started.conversationId;
     }
     const images = await this.storeImages(conversationId, message);
     if (!text && images.saved.length === 0) {
@@ -1662,18 +1688,13 @@ export class ContactService implements SecretaryContactPort {
     if (!delivered.ok) {
       this.forget(this.awaitingReply, conversationId, peer);
       this.forget(this.phoneChain, conversationId, peer);
-      await this.notifyUndelivered(peer);
+      await this.notifyUndelivered(peer, delivered.error);
     }
   }
 
-  /** 秘书没拉起来或没有可用会话：回一句，别让手机那边干等 */
-  private async notifyUndelivered(peer: Peer): Promise<void> {
-    await this.post(peer, 'sendText', {
-      text:
-        this.ports.lang() === 'zh'
-          ? '秘书没能启动，这条消息没送到。稍后再发，或在电脑上打开秘书看看。'
-          : "Couldn't start the secretary, so this message wasn't delivered. Try again later or open the secretary on your computer.",
-    });
+  /** 秘书没拉起来：回一句原因和下一步，别让手机那边干等 */
+  private async notifyUndelivered(peer: Peer, error?: string): Promise<void> {
+    await this.post(peer, 'sendText', { text: undeliveredText(this.ports.lang(), error) });
   }
 
   private async handleAction(message: Extract<ChannelInbound, { kind: 'action' }>): Promise<void> {

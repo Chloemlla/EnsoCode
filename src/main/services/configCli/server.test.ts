@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { IPC_CHANNELS } from '@shared/types';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ConfigCliHandle } from './server';
 
@@ -104,6 +104,9 @@ function runCli(
     );
   });
 }
+
+await import('../../ipc/settings');
+await import('./server');
 
 beforeAll(async () => {
   const settings = await import('../../ipc/settings');
@@ -353,6 +356,53 @@ describe('config CLI socket', () => {
       ok: true,
     });
     expect((await state()).longCacheRetention).toBe(true);
+  });
+
+  it('选中文字引用按钮开关热生效可写，只接受布尔值', async () => {
+    expect(
+      await config({ action: 'set', key: 'quoteSelectionButton', value: 'false' })
+    ).toMatchObject({ ok: false });
+    expect(await config({ action: 'set', key: 'quoteSelectionButton', value: false })).toEqual({
+      ok: true,
+    });
+    expect((await state()).quoteSelectionButton).toBe(false);
+  });
+
+  it('最近使用模型可写，只接受去重且不超过 10 条的 providerId/modelId 列表', async () => {
+    const refs = [
+      { providerId: 'p1', modelId: 'm1' },
+      { providerId: 'p1', modelId: 'm2' },
+    ];
+    expect(await config({ action: 'set', key: 'recentModels', value: refs })).toEqual({ ok: true });
+    expect((await state()).recentModels).toEqual(refs);
+    for (const value of [
+      'p1/m1',
+      [refs[0], refs[0]],
+      [{ providerId: 'p1' }],
+      [{ ...refs[0], apiKey: 'x' }],
+      Array.from({ length: 11 }, (_, i) => ({ providerId: 'p', modelId: String(i) })),
+    ]) {
+      expect(await config({ action: 'set', key: 'recentModels', value })).toMatchObject({
+        ok: false,
+      });
+    }
+    expect((await state()).recentModels).toEqual(refs);
+    const ten = Array.from({ length: 10 }, (_, i) => ({ providerId: 'p', modelId: String(i) }));
+    expect(await config({ action: 'set', key: 'recentModels', value: ten })).toEqual({ ok: true });
+    const reordered = [{ modelId: 'm3', providerId: 'p2' }];
+    expect(await config({ action: 'set', key: 'recentModels', value: reordered })).toEqual({
+      ok: true,
+    });
+    expect(await config({ action: 'set', key: 'recentModels', value: refs })).toEqual({ ok: true });
+    const schema = await config({ action: 'schema' });
+    const keys = new Map(
+      (schema.keys as Array<Record<string, unknown>>).map((entry) => [entry.path, entry])
+    );
+    expect(keys.get('recentModels')).toMatchObject({
+      writable: true,
+      secret: false,
+      requiresRestart: false,
+    });
   });
 
   it('提炼聚合窗口热生效可写，只接受预设分钟数', async () => {

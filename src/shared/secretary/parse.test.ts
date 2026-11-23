@@ -358,7 +358,13 @@ describe('parseDispatchFile', () => {
           lastResult: { kind: 'goal-complete', turn: 1, at: 20, manual: true },
           closedGoal: { text: '旧目标', status: 'blocked', note: '缺 token' },
         },
-        c2: { ...base, conversationId: 'c2', reopenedAt: 30, manualUndoneAt: 25 },
+        c2: {
+          ...base,
+          conversationId: 'c2',
+          reopenedAt: 30,
+          manualUndoneAt: 25,
+          failurePending: { at: 40, detail: 'boom' },
+        },
         c3: { ...base, conversationId: 'c3', closedGoal: { text: '旧目标', status: 'active' } },
       },
     });
@@ -366,7 +372,11 @@ describe('parseDispatchFile', () => {
       lastResult: { kind: 'goal-complete', turn: 1, at: 20, manual: true },
       closedGoal: { text: '旧目标', status: 'blocked', note: '缺 token' },
     });
-    expect(file.dispatched.c2).toMatchObject({ reopenedAt: 30, manualUndoneAt: 25 });
+    expect(file.dispatched.c2).toMatchObject({
+      reopenedAt: 30,
+      manualUndoneAt: 25,
+      failurePending: { at: 40, detail: 'boom' },
+    });
     // 只收受阻与暂停的目标：别的状态不认
     expect(file.dispatched.c3.closedGoal).toBeUndefined();
   });
@@ -670,6 +680,56 @@ describe('parseDispatchFile', () => {
       false
     );
     expect(file.proposals.bad).toBeUndefined();
+  });
+
+  it('结构化目标结果往返保留，坏的核验项丢掉，坏的整段不丢记录', () => {
+    const goalResult = {
+      result: { summary: 'shipped', commits: ['AbC1234'] },
+      at: 20,
+      checks: [
+        { kind: 'commit', ref: 'abc1234', status: 'verified' },
+        { kind: 'nope', ref: 'x', status: 'verified' },
+      ],
+    };
+    const base = {
+      conversationId: 'c1',
+      projectId: 'p1',
+      secretaryConversationId: 's1',
+      createdAt: 10,
+      lastEventAt: 10,
+      lastState: 'idle',
+    };
+    const file = parseDispatchFile({
+      dispatched: { c1: { ...base, goalResult } },
+      outbox: [
+        {
+          key: 'c1|goal-complete|1',
+          at: 20,
+          text: '完成',
+          kind: 'goal-complete',
+          conversationId: 'c1',
+          goalResult,
+        },
+        {
+          key: 'c1|failed|1',
+          at: 21,
+          text: '失败',
+          kind: 'failed',
+          conversationId: 'c1',
+          goalResult: { result: { commits: ['nope'] }, at: 1 },
+        },
+      ],
+    });
+    expect(file.dispatched.c1?.goalResult).toEqual({
+      result: { summary: 'shipped', commits: ['abc1234'] },
+      at: 20,
+      checks: [{ kind: 'commit', ref: 'abc1234', status: 'verified' }],
+    });
+    expect(file.outbox[0]).toMatchObject({
+      goalResult: { result: { commits: ['abc1234'] } },
+    });
+    expect(file.outbox[1]).toMatchObject({ kind: 'failed' });
+    expect(file.outbox[1]).not.toHaveProperty('goalResult');
   });
 });
 

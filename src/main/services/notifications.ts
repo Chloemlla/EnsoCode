@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { shouldMuteCoworkerCompletionNotification } from '@shared/coworkerNotification';
 import { shouldSilenceTurn } from '@shared/secretary/silence';
-import { IPC_CHANNELS } from '@shared/types';
 import type { RendererAgentEvent } from '@shared/types/agent';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 import { app, BrowserWindow, type Notification } from 'electron';
 import { showSystemNotification } from '../desktop/systemNotification';
 import { readSettings } from '../ipc/settings';
@@ -149,6 +149,7 @@ export async function maybeNotifyBot(
   if (!isCurrent) return;
   if (!bot.enabled) return;
   if (event.type !== 'approval-request' && event.type !== 'ask-request') return;
+  if (event.type === 'ask-request' && event.ask.relay) return;
   if (isSessionMuted(event.identity.sessionId)) return;
   const { focusMainWindow } = await import('../windows/MainWindow');
   const inFront = await localUiInFront();

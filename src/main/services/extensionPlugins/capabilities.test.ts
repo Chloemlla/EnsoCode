@@ -33,17 +33,16 @@ class InProcessChild extends EventEmitter {
 }
 
 const temps: string[] = [];
+const services: ExtensionPluginService[] = [];
 const temp = (prefix: string) => {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   temps.push(dir);
   return dir;
 };
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
-  // 停用插件后服务仍可能异步落盘，删目录时撞上新文件会报 ENOTEMPTY
-  for (const dir of temps.splice(0)) {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-  }
+  await Promise.all(services.splice(0).map((service) => service.dispose()));
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function writePlugin(files: Record<string, string>) {
@@ -102,6 +101,7 @@ function createService(
       ...(extra.sessions ? { sessions: extra.sessions } : {}),
     },
   });
+  services.push(service);
   return { root, service, bridge };
 }
 
@@ -114,9 +114,13 @@ async function install(service: ExtensionPluginService, files: Record<string, st
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-/** 先让插件 import 跑完再同步推进，避免 advanceTimersByTimeAsync 等在途 Promise 死锁 */
+/** 插件 import 是真 I/O：等计时器真正挂上再同步拨钟，固定 flush 次数在慢机器上会提前拨走 */
 const armThenAdvance = async (ms: number) => {
-  for (let i = 0; i < 80; i++) await flush();
+  const spy = vi.spyOn(globalThis, 'setTimeout');
+  const armed = () =>
+    spy.mock.calls.some(([, delay]) => typeof delay === 'number' && delay > 0 && delay <= ms);
+  while (!armed()) await flush();
+  spy.mockRestore();
   vi.advanceTimersByTime(ms);
   for (let i = 0; i < 5; i++) await flush();
 };
@@ -762,6 +766,139 @@ describe('插件能力', () => {
     });
     expect(service.setCrossSessionInject('example.demo', true).ok).toBe(false);
     expect(service.list()[0]?.crossSessionInject).toBeUndefined();
+  });
+
+  it.each([
+    [['agent.tool', 'agent.inject', 'agent.injectTrusted'], true],
+    [['agent.tool', 'agent.inject'], false],
+  ])('trusted 投递：权限 %j 时交给会话的 trusted=%s', async (permissions, trusted) => {
+    const { service, bridge } = createService();
+    await install(service, {
+      'enso-plugin.json': manifest({ permissions }),
+      'main.mjs': `export function activate(enso) {
+        enso.tools.register('lookup', async () => {
+          await enso.session.inject({ text: '跑一遍测试', trusted: true });
+          return 'ok';
+        });
+      }`,
+    });
+    await service.setEnabled('example.demo', true);
+    await service.callTool({
+      toolName: 'plugin_example-demo__lookup',
+      args: {},
+      sessionId: 's1',
+      projectRoot: null,
+    });
+    expect(bridge).toHaveBeenCalledWith('s1', expect.objectContaining({ trusted }));
+    await vi.waitFor(async () =>
+      expect((await service.logs('example.demo')).includes('agent.injectTrusted')).toBe(!trusted)
+    );
+  });
+
+  describe('调用结束后，调用里排下的定时器再调 enso.*', () => {
+    /** arm 在会话 s1 的调用里排定时器；collect 在 s2 的调用里放行它并取回结果，此时 arm 早已结束 */
+    const lateCallPlugin = `export function activate(enso) {
+      let release;
+      const released = new Promise((r) => (release = r));
+      let outcome;
+      const run = async (f) => { try { await f(); return 'ok'; } catch (e) { return e.code; } };
+      enso.tools.register('lookup', async (args) => {
+        if (args.op === 'arm') {
+          outcome = new Promise((done) =>
+            setTimeout(async () => {
+              await released;
+              done({
+                inject: await run(() => enso.session.inject({ text: 'later', sessionId: 's1' })),
+                injectDefault: await run(() => enso.session.inject({ text: 'later' })),
+                abort: await run(() => enso.session.abort('s1')),
+                artifact: await run(() => enso.artifacts.write({ name: 'a.txt', text: 'x' })),
+              });
+            }, 0)
+          );
+          return 'armed';
+        }
+        release();
+        return JSON.stringify(await outcome);
+      });
+    }`;
+    const arrange = async (crossSession: boolean) => {
+      const { service, bridge } = createService();
+      await install(service, {
+        'enso-plugin.json': manifest({ permissions: ['agent.tool', 'agent.inject'] }),
+        'main.mjs': lateCallPlugin,
+      });
+      await service.setEnabled('example.demo', true);
+      if (crossSession) service.setCrossSessionInject('example.demo', true);
+      const call = async (op: string, sessionId: string) =>
+        (
+          await service.callTool({
+            toolName: 'plugin_example-demo__lookup',
+            args: { op },
+            sessionId,
+            projectRoot: null,
+          })
+        ).content;
+      expect(await call('arm', 's1')).toBe('armed');
+      return { bridge, outcome: JSON.parse(String(await call('collect', 's2'))) };
+    };
+
+    it('按无调用处理：凭跨会话授权投递，不借用别的调用，必须在调用内的接口照样拒绝', async () => {
+      const { bridge, outcome } = await arrange(true);
+      expect(outcome).toEqual({
+        inject: 'ok',
+        injectDefault: 'NO_SESSION',
+        abort: 'ok',
+        artifact: 'NO_INVOCATION',
+      });
+      expect(bridge.mock.calls.map((call) => (call as unknown[])[0])).toEqual(['s1']);
+    });
+
+    it('没开跨会话授权时仍然拒绝，消息不投递', async () => {
+      const { bridge, outcome } = await arrange(false);
+      expect(outcome).toEqual({
+        inject: 'PERMISSION_DENIED',
+        injectDefault: 'NO_SESSION',
+        abort: 'PERMISSION_DENIED',
+        artifact: 'NO_INVOCATION',
+      });
+      expect(bridge).not.toHaveBeenCalled();
+    });
+  });
+
+  it('并发的两个调用各用各的调用上下文，注入落回各自会话', async () => {
+    const { service, bridge } = createService();
+    await install(service, {
+      'enso-plugin.json': manifest({ permissions: ['agent.tool', 'agent.inject'] }),
+      'main.mjs': `export function activate(enso) {
+        let arrived = 0;
+        let open;
+        const both = new Promise((r) => (open = r));
+        enso.tools.register('lookup', async (_args, ctx) => {
+          if (++arrived === 2) open();
+          await both;
+          try { await enso.session.inject({ text: ctx.sessionId }); return 'ok'; }
+          catch (e) { return e.code; }
+        });
+      }`,
+    });
+    await service.setEnabled('example.demo', true);
+    const call = (sessionId: string) =>
+      service.callTool({
+        toolName: 'plugin_example-demo__lookup',
+        args: {},
+        sessionId,
+        projectRoot: null,
+      });
+    const results = await Promise.all([call('a'), call('b')]);
+    expect(results.map((r) => r.content)).toEqual(['ok', 'ok']);
+    const delivered = bridge.mock.calls.map((call) => {
+      const [sessionId, input] = call as unknown as [string, { text: string }];
+      return [sessionId, input.text];
+    });
+    expect(delivered.sort()).toEqual([
+      ['a', 'a'],
+      ['b', 'b'],
+    ]);
   });
 
   it('session.onTurnEnd：只收本项目会话，取消订阅、进程退出、停用后都不再投递', async () => {

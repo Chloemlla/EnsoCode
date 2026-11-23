@@ -1,7 +1,9 @@
 import type { SettingsState } from '../renderer/stores/settings/types';
 import type { JsonSchema } from '../shared/capabilities/types';
 import type { ProductSurfaceId } from '../shared/productSurfaces';
-import { BUILTIN_AGENT_TYPES, BUILTIN_TOOLS, type IPC_CHANNELS } from '../shared/types';
+import type { IPC_CHANNELS } from '../shared/types';
+import { BUILTIN_AGENT_TYPES } from '../shared/types/assets';
+import { BUILTIN_TOOLS } from '../shared/types/builtinTools';
 
 export type CoverageDisposition =
   | { kind: 'surface'; surfaceIds: readonly [ProductSurfaceId, ...ProductSurfaceId[]] }
@@ -110,11 +112,15 @@ export const SETTINGS_DATA_COVERAGE = {
   contextMenuOpen: excluded('Device-local preference for right-clicking chat file links.'),
   compactReadOnlyTools: excluded('Renderer timeline density preference; not an Enso capability.'),
   pinnedModels: excluded('Renderer model picker starred list; not an Enso capability.'),
+  recentModels: excluded('Renderer model picker recently used list; not an Enso capability.'),
   expandLiveEdits: excluded('Renderer timeline expansion preference; not an Enso capability.'),
   expandLiveReasoning: excluded(
     'Renderer timeline reasoning expansion preference; not an Enso capability.'
   ),
   autoCollapseTurns: excluded('Renderer timeline collapse preference; not an Enso capability.'),
+  quoteSelectionButton: excluded(
+    'Renderer floating quote button preference; not an Enso capability.'
+  ),
   collapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
@@ -304,11 +310,16 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Renderer timeline density preference; not an Enso capability.'
   ),
   togglePinnedModel: excluded('Renderer model picker starred list; not an Enso capability.'),
+  recordRecentModel: excluded('Renderer model picker recently used list; not an Enso capability.'),
+  removeRecentModel: excluded('Renderer model picker recently used list; not an Enso capability.'),
   setExpandLiveEdits: excluded('Renderer timeline expansion preference; not an Enso capability.'),
   setExpandLiveReasoning: excluded(
     'Renderer timeline reasoning expansion preference; not an Enso capability.'
   ),
   setAutoCollapseTurns: excluded('Renderer timeline collapse preference; not an Enso capability.'),
+  setQuoteSelectionButton: excluded(
+    'Renderer floating quote button preference; not an Enso capability.'
+  ),
   setCollapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
@@ -492,6 +503,13 @@ export const IPC_PRODUCT_COVERAGE = {
   CONVERSATIONS_REMOVE: excluded('Conversation persistence delete transport for user removal.'),
   CONVERSATIONS_REGISTER: excluded('Conversation persistence insert for a newly created root.'),
   CONVERSATIONS_MOVE: excluded('Conversation persistence move between projects.'),
+  CONVERSATIONS_IMPORT_PROJECT: excluded(
+    'Conversation persistence move or copy of a whole project into another.'
+  ),
+  CONVERSATIONS_IMPORT_PROJECT_PREVIEW: excluded(
+    'Read-only preview for the whole-project conversation import dialog.'
+  ),
+  PROJECT_REMOVE_EMPTY: excluded('Drops an emptied project from the list after a move.'),
   CONVERSATIONS_RESYNC: excluded('Conversation persistence resync notification transport.'),
   SECRETARY_GET_STATE: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_STATE_CHANGED: excluded('Experimental secretary agent; not an Enso capability.'),
@@ -501,9 +519,12 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   SECRETARY_TODO_MUTATE: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_DISMISS_RESULT: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_DISMISS_PENDING: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_MARK_RESULT: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_STOP_TASKS: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_GOAL_ACTION: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_QUEUED_START: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_QUEUED_CANCEL: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_SCHEDULES_LIST: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_SCHEDULE_REMOVE: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_GET_PROFILE: excluded('Experimental secretary agent; not an Enso capability.'),
@@ -565,6 +586,9 @@ export const IPC_PRODUCT_COVERAGE = {
     'macOS window-shape refresh after a layout change; not a user product action.'
   ),
   WINDOW_OPEN_SETTINGS: surfaces('window.open-settings'),
+  WINDOW_OPEN_DEV_TOOLS: excluded(
+    'Host-only troubleshooting action that opens Chromium DevTools for the local main window.'
+  ),
   WINDOW_TOGGLE_SIDEBAR: excluded(
     'Main-to-renderer transport for the macOS View menu; the toggle itself stays in the renderer.'
   ),
@@ -669,6 +693,14 @@ export const IPC_PRODUCT_COVERAGE = {
   AGENT_ABORT: surfaces('conversations.abort'),
   AGENT_ABORT_RETRY: surfaces('conversations.abort'),
   AGENT_RETRY: surfaces('conversations.retry-turn'),
+  AGENT_UPSTREAM_REPORT_FAILURE: excluded(
+    'Internal upstream health gate failure report from renderer.'
+  ),
+  AGENT_UPSTREAM_RETRY_NOW: surfaces('conversations.retry-turn'),
+  AGENT_UPSTREAM_CANCEL: surfaces('conversations.abort'),
+  AGENT_UPSTREAM_HEALTH_LIST: excluded('Read-only upstream provider health snapshot query.'),
+  AGENT_UPSTREAM_HEALTH_EVENT: excluded('Main-to-renderer upstream provider health push stream.'),
+  AGENT_UPSTREAM_WAKE_EVENT: excluded('Main-to-renderer upstream recovery wake signal.'),
   AGENT_EVENT: excluded('Worker-to-renderer event stream transport.'),
   AGENT_SNAPSHOT: excluded('Worker recovery/debug snapshot transport.'),
   AGENT_TAKE_INTERRUPTED_TURNS: excluded(
@@ -753,6 +785,7 @@ export const IPC_PRODUCT_COVERAGE = {
   WORKTREE_GET: surfaces('conversations.worktree.status'),
   WORKTREE_LIST: surfaces('conversations.worktree.status'),
   WORKTREE_STATUS: surfaces('conversations.worktree.status'),
+  WORKTREE_STATUSES: surfaces('conversations.worktree.status'),
   WORKTREE_REMOVE: surfaces('conversations.worktree.remove'),
   WORKTREE_REBUILD: surfaces('conversations.worktree.rebuild'),
   WORKTREE_REPO_CLEAN: surfaces('conversations.worktree.status'),
@@ -1010,6 +1043,9 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   RESOURCES_SESSIONS_CLEAN_REQUEST: excluded('Main-to-renderer session cleanup relay event.'),
   RESOURCES_SESSIONS_CLEAN_DONE: excluded('Main window acknowledgement of a session cleanup.'),
+  LOGS_ERRORS: excluded('Read-only redacted error summary for Settings → Logs.'),
+  LOGS_EXPORT: excluded('Human-only save dialog exporting redacted logs for Settings → Logs.'),
+  LOGS_REVEAL_EXPORT: excluded('Reveal the last log export in the OS file manager.'),
   MEMORY_LIST: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_DETAIL: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_ARCHIVE: excluded('Memory desktop UI; not an Enso capability.'),
@@ -1042,6 +1078,13 @@ export const IPC_PRODUCT_COVERAGE = {
   DCG_STATUS: excluded('dcg install settings UI; not an Enso capability.'),
   DCG_INSTALL: excluded('dcg install settings UI; not an Enso capability.'),
   DCG_UNINSTALL: excluded('dcg install settings UI; not an Enso capability.'),
+  DCG_CHECK_UPDATE: excluded('dcg install settings UI; not an Enso capability.'),
+  DCG_RULE_STATE: excluded('dcg approval card rule memory; not an Enso capability.'),
+  DCG_RULE_ALLOWED: excluded('dcg approval card rule memory; not an Enso capability.'),
+  DCG_RULE_EXEMPT: excluded('dcg approval card rule memory; not an Enso capability.'),
+  DCG_RULE_REVOKE: excluded('dcg settings exemption revoke; not an Enso capability.'),
+  DCG_EXEMPTIONS_LIST: excluded('dcg settings exemption list; not an Enso capability.'),
+  DCG_EXEMPTIONS_CLEAR: excluded('dcg install settings UI; not an Enso capability.'),
   MEMORY_REEMBED: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_CHANGED: excluded('Memory desktop UI; not an Enso capability.'),
   MEMORY_GRAPH: excluded('Memory desktop UI; not an Enso capability.'),

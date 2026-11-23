@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSessionWorktree,
+  deleteUntouchedSessionBranch,
   probeDispatchBase,
   rebuildSessionWorktree,
   removeSessionWorktree,
@@ -12,6 +13,18 @@ import {
   worktreeStatus,
 } from './service';
 import { worktreeTrash } from './trash';
+
+// 生产删除走 macOS background QoS，负载高时排队数秒；这里换成普通优先级，只验证接线
+vi.mock('./trash', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./trash')>();
+  const { rm } = await import('node:fs/promises');
+  return {
+    ...actual,
+    worktreeTrash: new actual.WorktreeTrash({
+      fs: { ...actual.realTrashFs, remove: (p) => rm(p, { recursive: true, force: true }) },
+    }),
+  };
+});
 
 const runGit = (cwd: string, ...args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -310,6 +323,35 @@ describe('removeSessionWorktree', () => {
     rmSync(record.path, { recursive: true, force: true });
     await expect(removeSessionWorktree(record)).resolves.toBeUndefined();
     expect(runGit(repo, 'worktree', 'list')).not.toContain(record.path);
+  });
+});
+
+describe('deleteUntouchedSessionBranch', () => {
+  it('worktree 删掉后，还停在基线上的分支一并删除', async () => {
+    const record = await createSessionWorktree({
+      repoPath: repo,
+      conversationId: 'c-untouched',
+      projectId: 'p1',
+      root,
+    });
+    await removeSessionWorktree(record, root);
+    await deleteUntouchedSessionBranch(record);
+    expect(runGit(repo, 'branch', '--list', record.branch)).toBe('');
+  });
+
+  it('分支上有新提交就保留', async () => {
+    const record = await createSessionWorktree({
+      repoPath: repo,
+      conversationId: 'c-touched',
+      projectId: 'p1',
+      root,
+    });
+    writeFileSync(join(record.path, 'b.txt'), 'b\n');
+    runGit(record.path, 'add', '.');
+    runGit(record.path, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'b');
+    await removeSessionWorktree(record, root);
+    await deleteUntouchedSessionBranch(record);
+    expect(runGit(repo, 'branch', '--list', record.branch)).toContain(record.branch);
   });
 });
 

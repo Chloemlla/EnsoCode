@@ -925,7 +925,7 @@ describe('rewind 在 failed 状态放行、running 仍拦截', () => {
     expect(agentFork).not.toHaveBeenCalled();
     emitRewindSnapshot();
     await expect(forked).resolves.toBe('forked');
-    expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { userIndexFromEnd: 1 });
+    expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { turnIndexFromEnd: 1 });
   });
 
   it('冷会话 resume 失败不 fork、不建分支会话', async () => {
@@ -952,5 +952,182 @@ describe('rewind 在 failed 状态放行、running 仍拦截', () => {
     ).resolves.toBe(null);
     expect(agentFork).not.toHaveBeenCalled();
     expect(sessionsModule.useSessionsStore.getState().conversations.forked).toBeUndefined();
+  });
+
+  describe('嵌套分支最多 3 层', () => {
+    function seedLineage(
+      lineage: Record<string, string | undefined>,
+      overrides: Record<string, unknown> = {}
+    ) {
+      sessionsModule.useSessionsStore.setState((state) => {
+        const base = {
+          ...state.conversations.parent,
+          started: true,
+          spawning: false,
+          status: 'idle' as const,
+          generation: 'g1',
+        };
+        const conversations = { ...state.conversations };
+        for (const [id, forkedFrom] of Object.entries(lineage)) {
+          conversations[id] = {
+            ...base,
+            id,
+            forkedFromConversationId: forkedFrom,
+            ...overrides,
+          };
+        }
+        return { conversations };
+      });
+    }
+
+    beforeEach(() => {
+      agentFork.mockClear();
+      nextConversationId = 'forked';
+    });
+
+    it('root 与第 2 层可以分支，第 3 层不能', async () => {
+      seedLineage({ parent: undefined, second: 'parent', third: 'second' });
+      const store = sessionsModule.useSessionsStore.getState();
+      await expect(store.forkFromMessage('parent', 0)).resolves.toBe('forked');
+      nextConversationId = 'forked-2';
+      await expect(store.forkFromMessage('second', 0)).resolves.toBe('forked-2');
+      nextConversationId = 'forked-3';
+      await expect(store.forkFromMessage('third', 0)).resolves.toBe(null);
+      await expect(store.forkFromEntry('third', 'entry-one')).resolves.toBe(null);
+      expect(agentFork).toHaveBeenCalledTimes(2);
+      expect(sessionsModule.useSessionsStore.getState().conversations['forked-3']).toBeUndefined();
+    });
+
+    it('forkedFrom 成环时不死循环，按已走过的层数判定', async () => {
+      seedLineage({ a: 'c', b: 'a', c: 'b', x: 'y', y: 'x' });
+      const store = sessionsModule.useSessionsStore.getState();
+      await expect(store.forkFromMessage('a', 0)).resolves.toBe(null);
+      await expect(store.forkFromMessage('x', 0)).resolves.toBe('forked');
+      expect(agentFork).toHaveBeenCalledTimes(1);
+    });
+
+    it('非 idle 或 historyOnly 的分支会话仍不能分支', async () => {
+      seedLineage({ second: 'parent' }, { status: 'running' });
+      await expect(
+        sessionsModule.useSessionsStore.getState().forkFromMessage('second', 0)
+      ).resolves.toBe(null);
+      seedLineage({ second: 'parent' }, { historyOnly: true });
+      await expect(
+        sessionsModule.useSessionsStore.getState().forkFromMessage('second', 0)
+      ).resolves.toBe(null);
+      expect(agentFork).not.toHaveBeenCalled();
+    });
+
+    it('分支会话可以回退，回退后仍保留分支来源', () => {
+      seedLineage({ second: 'parent' }, { messages: rewindMessages() });
+      sessionsModule.useSessionsStore.getState().rewind('second', 0, false);
+      expect(agentRewind).toHaveBeenCalledWith('second', 'entry-two', false);
+      expect(
+        sessionsModule.useSessionsStore.getState().conversations.second.forkedFromConversationId
+      ).toBe('parent');
+    });
+
+    it('上限之前已存在的第 4 层分支会话照常可回退，只是不能再分支', async () => {
+      seedLineage(
+        { parent: undefined, second: 'parent', third: 'second', fourth: 'third' },
+        { messages: rewindMessages() }
+      );
+      const store = sessionsModule.useSessionsStore.getState();
+      await expect(store.forkFromMessage('fourth', 0)).resolves.toBe(null);
+      store.rewind('fourth', 0, false);
+      expect(agentRewind).toHaveBeenCalledWith('fourth', 'entry-two', false);
+      expect(agentFork).not.toHaveBeenCalled();
+      expect(sessionsModule.useSessionsStore.getState().conversations.fourth).toMatchObject({
+        forkedFromConversationId: 'third',
+      });
+    });
+
+    describe('压缩后的早期轮次分叉（forkFromTurn）', () => {
+      const text = (role: 'user' | 'assistant', value: string, entryId?: string) => ({
+        role,
+        ...(entryId ? { entryId } : {}),
+        content: [{ type: 'text' as const, text: value }],
+      });
+      const summary = (value: string) => ({
+        role: 'compactionSummary' as const,
+        content: [{ type: 'text' as const, text: value }],
+      });
+      // 两次压缩：0-1 第一轮，2 摘要，3-4 第二轮，5 摘要，6-7 最新一轮
+      const compacted = () => [
+        text('user', 'q1', 'u1'),
+        text('assistant', 'a1'),
+        summary('S1'),
+        text('user', 'q2', 'u2'),
+        text('assistant', 'a2'),
+        summary('S2'),
+        text('user', 'q3', 'u3'),
+        text('assistant', 'a3'),
+      ];
+
+      it('摘要之前的轮次按本轮 user entryId 分叉', async () => {
+        seedLineage({ parent: undefined }, { messages: compacted() });
+        const store = sessionsModule.useSessionsStore.getState();
+        await expect(store.forkFromTurn('parent', 1)).resolves.toBe('forked');
+        expect(agentFork).toHaveBeenLastCalledWith('parent', 'forked', { entryId: 'u1' });
+        nextConversationId = 'forked-2';
+        await expect(store.forkFromTurn('parent', 4)).resolves.toBe('forked-2');
+        expect(agentFork).toHaveBeenLastCalledWith('parent', 'forked-2', { entryId: 'u2' });
+      });
+
+      it('本轮 user 在未加载的更早页时退回从末尾计数，不再静默无响应', async () => {
+        seedLineage({ parent: undefined }, { messages: compacted().slice(4), historyBaseIndex: 4 });
+        await expect(
+          sessionsModule.useSessionsStore.getState().forkFromTurn('parent', 4)
+        ).resolves.toBe('forked');
+        expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { turnIndexFromEnd: 1 });
+      });
+
+      it('层级上限、非 idle、定位不到时仍拒绝', async () => {
+        seedLineage(
+          { parent: undefined, second: 'parent', third: 'second' },
+          { messages: compacted() }
+        );
+        const store = sessionsModule.useSessionsStore.getState();
+        await expect(store.forkFromTurn('third', 1)).resolves.toBe(null);
+        seedLineage({ parent: undefined }, { messages: compacted(), status: 'running' });
+        await expect(store.forkFromTurn('parent', 1)).resolves.toBe(null);
+        seedLineage({ parent: undefined }, { messages: [summary('S')] });
+        await expect(store.forkFromTurn('parent', 0)).resolves.toBe(null);
+        expect(agentFork).not.toHaveBeenCalled();
+      });
+
+      it('从压缩点分叉的入口不变', async () => {
+        seedLineage({ parent: undefined }, { messages: compacted() });
+        await expect(
+          sessionsModule.useSessionsStore.getState().forkFromEntry('parent', 'compaction-1')
+        ).resolves.toBe('forked');
+        expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { entryId: 'compaction-1' });
+      });
+
+      it('插件投递触发的轮次可分叉，按轮次输入从末尾计数', async () => {
+        const plugin = (value: string) => ({
+          role: 'custom' as const,
+          content: [{ type: 'text' as const, text: value }],
+          pluginSource: { pluginId: 'enso.github', pluginName: 'GitHub' },
+        });
+        seedLineage(
+          { parent: undefined },
+          {
+            messages: [
+              text('user', 'q1', 'u1'),
+              text('assistant', 'a1'),
+              plugin('p1'),
+              text('assistant', 'a2'),
+              text('user', 'q3', 'u3'),
+              text('assistant', 'a3'),
+            ],
+          }
+        );
+        await expect(
+          sessionsModule.useSessionsStore.getState().forkFromTurn('parent', 3)
+        ).resolves.toBe('forked');
+        expect(agentFork).toHaveBeenCalledWith('parent', 'forked', { turnIndexFromEnd: 1 });
+      });
+    });
   });
 });

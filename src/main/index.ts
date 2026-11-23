@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { electronApp, optimizer } from '@electron-toolkit/utils';
+import { installConsoleLog } from '@shared/appLogFile';
 import type { AppExitReason } from '@shared/types/ipc';
 import { DEFAULT_UPDATE_CHANNEL, isUpdateChannel } from '@shared/updater/channel';
 import { resolveAutoRestartMode } from '@shared/updater/idleRestart';
@@ -13,7 +14,7 @@ import { installDesktopLocalUi } from './desktop/localUi';
 import { openBotPdfWindow, openDesktopPdfWindow } from './desktop/pdfWindow';
 import { confirmRevealExternal } from './desktop/revealExternalConfirm';
 import { registerIpcHandlers } from './ipc';
-import { resumeRootFromRestartManifest } from './ipc/agent';
+import { resumeRootFromRestartManifest, wakeInterruptedRunOwners } from './ipc/agent';
 import {
   clearRestartOverlay,
   registerAppRestartHandlers,
@@ -48,15 +49,23 @@ import {
 } from './services/agentHost';
 import { appendAgentWorkerExitLog } from './services/agentWorkerExit';
 import { allowAppQuit, setBeforeConfirmedQuit } from './services/appCloseConfirm';
+import { appLogFile } from './services/appLogs';
 import { installAppMenu, setAppMenuActions } from './services/appMenu';
+import { setUserDataDir } from './services/appPaths';
 import { attachAppQuitDrain } from './services/appQuitDrain';
-import { configureQuitWatchdog, quitWatchdog } from './services/appQuitWatchdog';
+import {
+  agentWorkerQuitDrain,
+  configureQuitWatchdog,
+  quitWatchdog,
+} from './services/appQuitWatchdog';
 import { createAppRestart, restartOverlayFor } from './services/appRestart';
 import {
   ensureTray,
   leaveServerMode,
+  rebuildTrayMenu,
   restoreFromSecondInstance,
   scheduleReenterServerMode,
+  setTrayRestartActions,
   shouldQuitOnWindowAllClosed,
   toggleTrayMode,
 } from './services/appServerMode';
@@ -75,11 +84,11 @@ import {
   startExitInterruptRecovery,
   startRunningSessionsHeartbeat,
 } from './services/exitInterruptHost';
-import { releaseLocalChatSlot } from './services/llama/chat';
-import { disposeLlamaRuntime, llamaRuntimeActive } from './services/llama/runtime';
 import {
-  awaitMemoryEmbeddingClose,
   closeMemoryDb,
+  memoryServiceActive,
+  scheduleMemoryServiceWarmup,
+  shutdownMemoryService,
   syncMemoryDistillFromSettings,
   syncMemoryEmbeddingFromSettings,
   syncMemoryForgettingFromSettings,
@@ -136,6 +145,10 @@ app.setPath(
     ? path.resolve(developmentUserData)
     : path.join(app.getPath('appData'), app.isPackaged ? 'enso-code' : 'enso-code-dev')
 );
+// 服务侧路径解析（模型目录等）不直接碰 Electron，统一从注入口取
+setUserDataDir(app.getPath('userData'));
+// 打包版 stdout 无人接收：console 同步落结构化滚动日志，供设置 → 日志汇总与导出
+installConsoleLog(appLogFile(app.getPath('userData'), 'main'), 'main');
 
 // 未启动 crashpad 时子进程 native 崩溃只剩 0xFFFF7003，真实异常码与现场全丢。
 // 只落本地 minidump（userData/Crashpad），不上传。
@@ -184,9 +197,10 @@ const appRestart = createAppRestart({
       // 应用马上重新打开：能脱离的转后台命令（dev server 等）交给新实例认回，不等也不停
       keepBackgroundTasks: true,
     }),
-  stateChanged: (state, waitReason) => {
+  stateChanged: (state, waitReason, blockers) => {
     installAppMenu(readLocale());
-    const overlay = restartOverlayFor(state, waitReason);
+    rebuildTrayMenu();
+    const overlay = restartOverlayFor(state, waitReason, blockers);
     if (overlay) setRestartOverlay(overlay);
     else clearRestartOverlay('restart');
   },
@@ -295,6 +309,11 @@ if (!gotTheLock) {
       restartState: () => appRestart.state,
       reportError: showMenuError,
     });
+    setTrayRestartActions({
+      restartApp: () => void appRestart.restart(),
+      restartState: () => appRestart.state,
+      reportError: showMenuError,
+    });
     registerAppRestartHandlers(forceExitWait);
     installAppMenu(readLocale());
 
@@ -337,7 +356,10 @@ if (!gotTheLock) {
           await autoUpdaterService.downloadUpdate();
         },
         syncTrayToggleShortcut,
-        syncAppLanguage: () => installAppMenu(readLocale()),
+        syncAppLanguage: () => {
+          installAppMenu(readLocale());
+          rebuildTrayMenu();
+        },
         syncDropShelf,
       },
     });
@@ -385,6 +407,7 @@ if (!gotTheLock) {
     syncMemoryKgFromSettings(persistedState);
     syncMemoryReconcileFromSettings(persistedState);
     syncMemoryForgettingFromSettings(persistedState);
+    scheduleMemoryServiceWarmup();
     // UI shell 必须先创建并发起加载；Agent worker 初始化变重时不得阻塞 renderer spawn。
     const mainWindow = createMainWindow();
     ensureTray();
@@ -395,7 +418,10 @@ if (!gotTheLock) {
       // 冷启动接管断点：第一代 worker 带上断点，再按清单重走 spawn（凭据现取）
       const startWorker = (): void => {
         startAgentWorker(coldRestart ? { restartCheckpointFile: coldRestart.checkpointFile } : {});
-        if (coldRestart) void resumeColdRestartSessions(coldRestart, resumeRootFromRestartManifest);
+        if (coldRestart)
+          void resumeColdRestartSessions(coldRestart, resumeRootFromRestartManifest).then(() =>
+            wakeInterruptedRunOwners(coldRestart)
+          );
       };
       // worker 的 env 是 fork 时的快照：等系统代理解析后再 fork，
       // 打包版再等登录 shell 探测出真实 PATH。
@@ -439,8 +465,15 @@ if (!gotTheLock) {
     computerHost.closeAll();
     closeMemoryDb();
   });
-  // node-pty TSFN / llama AsyncWorker 在 FreeEnvironment 期间回调会 SIGABRT；
-  // 两步必须共用一次 preventDefault，谁先 app.quit 都会拆掉另一边的环境。
+  // node-pty TSFN / 记忆服务子进程（llama/sqlite 在里面）的收尾都要赶在退出前完成；
+  // 三步共用一次 preventDefault，谁先 app.quit 都会拆掉其他两边的环境。
+  // 先等 worker 到安全点、断点与恢复清单落盘（有超时兜底），再照常收尾
+  const agentQuit = agentWorkerQuitDrain(quitWatchdog, {
+    alive: agentWorkerAlive,
+    prepare: () =>
+      prepareAgentWorkerForQuit({ reason: 'quit', hasRunningSessions: needsQuitCheckpoint }),
+    stop: () => stopAgentWorkerForQuit(3_000),
+  });
   attachAppQuitDrain(
     app,
     [
@@ -451,32 +484,16 @@ if (!gotTheLock) {
         wait: waitPtyQuitIdle,
       },
       {
-        name: 'llama',
-        shouldWait: llamaRuntimeActive,
-        wait: async () => {
-          await awaitMemoryEmbeddingClose();
-          await releaseLocalChatSlot();
-          await disposeLlamaRuntime();
-        },
+        // 记忆服务（utilityProcess）：等它关库、卸载模型；超时内部 SIGKILL，
+        // 卡死也不拖住退出（#323 看门狗同款，子进程死了 WAL 可恢复）
+        name: '记忆服务',
+        shouldWait: memoryServiceActive,
+        wait: () => shutdownMemoryService(),
       },
-      {
-        name: 'agent worker',
-        shouldWait: agentWorkerAlive,
-        // 先等 worker 到安全点、断点与恢复清单落盘（有超时兜底），再照常收尾
-        wait: async () => {
-          await prepareAgentWorkerForQuit({
-            reason: 'quit',
-            hasRunningSessions: needsQuitCheckpoint,
-          });
-          await stopAgentWorkerForQuit(3_000);
-        },
-      },
+      agentQuit.step,
     ],
-    // 窗口已关、退出不可撤回：之后卡住由看门狗限时强退
-    (pending) =>
-      quitWatchdog.step(pending.length ? `will-quit 收尾：${pending.join('、')}` : 'will-quit', {
-        finishing: true,
-      })
+    // 窗口已关、退出不可撤回：过了安全点之后卡住由看门狗限时强退
+    agentQuit.onProgress
   );
 }
 

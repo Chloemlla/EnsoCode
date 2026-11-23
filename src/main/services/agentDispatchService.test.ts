@@ -7,6 +7,7 @@ import type {
   ResolvedAgentTypeSpawnConfig,
 } from '@shared/types/agent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { pickChildReasoningOverride, resolveChildReasoning } from '../../agent/childReasoning';
 import { ActiveConversationRegistry } from './activeConversationRegistry';
 import { AgentDispatchService, selectHiredAgentType } from './agentDispatchService';
 import { AgentSessionIndex } from './agentSessionIndex';
@@ -169,6 +170,7 @@ async function setup(
   const spawnChildCalls: Array<{
     identity: ChildSessionIdentity;
     cwd: string;
+    config: ResolvedAgentTypeSpawnConfig;
     resumeFile?: string;
   }> = [];
   const resumeCoworkerCalls: Array<{
@@ -238,8 +240,13 @@ async function setup(
         );
         return { ok: true };
       },
-      spawnChild: (identity, cwd, _config, resumeFile) => {
-        spawnChildCalls.push({ identity, cwd, ...(resumeFile ? { resumeFile } : {}) });
+      spawnChild: (identity, cwd, spawnConfig, resumeFile) => {
+        spawnChildCalls.push({
+          identity,
+          cwd,
+          config: spawnConfig,
+          ...(resumeFile ? { resumeFile } : {}),
+        });
         if (options.rejectChild) {
           const reason = options.rejectChild;
           queueMicrotask(() =>
@@ -812,11 +819,60 @@ describe('parent-ready 级联恢复 child（§7.3）', () => {
   });
 });
 
+describe('agent-tool 显式 thinking', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('调用方显式 thinking 压过父会话档位，resume 后不丢；off 不把模型能力改成关闭', async () => {
+    const fixture = await setup();
+    const parent = { sessionId: fixture.conversationId, generation: crypto.randomUUID() };
+    fixture.index.prepareParent(parent);
+    fixture.service.observe({
+      type: 'parent-ready',
+      identity: parent,
+      seq: 1,
+      sessionFile: path.join(fixture.root, 'parent.jsonl'),
+      model: { providerId: 'provider', modelId: 'model' },
+    });
+    await settle();
+    const spawn = (name: string, thinking: 'low' | 'off') =>
+      fixture.service.spawnControlledAgent({
+        agentId: crypto.randomUUID(),
+        parentConversationId: fixture.conversationId,
+        name,
+        agentType: 'builtin:scout',
+        mode: 'task',
+        thinking,
+      });
+    // worker 侧同一套合并：父会话开着推理、当前 high
+    const childLevel = (config: ResolvedAgentTypeSpawnConfig) =>
+      resolveChildReasoning(
+        pickChildReasoningOverride(undefined, config),
+        true,
+        'high',
+        config.model
+      ).level;
+
+    const low = (await spawn('low', 'low')) as ChildSessionIdentity;
+    writeFileSync(path.join(fixture.root, 'child.jsonl'), '{}\n');
+    await spawn('off', 'off');
+    const [lowCall, offCall] = fixture.spawnChildCalls;
+    expect(childLevel(lowCall!.config)).toBe('low');
+    expect(childLevel(offCall!.config)).toBe('off');
+    expect(offCall!.config.model.reasoning).toBeUndefined();
+
+    fixture.service.observe({ type: 'child-ended', identity: low, seq: 2, reason: 'dismissed' });
+    await fixture.service.resumeControlledAgent(fixture.conversationId, low);
+    expect(childLevel(fixture.spawnChildCalls.at(-1)!.config)).toBe('low');
+  });
+});
+
 describe('agent-tool task 中断后续跑', () => {
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   async function interruptedTask(withSessionFile: boolean) {
-    const fixture = await setup();
+    // 渲染层持久化的会话记录：Main 重启后内存索引里没有子会话 metadata，只能从这里读
+    const conversations: Record<string, unknown> = {};
+    const fixture = await setup(undefined, { persistedState: () => ({ conversations }) });
     const parent = { sessionId: fixture.conversationId, generation: crypto.randomUUID() };
     fixture.index.prepareParent(parent);
     fixture.service.observe({
@@ -834,6 +890,10 @@ describe('agent-tool task 中断后续跑', () => {
       agentType: 'builtin:scout',
       mode: 'task',
     });
+    conversations[(child as ChildSessionIdentity).sessionId] = {
+      sessionFile: path.join(fixture.root, 'child.jsonl'),
+      child: fixture.index.childMetadata(child as ChildSessionIdentity),
+    };
     if (withSessionFile) writeFileSync(path.join(fixture.root, 'child.jsonl'), '{}\n');
     fixture.service.observe({
       type: 'child-ended',
@@ -871,6 +931,41 @@ describe('agent-tool task 中断后续跑', () => {
     await expect(
       fixture.service.resumeControlledAgent(fixture.conversationId, stranger)
     ).rejects.toThrow(/cannot be resumed/);
+    expect(fixture.spawnChildCalls).toHaveLength(1);
+  });
+
+  /** Main 重启后内存里的派发配置没了：只剩台账里的派发参数 */
+  const forgetSpawnConfigs = (service: AgentDispatchService) =>
+    (service as unknown as { resumableTasks: Map<string, unknown> }).resumableTasks.clear();
+
+  it('Main 重启后按台账里的派发参数重新解析同一套配置，用原会话文件重开', async () => {
+    const { fixture, child } = await interruptedTask(true);
+    forgetSpawnConfigs(fixture.service);
+    const resumed = await fixture.service.resumeControlledAgent(fixture.conversationId, child, {
+      description: 'research',
+      agentType: 'builtin:scout',
+      thinking: 'low',
+    });
+    expect(resumed).toMatchObject({ sessionId: child.sessionId, instanceId: child.instanceId });
+    const [original, again] = fixture.spawnChildCalls;
+    expect(again).toMatchObject({
+      resumeFile: path.join(fixture.root, 'child.jsonl'),
+      cwd: original!.cwd,
+      config: { typeKey: original!.config.typeKey, model: original!.config.model },
+    });
+    expect(again!.config.thinkingLevel).toBe('low');
+  });
+
+  it('Main 重启后会话文件损坏：明确报错且不 spawn', async () => {
+    const { fixture, child } = await interruptedTask(true);
+    writeFileSync(path.join(fixture.root, 'child.jsonl'), '{}\n{"type":"mess');
+    forgetSpawnConfigs(fixture.service);
+    await expect(
+      fixture.service.resumeControlledAgent(fixture.conversationId, child, {
+        description: 'research',
+        agentType: 'builtin:scout',
+      })
+    ).rejects.toThrow(/corrupted/);
     expect(fixture.spawnChildCalls).toHaveLength(1);
   });
 });

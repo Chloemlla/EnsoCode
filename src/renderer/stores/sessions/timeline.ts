@@ -7,6 +7,7 @@ import { type MaskReport, mergeMaskReports } from '@shared/privacyMask/report';
 import { firstProgram, isReadOnlyCommand } from '@shared/readOnlyCommand';
 import type { RtkToolStats } from '@shared/rtk';
 import { isPureSessionUpdate, isSilentMarker, SILENCE_TURN_TOOL } from '@shared/secretary/silence';
+import { unwrapUntrustedForDisplay } from '@shared/secretary/transcript';
 import { splitSkillBlocks } from '@shared/skillCommands';
 import { nestedToolCallParent } from '@shared/toolCallId';
 import { leadingTaskWrapUp, TASK_WRAP_UP_TAG } from '@shared/turnNotes';
@@ -19,10 +20,12 @@ import type {
   TodoItem,
   TurnPerf,
 } from '@shared/types/agent';
+import type { DcgWarning } from '@shared/types/dcg';
 import type { ProjectedApplyPatchOutcome, ProjectedFileChange } from '@shared/types/fileChanges';
 import { unwrapMcpProxyCall } from '@/lib/mcpToolName';
 import { mergeRuns, usesToolCard } from '@/lib/toolCards';
 import { type ToolImage, toolImageOf } from '@/lib/toolImage';
+import { isTurnInput } from './conversationRewind';
 import type { TimelineMessage } from './reducer';
 
 /** edit 工具的单个替换块（pi edit 工具参数 edits[] 的元素） */
@@ -39,7 +42,7 @@ export type TimelineItem =
       images: { data: string; mimeType: string }[];
       timestamp?: number;
       turnDurationMs?: number;
-      deliveryState?: 'pending' | 'rejected';
+      deliveryState?: 'pending' | 'rejected' | 'stuck';
       collapsed?: boolean;
       canCollapse?: boolean;
       /** 本轮首个 assistant 回复的模型与时间，供回复身份头显示 */
@@ -117,6 +120,8 @@ export type TimelineItem =
       backgroundTaskId?: string;
       /** bash / powershell 结果的结构化失败分类；其它缺省 */
       shellFailure?: ShellFailure;
+      /** dcg warn 档命中（不拦，只提示）；其它缺省 */
+      dcgWarning?: DcgWarning;
       /** submit_plan 提交的计划；其它工具缺省 */
       plan?: { title: string; text: string } | null;
       /** 联系主 agent / 队员、子代理 send 发出的正文，或子代理 spawn 交代的任务；其它工具缺省 */
@@ -956,6 +961,7 @@ function buildMessageTimeline(
       approvalReview?: ApprovalReviewRecord;
       backgroundTaskId?: string;
       shellFailure?: ShellFailure;
+      dcgWarning?: DcgWarning;
       pluginArtifacts?: PluginArtifactInfo[];
     }
   >();
@@ -975,6 +981,7 @@ function buildMessageTimeline(
         approvalReview: message.approvalReview,
         backgroundTaskId: message.backgroundTaskId,
         shellFailure: message.shellFailure,
+        dcgWarning: message.dcgWarning,
         pluginArtifacts: message.pluginArtifacts,
         generatedImages: message.generatedImages,
         image: toolImageOf(message.content),
@@ -995,11 +1002,13 @@ function buildMessageTimeline(
   const items: TimelineItem[] = [];
   const spawnedAgents = new Map<string, string>();
   const subagentRuns = new Map<string, string>();
-  // 每条消息之后的首个非 toolResult 角色（反向一次扫完）：用于判定「本轮末 step」
-  const nextTurnRole: (string | undefined)[] = new Array(messages.length);
-  for (let i = messages.length - 1, seen: string | undefined; i >= 0; i--) {
+  // 每条消息之后的首个轮次输入或 assistant（反向一次扫完）：用于判定「本轮末 step」；
+  // toolResult、压缩摘要、隐藏 custom、system、乐观回显都不打断轮次
+  const nextTurnRole: ('user' | 'assistant' | undefined)[] = new Array(messages.length);
+  for (let i = messages.length - 1, seen: 'user' | 'assistant' | undefined; i >= 0; i--) {
     nextTurnRole[i] = seen;
-    if (!messages[i].optimistic && messages[i].role !== 'toolResult') seen = messages[i].role;
+    if (isTurnInput(messages[i])) seen = 'user';
+    else if (messages[i].role === 'assistant' && !messages[i].optimistic) seen = 'assistant';
   }
   const lastUserMessageIndex = messages.findLastIndex((m) => m.role === 'user' && !m.optimistic);
   const lastMessageIndex = messages.findLastIndex((m) => !m.optimistic);
@@ -1023,7 +1032,11 @@ function buildMessageTimeline(
         images: message.content.filter((part) => part.type === 'image'),
         timestamp: message.timestamp,
         canCollapse: false,
-        deliveryState: message.deliveryRejected ? 'rejected' : 'pending',
+        deliveryState: message.deliveryRejected
+          ? message.rejectedReason === 'turn-stuck'
+            ? 'stuck'
+            : 'rejected'
+          : 'pending',
       });
       return;
     }
@@ -1053,7 +1066,7 @@ function buildMessageTimeline(
       if (text || images.length > 0) {
         let next = messageIndex + 1;
         while (messages[next]?.role === 'system' || messages[next]?.optimistic) next++;
-        const hasNextReply = next < messages.length && messages[next].role !== 'user';
+        const hasNextReply = next < messages.length && !isTurnInput(messages[next]);
         const isLastTurn = messageIndex === lastUserMessageIndex;
         const canCollapse = hasNextReply && !(running && isLastTurn);
         const userItem: Extract<TimelineItem, { kind: 'user' }> = {
@@ -1071,10 +1084,17 @@ function buildMessageTimeline(
     }
     if (message.role === 'custom') {
       if (message.pluginSource) {
+        // 插件投递开新一轮：之后回复的计时不能回写到上一条真实 user 消息
+        turnUserTimestamp = message.timestamp;
+        turnHadAskUser = false;
+        turnActiveMs = 0;
+        turnSteps = 0;
+        replyModelFailed = false;
+        currentTurnUserItem = undefined;
         items.push({
           kind: 'plugin-message',
           key: `${absIndex}`,
-          text: partText(message),
+          text: unwrapUntrustedForDisplay(partText(message)),
           ...message.pluginSource,
         });
       }
@@ -1334,6 +1354,7 @@ function buildMessageTimeline(
             ...(waiting ? { waiting } : {}),
             ...(result?.backgroundTaskId ? { backgroundTaskId: result.backgroundTaskId } : {}),
             ...(result?.shellFailure ? { shellFailure: result.shellFailure } : {}),
+            ...(result?.dcgWarning ? { dcgWarning: result.dcgWarning } : {}),
             ...(part.name === 'submit_plan'
               ? { plan: extractSubmittedPlan(part.name, part.arguments) }
               : {}),

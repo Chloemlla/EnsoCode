@@ -12,6 +12,7 @@ import { isAbsolutePathLike } from '@shared/worktreeRoot';
 import * as React from 'react';
 import { ManualInstallActions } from '@/components/app/ManualInstallActions';
 import { ReleaseNotesDialog } from '@/components/app/ReleaseNotesDialog';
+import { restartToUpdate } from '@/components/app/restartToUpdate';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +35,7 @@ import {
 } from '@/stores/settings/autoArchiveIdleDays';
 import { CompactReserveTokensSection } from './CompactReserveTokensSection';
 import { ConfigSyncSettings } from './ConfigSyncSettings';
+import { DevToolsSection } from './DevToolsSection';
 import { NewSessionBadge } from './NewSessionBadge';
 import { SmartCompactPicker } from './SmartCompactPicker';
 
@@ -124,6 +126,8 @@ export function GeneralSettings() {
           />
         </section>
       )}
+
+      <DevToolsSection />
     </div>
   );
 }
@@ -930,11 +934,7 @@ function UpdateSection() {
         {status?.manualInstall ? (
           <ManualInstallActions manualInstall={status.manualInstall} />
         ) : status?.status === 'downloaded' ? (
-          <Button
-            size="sm"
-            onClick={() => void window.electronAPI.updater.quitAndInstall()}
-            className="shrink-0"
-          >
+          <Button size="sm" onClick={() => void restartToUpdate(t)} className="shrink-0">
             {t('Restart to update')}
           </Button>
         ) : canDownload && status?.status === 'available' ? (

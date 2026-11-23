@@ -1,3 +1,5 @@
+import type { GoalResultView } from '../secretary/goalResult';
+import type { GoalUpstreamRetry } from '../upstreamRecovery';
 import type { ModelRef, ThinkingLevel } from './agent';
 
 /**
@@ -117,6 +119,12 @@ export interface PendingDispatch {
   problem?: PendingProblem;
   /** 触发失败的依赖会话；dispatch-failed 时缺省 */
   failedDependency?: string;
+  /** 启动遇瞬态错误时的自动重试次数（上限 5 次） */
+  retryCount?: number;
+  /** 下次允许自动重试的时间戳（epoch ms） */
+  nextRetryAt?: number;
+  /** 最近一次瞬态启动错误 */
+  lastError?: string;
 }
 
 /**
@@ -296,6 +304,11 @@ export type SecretaryResultKind =
 /** 转交提问的收尾方式：秘书代答、用户在原会话里直接答、超时兜底 */
 export const RELAY_ASK_STATUSES = ['pending', 'answered', 'user-answered', 'timed-out'] as const;
 
+/** 排队会话给秘书的回传：启动失败、被取消 */
+export const QUEUED_UPDATE_STATUSES = ['failed', 'cancelled'] as const;
+
+export type QueuedUpdateStatus = (typeof QUEUED_UPDATE_STATUSES)[number];
+
 export type RelayAskStatus = (typeof RELAY_ASK_STATUSES)[number];
 
 /**
@@ -375,6 +388,11 @@ export interface DispatchRecord {
    * 轮次一结束就清掉；这一轮的结果照常推给秘书。
    */
   reopenedAt?: number;
+  /**
+   * 空闲时只来了 status=failed、还在等 turn-failed 配对的失败（detail 已脱敏截断）。
+   * 配对窗口过了仍在报错就补记失败；落盘是为了窗口内重启也能在启动时补报
+   */
+  failurePending?: { at: number; detail?: string };
   /** 用户撤销手动标记的时间：放回进行中，直到这一轮出现新结果 */
   manualUndoneAt?: number;
   /** 手动标记完成时一起收掉的受阻/暂停目标：撤销标记时恢复，重新跟踪后作废 */
@@ -412,6 +430,8 @@ export interface DispatchRecord {
    * 有了可见回复就清掉。
    */
   sentAt?: number;
+  /** goal_complete 的结构化结果和宿主核验 */
+  goalResult?: GoalResultView;
 }
 
 export type SecretaryUpdate = {
@@ -423,12 +443,16 @@ export type SecretaryUpdate = {
   secretaryConversationId?: string;
   /** 非紧急更新到这个时间再投；缺省表示可以立刻投 */
   deliverAt?: number;
+  /** 只有 goal-complete 带：结构化结果与宿主核验 */
+  goalResult?: GoalResultView;
 } & (
   | { kind: SecretaryResultKind; conversationId: string }
   /** 转交给秘书的提问：pending 要秘书处理，其余是收尾通知 */
   | { kind: 'ask-relay'; conversationId: string; askId: string; status: RelayAskStatus }
   /** 遗留任务巡检：说明哪个会话、什么命令、跑了多久；不自动杀进程 */
   | { kind: 'leftover'; conversationId: string }
+  /** 排队会话：自动启动失败（等用户立即开始或取消）、被取消（会话已删除） */
+  | { kind: 'queued'; conversationId: string; status: QueuedUpdateStatus }
   | { kind: 'proposal'; proposalId: string; status: ProposalStatus }
   | { kind: 'schedule'; scheduleId: string }
   | {
@@ -514,7 +538,7 @@ export interface SecretaryBoardTodo extends SecretaryTodo {
   phase?: SecretaryTodoPhase;
   projectName?: string;
   sessionTitle?: string;
-  sessionState?: 'running' | 'idle' | 'waiting' | 'error' | 'not-started' | 'gone';
+  sessionState?: 'running' | 'idle' | 'waiting' | 'error' | 'not-started' | 'gone' | 'queued';
 }
 
 /** 界面对待办的操作；dispatch 是用户亲手点出，直接派发 */
@@ -585,7 +609,11 @@ export type SecretaryCard =
       projectId: string;
       projectName: string;
       title: string;
-      state: 'running' | 'idle' | 'waiting' | 'error' | 'not-started';
+      state: 'running' | 'idle' | 'waiting' | 'error' | 'not-started' | 'queued';
+      /** 排队中：同一秘书内的位次（从 1 开始）；启动失败的不占位，改给 queueFailed */
+      queuePosition?: number;
+      /** 排队会话自动启动失败的原因：等用户立即开始重试或取消 */
+      queueFailed?: string;
       lastText?: string;
       /** 派出时间 */
       startedAt: number;
@@ -596,6 +624,8 @@ export type SecretaryCard =
       resultAt?: number;
       /** 会话不在跑，但目标还要续或还在等后台任务。动态不能再显示上一轮的完成 */
       continuing?: true;
+      /** 目标因上游瞬态/配额故障等待自动恢复 */
+      upstreamRetry?: GoalUpstreamRetry;
       /** 会话空闲但还有没结束的后台任务：进行中列表要把它和续跑区分开 */
       backgroundRunning?: true;
       /** 会话空闲但还有常驻服务在跑：显示成「有常驻服务」，与「正在跑」区分 */
@@ -680,6 +710,7 @@ export interface SecretaryDailyRecord {
   commit?: string;
   /** 最终汇报里明确说了合并 */
   merged?: true;
+  goalResult?: GoalResultView;
 }
 
 /** 派发/接管会话按当天最终状态落一列；待办与设置变更是另外两类记录 */
@@ -687,6 +718,7 @@ export type SecretaryDailyGroupKey =
   | 'done'
   | 'failed'
   | 'needsYou'
+  | 'withSecretary'
   | 'running'
   | 'stopped'
   | 'todos'
@@ -722,6 +754,7 @@ export interface SecretaryDailyItem {
   leftover?: { count: number };
   /** 还在跑但带着常驻服务：卡片标「有常驻服务」，与「正在跑」区分 */
   persistent?: true;
+  goalResult?: GoalResultView;
 }
 
 export interface SecretaryDailyCounts {
@@ -787,6 +820,7 @@ export interface SecretaryStoredReport {
   imagesGoneAt?: number;
   /** 只在视图里：截图保留天数 */
   retentionDays?: number;
+  goalResult?: GoalResultView;
 }
 
 /** 已完成条目的「结果」视图；没存下报告（旧数据、手动标记完成）时 report 为 null */

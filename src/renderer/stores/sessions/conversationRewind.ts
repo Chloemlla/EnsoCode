@@ -29,6 +29,23 @@ export interface ForkHost extends RewindHost {
   canFork?: boolean;
 }
 
+/** 分支层级上限：root 为第 1 层，每层分支都是一份完整上下文副本 */
+export const MAX_FORK_DEPTH = 3;
+
+/** 沿 forkedFrom 链计层；来源已删除仍计入该层，成环时停在重复节点前 */
+export function forkDepth(
+  conversations: Readonly<Record<string, { forkedFromConversationId?: string } | undefined>>,
+  conversationId: string
+): number {
+  const seen = new Set([conversationId]);
+  let parent = conversations[conversationId]?.forkedFromConversationId;
+  while (parent && !seen.has(parent)) {
+    seen.add(parent);
+    parent = conversations[parent]?.forkedFromConversationId;
+  }
+  return seen.size;
+}
+
 export function canWakeConversationForRewind(conversation: ConversationRewindView): boolean {
   return (
     !conversation.started &&
@@ -55,12 +72,14 @@ export function canShowConversationRewind(
   return canWakeConversationForRewind(conversation);
 }
 
-/** 分支入口：热主会话需 idle 且非 spawning；未激活的冷主会话由 store 先唤醒再分叉 */
+/** 分支入口：热主会话需 idle 且非 spawning；未激活的冷主会话由 store 先唤醒再分叉；层级到上限不显示 */
 export function canShowConversationFork(
   conversation: ConversationRewindView | null | undefined,
-  host?: ForkHost | null
+  host?: ForkHost | null,
+  depth = 1
 ): boolean {
   if (host && (!host.canRewind || host.canFork === false)) return false;
+  if (depth >= MAX_FORK_DEPTH) return false;
   if (!conversation || conversation.parentId || conversation.historyOnly) return false;
   if (conversation.status !== 'idle') return false;
   if (conversation.started) return !conversation.spawning;
@@ -154,19 +173,46 @@ export function userIndexFromEndForTimelineKey(
     .length;
 }
 
-/** 轮末行 key（绝对下标）回溯到本轮 user，再从末尾计数 */
-export function userIndexFromEndForTurnKey(
-  conversation: { messages: readonly { role: string }[]; historyBaseIndex?: number },
+type TurnInputCandidate = {
+  role: string;
+  entryId?: string;
+  optimistic?: boolean;
+  pluginSource?: unknown;
+};
+
+/**
+ * 轮次输入：已落盘的用户消息（含宿主合成注入）或插件投递，与 worker 的 isTurnInputEntry 同口径。
+ * 压缩摘要、隐藏 custom、toolResult、本地乐观回显都不开新一轮。
+ */
+export function isTurnInput(message: TurnInputCandidate): boolean {
+  if (message.optimistic) return false;
+  return message.role === 'user' || (message.role === 'custom' && Boolean(message.pluginSource));
+}
+
+/**
+ * 轮末行 key（绝对下标）→ 分叉锚点：优先本轮 user 的 entryId，压缩前的早期轮次与 worker 计数口径无关。
+ * 本轮由插件投递触发、user 无 entryId 或在未加载的更早页时，按其后的轮次输入数从末尾定位，由 worker 校验。
+ */
+export function forkAnchorForTurnKey(
+  conversation: {
+    messages: readonly TurnInputCandidate[];
+    historyBaseIndex?: number;
+  },
   absIndex: number
-): number | null {
+): { entryId: string } | { turnIndexFromEnd: number } | null {
   if (!Number.isInteger(absIndex)) return null;
   const base = conversation.historyBaseIndex ?? 0;
-  for (let i = absIndex; i >= base; i--) {
-    if (conversation.messages[i - base]?.role === 'user') {
-      return userIndexFromEndForTimelineKey(conversation, i);
-    }
+  const local = absIndex - base;
+  if (local < 0 || local >= conversation.messages.length) return null;
+  const turnIndexFromEnd = conversation.messages.slice(local + 1).filter(isTurnInput).length;
+  for (let i = local; i >= 0; i--) {
+    const message = conversation.messages[i];
+    if (!isTurnInput(message)) continue;
+    return message.role === 'user' && message.entryId
+      ? { entryId: message.entryId }
+      : { turnIndexFromEnd };
   }
-  return null;
+  return base > 0 ? { turnIndexFromEnd } : null;
 }
 
 /** 回退到倒数第 N+1 条 user：保留它之前的消息（不含该 user）。对不上返回 null。 */

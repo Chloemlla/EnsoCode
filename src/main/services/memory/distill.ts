@@ -18,6 +18,7 @@ import {
   withMemoryLanguage,
 } from '@shared/memory/prompts';
 import { normalizeTemporalDate } from '@shared/memory/temporal';
+import { redactSecrets as sharedRedactSecrets } from '@shared/redactSecrets';
 import type Database from 'better-sqlite3';
 import { scanMemoryInjection } from './injectionScan';
 import { createMemory } from './store';
@@ -82,53 +83,8 @@ export function distillTargetSpace(
   return m.scope === 'chat' && chatSpaceId ? chatSpaceId : spaceId;
 }
 
-// ---------------------------------------------------------------------------
-// 敏感信息过滤
-// ---------------------------------------------------------------------------
-
-const REDACTED = '[REDACTED]';
-
-/**
- * 蒸馏前的安全边界：会话正文里可能贴过密钥 / 口令，长期记忆一旦写入就会被检索回灌到后续会话。
- * 规则按「先整块、再已知前缀、再键值」的顺序，宁可误杀不可漏杀；键名保留以维持语义。
- */
-const SECRET_PATTERNS: RegExp[] = [
-  // PEM 私钥整块
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-  // OpenAI / Anthropic 等 sk- 前缀；GitHub ghp_/gho_/ghu_/ghs_/ghr_；Slack xox*；AWS AKIA；Google AIza
-  /\bsk-[A-Za-z0-9_-]{16,}/g,
-  // Stripe 是下划线（sk_live_/sk_test_/rk_live_），上一条 sk- 挡不住
-  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g,
-  /\bgh[opusr]_[A-Za-z0-9]{20,}/g,
-  // GitHub fine-grained PAT；HuggingFace token（本项目会下模型，用户很可能贴）
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
-  /\bhf_[A-Za-z0-9]{20,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  // JWT 三段
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
-  // Authorization: Bearer <token>
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/g,
-  // URL 里的 user:pass@
-  /(\w+:\/\/[^\s/:@]+:)[^\s/@]+@/g,
-];
-// 引号值按完整字符串（含转义）打码；裸值至少 6 字符且不吞 JSON 边界，保留 null / false。
-const KV_PATTERN =
-  /\b((?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?token|refresh[_-]?token|token|passwd|password|pwd|authorization|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s"',;{}[\]]{6,})/gi;
-
 export function redactSecrets(text: string): string {
-  let out = text;
-  for (const re of SECRET_PATTERNS) {
-    out = out.replace(re, (m, group?: string) =>
-      typeof group === 'string' && m.includes('://') ? `${group}${REDACTED}@` : REDACTED
-    );
-  }
-  out = out.replace(KV_PATTERN, (_m, key: string, value: string) => {
-    const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
-    return `${key}${quote}${REDACTED}${quote}`;
-  });
-  return out;
+  return sharedRedactSecrets(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +674,19 @@ export function listResumableDistillJobs(db: Database.Database): DistillJob[] {
   ).map(toJob);
 }
 
+/** 开库时清理上次进程异常退出遗留的 running 行，避免快照永久卡在进行中；pending 仍由续跑或手动提炼接手 */
+export function resetInterruptedDistillJobs(db: Database.Database): number {
+  return db
+    .prepare(
+      `UPDATE memory_jobs
+       SET status = 'pending',
+           error = COALESCE(error, 'interrupted before completion'),
+           updated_at = ?
+       WHERE kind = ? AND status = 'running'`
+    )
+    .run(new Date().toISOString(), KIND).changes;
+}
+
 /** 设置页出口：最近的蒸馏任务（含结构化 notes），新在前 */
 export function listDistillJobs(db: Database.Database, limit = 50): DistillJob[] {
   return (
@@ -738,6 +707,8 @@ export interface RunDistillOptions {
   chatSpaceId?: string;
   /** 透传 createMemory 的 on_memory_created hook（蒸馏出的记忆同样要排 KG 抽取） */
   onCreated?: (memory: Memory) => void;
+  /** 任务落库进入 running 后回调，便于多窗口与远程页立即刷新快照 */
+  onStarted?: () => void;
 }
 
 /**
@@ -793,6 +764,7 @@ export async function runDistillJob(
   }
   const attempts = job.attempts + 1;
   finish('running', attempts, zero, null, []);
+  opts.onStarted?.();
 
   let distilled: DistilledMemory[];
   try {

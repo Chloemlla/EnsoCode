@@ -6,6 +6,7 @@ import type {
   AgentWorkerEvent,
 } from '@shared/types/agent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AgentRunLedgerEntry, AgentRunLedgerStore } from './agentRunLedger';
 import { AgentService, type AgentServiceOptions, type AgentServiceRuntime } from './agentService';
 
 const owner: AgentOwnerIdentity = {
@@ -242,7 +243,7 @@ describe('AgentService lifecycle', () => {
         requestId: 'sibling-read',
         runId: spawned.value.runId,
       })
-    ).resolves.toMatchObject({ ok: false, code: 'not-found' });
+    ).resolves.toMatchObject({ ok: false, code: 'other-owner' });
   });
 
   it('schema/gate 在完成后进入 validating，并以 Main runtime 结果结算报告', async () => {
@@ -492,6 +493,28 @@ describe('AgentService lifecycle', () => {
       ok: true,
     });
     expect(runtime.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('已 dismiss 的 coworker 遇到 worker 退出仍是 closed，不会被复活成 parked', async () => {
+    const { service, runtime } = setup();
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    await service.dismiss({ context, requestId: 'dismiss', agentId: spawned.value.agentId });
+    service.observe({ type: 'worker-exited' });
+    const listed = await service.list({ context, requestId: 'list', limit: 10 });
+    expect(listed).toMatchObject({
+      ok: true,
+      value: { agents: [{ agentId: spawned.value.agentId, status: 'closed' }] },
+    });
+    expect(
+      await service.send({
+        context,
+        requestId: 'send-after-dismiss',
+        agentId: spawned.value.agentId,
+        message: 'again',
+      })
+    ).toMatchObject({ ok: false, code: 'invalid-state' });
+    expect(runtime.prompt).toHaveBeenCalledTimes(1);
   });
 
   it('stop 掉 task 唯一的 Run 后关闭实例并回收子会话，不留孤儿', async () => {
@@ -1518,6 +1541,47 @@ describe('AgentService 子代理起的后台任务', () => {
     });
     expect(notify.mock.calls[0][1]).not.toContain('Background tasks');
   });
+
+  it('回合带 awaitingTasks 结束时 Run 不收口；接上它的那一轮结束才收口，结果是后一轮的文本', async () => {
+    const notify = vi.fn();
+    const { service, children } = setup({ notify });
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    const runId = spawned.value.runId;
+    const say = (index: number, text: string) =>
+      service.observe({
+        type: 'message-upsert',
+        identity: children[0],
+        seq: index,
+        index,
+        message: { role: 'assistant', content: [{ type: 'text', text }] },
+      });
+    say(1, '服务已起，等它跑完');
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 2,
+      turnId: runId,
+      awaitingTasks: true,
+    });
+    expect(notify).not.toHaveBeenCalled();
+    expect(service.progress('chat-1').map((run) => run.runId)).toEqual([runId]);
+
+    say(3, '服务跑完了，结论是 X');
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 4,
+      turnId: 'woken-turn',
+      continues: runId,
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const text = notify.mock.calls[0][1] as string;
+    expect(text).toContain('succeeded');
+    expect(text).toContain('结论是 X');
+    expect(text).not.toContain('等它跑完');
+    expect(service.progress('chat-1')).toEqual([]);
+  });
 });
 
 describe('AgentService 用户在子代理 tab 里停止', () => {
@@ -1660,5 +1724,495 @@ describe('AgentService 用户在子代理 tab 里停止', () => {
     ).toMatchObject({ ok: true, value: { run: { status: 'cancelled' } } });
     expect(await listStatus(service)).toEqual(['closed']);
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentService 找不到 Run / Agent 时说明原因', () => {
+  /** 内存台账：同一份数据交给重启后的新 AgentService，模拟 Main 重启 */
+  function memoryLedger() {
+    let saved: AgentRunLedgerEntry[] = [];
+    const store: AgentRunLedgerStore = {
+      load: () => saved.map((entry) => ({ ...entry })),
+      save: (entries) => {
+        saved = entries.map((entry) => ({ ...entry }));
+      },
+    };
+    return store;
+  }
+
+  const target = (runId: string) => ({ context, requestId: `t-${runId}`, runId });
+
+  it('现场：coworker 在跑时更新重启，父会话回来后补一次中断通知，旧 runId 仍可 report / wait / stop', async () => {
+    const ledger = memoryLedger();
+    const before = setup({ ledger });
+    const spawned = await before.service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    // 更新重启：worker 退出时父会话也没了，此刻不通知
+    before.service.observe({ type: 'worker-exited' });
+
+    const notify = vi.fn();
+    const after = setup({ ledger, notify });
+    after.service.recoverOwner(context);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][1]).toContain(`runId ${spawned.value.runId}`);
+    expect(notify.mock.calls[0][1]).toContain(`send with agentId ${spawned.value.agentId}`);
+    // 子会话恢复后 coworker 被重新认领
+    expect(after.service.adoptCoworker(context, before.children[0])).toBe(true);
+    const report = await after.service.report(target(spawned.value.runId));
+    expect(report).toMatchObject({
+      ok: true,
+      value: { run: { runId: spawned.value.runId, status: 'interrupted' } },
+    });
+    expect(report.ok && report.value.error).toContain('restarted while this Run was in progress');
+    await expect(
+      after.service.wait({ context, requestId: 'w', runIds: [spawned.value.runId] })
+    ).resolves.toMatchObject({ ok: true, value: { runs: [{ status: 'interrupted' }] } });
+    await expect(after.service.stop(target(spawned.value.runId))).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'interrupted' },
+    });
+    // 同一父会话再次就绪、或再重启一次，都不重复通知
+    after.service.recoverOwner(context);
+    const again = vi.fn();
+    setup({ ledger, notify: again }).service.recoverOwner(context);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(again).not.toHaveBeenCalled();
+  });
+
+  it('没来得及收到 worker-exited 的崩溃式重启：在跑的 task 也补通知，并说明不能 resume、要重新派', async () => {
+    const ledger = memoryLedger();
+    const before = setup({ ledger });
+    const spawned = await before.service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+
+    const notify = vi.fn();
+    const after = setup({ ledger, notify });
+    after.service.recoverOwner(context);
+    expect(notify.mock.calls[0][1]).toContain('cannot be resumed after a restart');
+    const resumed = await after.service.resume({
+      context,
+      requestId: 'resume',
+      agentId: spawned.value.agentId,
+    });
+    expect(resumed).toMatchObject({ ok: false, code: 'restart-lost' });
+    expect(!resumed.ok && resumed.error).toContain('spawn a new subagent');
+  });
+
+  it('重启前已结束且已通知的 task：不再通知，旧 runId 的 report 说明结果正文不跨重启保留', async () => {
+    const ledger = memoryLedger();
+    const before = setup({ ledger });
+    const spawned = await before.service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    before.service.observe({
+      type: 'turn-completed',
+      identity: before.children[0],
+      seq: 1,
+      turnId: spawned.value.runId,
+    });
+
+    const notify = vi.fn();
+    const after = setup({ ledger, notify });
+    after.service.recoverOwner(context);
+    expect(notify).not.toHaveBeenCalled();
+    const report = await after.service.report(target(spawned.value.runId));
+    expect(report).toMatchObject({ ok: true, value: { run: { status: 'succeeded' } } });
+    expect(report.ok && report.value.error).toContain('not kept across a restart');
+  });
+
+  it('同一 Main 里 worker 退出停放的 task：父会话重新就绪时补通知并指向 resume', async () => {
+    const notify = vi.fn();
+    const { service } = setup({ notify });
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({ type: 'worker-exited' });
+    expect(notify).not.toHaveBeenCalled();
+    service.recoverOwner(context);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][1]).toContain(`resume with agentId ${spawned.value.agentId}`);
+    service.recoverOwner(context);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('worker 退出时 coworker 排队的 Run 随在跑的一起中断，父会话就绪时一并补通知', async () => {
+    const notify = vi.fn();
+    const { service } = setup({ notify });
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    const queued = await service.send({
+      context,
+      requestId: 'queued',
+      agentId: spawned.value.agentId,
+      message: 'after that',
+      delivery: 'next',
+    });
+    if (!queued.ok) throw new Error(queued.error);
+    service.observe({ type: 'worker-exited' });
+    expect(service.progress(owner.ownerId)).toEqual([]);
+    service.recoverOwner(context);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][1]).toContain(`runId ${spawned.value.runId}`);
+    expect(notify.mock.calls[0][1]).toContain(`runId ${queued.value.runId}`);
+  });
+
+  it('resume 换了新 runId 后，旧 runId 仍可 report / stop，不报 not-found', async () => {
+    const { service, runtime, children } = setup();
+    runtime.resume = vi.fn(async ({ identity }) => ({
+      ...identity,
+      generation: '55555555-5555-4555-8555-555555555555',
+    }));
+    runtime.retry = vi.fn(async () => ({ ok: true }));
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 1,
+      turnId: spawned.value.runId,
+      aborted: true,
+    });
+    const resumed = await service.resume({
+      context,
+      requestId: 'resume',
+      agentId: spawned.value.agentId,
+    });
+    if (!resumed.ok) throw new Error(resumed.error);
+    expect(resumed.value.runId).not.toBe(spawned.value.runId);
+    await expect(service.report(target(spawned.value.runId))).resolves.toMatchObject({
+      ok: true,
+      value: { run: { status: 'interrupted' } },
+    });
+    await expect(service.stop(target(spawned.value.runId))).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'interrupted' },
+    });
+  });
+
+  it('agentId 与 runId 传反时指出类型错了', async () => {
+    const { service } = setup();
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    const asRun = await service.report(target(spawned.value.agentId));
+    expect(asRun).toMatchObject({ ok: false, code: 'not-found' });
+    expect(!asRun.ok && asRun.error).toContain('is an agentId, not a runId');
+    const asAgent = await service.dismiss({
+      context,
+      requestId: 'dismiss',
+      agentId: spawned.value.runId,
+    });
+    expect(asAgent).toMatchObject({ ok: false, code: 'not-found' });
+    expect(!asAgent.ok && asAgent.error).toContain(
+      `is a runId, not an agentId; it belongs to agentId ${spawned.value.agentId}`
+    );
+  });
+
+  it('别的会话（如 fork 出来的会话）拿父会话的 id：说明属于别的会话；重启后台账里的也一样', async () => {
+    const ledger = memoryLedger();
+    const { service } = setup({ ledger });
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    const forked: AgentControlContext = {
+      owner: { ...owner, ownerId: 'chat-fork' },
+      actor: {
+        kind: 'agent',
+        actorId: 'chat-fork',
+        ownerId: 'chat-fork',
+        projectId: owner.projectId,
+        identity: { sessionId: 'chat-fork', generation: '66666666-6666-4666-8666-666666666666' },
+      },
+    };
+    const fromFork = { context: forked, requestId: 'fork', runId: spawned.value.runId };
+    await expect(service.report(fromFork)).resolves.toMatchObject({
+      ok: false,
+      code: 'other-owner',
+    });
+    await expect(setup({ ledger }).service.report(fromFork)).resolves.toMatchObject({
+      ok: false,
+      code: 'other-owner',
+    });
+  });
+
+  it('不存在的 id 说明可能抄错或编造，并引导 list', async () => {
+    const { service } = setup();
+    const result = await service.report(target('made-up-run'));
+    expect(result).toMatchObject({ ok: false, code: 'not-found' });
+    expect(!result.ok && result.error).toContain('mistyped or made up');
+    expect(!result.ok && result.error).toContain('subagent list');
+  });
+});
+
+describe('AgentService 父会话停止时级联停止子代理', () => {
+  const otherOwner: AgentControlContext = {
+    owner: { ...owner, ownerId: 'chat-2' },
+    actor: {
+      kind: 'agent',
+      actorId: 'chat-2',
+      ownerId: 'chat-2',
+      projectId: owner.projectId,
+      identity: { sessionId: 'chat-2', generation: '33333333-3333-4333-8333-333333333333' },
+    },
+  };
+
+  it('停掉名下在跑的 task 与 coworker：按用户中止收口，task 停放可 resume，coworker 回到 ready，不另发通知', async () => {
+    const notify = vi.fn();
+    const { service, runtime } = setup({ notify });
+    const task = await service.spawn(spawnRequest({ requestId: 'spawn-task' }));
+    const coworker = await service.spawn(
+      spawnRequest({ requestId: 'spawn-coworker', mode: 'coworker' })
+    );
+    if (!task.ok || !coworker.ok) throw new Error('spawn failed');
+
+    await service.cancelOwner(owner.ownerId);
+
+    expect(runtime.stop).toHaveBeenCalledTimes(2);
+    expect(runtime.stop).toHaveBeenCalledWith(expect.objectContaining({ runId: task.value.runId }));
+    expect(runtime.stop).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: coworker.value.runId })
+    );
+    const listed = await service.list({ context, requestId: 'list', limit: 10 });
+    if (!listed.ok) throw new Error(listed.error);
+    expect(
+      Object.fromEntries(listed.value.agents.map((agent) => [agent.agentId, agent.status]))
+    ).toEqual({ [task.value.agentId]: 'parked', [coworker.value.agentId]: 'ready' });
+    expect(runtime.dismiss).toHaveBeenCalledTimes(1);
+    expect(runtime.dismiss).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: task.value.agentId })
+    );
+    expect(service.progress(owner.ownerId)).toEqual([]);
+    const report = await service.report({ context, requestId: 'r', runId: task.value.runId });
+    expect(report).toMatchObject({
+      ok: true,
+      value: { run: { status: 'interrupted' }, error: expect.stringContaining('父会话') },
+    });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('停止后父会话接着发消息：停掉的 task 能 resume，也能派新的子代理', async () => {
+    const { service, runtime } = setup();
+    runtime.resume = vi.fn(async ({ identity }) => identity);
+    runtime.retry = vi.fn(async () => ({ ok: true }));
+    const task = await service.spawn(spawnRequest());
+    if (!task.ok) throw new Error(task.error);
+
+    await service.cancelOwner(owner.ownerId);
+
+    const resumed = await service.resume({
+      context,
+      requestId: 'resume',
+      agentId: task.value.agentId,
+    });
+    expect(resumed).toMatchObject({ ok: true, value: { status: 'running' } });
+    const fresh = await service.spawn(
+      spawnRequest({ requestId: 'spawn-fresh', prompt: 'other work' })
+    );
+    expect(fresh).toMatchObject({ ok: true, value: { status: 'running' } });
+  });
+
+  it('停止时还在初始化的 spawn：回收子会话、不起 Run，之后的 spawn 照常', async () => {
+    const notify = vi.fn();
+    const { service, runtime } = setup({ notify });
+    const create = vi.mocked(runtime.spawn).getMockImplementation()!;
+    let finishSpawn!: () => void;
+    vi.mocked(runtime.spawn).mockImplementationOnce(async (input) => {
+      await new Promise<void>((resolve) => {
+        finishSpawn = resolve;
+      });
+      return create(input);
+    });
+    const pending = service.spawn(spawnRequest());
+    await Promise.resolve();
+
+    await service.cancelOwner(owner.ownerId);
+    finishSpawn();
+
+    expect(await pending).toMatchObject({ ok: false });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(runtime.dismiss).toHaveBeenCalledTimes(1);
+    expect(service.progress(owner.ownerId)).toEqual([]);
+    const listed = await service.list({ context, requestId: 'list', limit: 10 });
+    expect(listed.ok && listed.value.agents).toEqual([]);
+    const next = await service.spawn(spawnRequest({ requestId: 'spawn-next' }));
+    expect(next).toMatchObject({ ok: true, value: { status: 'running' } });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('已结束的 Run 与别的父会话的 Run 不动', async () => {
+    const { service, runtime, children } = setup();
+    const done = await service.spawn(spawnRequest({ requestId: 'spawn-done' }));
+    const foreign = await service.spawn(
+      spawnRequest({ requestId: 'spawn-foreign', context: otherOwner })
+    );
+    if (!done.ok || !foreign.ok) throw new Error('spawn failed');
+    service.observe({
+      type: 'turn-completed',
+      identity: children[0],
+      seq: 2,
+      turnId: done.value.runId,
+    });
+
+    await service.cancelOwner(owner.ownerId);
+
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(service.progress('chat-2')).toHaveLength(1);
+  });
+
+  it('coworker 排队的 Run 一并撤掉，不会在停掉当前 Run 后被拉起', async () => {
+    const { service, runtime } = setup();
+    const spawned = await service.spawn(spawnRequest({ mode: 'coworker' }));
+    if (!spawned.ok) throw new Error(spawned.error);
+    await service.send({
+      context,
+      requestId: 'send-next',
+      agentId: spawned.value.agentId,
+      message: 'second round',
+      delivery: 'next',
+    });
+
+    await service.cancelOwner(owner.ownerId);
+
+    expect(runtime.stop).toHaveBeenCalledTimes(1);
+    expect(runtime.prompt).toHaveBeenCalledTimes(1);
+    expect(service.progress(owner.ownerId)).toEqual([]);
+  });
+
+  it('在等这些 Run 的 wait 随之返回，不留孤儿等待', async () => {
+    const { service } = setup();
+    const spawned = await service.spawn(spawnRequest());
+    if (!spawned.ok) throw new Error(spawned.error);
+    const waiting = service.wait({ context, requestId: 'w', runIds: [spawned.value.runId] });
+
+    await service.cancelOwner(owner.ownerId);
+
+    expect(await waiting).toMatchObject({ ok: true, value: { timedOut: false } });
+  });
+
+  it('某个子会话停止失败或抛错：其余照停，Main 侧照样收口，整体不抛', async () => {
+    const { service, runtime } = setup();
+    const first = await service.spawn(spawnRequest({ requestId: 'spawn-1' }));
+    const second = await service.spawn(spawnRequest({ requestId: 'spawn-2' }));
+    const third = await service.spawn(spawnRequest({ requestId: 'spawn-3' }));
+    if (!first.ok || !second.ok || !third.ok) throw new Error('spawn failed');
+    vi.mocked(runtime.stop)
+      .mockImplementationOnce(async () => {
+        throw new Error('worker gone');
+      })
+      .mockImplementationOnce(async () => ({ ok: false, error: 'not running' }));
+
+    await expect(service.cancelOwner(owner.ownerId)).resolves.toBeUndefined();
+
+    expect(runtime.stop).toHaveBeenCalledTimes(3);
+    expect(service.progress(owner.ownerId)).toEqual([]);
+  });
+});
+
+describe('AgentService 父会话被释放（删除 / worktree 归档 / 移入 worktree）时收口子代理 Run', () => {
+  function fileLedger() {
+    let saved: AgentRunLedgerEntry[] = [];
+    return {
+      load: () => saved.map((entry) => ({ ...entry })),
+      save: (entries: readonly AgentRunLedgerEntry[]) => {
+        saved = entries.map((entry) => ({ ...entry }));
+      },
+    } satisfies AgentRunLedgerStore;
+  }
+  const parentEnded = {
+    type: 'parent-ended',
+    identity: context.actor.kind === 'agent' ? context.actor.identity : ({} as never),
+    seq: 9,
+    reason: 'released',
+  } as AgentWorkerEvent;
+
+  it('worker 拆掉子会话树后 Main 侧 Run 全部收口：wait 返回、不发通知、台账落终态', async () => {
+    const notify = vi.fn();
+    const ledger = fileLedger();
+    const { service } = setup({ notify, ledger });
+    const task = await service.spawn(spawnRequest({ requestId: 'spawn-task' }));
+    const coworker = await service.spawn(
+      spawnRequest({ requestId: 'spawn-coworker', mode: 'coworker' })
+    );
+    if (!task.ok || !coworker.ok) throw new Error('spawn failed');
+    const waiting = service.wait({ context, requestId: 'w', runIds: [task.value.runId] });
+
+    service.observe(parentEnded);
+
+    expect(service.progress(owner.ownerId)).toEqual([]);
+    expect(await waiting).toMatchObject({ ok: true, value: { timedOut: false } });
+    expect(notify).not.toHaveBeenCalled();
+    expect(ledger.load().map((entry) => entry.status)).toEqual(['interrupted', 'interrupted']);
+    expect(ledger.load().every((entry) => entry.restart === undefined)).toBe(true);
+  });
+
+  it('会话被删除：台账记为已告知，冷启动不再叫醒它；删除先于 parent-ended 到达也一样', async () => {
+    for (const order of ['released-first', 'removed-first'] as const) {
+      const notify = vi.fn();
+      const ledger = fileLedger();
+      const { service } = setup({ notify, ledger });
+      const task = await service.spawn(spawnRequest());
+      if (!task.ok) throw new Error(task.error);
+
+      if (order === 'released-first') service.observe(parentEnded);
+      service.abandonOwner(owner.ownerId);
+      if (order === 'removed-first') service.observe(parentEnded);
+
+      expect(service.progress(owner.ownerId)).toEqual([]);
+      expect(ledger.load()).toMatchObject([{ status: 'interrupted', notified: true }]);
+      const next = setup({ ledger, notify });
+      expect(next.service.restartInterruptedOwners()).toEqual([]);
+      next.service.recoverOwner(context);
+      expect(notify).not.toHaveBeenCalled();
+    }
+  });
+
+  it('父会话之后回来（移入 worktree / 重启会话）：就绪时补告一次，task 可 resume', async () => {
+    const notify = vi.fn();
+    const { service, runtime } = setup({ notify });
+    runtime.resume = vi.fn(async ({ identity }) => identity);
+    runtime.retry = vi.fn(async () => ({ ok: true }));
+    const task = await service.spawn(spawnRequest());
+    if (!task.ok) throw new Error(task.error);
+
+    service.observe(parentEnded);
+    expect(notify).not.toHaveBeenCalled();
+    service.recoverOwner(context);
+    service.recoverOwner(context);
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]?.[1]).toContain(task.value.runId);
+    await expect(
+      service.resume({ context, requestId: 'r', agentId: task.value.agentId })
+    ).resolves.toMatchObject({ ok: true });
+  });
+
+  it('释放时还在初始化的 spawn 不再起 Run', async () => {
+    const { service, runtime } = setup();
+    const create = vi.mocked(runtime.spawn).getMockImplementation()!;
+    let finishSpawn!: () => void;
+    vi.mocked(runtime.spawn).mockImplementationOnce(async (input) => {
+      await new Promise<void>((resolve) => {
+        finishSpawn = resolve;
+      });
+      return create(input);
+    });
+    const pending = service.spawn(spawnRequest());
+    await Promise.resolve();
+
+    service.observe(parentEnded);
+    finishSpawn();
+
+    expect(await pending).toMatchObject({ ok: false });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(service.progress(owner.ownerId)).toEqual([]);
+  });
+
+  it('别的父会话被释放不影响本会话的 Run', async () => {
+    const { service } = setup();
+    const task = await service.spawn(spawnRequest());
+    if (!task.ok) throw new Error(task.error);
+
+    service.observe({
+      ...parentEnded,
+      identity: { sessionId: 'chat-2', generation: '33333333-3333-4333-8333-333333333333' },
+    } as AgentWorkerEvent);
+
+    expect(service.progress(owner.ownerId)).toHaveLength(1);
   });
 });

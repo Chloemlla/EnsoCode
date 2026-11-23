@@ -10,9 +10,8 @@ import { BOT_NOTES_MAX_CHARS } from '@shared/bots/notes';
 import { isSkipReply } from '@shared/bots/router';
 import { assignTeamNames } from '@shared/bots/team';
 import type { SessionIdentity } from '@shared/builtinAgents';
-import { BUILTIN_AGENT_TYPES, IPC_CHANNELS } from '@shared/types';
 import { type AgentWorkerEvent, type AttachedImage, isDeliveryId } from '@shared/types/agent';
-import type { SkillEntry } from '@shared/types/assets';
+import { BUILTIN_AGENT_TYPES, type SkillEntry } from '@shared/types/assets';
 import {
   type BotChat,
   type BotChatWorkspace,
@@ -44,6 +43,7 @@ import type {
   BotTimelineResult,
   BotWriteIpcResult,
 } from '@shared/types/botIpc';
+import { IPC_CHANNELS } from '@shared/types/ipc';
 import { isUsageRangeDays } from '@shared/usage/types';
 import {
   abortCompleteText,
@@ -126,7 +126,6 @@ import { type BotDesktop, botDesktop } from '../services/desktopHooks';
 import { searchFiles } from '../services/fileSearch';
 import { resolveGlobalInstruction } from '../services/instructionStore';
 import { setBotAvatarResolver } from '../services/localImageProtocol';
-import { listMemories } from '../services/memory/store';
 import { removeMemorySpace } from '../services/memoryCleanup';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
 import {
@@ -1137,8 +1136,13 @@ function skillEntries(value: unknown): SkillEntry[] {
 
 /** since 之后整理写入某空间的结论（核心笔记重写的输入） */
 async function recentDistilled(spaceId: string, since: number): Promise<string[]> {
-  const { memoryDatabase } = await import('../services/memoryHost');
-  return listMemories(memoryDatabase(), { spaceIds: [spaceId], limit: 50 })
+  const { memoryServiceOp, isMissingDb } = await import('../services/memoryHost');
+  const result = await memoryServiceOp<
+    | { items: { title: string; content: string; createdAt: string; source: string }[] }
+    | { missing: true }
+  >('list-memories', { spaceIds: [spaceId], limit: 50 });
+  if (isMissingDb(result)) return [];
+  return result.items
     .filter((memory) => memory.source === 'distill' && Date.parse(memory.createdAt) >= since)
     .map((memory) => `${memory.title}: ${memory.content}`);
 }

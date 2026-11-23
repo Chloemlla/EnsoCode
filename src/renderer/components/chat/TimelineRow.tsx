@@ -7,6 +7,7 @@ import { interruptNotice } from '@shared/exitInterrupt';
 import { toLocalImageUrl } from '@shared/localImage';
 import { type PlanNoteKind, parsePlanMessage, splitPlanPrefix } from '@shared/planMode';
 import type { MaskReport } from '@shared/privacyMask/report';
+import { quotesAsMarkdown } from '@shared/quoteBlock';
 import { parseInboundMessage } from '@shared/secretary/inbound';
 import { splitInboundImageBlock } from '@shared/secretary/inboundImages';
 import {
@@ -45,6 +46,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   CircleX,
   ClipboardCheck,
@@ -64,6 +66,7 @@ import {
   PackageMinus,
   Pause,
   RefreshCw,
+  RotateCcw,
   SkipForward,
   Sparkles,
   Target,
@@ -80,11 +83,13 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
 import { InjectedMessageCard } from '@/components/bots/InjectedMessageCard';
+import { restartConversationFromMenu } from '@/components/chat/reloadConversationAction';
 import { conversationIdBySessionFile } from '@/components/chat/sessionRefJump';
 import { SecretaryFace } from '@/components/secretary/SecretaryFace';
 import {
@@ -117,8 +122,8 @@ import { useSessionsStore } from '@/stores/sessions';
 import {
   canShowConversationFork,
   canShowConversationRewind,
+  forkDepth,
   resolveRewindConfirm,
-  userIndexFromEndForTurnKey,
 } from '@/stores/sessions/conversationRewind';
 import { canRequestWithdraw, canWithdrawMessage } from '@/stores/sessions/reducer';
 import { formatDuration, formatTokens } from '@/stores/sessions/stats';
@@ -154,12 +159,13 @@ import { mentionChipClass } from './MentionChip';
 import { parseMemoryCapture, parseMemorySearchHits } from './memorySearchHits';
 import { fileMentionBasename, splitInlineMentions, splitMentionRefs } from './mentionComposer';
 import { PrivacyMaskBadge } from './PrivacyMaskBadge';
+import { splitQuoteFences } from './quoteSelection';
 import { RtkToolStatsBar } from './RtkToolStatsBar';
-import { ShellFailureBadge, ShellRunStatus } from './ShellStatus';
+import { DcgWarningBadge, ShellFailureBadge, ShellRunStatus } from './ShellStatus';
 import { SlashChip, slashChipClass, splitSlashCommand } from './SlashChip';
 import { StepDot } from './StepNode';
 import { SubagentResult } from './SubagentResult';
-import { parseSubagentReceipt } from './subagentReceipt';
+import { parseSubagentReceipt, subagentErrorReason } from './subagentReceipt';
 import { TaskWrapUpCard } from './TaskWrapUpCard';
 
 // 只有出现 diff / 读文件行时才需要，按需加载以把 @pierre/diffs 移出首屏
@@ -295,6 +301,7 @@ function itemEqual(prev: TimelineRowProps, next: TimelineRowProps): boolean {
         a.waiting === b.waiting &&
         a.pluginArtifacts === b.pluginArtifacts &&
         a.shellFailure === b.shellFailure &&
+        a.dcgWarning === b.dcgWarning &&
         JSON.stringify(a.args ?? null) === JSON.stringify(b.args ?? null) &&
         cardPeersEqual(a.cardPeers, b.cardPeers)
       );
@@ -718,6 +725,7 @@ const UPDATE_ICON: Record<SecretaryUpdateLine['kind'], typeof Bot> = {
   pending: Hourglass,
   'ask-relay': MessageCircleQuestion,
   leftover: Hourglass,
+  queued: AlarmClock,
 };
 
 /** 秘书收到的派出会话回传与定时提醒：每条一行，点整行展开详情，右侧图标打开会话 */
@@ -827,7 +835,9 @@ function ChipBubble({ chip, extra }: { chip: ReactNode; extra?: string }) {
     <div className="max-w-[80%] rounded-2xl rounded-br-md bg-muted px-4 py-2.5 text-sm">
       <div className="flex flex-wrap items-center gap-1">{chip}</div>
       {extra ? (
-        <div className="mt-1.5 whitespace-pre-wrap break-words leading-relaxed">{extra}</div>
+        <div className="mt-1.5 whitespace-pre-wrap break-words leading-relaxed">
+          <InlineMentionText text={extra} />
+        </div>
       ) : null}
     </div>
   );
@@ -970,6 +980,74 @@ function ChatRefCard({ label, sessionFile }: { label: string; sessionFile: strin
   );
 }
 
+const QUOTE_BLOCK_MAX_HEIGHT = 240;
+
+/** 选中文本引用块：左边框引用样式，代码围栏渲染为代码块，截断时标注原文行数；超高时底部渐隐，可展开 / 收起 */
+export function QuoteBlock({ text, originalLines }: { text: string; originalLines?: number }) {
+  const { t } = useI18n();
+  const bodyRef = useRef<HTMLSpanElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    // scrollHeight 是内容全高，不受 max-height 影响，折叠/展开下判定一致
+    const measure = () => setOverflowing(body.scrollHeight > QUOTE_BLOCK_MAX_HEIGHT + 1);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, []);
+  const clipped = overflowing && !expanded;
+  return (
+    <span
+      data-enso="quote-block"
+      className="mt-1 mb-2.5 block border-l-2 border-brand/40 pl-2.5 text-muted-foreground"
+    >
+      {originalLines ? (
+        <span data-quote-truncated="" className="mb-0.5 block text-[11px] text-warning">
+          {t('Truncated · original {{count}} lines', { count: originalLines })}
+        </span>
+      ) : null}
+      <span
+        ref={bodyRef}
+        data-quote-body=""
+        data-clipped={clipped ? '' : undefined}
+        style={clipped ? { maxHeight: QUOTE_BLOCK_MAX_HEIGHT } : undefined}
+        className={cn('block', clipped && 'overflow-hidden mask-b-from-60%')}
+      >
+        {splitQuoteFences(text).map((part, index) =>
+          part.type === 'code' ? (
+            <span
+              // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
+              key={index}
+              data-quote-code=""
+              className="my-1 block overflow-x-auto whitespace-pre rounded-md bg-background/60 px-2 py-1 font-mono text-xs"
+            >
+              {part.code}
+            </span>
+          ) : (
+            // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
+            <span key={index}>{part.text}</span>
+          )
+        )}
+      </span>
+      {overflowing ? (
+        <button
+          type="button"
+          data-quote-toggle=""
+          data-quote-skip=""
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-0.5 text-[11px] text-muted-foreground/80 select-none hover:text-foreground"
+        >
+          {expanded ? t('Show less') : t('Show more')}
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
 /** 正文里的 @path / chat 引用块原位渲染成卡片，其余文本原样 */
 function InlineMentionText({
   text,
@@ -1008,6 +1086,13 @@ function InlineMentionText({
             kind="ui-element"
             label={segment.label}
             title={`${segment.path}${segment.text ? ` · ${segment.text}` : ''}`}
+          />
+        ) : segment.type === 'quote' ? (
+          <QuoteBlock
+            // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
+            key={index}
+            text={segment.text}
+            originalLines={segment.originalLines}
           />
         ) : (
           // biome-ignore lint/suspicious/noArrayIndexKey: 分段随文本快照整体替换
@@ -1330,7 +1415,10 @@ export function ReplyHeader({
   const meta = [model, typeof at === 'number' ? formatClock(at) : null].filter(Boolean).join(' · ');
   if (!speaker && !meta && !privacyMask) return null;
   return (
-    <div className="mb-2 flex h-6 min-w-0 items-center gap-2 text-xs select-none">
+    <div
+      data-quote-skip=""
+      className="mb-2 flex h-6 min-w-0 items-center gap-2 text-xs select-none"
+    >
       {speaker &&
         (speaker.image ? (
           <img
@@ -1550,10 +1638,15 @@ function PluginMessageRow({ item }: { item: Extract<TimelineItem, { kind: 'plugi
         <span>{t('From plugin {{name}}', { name: item.pluginName })}</span>
         <span className="font-mono opacity-70">{item.pluginId}</span>
       </p>
-      <p className="whitespace-pre-wrap break-words text-foreground">{item.text}</p>
+      <div className={PLUGIN_BODY_CLASS}>
+        <Markdown text={item.text} />
+      </div>
     </div>
   );
 }
+
+/** 插件投递多是按行写的通知：段内换行照原样断行 */
+const PLUGIN_BODY_CLASS = 'break-words text-foreground [&_p]:whitespace-pre-line';
 
 /** 被 turn_discard 丢弃的插件投递：一行原因，展开看原文；模型上下文里只剩痕迹 */
 function DiscardedTurnRow({
@@ -1594,9 +1687,9 @@ function DiscardedTurnRow({
           </p>
           {item.messages.map((text, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: 投递原文只读、顺序固定
-            <p key={i} className="whitespace-pre-wrap break-words text-foreground">
-              {text}
-            </p>
+            <div key={i} className={PLUGIN_BODY_CLASS}>
+              <Markdown text={text} />
+            </div>
           ))}
           {item.tools.map((tool, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: 只读工具记录只读、顺序固定
@@ -1878,13 +1971,18 @@ function canRewindDisplayedSession(
 const userActionClass =
   'flex items-center gap-1 text-[11px] text-muted-foreground transition-opacity hover:text-foreground';
 
-/** 分叉入口：与回退并列；idle 的 root 显示，冷会话点击时由 store 先唤醒 */
+/** 分叉入口：与回退并列；idle 且分支层级未到上限时显示，冷会话点击时由 store 先唤醒 */
 function ForkButton({ messageIndex }: { messageIndex: number }) {
   const { t } = useI18n();
   const host = useChatHost();
-  const canFork = useSessionsStore((state) =>
-    canShowConversationFork(displayedConversation(state), host)
-  );
+  const canFork = useSessionsStore((state) => {
+    const conversation = displayedConversation(state);
+    return canShowConversationFork(
+      conversation,
+      host,
+      conversation ? forkDepth(state.conversations, conversation.id) : 1
+    );
+  });
   if (!canFork) return null;
   return (
     <button
@@ -1895,9 +1993,7 @@ function ForkButton({ messageIndex }: { messageIndex: number }) {
         const state = useSessionsStore.getState();
         const conversation = displayedConversation(state);
         if (!conversation) return;
-        const userIndexFromEnd = userIndexFromEndForTurnKey(conversation, messageIndex);
-        if (userIndexFromEnd === null) return;
-        void state.forkFromMessage(conversation.id, userIndexFromEnd);
+        void state.forkFromTurn(conversation.id, messageIndex);
       }}
     >
       <GitBranch className="h-3 w-3" />
@@ -1941,6 +2037,46 @@ function WithdrawButton({ messageIndex }: { messageIndex: number }) {
     >
       <Undo2 className="h-3 w-3" />
       {t('Withdraw message')}
+    </button>
+  );
+}
+
+function RestartStuckButton() {
+  const { t } = useI18n();
+  const conversationId = useSessionsStore((state) => displayedConversation(state)?.id);
+  if (!conversationId) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => void restartConversationFromMenu(conversationId, t)}
+      className="inline-flex items-center gap-1 hover:text-foreground"
+    >
+      <RotateCcw className="h-3 w-3" />
+      {t('Restart conversation')}
+    </button>
+  );
+}
+
+function ResendButton({ messageIndex }: { messageIndex: number }) {
+  const { t } = useI18n();
+  const host = useChatHost();
+  const conversationId = useSessionsStore((state) => displayedConversation(state)?.id);
+  const deliveryId = useSessionsStore((state) => {
+    const conversation = conversationId ? state.conversations[conversationId] : undefined;
+    if (host || !conversation || conversation.historyOnly) return undefined;
+    const message = conversation.messages[messageIndex - (conversation.historyBaseIndex ?? 0)];
+    return canWithdrawMessage(message) ? message?.deliveryId : undefined;
+  });
+  if (!conversationId || !deliveryId) return null;
+  return (
+    <button
+      type="button"
+      title={t('Resend')}
+      onClick={() => useSessionsStore.getState().resendMessage(conversationId, deliveryId)}
+      className="inline-flex items-center gap-1 hover:text-foreground"
+    >
+      <RefreshCw className="h-3 w-3" />
+      {t('Resend')}
     </button>
   );
 }
@@ -2093,7 +2229,10 @@ function CollapsedTurnBar({
 }) {
   const { t } = useI18n();
   return (
-    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 select-none">
+    <div
+      data-quote-skip=""
+      className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 select-none"
+    >
       <button
         type="button"
         onClick={() => onToggle?.(turnKey, false)}
@@ -2118,7 +2257,7 @@ function UserPromptCopy({ text }: { text: string }) {
   return (
     <span data-enso="copy-user-prompt" className="inline-flex">
       <CopyButton
-        text={text}
+        text={quotesAsMarkdown(text)}
         className="opacity-0 transition-opacity group-hover/user:opacity-100 focus-visible:opacity-100"
       />
     </span>
@@ -2139,19 +2278,32 @@ function UserMeta({
   text: string;
   timestamp?: number;
   canCollapse?: boolean;
-  deliveryState?: 'pending' | 'rejected';
+  deliveryState?: 'pending' | 'rejected' | 'stuck';
   onToggleTurn?: (key: string, collapsed: boolean) => void;
 }) {
   const { t } = useI18n();
   const autoCollapseTurns = useSettingsStore((s) => s.autoCollapseTurns);
   return (
-    <div className="flex items-center gap-2 text-[11px] text-muted-foreground/75 select-none">
+    <div
+      data-quote-skip=""
+      className="flex items-center gap-2 text-[11px] text-muted-foreground/75 select-none"
+    >
       <RewindButton messageIndex={messageIndex} />
+      <ResendButton messageIndex={messageIndex} />
       <WithdrawButton messageIndex={messageIndex} />
       <UserPromptCopy text={text} />
       {deliveryState && (
-        <span>{t(deliveryState === 'rejected' ? 'Not sent' : 'Delivery unconfirmed')}</span>
+        <span>
+          {t(
+            deliveryState === 'stuck'
+              ? 'Not sent: the previous turn is stuck and could not be interrupted. Restart the conversation, then resend.'
+              : deliveryState === 'rejected'
+                ? 'Not sent'
+                : 'Delivery unconfirmed'
+          )}
+        </span>
       )}
+      {deliveryState === 'stuck' && <RestartStuckButton />}
       {autoCollapseTurns && canCollapse && onToggleTurn && (
         <button
           type="button"
@@ -2202,7 +2354,10 @@ function TextRow({
       />
       {item.turnEnd && !item.streaming && host?.turnFooter?.(Number(item.key.split('-')[0]))}
       {!item.streaming && (
-        <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+        <div
+          data-quote-skip=""
+          className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+        >
           <PluginMessageActions position="left" {...pluginActionProps} />
           <CopyButton text={item.text} />
           <PluginMessageActions position="right" {...pluginActionProps} />
@@ -2266,6 +2421,31 @@ function formatPerf(perf: TurnPerf, t: TFunction, hasTurnDuration = false): stri
   return parts.join(' · ');
 }
 
+/** 长思考块点底部收起时，行头已滚出视口外则计算拉回视口所需的 scrollTop 偏移量；已在视口内返回 0 */
+export function thinkingCollapseScrollDelta(
+  rowRect: { top: number; bottom: number },
+  viewportRect: { top: number; bottom: number },
+  padding = 16
+): number {
+  if (rowRect.top < viewportRect.top) return rowRect.top - viewportRect.top - padding;
+  if (rowRect.bottom > viewportRect.bottom) return rowRect.bottom - viewportRect.bottom + padding;
+  return 0;
+}
+
+function findScrollContainer(element: HTMLElement): HTMLElement | null {
+  let current = element.parentElement;
+  while (current) {
+    if (current.hasAttribute('data-virtuoso-scroller')) return current;
+    const overflowY =
+      typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(current).overflowY
+        : current.style.overflowY;
+    if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') return current;
+    current = current.parentElement;
+  }
+  return null;
+}
+
 /** Think 行：仅在 expandLiveReasoning 时流式展开、结束收起；手动点击覆盖默认 */
 function ThinkingRow({
   itemKey,
@@ -2284,13 +2464,34 @@ function ThinkingRow({
   const expandLiveReasoning = useSettingsStore((s) => s.expandLiveReasoning);
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   const expanded = thinkingRowExpanded(userToggled, streaming, expandLiveReasoning);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const restoreScrollRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (expanded || !restoreScrollRef.current) return;
+    restoreScrollRef.current = false;
+    const row = rowRef.current;
+    if (!row) return;
+    const scroller = findScrollContainer(row);
+    if (!scroller) {
+      if (row.getBoundingClientRect().top < 0) row.scrollIntoView?.({ block: 'nearest' });
+      return;
+    }
+    const delta = thinkingCollapseScrollDelta(
+      row.getBoundingClientRect(),
+      scroller.getBoundingClientRect()
+    );
+    if (delta !== 0) scroller.scrollTop = Math.max(0, scroller.scrollTop + delta);
+  }, [expanded]);
+
   return (
-    <div data-enso="thinking" data-live={streaming || undefined}>
+    <div ref={rowRef} data-enso="thinking" data-live={streaming || undefined}>
       <button
         type="button"
+        data-quote-skip=""
         onClick={() => setUserToggled(!expanded)}
         className={cn(
-          'flex min-h-6 items-center gap-2 text-[13px] transition-colors hover:text-foreground',
+          'flex min-h-6 select-none items-center gap-2 text-[13px] transition-colors hover:text-foreground',
           SUBTLE_TEXT
         )}
       >
@@ -2308,6 +2509,24 @@ function ThinkingRow({
         <ChevronRight className={cn('h-3 w-3 transition-transform', expanded && 'rotate-90')} />
       </button>
       {expanded && <PluginThinkingBody text={text} streaming={streaming} itemKey={itemKey} />}
+      {expanded && !streaming && (
+        <button
+          type="button"
+          data-enso="thinking-collapse"
+          data-quote-skip=""
+          onClick={() => {
+            restoreScrollRef.current = true;
+            setUserToggled(false);
+          }}
+          className={cn(
+            'mt-1 ml-[31px] flex min-h-6 select-none items-center gap-1 text-[12px] transition-colors hover:text-foreground',
+            SUBTLE_TEXT
+          )}
+        >
+          <ChevronUp className="h-3 w-3" />
+          <span>{t('Collapse thinking')}</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -2841,6 +3060,8 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
     expanded && item.name === 'subagent' && item.state !== 'error'
       ? parseSubagentReceipt(item.subagentOp, item.output)
       : null;
+  const subagentError =
+    item.name === 'subagent' && item.state === 'error' ? subagentErrorReason(item.output) : null;
   const previouslyHadFileChanges = useRef(hasFileChanges);
   // apply_patch 只在终态结果中拿到真实 diff：必须按「本行从无到有」识别直播，历史首次挂载不展开。
   useEffect(() => {
@@ -2898,7 +3119,9 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
             {item.state === 'error' && item.output
               ? summary && item.name === 'apply_patch' && hasFileChanges
                 ? `${headerSummary} · ${firstLine(item.output)}`
-                : shellFailureHeadline(stripAnsi(item.output))
+                : subagentError
+                  ? t(subagentError)
+                  : shellFailureHeadline(stripAnsi(item.output))
               : summary
                 ? headerSummary
                 : null}
@@ -2914,6 +3137,7 @@ function ToolRow({ item }: { item: Extract<TimelineItem, { kind: 'tool' }> }) {
           {item.shellFailure && item.state !== 'running' && (
             <ShellFailureBadge failure={item.shellFailure} />
           )}
+          {item.dcgWarning && <DcgWarningBadge warning={item.dcgWarning} />}
           {item.state === 'reviewing' ? (
             <span className={cn('shrink-0 text-[11px] text-foreground', BREATHE)}>
               {t('Assistant reviewing…')}

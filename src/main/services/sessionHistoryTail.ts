@@ -1,8 +1,9 @@
 import path from 'node:path';
-import { type SessionEntry, sessionEntryToContextMessages } from '@earendil-works/pi-coding-agent';
+import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { takeSnapshotTail } from '@shared/snapshotTail';
 import type { ProjectedMessage } from '@shared/types/agent';
 import { projectMessage } from '../../agent/projection';
+import { sessionEntryToContextMessages } from '../../agent/sessionEntryMessages';
 import { withPrivacyMask, withUserEntryIds } from '../../agent/transcript';
 
 export interface HistoryProjectionOptions {
@@ -10,7 +11,8 @@ export interface HistoryProjectionOptions {
   messageIds?: boolean;
 }
 
-function displayMessages(
+/** jsonl 分支 → 显示用消息（脱敏、带 user entryId）；分页按它的绝对下标切 */
+export function displayMessages(
   branch: readonly SessionEntry[],
   options: HistoryProjectionOptions = {}
 ): unknown[] {
@@ -40,8 +42,8 @@ export function resolveParentHistoryFile(
   return within ? resolved : null;
 }
 
-function projectWindow(
-  raw: unknown[],
+export function projectWindow(
+  raw: readonly unknown[],
   endIndex: number
 ): {
   messages: ProjectedMessage[];
@@ -49,7 +51,7 @@ function projectWindow(
 } {
   const end = Math.max(0, Math.min(endIndex, raw.length));
   if (end === 0) return { messages: [], baseIndex: 0 };
-  const window = takeSnapshotTail(raw, end);
+  const window = takeSnapshotTail(raw as unknown[], end);
   return {
     messages: window.messages
       .map(projectMessage)
@@ -85,9 +87,11 @@ export function projectParentHistoryAll(
   branch: readonly SessionEntry[],
   options?: HistoryProjectionOptions
 ): ProjectedMessage[] {
-  return displayMessages(branch, options)
-    .map(projectMessage)
-    .filter((message): message is ProjectedMessage => message !== null);
+  return projectAll(displayMessages(branch, options));
+}
+
+export function projectAll(raw: readonly unknown[]): ProjectedMessage[] {
+  return raw.map(projectMessage).filter((message): message is ProjectedMessage => message !== null);
 }
 
 /** 全量投影里按 jsonl entry id（优先）或绝对下标取一条；取不到返回 null */
