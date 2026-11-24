@@ -25,6 +25,34 @@ describe('buildSecretarySystemPrompt', () => {
     expect(prompt).toMatch(/bash|file/i);
   });
 
+  it('needsUser 每条是用户要亲自决定或动手的一件事，followUps 不需要用户，处理完用 result_mark_done 收口', () => {
+    const prompt = buildSecretarySystemPrompt({ profile, persona: '', uiLanguage: 'en' });
+    const results = prompt.split('\n').find((line) => line.startsWith('Results:')) ?? '';
+    expect(results).toContain('followUps');
+    expect(results).toMatch(/Escalate only what the user personally/);
+    expect(results).toContain('result_mark_done');
+  });
+
+  it('转问 needsUser 必须带 relatesTo，答复后宿主自动收口，不再手动 result_mark_done', () => {
+    const prompt = buildSecretarySystemPrompt({ profile, persona: '', uiLanguage: 'en' });
+    const results = prompt.split('\n').find((line) => line.startsWith('Results:')) ?? '';
+    expect(results).toContain('needs-user[N]');
+    expect(results).toMatch(/always pass relatesTo/);
+    expect(results).toMatch(/needsUserIndex/);
+    expect(results).toMatch(/do not call result_mark_done for it/);
+  });
+
+  it('needsUser 先经秘书筛选：自己办完 mark done，只有用户本人必须做的才升级，30 分钟没处理自动给用户', () => {
+    const prompt = buildSecretarySystemPrompt({ profile, persona: '', uiLanguage: 'en' });
+    const results = prompt.split('\n').find((line) => line.startsWith('Results:')) ?? '';
+    expect(results).toMatch(/do not reach the user's needs-you list until you triage them/);
+    expect(results).toMatch(/Escalate only what the user personally has to decide or do by hand/);
+    expect(results).toMatch(/the card returns to with-secretary/);
+    expect(results).not.toMatch(/count as handled by you/);
+    expect(results).toContain('needs_user_escalate');
+    expect(results).toMatch(/30 minutes/);
+  });
+
   it('称呼按档案写进提示词，没设置时不写称呼（默认）', () => {
     expect(
       buildSecretarySystemPrompt({

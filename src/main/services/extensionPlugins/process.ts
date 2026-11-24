@@ -4,14 +4,16 @@ import type {
   PluginAgentSource,
   PluginCallMethod,
   PluginHostApi,
+  PluginLogLevel,
   PluginRegistrations,
 } from '@shared/extensionPlugins/protocol';
 import { PLUGIN_HOST_APIS } from '@shared/extensionPlugins/protocol';
 import type { WorkerForkOptions, WorkerProcess } from '../../platform/types';
 
-export type PluginError = Error & { code: string };
-export const pluginError = (code: string, message: string): PluginError =>
-  Object.assign(new Error(message), { code });
+export type { PluginLogLevel };
+export type PluginError = Error & { code: string; userMessage?: string; expected?: true };
+export const pluginError = (code: string, message: string, userMessage?: string): PluginError =>
+  Object.assign(new Error(message), { code }, userMessage ? { userMessage } : {});
 
 export interface PluginProcessDeps {
   fork(modulePath: string, args: string[], options: WorkerForkOptions): WorkerProcess;
@@ -25,6 +27,8 @@ export interface PluginProcessDeps {
   ): Promise<unknown>;
   onExit(info: { unexpected: boolean }): void;
   onLog?(level: PluginLogLevel, message: string): void;
+  /** 缺省关闭。init 与运行中切换都读调用当下的值 */
+  loggingEnabled?: () => boolean;
   idleMs?: number;
   readyTimeoutMs?: number;
   /** 常驻进程不因空闲退出 */
@@ -47,8 +51,7 @@ const STOP_FORCE_MS = 5_000;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
-export type PluginLogLevel = 'info' | 'warn' | 'error';
-const LOG_LEVELS: readonly unknown[] = ['info', 'warn', 'error'];
+const LOG_LEVELS: readonly unknown[] = ['debug', 'info', 'warn', 'error'];
 
 /** 一个插件一个进程：按需拉起、闲置退出；超时先 cancel 再失败，晚到结果丢弃 */
 export class PluginProcess {
@@ -71,6 +74,11 @@ export class PluginProcess {
 
   get inflight(): number {
     return this.pending.size;
+  }
+
+  /** 服务主动停过：之后的 PLUGIN_EXITED 是停用、卸载、换版或退出的预期收尾 */
+  get stopped(): boolean {
+    return this.closed;
   }
 
   ready(): Promise<PluginRegistrations> {
@@ -217,6 +225,10 @@ export class PluginProcess {
     return this.stopWait;
   }
 
+  setLoggingEnabled(enabled: boolean): void {
+    if (this.child) this.post({ t: 'set-logging', enabled });
+  }
+
   private post(message: MainToPluginHost): void {
     try {
       this.child?.postMessage(message);
@@ -245,7 +257,13 @@ export class PluginProcess {
         () => fail('插件加载超时'),
         this.deps.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS
       );
-      child.once('spawn', () => this.post({ t: 'init', ...this.deps.init }));
+      child.once('spawn', () =>
+        this.post({
+          t: 'init',
+          ...this.deps.init,
+          loggingEnabled: this.deps.loggingEnabled?.() === true,
+        })
+      );
       child.on('message', (raw: unknown) => {
         if (!isRecord(raw)) return;
         if (raw.t === 'ready' && !settled) {
@@ -293,12 +311,13 @@ export class PluginProcess {
       if (message.ok === true) entry.resolve(message.value);
       else {
         const error = isRecord(message.error) ? message.error : {};
-        entry.reject(
-          pluginError(
-            typeof error.code === 'string' ? error.code : 'PLUGIN_ERROR',
-            typeof error.message === 'string' ? error.message : '插件调用失败'
-          )
+        const failure: PluginError = pluginError(
+          typeof error.code === 'string' ? error.code : 'PLUGIN_ERROR',
+          typeof error.message === 'string' ? error.message : '插件调用失败',
+          typeof error.userMessage === 'string' ? error.userMessage : undefined
         );
+        if (error.expected === true) failure.expected = true;
+        entry.reject(failure);
       }
       this.armIdle();
       return;

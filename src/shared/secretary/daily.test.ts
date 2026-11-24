@@ -153,6 +153,7 @@ describe('一天的看板投影', () => {
     expect(daily.counts).toEqual({
       dispatched: 1,
       completed: 1,
+      completedEarlier: 0,
       failed: 1,
       needsYou: 1,
       todosDone: 1,
@@ -177,6 +178,49 @@ describe('一天的看板投影', () => {
     });
     expect(daily.groups).toEqual([]);
     expect(daily.counts.completed).toBe(0);
+  });
+
+  it('完成按会话去重，其中之前派出或接手的单独计数', () => {
+    const manualDone = (hour: number) => ({
+      kind: 'goal-complete' as const,
+      turn: 1,
+      at: at(15, hour),
+      manual: true as const,
+    });
+    const daily = buildSecretaryDaily({
+      ...base,
+      results: [
+        // 今天派出：完成后追加目标又完成一次
+        record({ at: at(15, 10) }),
+        record({ at: at(15, 16) }),
+        // 今天派出：先失败，重试后完成
+        record({ at: at(15, 11), conversationId: 'c2', kind: 'failed' }),
+        record({ at: at(15, 12), conversationId: 'c2' }),
+        // 昨天派出、今天才完成
+        record({ at: at(15, 13), conversationId: 'c3' }),
+        // 今天派出：goal-complete 后又被手动标完成
+        record({ at: at(15, 14), conversationId: 'c5' }),
+      ],
+      dispatched: [
+        dispatch(),
+        dispatch({ conversationId: 'c2' }),
+        dispatch({ conversationId: 'c3', createdAt: at(14, 22) }),
+        dispatch({
+          conversationId: 'c4',
+          takeover: { grantedAt: at(15, 9), via: 'user' },
+          lastResult: manualDone(14),
+        }),
+        dispatch({ conversationId: 'c5', lastResult: manualDone(15) }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(daily.counts).toMatchObject({
+      dispatched: 3,
+      completed: 5,
+      completedEarlier: 2,
+      failed: 0,
+    });
   });
 
   it('完成行带摘要、分支与提交号；认不出就不给字段', () => {
@@ -914,5 +958,376 @@ describe('看板分类规则（防误入「需要你」与「失败或中断」�
       daily.groups.find((g) => g.key === 'needsYou')?.items.map((i) => i.conversationId)
     ).toEqual(['c-blk-need', 'c-need-field', 'c-approval']);
     expect(daily.counts.needsYou).toBe(3);
+  });
+
+  it('今日正在运行的会话即使历史曾记过 needs-user / failed / goal-complete(needsUser) 也归「进行中」', () => {
+    const daily = buildSecretaryDaily({
+      day: '2024-05-15',
+      now: at(15, 20),
+      session: (id) => ({ title: id, projectName: 'enso-code' }),
+      projectName: () => 'enso-code',
+      results: [
+        record({ at: at(15, 10), conversationId: 'c-run-need', kind: 'needs-user' }),
+        record({ at: at(15, 10), conversationId: 'c-run-fail', kind: 'failed' }),
+        record({
+          at: at(15, 10),
+          conversationId: 'c-run-goal-need',
+          kind: 'goal-complete',
+          goalResult: { at: at(15, 10), result: { needsUser: ['旧待确认'] } },
+        }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-run-need',
+          createdAt: at(15, 0),
+          lastState: 'running',
+          stateSince: at(15, 5),
+        }),
+        dispatch({
+          conversationId: 'c-run-fail',
+          createdAt: at(15, 0),
+          lastState: 'running',
+          stateSince: at(15, 5),
+          lastResult: { kind: 'failed', turn: 1, at: at(15, 10) },
+        }),
+        dispatch({
+          conversationId: 'c-run-goal-need',
+          createdAt: at(15, 0),
+          lastState: 'running',
+          stateSince: at(15, 12),
+          lastResult: { kind: 'goal-complete', turn: 1, at: at(15, 10) },
+          goalResult: { at: at(15, 10), result: { needsUser: ['旧待确认'] } },
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(
+      daily.groups
+        .find((g) => g.key === 'running')
+        ?.items.map((i) => i.conversationId)
+        .sort()
+    ).toEqual(['c-run-fail', 'c-run-goal-need', 'c-run-need']);
+    expect(daily.groups.find((g) => g.key === 'needsYou')).toBeUndefined();
+    expect(daily.groups.find((g) => g.key === 'failed')).toBeUndefined();
+  });
+
+  it('goal-complete 带 needsUser 时标签为「完成 · 需要你」、直接暴露 needsUser，摘要取结构化 summary 而不是正文', () => {
+    const daily = buildSecretaryDaily({
+      ...base,
+      results: [
+        record({
+          at: at(15, 14),
+          conversationId: 'c-pr62',
+          kind: 'goal-complete',
+          text: 'PR #62 review 完了，补修已推到 PR 分支，CI 通过',
+          goalResult: {
+            at: at(15, 14),
+            result: {
+              summary: 'Review 完成',
+              needsUser: ['是否合并上架 #62', '确认是否同步发版'],
+            },
+          },
+        }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-pr62',
+          createdAt: at(15, 10),
+          lastResult: { kind: 'goal-complete', turn: 1, at: at(15, 14) },
+          goalResult: {
+            at: at(15, 14),
+            result: {
+              summary: 'Review 完成',
+              needsUser: ['是否合并上架 #62', '确认是否同步发版'],
+            },
+          },
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    const card = daily.groups.find((g) => g.key === 'needsYou')?.items[0];
+    expect(card).toBeDefined();
+    expect(card?.label).toBe('Done · needs you');
+    expect(card?.label).not.toBe('Goal complete');
+    expect(card?.needsUser).toEqual(['是否合并上架 #62', '确认是否同步发版']);
+    expect(card?.summary).toBe('Review 完成');
+  });
+
+  it('同一份结果在派发记录里已部分答复：日看板卡片带上答复，供逐条标已答复', () => {
+    const goalResult = {
+      at: at(15, 14),
+      result: { summary: 'Review 完成', needsUser: ['是否合并上架 #62', '确认是否同步发版'] },
+    };
+    const answers = [{ index: 1, answer: '先不发', at: at(15, 20) }];
+    const daily = buildSecretaryDaily({
+      ...base,
+      results: [
+        record({ at: at(15, 14), conversationId: 'c-pr62', kind: 'goal-complete', goalResult }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-pr62',
+          createdAt: at(15, 10),
+          lastResult: { kind: 'goal-complete', turn: 1, at: at(15, 14) },
+          goalResult: { ...goalResult, answers },
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    const card = daily.groups.find((g) => g.key === 'needsYou')?.items[0];
+    expect(card?.needsUser).toEqual(['是否合并上架 #62', '确认是否同步发版']);
+    expect(card?.goalResult?.answers).toEqual(answers);
+  });
+
+  it('已归档会话的 needsUser 结果不再进「需要你」，归入完成且不带 needsUser', () => {
+    const goalResult = {
+      at: at(15, 14),
+      result: { summary: '已部署', needsUser: ['在服务器 ali 删除 /tmp/x'] },
+    };
+    const daily = buildSecretaryDaily({
+      ...base,
+      session: (conversationId) =>
+        conversationId === 'c-archived' ? { title: '部署', archived: true } : {},
+      results: [
+        record({ at: at(15, 14), conversationId: 'c-archived', kind: 'goal-complete', goalResult }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-archived',
+          createdAt: at(15, 10),
+          lastResult: { kind: 'goal-complete', turn: 1, at: at(15, 14) },
+          goalResult,
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(daily.groups.find((g) => g.key === 'needsYou')).toBeUndefined();
+    expect(daily.counts.needsYou).toBe(0);
+    const doneCard = daily.groups.find((g) => g.key === 'done')?.items[0];
+    expect(doneCard).toMatchObject({ conversationId: 'c-archived', label: 'Goal complete' });
+    expect(doneCard).not.toHaveProperty('needsUser');
+  });
+
+  it('点「知道了」(dismissed) 后，看板卡片移入「完成了什么」不再留在「需要你」，除非产生带新 needsUser 的新结果', () => {
+    const goalResult = {
+      at: at(15, 14),
+      result: { summary: 'PR #62 review 完了', needsUser: ['是否合并上架 #62'] },
+    };
+    const dismissed = buildSecretaryDaily({
+      ...base,
+      results: [
+        record({
+          at: at(15, 14),
+          conversationId: 'c-pr62',
+          kind: 'goal-complete',
+          text: 'PR #62 review 完了',
+          goalResult,
+        }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-pr62',
+          createdAt: at(15, 10),
+          lastResult: { kind: 'goal-complete', turn: 1, at: at(15, 14), dismissed: true },
+          goalResult,
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(dismissed.groups.find((g) => g.key === 'needsYou')).toBeUndefined();
+    const doneCard = dismissed.groups.find((g) => g.key === 'done')?.items[0];
+    expect(doneCard).toMatchObject({ conversationId: 'c-pr62', label: 'Goal complete' });
+    expect(doneCard).not.toHaveProperty('needsUser');
+
+    // 之后会话产生了更新的结果且新结果里 needsUser 非空 -> 再次进入「需要你」
+    const newGoalResult = {
+      at: at(15, 30),
+      result: { summary: '发版就绪', needsUser: ['确认是否部署阿里'] },
+    };
+    const renewed = buildSecretaryDaily({
+      ...base,
+      results: [
+        record({
+          at: at(15, 14),
+          conversationId: 'c-pr62',
+          kind: 'goal-complete',
+          goalResult,
+        }),
+        record({
+          at: at(15, 30),
+          conversationId: 'c-pr62',
+          kind: 'goal-complete',
+          goalResult: newGoalResult,
+        }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-pr62',
+          createdAt: at(15, 10),
+          lastResult: { kind: 'goal-complete', turn: 2, at: at(15, 30) },
+          goalResult: newGoalResult,
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(
+      renewed.groups.find((g) => g.key === 'needsYou')?.items.map((i) => i.conversationId)
+    ).toEqual(['c-pr62']);
+  });
+
+  it('隔天调 result_mark_done / 标记完成后，历史日的旧 needsUser 卡也不再留在「需要你」', () => {
+    const yesterdayAt = at(14, 22);
+    const todayAt = at(15, 10);
+    const daily = buildSecretaryDaily({
+      ...base,
+      day: '2024-05-14',
+      now: at(15, 0),
+      results: [
+        record({
+          at: yesterdayAt,
+          conversationId: 'c-old',
+          kind: 'goal-complete',
+          goalResult: { at: yesterdayAt, result: { needsUser: ['是否合并上架 #62'] } },
+        }),
+      ],
+      dispatched: [
+        dispatch({
+          conversationId: 'c-old',
+          createdAt: yesterdayAt - 60_000,
+          lastResult: { kind: 'goal-complete', turn: 1, at: todayAt, manual: true },
+        }),
+      ],
+      todos: [],
+      audit: [],
+    });
+    expect(daily.groups.find((g) => g.key === 'needsYou')).toBeUndefined();
+    expect(daily.groups.find((g) => g.key === 'done')?.items.map((i) => i.conversationId)).toEqual([
+      'c-old',
+    ]);
+  });
+
+  it('空闲但挂着未到点提醒的会话留在进行中列并标 pendingReminder，切回运行中后不标', () => {
+    const dueAt = at(15, 25);
+    const reminderItem = {
+      id: 'r00000001',
+      sessionId: 'c-rem',
+      dueAt,
+      createdAt: at(15, 20),
+      prompt: '检查构建',
+      label: '检查 Beta #153',
+      ifIdle: true,
+      chain: 1,
+    };
+    const waiting = buildSecretaryDaily({
+      ...base,
+      results: [],
+      dispatched: [dispatch({ conversationId: 'c-rem', lastState: 'idle' })],
+      reminders: (id) => (id === 'c-rem' ? [reminderItem] : []),
+      todos: [],
+      audit: [],
+    });
+    const runningItems = waiting.groups.find((g) => g.key === 'running')?.items ?? [];
+    expect(runningItems).toHaveLength(1);
+    expect(runningItems[0]).toMatchObject({
+      conversationId: 'c-rem',
+      pendingReminder: {
+        id: 'r00000001',
+        dueAt,
+        label: '检查 Beta #153',
+        count: 1,
+      },
+    });
+
+    const runningAgain = buildSecretaryDaily({
+      ...base,
+      results: [],
+      dispatched: [dispatch({ conversationId: 'c-rem', lastState: 'running' })],
+      reminders: () => [],
+      todos: [],
+      audit: [],
+    });
+    expect(
+      runningAgain.groups.find((g) => g.key === 'running')?.items[0]?.pendingReminder
+    ).toBeUndefined();
+  });
+});
+
+describe('needsUser 先经秘书筛选', () => {
+  const doneAt = at(15, 10);
+  const needs = {
+    at: doneAt,
+    result: { summary: '做完了', needsUser: ['删临时文件', '在 Mac 上点确认'] },
+  };
+  const daily = (now: number, extra: Partial<DispatchRecord> = {}, live = true) =>
+    buildSecretaryDaily({
+      day: '2024-05-15',
+      now,
+      results: [record({ at: doneAt, goalResult: needs })],
+      dispatched: [
+        dispatch({
+          lastResult: { kind: 'goal-complete', turn: 1, at: doneAt },
+          goalResult: needs,
+          ...extra,
+        }),
+      ],
+      todos: [],
+      audit: [],
+      secretaryLive: () => live,
+    });
+  const column = (board: ReturnType<typeof daily>, key: string) =>
+    board.groups.find((g) => g.key === key)?.items ?? [];
+
+  it('秘书在、未升级：进「秘书处理中」，不计入「需要你」', () => {
+    const board = daily(doneAt + 5 * 60_000);
+    expect(board.counts.needsYou).toBe(0);
+    expect(column(board, 'needsYou')).toEqual([]);
+    expect(column(board, 'withSecretary').map((i) => i.conversationId)).toEqual(['c1']);
+    expect(column(board, 'withSecretary')[0]).not.toHaveProperty('needsUser');
+    expect(column(board, 'withSecretary')[0]?.goalResult?.result.needsUser).toBeUndefined();
+    expect(column(board, 'withSecretary')[0]?.goalResult?.result.summary).toBe('做完了');
+  });
+
+  it('秘书续跑撤下了旧结果、这一轮以 turn-ended 收尾：旧的 needsUser 不再进「需要你」', () => {
+    const board = daily(doneAt + 60 * 60_000, {
+      lastResult: { kind: 'turn-ended', turn: 2, at: doneAt + 10 * 60_000 },
+      goalResult: undefined,
+    });
+    expect(board.counts.needsYou).toBe(0);
+    expect(column(board, 'needsYou')).toEqual([]);
+    expect(column(board, 'done').map((i) => i.conversationId)).toEqual(['c1']);
+    expect(column(board, 'done')[0]).not.toHaveProperty('needsUser');
+  });
+
+  it('升级后只显示升级的那条（改写后的文字）；超时或秘书不在时照旧全部显示', () => {
+    const escalated = daily(doneAt + 5 * 60_000, {
+      goalResult: { ...needs, escalations: [{ index: 1, text: '在 Mac 顶栏点确认', at: doneAt }] },
+    });
+    expect(escalated.counts.needsYou).toBe(1);
+    expect(column(escalated, 'needsYou')[0]?.needsUser).toEqual(['在 Mac 顶栏点确认']);
+
+    const late = daily(doneAt + 30 * 60_000);
+    expect(column(late, 'needsYou')[0]?.needsUser).toEqual(['删临时文件', '在 Mac 上点确认']);
+
+    const gone = daily(doneAt + 5 * 60_000, {}, false);
+    expect(gone.counts.needsYou).toBe(1);
+  });
+
+  it('没有派发记录的会话（用户自己的）照旧直接进「需要你」', () => {
+    const board = buildSecretaryDaily({
+      day: '2024-05-15',
+      now: doneAt + 60_000,
+      results: [record({ at: doneAt, goalResult: needs })],
+      dispatched: [],
+      todos: [],
+      audit: [],
+      secretaryLive: () => true,
+    });
+    expect(board.counts.needsYou).toBe(1);
   });
 });

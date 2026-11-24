@@ -61,6 +61,7 @@ import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
 import type { PresetImportDraft } from '@shared/presetImport';
 import type { PrivacyMaskRecord } from '@shared/privacyMask/report';
+import type { SessionReminderSummary } from '@shared/reminders';
 import type { RemoteApi } from '@shared/remoteBridge';
 import type {
   ResourceSnapshot,
@@ -275,7 +276,11 @@ import type {
   SecretaryToolDraft,
   SecretaryUntrackedView,
 } from '@shared/types/secretary';
-import type { ExternalSessionSource, SimpleMessage } from '@shared/types/sessionImport';
+import type {
+  ExternalSessionImportResult,
+  ExternalSessionReadResult,
+  ExternalSessionSource,
+} from '@shared/types/sessionImport';
 import type {
   TerminalCreateRequest,
   TerminalCreateResult,
@@ -700,12 +705,22 @@ const electronAPI = {
       secretaryId?: string
     ): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_CONTACT_FORGET_BOT, secretaryId),
-    contactTest: (secretaryId?: string): Promise<{ ok: true } | { ok: false; error: string }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_CONTACT_TEST, secretaryId),
+    /** 不带 channelId 发 Telegram 测试消息；带插件渠道 id 是「立即重试」 */
+    contactTest: (
+      secretaryId?: string,
+      channelId?: string
+    ): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.SECRETARY_CONTACT_TEST,
+        secretaryId,
+        channelId ? { channelId } : undefined
+      ),
     /** 总开关 enabled、Telegram 老开关，或某个渠道卡片上的通用开关 */
     contactSettings: (
       patch:
         | { enabled?: boolean; allowCardConfirm?: boolean; allowMemory?: boolean }
+        | { githubLogins: string[] }
+        | { externalConfirm: boolean }
         | { channelId: string; prefs: Partial<SecretaryContactChannelPrefs> }
         | { telegramGroup: { action: 'add' | 'remove'; chatId: string } }
         | { telegramRoute: { action: 'remove'; chatId: string; topicId?: string } }
@@ -713,6 +728,9 @@ const electronAPI = {
       secretaryId?: string
     ): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_CONTACT_SETTINGS, patch, secretaryId),
+    /** 读本机 gh 登录名。只填进输入框，不写入 */
+    contactGithubSuggest: (): Promise<{ login: string | null }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_CONTACT_GITHUB_SUGGEST),
     /** 拉一个 Telegram 群的论坛话题：失败带错误码与 Telegram 的说明 */
     contactTelegramTopics: (
       chatId: string,
@@ -1234,9 +1252,12 @@ const electronAPI = {
   },
 
   files: {
-    /** 在 root 下按文件名/路径模糊搜索（@ 提及用） */
-    search: (root: string, query: string): Promise<{ relativePath: string; name: string }[]> =>
-      ipcRenderer.invoke(IPC_CHANNELS.FILES_SEARCH, root, query),
+    /** 按会话的 @ 搜索根模糊搜索文件名/路径；根目录由 Main 按会话推导 */
+    search: (request: {
+      conversationId: string;
+      query: string;
+    }): Promise<{ relativePath: string; name: string }[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.FILES_SEARCH, request),
     /** 拖放浮窗收到的路径：Main 推 pending 提醒，renderer 主动取走 */
     takeShelfDrop: (): Promise<DropShelfDelivery[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.DROP_SHELF_TAKE),
@@ -1274,16 +1295,12 @@ const electronAPI = {
     /** 列出各本地 AI 应用在项目目录下的会话 */
     scan: (projectPath: string): Promise<ExternalSessionSource[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.SESSIONS_SCAN_EXTERNAL, projectPath),
-    /** 读取外部会话的拉平消息（预览用） */
-    read: (sourceId: string, sessionPath: string): Promise<SimpleMessage[]> =>
-      ipcRenderer.invoke(IPC_CHANNELS.SESSIONS_READ_EXTERNAL, sourceId, sessionPath),
-    /** 转成 pi jsonl，返回可 resume 的文件与标题 */
-    import: (
-      sourceId: string,
-      sessionPath: string,
-      projectPath: string
-    ): Promise<{ sessionFile: string; title: string; messageCount: number } | null> =>
-      ipcRenderer.invoke(IPC_CHANNELS.SESSIONS_IMPORT_EXTERNAL, sourceId, sessionPath, projectPath),
+    /** 凭扫描令牌读取外部会话的拉平消息（预览用） */
+    read: (token: string): Promise<ExternalSessionReadResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SESSIONS_READ_EXTERNAL, token),
+    /** 凭扫描令牌转成 pi jsonl，返回可 resume 的文件与标题 */
+    import: (token: string): Promise<ExternalSessionImportResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SESSIONS_IMPORT_EXTERNAL, token),
   },
 
   agent: {
@@ -1453,6 +1470,18 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, listener);
       return () =>
         ipcRenderer.removeListener(IPC_CHANNELS.AGENT_SUBAGENT_PROGRESS_CHANGED, listener);
+    },
+    listReminders: (): Promise<Record<string, SessionReminderSummary[]>> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_REMINDERS_LIST),
+    onRemindersChanged: (
+      callback: (push: { sessionId: string; reminders: SessionReminderSummary[] }) => void
+    ): (() => void) => {
+      const listener = (
+        _: unknown,
+        push: { sessionId: string; reminders: SessionReminderSummary[] }
+      ) => callback(push);
+      ipcRenderer.on(IPC_CHANNELS.AGENT_REMINDERS_CHANGED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_REMINDERS_CHANGED, listener);
     },
     stopSubagent: (sessionId: string, agentId: string): Promise<AgentActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_SUBAGENT_STOP, sessionId, agentId),

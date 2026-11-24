@@ -1,15 +1,19 @@
+import { formatReminderClock, formatReminderTooltip } from '@shared/reminders';
 import { queuedStartOf, queuePositions } from '@shared/secretary/queuedSession';
 import {
   NEEDS_YOU_RESULTS,
   type PendingDispatch,
   type SecretaryBoard,
   type SecretaryBoardTodo,
+  type SecretaryDemandThreadView,
   type SecretaryTodoMutate,
   type TodoProblemCode,
 } from '@shared/types/secretary';
 import { formatRetryClock } from '@shared/upstreamRecovery';
 import {
   ArrowUpRight,
+  CheckCircle2,
+  ChevronRight,
   Coffee,
   Pencil,
   Plus,
@@ -19,7 +23,7 @@ import {
   Trash2,
   Undo2,
 } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import { ApprovalBar } from '@/components/chat/ApprovalBar';
 import { AskBar } from '@/components/chat/AskBar';
 import { QueuedSessionButtons } from '@/components/chat/QueuedSessionCard';
@@ -33,6 +37,7 @@ import { openSessionPeek } from '@/stores/sessionPeek';
 import { useSessionsStore } from '@/stores/sessions';
 import { SecretaryFace } from './SecretaryFace';
 import { SecretaryProposalRow } from './SecretaryProposalRow';
+import { RunningCards } from './SecretaryRunningList';
 import {
   type FeedEvent,
   type FeedTone,
@@ -79,6 +84,11 @@ function todoStateText(
   conversations: Record<string, unknown>,
   t: (key: string, params?: Record<string, string | number>) => string
 ): string {
+  if (todo.pendingReminder) {
+    return t('Waiting for reminder · {{time}}', {
+      time: formatReminderClock(todo.pendingReminder.dueAt),
+    });
+  }
   if (!todo.sessionState) return '';
   if (todo.sessionState !== 'queued') return t(SESSION_STATE_LABEL[todo.sessionState]);
   const row = todo.conversationId ? conversations[todo.conversationId] : undefined;
@@ -96,19 +106,65 @@ const PROBLEM_LABEL: Record<TodoProblemCode, string> = {
   deleted: 'The session was deleted',
 };
 
-function Stat({ value, label, warn }: { value: number; label: string; warn?: boolean }) {
+/** 计数卡：点了滚到下面对应的列表 */
+function Stat({
+  value,
+  label,
+  warn,
+  target,
+  section,
+}: {
+  value: number;
+  label: string;
+  warn?: boolean;
+  target: string;
+  section: RefObject<HTMLElement | null>;
+}) {
   return (
-    <div
+    <button
+      type="button"
       data-enso="secretary-stat"
+      data-target={target}
       data-warn={warn || undefined}
+      onClick={() => section.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })}
       className={cn(
-        'rounded-[10px] border px-2.5 py-2',
-        warn ? 'border-warning/40 bg-warning/5' : 'border-border'
+        'rounded-[10px] border px-2.5 py-2 text-left transition-colors',
+        warn ? 'border-warning/40 bg-warning/5 hover:bg-warning/10' : 'border-border hover:bg-muted'
       )}
     >
       <div className="text-[18px] font-semibold tabular-nums">{value}</div>
       <div className="text-[11.5px] text-muted-foreground">{label}</div>
-    </div>
+    </button>
+  );
+}
+
+function ThreadList({ threads }: { threads: readonly SecretaryDemandThreadView[] }) {
+  const { t } = useI18n();
+  return (
+    <section data-enso="secretary-threads" className="flex flex-col gap-1.5">
+      <p className="text-[12px] font-medium text-muted-foreground">{t('Demand threads')}</p>
+      {threads.map((thread) => (
+        <button
+          key={thread.id}
+          type="button"
+          data-enso="secretary-thread"
+          onClick={() => openSessionFromSecretary(thread.sessionId)}
+          className="flex flex-col items-start rounded-lg border border-border px-2.5 py-2 text-left"
+        >
+          <span className="text-[13px] font-medium">
+            {thread.summary || `${thread.channel} ${thread.messageId}`}
+          </span>
+          <span className="text-[11.5px] text-muted-foreground">
+            {thread.requesterIsOwner ? t('Thread owner') : t('Thread external')}
+            {thread.pr ? ` · #${thread.pr.number}` : ''}
+            {` · ${thread.status}`}
+          </span>
+          <span className="text-[11.5px] text-muted-foreground">
+            {t('Handled by {{session}}', { session: thread.sessionTitle })}
+          </span>
+        </button>
+      ))}
+    </section>
   );
 }
 
@@ -177,14 +233,30 @@ function AttentionCard({ card }: { card: SecretarySessionCard }) {
       card.result === 'goal-complete' ||
       card.result === 'goal-blocked');
   const feed = sessionFeed(card);
+  const decisionNeeds =
+    card.state !== 'waiting' &&
+    card.result === 'goal-complete' &&
+    card.needsUser &&
+    card.needsUser.length > 0
+      ? card.needsUser
+      : undefined;
   return (
     <div
       data-enso="secretary-card"
       data-kind="session"
       data-state={card.state}
-      className="rounded-xl border border-warning/40 bg-warning/5 px-3 py-2.5"
+      data-tone={decisionNeeds ? 'decision' : undefined}
+      className={cn(
+        'rounded-xl border px-3 py-2.5',
+        decisionNeeds ? 'border-brand/30 bg-brand/[0.04]' : 'border-warning/40 bg-warning/5'
+      )}
     >
-      <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-warning">
+      <div
+        className={cn(
+          'flex items-center gap-1.5 text-[11.5px] font-medium',
+          decisionNeeds ? 'text-foreground' : 'text-warning'
+        )}
+      >
         {face && (
           <SecretaryFace
             name={face.name}
@@ -194,17 +266,74 @@ function AttentionCard({ card }: { card: SecretarySessionCard }) {
             className="size-4 rounded-[5px] text-[9px]"
           />
         )}
-        <ShieldAlert className="size-3.5 shrink-0" />
+        {decisionNeeds ? (
+          <CheckCircle2 className="size-3.5 shrink-0 text-success" />
+        ) : (
+          <ShieldAlert className="size-3.5 shrink-0" />
+        )}
         <span className="min-w-0 flex-1 truncate">{t(feed.label)}</span>
         <span className="shrink-0 font-normal text-subtle-foreground">
           {formatRelativeTime(feed.at, locale)}
         </span>
       </div>
       <p className="mt-1 text-[13px] font-medium">{card.title}</p>
-      <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted-foreground">
-        <span className="shrink-0 rounded bg-muted px-1.5 text-[11px]">{card.projectName}</span>
-        {card.lastText && <span className="line-clamp-1">{card.lastText}</span>}
-      </div>
+      {decisionNeeds ? (
+        <div className="mt-1 flex flex-col gap-1 text-[12px]">
+          {card.projectName && (
+            <div>
+              <span className="inline-block rounded bg-muted px-1.5 text-[11px] text-muted-foreground">
+                {card.projectName}
+              </span>
+            </div>
+          )}
+          {card.summary && (
+            <p
+              data-enso="secretary-card-needs-user-summary"
+              title={card.summary}
+              className="line-clamp-1 break-words text-muted-foreground"
+            >
+              {card.summary}
+            </p>
+          )}
+          <ul
+            data-enso="secretary-card-needs-user"
+            className="flex flex-col gap-0.5 text-foreground/90"
+          >
+            {decisionNeeds.map((item, index) => {
+              const answered = card.needsUserAnswers?.find((entry) => entry.index === index);
+              return (
+                <li
+                  key={item}
+                  data-enso="secretary-card-needs-user-item"
+                  data-answered={answered ? 'true' : undefined}
+                  title={item}
+                  className="break-words"
+                >
+                  <span
+                    className={cn('line-clamp-2', answered && 'text-muted-foreground line-through')}
+                  >
+                    {t('Needs you: {{item}}', { item })}
+                  </span>
+                  {answered && (
+                    <span
+                      data-enso="secretary-card-needs-user-answer"
+                      title={answered.answer}
+                      className="line-clamp-1 text-success"
+                    >
+                      {t('Answered: {{answer}}', { answer: answered.answer })}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : (
+        <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted-foreground">
+          <span className="shrink-0 rounded bg-muted px-1.5 text-[11px]">{card.projectName}</span>
+          {card.lastText && <span className="line-clamp-1">{card.lastText}</span>}
+        </div>
+      )}
       {(card.state === 'queued' || card.queueFailed) && (
         <div className="mt-2 flex flex-col gap-1.5">
           <p data-enso="secretary-queued-card" className="text-[12.5px] text-orange-600">
@@ -332,13 +461,20 @@ function TodoRow({ todo, secretaryId }: { todo: SecretaryBoardTodo; secretaryId?
             type="button"
             data-enso="secretary-todo-session"
             disabled={!openable}
+            title={
+              todo.pendingReminder
+                ? formatReminderTooltip(todo.pendingReminder, Date.now(), t)
+                : undefined
+            }
             onClick={() => {
               if (todo.conversationId) openSessionPeek(todo.conversationId);
             }}
             className="mt-0.5 block max-w-full truncate text-left text-[12px] text-muted-foreground hover:text-foreground disabled:cursor-default"
           >
             {todo.sessionTitle || t('Open session')}
-            {todo.sessionState ? ` · ${todoStateText(todo, conversations, t)}` : ''}
+            {todo.sessionState || todo.pendingReminder
+              ? ` · ${todoStateText(todo, conversations, t)}`
+              : ''}
           </button>
         )}
         {phase === 'problem' && todo.problem && (
@@ -455,6 +591,7 @@ function FeedEntry({ event }: { event: FeedEvent }) {
           .finally(() => setStopping(false));
       }
     : undefined;
+  const line = event.detail ? `${t(event.label)} · ${event.detail}` : t(event.label);
   return (
     <div
       data-enso="secretary-feed-event"
@@ -491,12 +628,13 @@ function FeedEntry({ event }: { event: FeedEvent }) {
         </span>
         <span className="mt-0.5 block truncate text-[13px]">{event.title}</span>
         <span
+          title={line}
           className={cn(
             'mt-0.5 block text-[12px] text-muted-foreground',
             expanded ? 'whitespace-pre-wrap break-words' : 'line-clamp-2'
           )}
         >
-          {event.detail ? `${t(event.label)} · ${event.detail}` : t(event.label)}
+          {line}
         </span>
       </button>
       {event.running && stop && (
@@ -565,7 +703,7 @@ function EmptyState({ name, onAdd }: { name: string; onAdd: () => void }) {
   );
 }
 
-/** 工作台：问候与今日战报、三个计数、需要你处理、待办、动态时间线 */
+/** 工作台：问候与今日战报、三个计数、需要你处理、进行中、需求线程、待办、动态时间线 */
 export function SecretaryWorkbench({ name, secretaryId }: { name: string; secretaryId?: string }) {
   const { t } = useI18n();
   const ownBoard = useSecretaryStore((s) =>
@@ -582,11 +720,16 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
   useEffect(() => {
     if (scope !== 'all') return;
     let alive = true;
-    void window.electronAPI.secretary.overview().then((result) => {
-      if (alive && result.ok) setOverviewBoards(result.boards);
-    });
+    const load = () => {
+      void window.electronAPI.secretary.overview().then((result) => {
+        if (alive && result.ok) setOverviewBoards(result.boards);
+      });
+    };
+    load();
+    const off = window.electronAPI.secretary.onStateChanged(load);
     return () => {
       alive = false;
+      off();
     };
   }, [scope]);
   const board = useMemo(() => {
@@ -604,6 +747,9 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
   }, [scope, overviewBoards, filterId, ownBoard]);
   const focusProposal = useSecretaryStore((s) => s.focusProposal);
   const [adding, setAdding] = useState(false);
+  const needsYouRef = useRef<HTMLElement>(null);
+  const runningRef = useRef<HTMLElement>(null);
+  const todosRef = useRef<HTMLElement>(null);
   /** 深链定位过来的那张卡：滚到它并闪一下，2 秒后恢复 */
   const [highlight, setHighlight] = useState<string | null>(null);
   const digest = secretaryDigest(board, Date.now());
@@ -636,19 +782,30 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
     );
   }
 
-  const { dispatched, completed, failed } = digest.today;
+  const { dispatched, completed, failed, earlier } = digest.today;
   const todayLine =
-    dispatched + completed + failed === 0
-      ? t('Nothing dispatched today')
+    dispatched === 0
+      ? earlier === 0
+        ? t('Nothing dispatched today')
+        : t('No new dispatches today; {{count}} earlier or taken over completed', {
+            count: earlier,
+          })
       : t('Today {{dispatched}} dispatched, {{completed}} completed, {{failed}} failed', {
           dispatched,
           completed,
           failed,
-        });
+        }) +
+        (earlier > 0
+          ? t('; plus {{count}} earlier or taken over completed', { count: earlier })
+          : '');
   const active = board.todos.filter((todo) => todo.phase === 'active');
   const problem = board.todos.filter((todo) => todo.phase === 'problem');
   const open = board.todos.filter((todo) => (todo.phase ?? 'todo') === 'todo');
   const reopenIds = new Set([...active, ...problem].map((todo) => todo.id));
+  // 等审批的会话因审批进「需要你」，它完成结果里的 needsUser 仍在秘书手里
+  const triage = [...board.needsYou, ...board.done].filter(
+    (card): card is SecretarySessionCard => card.kind === 'session' && card.triage === true
+  );
 
   return (
     <div data-enso="secretary-workbench" className="flex flex-col gap-3 px-3 py-3">
@@ -714,17 +871,28 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
         <p className="text-[15px] font-semibold">{t(digest.greeting)}</p>
         <p className="mt-0.5 text-[12.5px] text-muted-foreground">{todayLine}</p>
       </div>
-      <div className="grid grid-cols-3 gap-1.5">
+      <div data-enso="secretary-stats" className="grid grid-cols-3 gap-1.5">
         <Stat
           value={digest.counts.needsYou}
           label={t('Waiting on you')}
           warn={digest.counts.needsYou > 0}
+          target="needs-you"
+          section={needsYouRef}
         />
-        <Stat value={digest.counts.running} label={t('In progress')} />
-        <Stat value={digest.counts.todos} label={t('To do')} />
+        <Stat
+          value={digest.counts.running}
+          label={t('In progress')}
+          target="running"
+          section={runningRef}
+        />
+        <Stat value={digest.counts.todos} label={t('To do')} target="todos" section={todosRef} />
       </div>
       {board.needsYou.length > 0 && (
-        <section data-enso="secretary-needs-you" className="flex flex-col gap-1.5">
+        <section
+          ref={needsYouRef}
+          data-enso="secretary-needs-you"
+          className="flex scroll-mt-3 flex-col gap-1.5"
+        >
           {board.needsYou.map((card) =>
             card.kind === 'proposal' ? (
               <div
@@ -746,6 +914,21 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
           )}
         </section>
       )}
+      {triage.length > 0 && <TriageSection cards={triage} />}
+      {board.running.length > 0 && (
+        <section
+          ref={runningRef}
+          data-enso="secretary-workbench-running"
+          className="flex scroll-mt-3 flex-col"
+        >
+          <h3 className="px-1.5 pb-1 text-[12px] text-subtle-foreground">
+            {t('In progress')}
+            <span className="ml-1 tabular-nums">{board.running.length}</span>
+          </h3>
+          <RunningCards running={board.running} />
+        </section>
+      )}
+      {board.threads && board.threads.length > 0 && <ThreadList threads={board.threads} />}
       {active.length > 0 && (
         <TodoGroup title={t('In progress')} count={active.length} marker="secretary-active">
           {active.map((todo) => (
@@ -761,8 +944,9 @@ export function SecretaryWorkbench({ name, secretaryId }: { name: string; secret
         </TodoGroup>
       )}
       <section
+        ref={todosRef}
         data-enso="secretary-todos"
-        className="flex flex-col"
+        className="flex scroll-mt-3 flex-col"
         onDragOver={(event) => {
           if ([...event.dataTransfer.types].includes('text/plain')) event.preventDefault();
         }}
@@ -843,6 +1027,57 @@ function TodoGroup({
         <span className="ml-1 tabular-nums">{count}</span>
       </h3>
       {children}
+    </section>
+  );
+}
+
+/** needsUser 还在等秘书筛选的完成卡：默认收起，不计入「需要你」 */
+function TriageSection({ cards }: { cards: readonly SecretarySessionCard[] }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  return (
+    <section data-enso="secretary-triage" className="flex flex-col">
+      <button
+        type="button"
+        data-enso="secretary-triage-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex items-center gap-1 px-1.5 pb-1 text-left text-[12px] text-subtle-foreground hover:text-foreground"
+      >
+        <ChevronRight className={cn('size-3 transition-transform', open && 'rotate-90')} />
+        {t('With secretary')}
+        <span className="tabular-nums">· {cards.length}</span>
+      </button>
+      {open &&
+        cards.map((card) => (
+          <button
+            key={card.conversationId}
+            type="button"
+            data-enso="secretary-triage-card"
+            onClick={() => openSessionPeek(card.conversationId, { title: card.title })}
+            className={cn(
+              HOVER_ROW_CLASS,
+              'flex flex-col gap-0.5 rounded-lg px-1.5 py-1 text-left'
+            )}
+          >
+            <span className="flex min-w-0 items-center gap-1.5 text-[12.5px]">
+              <span className="min-w-0 flex-1 truncate">{card.title}</span>
+              <span className="shrink-0 rounded bg-muted px-1.5 text-[11px] text-muted-foreground">
+                {card.projectName}
+              </span>
+            </span>
+            {(card.needsUser ?? []).map((item) => (
+              <span
+                key={item}
+                data-enso="secretary-triage-item"
+                title={item}
+                className="line-clamp-1 break-words text-[12px] text-muted-foreground"
+              >
+                {item}
+              </span>
+            ))}
+          </button>
+        ))}
     </section>
   );
 }

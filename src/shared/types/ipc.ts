@@ -98,6 +98,8 @@ export const IPC_CHANNELS = {
   SECRETARY_CONTACT_TEST: 'secretary:contact-test',
   /** 秘书联系方式：扩权开关 */
   SECRETARY_CONTACT_SETTINGS: 'secretary:contact-settings',
+  /** 秘书联系方式：读本机 gh 登录名，只做建议，不写入 */
+  SECRETARY_CONTACT_GITHUB_SUGGEST: 'secretary:contact-github-suggest',
   /** 秘书联系方式：手机关注的任务，取消一项或全清 */
   SECRETARY_CONTACT_FOLLOWING: 'secretary:contact-following',
   /** 秘书联系方式：拉一个 Telegram 群的论坛话题给设置页勾选 */
@@ -365,6 +367,10 @@ export const IPC_CHANNELS = {
   AGENT_SUBAGENT_PROGRESS: 'agent:subagent-progress',
   /** Main → renderer：子代理进度全量快照推送（REPLACE 语义，payload 自带 sessionId） */
   AGENT_SUBAGENT_PROGRESS_CHANGED: 'agent:subagent-progress-changed',
+  /** 获取所有会话当前挂着的自定提醒摘要快照（含冷会话） */
+  AGENT_REMINDERS_LIST: 'agent:reminders-list',
+  /** Main → renderer：单个根会话的自定提醒摘要全量推送（REPLACE 语义） */
+  AGENT_REMINDERS_CHANGED: 'agent:reminders-changed',
   AGENT_SUBAGENT_STOP: 'agent:subagent-stop',
   AGENT_WORKFLOW_STOP: 'agent:workflow-stop',
   AGENT_REWIND: 'agent:rewind',

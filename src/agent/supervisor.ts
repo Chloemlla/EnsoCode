@@ -34,6 +34,7 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { AGENT_COMPACTION_LOG } from '@shared/agentWorkerExit';
+import { setAppLoggingEnabled } from '@shared/appLogFile';
 import type { ApprovalAllowThreshold } from '@shared/approvalReviewRecord';
 import { autoRetryOverrides, DEFAULT_AUTO_RETRY_LIMIT } from '@shared/autoRetry';
 import { snapshotMainConversation } from '@shared/btw';
@@ -88,7 +89,7 @@ import {
   qoderProviderConfig,
 } from '@shared/providers/qoder';
 import { looksLikeRefusal } from '@shared/refusalRetry';
-import { REMINDER_MAX_DELAY_MS, REMINDERS_FILE } from '@shared/reminders';
+import { REMINDER_MAX_DELAY_MS, REMINDERS_FILE, toReminderSummary } from '@shared/reminders';
 import type { RequestBodyUsage } from '@shared/requestBodyUsage';
 import { turnCalledSilenceTurn, turnRequestedSilence } from '@shared/secretary/silence';
 import { isSecretaryToolAllowed, type SecretaryInvokeOp } from '@shared/secretary/tools';
@@ -250,9 +251,11 @@ import {
 } from './goalVerifier';
 import { readHarnessRuleFiles, resolveHarnessSkillRoots } from './harnessAssets';
 import { type ContextMessage, sanitizeContextMessages } from './imageContext';
+import { localReadOperations } from './localReadOperations';
 import { installLongCacheRetention } from './longCacheRetention';
 import { McpManager } from './mcp';
 import { partitionMcpNamespaces } from './mcpNames';
+import { MCP_SERVER_REGISTRY_DIR } from './mcpStdio';
 import { createMessageCoworkerTool } from './messageCoworker';
 import { createMessageMainTool } from './messageMain';
 import { microcompactExtension } from './microcompact';
@@ -268,7 +271,12 @@ import {
   resolveOauthPoolModel,
 } from './oauthAccountPool';
 import { outputLimitRecoveryExtension } from './outputLimitRecovery';
-import { applyOwnerAskResolution, OwnerGate, withOwnerGate } from './ownerGate';
+import {
+  applyOwnerAskResolution,
+  OWNER_GATE_AUDIT_LOG,
+  OwnerGate,
+  withOwnerGate,
+} from './ownerGate';
 import { withPathHints } from './pathHints';
 import { PendingNotificationStore } from './pendingNotifications';
 import { type PersonaHolder, personaExtension } from './personaExtension';
@@ -288,7 +296,7 @@ import {
 import { createProjectSettingsManager } from './projectCode';
 import { projectMessage } from './projection';
 import { promptCatalogExtension } from './promptCatalog';
-import { applyWorkerProxyEnv } from './proxyEnv';
+import { applyWorkerProxyEnv, runWithProviderProxy } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
 import { enqueueReminder, REMINDER_QUEUE_LIMIT } from './reminderQueue';
 import { createReminderTools, REMINDER_RETRY_MS, ReminderStore, reminderNotice } from './reminders';
@@ -319,6 +327,7 @@ import {
 } from './sessionEviction';
 import { branchSessionFromPersistedFile, resolveForkLeafId } from './sessionFork';
 import { createSessionCommandTool } from './sessionShell';
+import { sessionTempDir } from './sessionTempDir';
 import { killRunGroup, sweepOrphanRuns } from './shell/detachedRun';
 import { prepareElevation, withElevation } from './shell/elevation';
 import { type SilentTurnKind, silentTurnKind } from './silentTurn';
@@ -988,6 +997,8 @@ export class SessionSupervisor {
   private readonly mcp = new McpManager({
     emit: (event) => this.options.emit(event),
     refreshOAuth: (serverId, rejected) => this.requestMcpOAuthRefresh(serverId, rejected),
+    processRegistryDir: () =>
+      this.options.dataDir && path.join(this.options.dataDir, MCP_SERVER_REGISTRY_DIR),
   });
   private readonly mcpOAuthPending = new Map<string, (result: McpOAuthRefreshResult) => void>();
   /** 插件经 Main 发起的宿主 MCP 调用，按 requestId 可取消 */
@@ -1301,7 +1312,9 @@ export class SessionSupervisor {
       }
       if (busy && item.ifIdle) continue;
       if (!this.reminders.take(item.id)) continue;
-      texts.push(reminderNotice(item));
+      texts.push(
+        reminderNotice(item, this.reminders.missedWhileDown(item.id) ? Date.now() : undefined)
+      );
       chain = Math.max(chain, item.chain);
     }
     if (texts.length === 0) return;
@@ -1346,8 +1359,22 @@ export class SessionSupervisor {
     this.pendingNotifications = new PendingNotificationStore(
       path.join(options.sessionDir, 'pending-notifications')
     );
-    this.reminders = new ReminderStore(path.join(options.sessionDir, REMINDERS_FILE), () =>
-      this.onRemindersDue()
+    this.reminders = new ReminderStore(
+      path.join(options.sessionDir, REMINDERS_FILE),
+      () => this.onRemindersDue(),
+      (rootIds) => {
+        for (const rootId of rootIds) {
+          const reminders = this.reminders
+            .forRoot(rootId)
+            .sort((a, b) => a.dueAt - b.dueAt)
+            .map(toReminderSummary);
+          this.options.emit({
+            type: 'session-reminders-changed',
+            sessionId: rootId,
+            reminders,
+          });
+        }
+      }
     );
     this.bgTasks = new BackgroundTaskManager(
       {
@@ -1768,6 +1795,10 @@ export class SessionSupervisor {
       this.longCacheRetention = command.enabled;
       return;
     }
+    if (command.type === 'set-app-logging') {
+      setAppLoggingEnabled(command.enabled);
+      return;
+    }
     if (command.type === 'set-privacy-masking') {
       configurePrivacyMasking(this.options.agentDir, command.settings);
       return;
@@ -1913,7 +1944,10 @@ export class SessionSupervisor {
     // abort 必须旁路串行门：它要打断的正是占着门的那一轮，排队等于永远等不到
     if (command.type === 'abort') {
       void this.execute(command).catch((error) => {
-        console.error('[abort] failed:', toErrorMessage(error));
+        const message = toErrorMessage(error);
+        // 会话已销毁或已换代：要停的东西已经不在了，重复 abort 是幂等终态
+        if (message.startsWith(STALE_SESSION_ERROR)) console.debug('[abort] skipped:', message);
+        else console.error('[abort] failed:', message);
       });
       return;
     }
@@ -2213,7 +2247,8 @@ export class SessionSupervisor {
           return;
         }
         // 持有中空闲：没有活轮可插，pi 只会把插话排进没人取的队列，改开新一轮接着这次 Run
-        if (managed.agentRun && managed.status !== 'running') {
+        // 空闲等异步子代理 / 后台任务或刚结束回合的竞态同样没有活轮可插，一律改开新一轮
+        if (managed.status !== 'running' && !managed.session.isStreaming) {
           this.promptFresh(managed, command.text, images, command.deliveryId);
           return;
         }
@@ -2420,9 +2455,15 @@ export class SessionSupervisor {
         return;
       }
       case 'memory-result': {
-        const managed = this.must(command.identity);
-        if (!managed.memory?.resolve(command)) {
-          console.warn(`[memory] dropped result for unknown request ${command.requestId}`);
+        const memory = this.must(command.identity).memory;
+        if (!memory?.resolve(command)) {
+          if (memory?.wasCancelled(command.requestId)) {
+            console.debug(
+              `[memory] dropped late result for cancelled request ${command.requestId}`
+            );
+          } else {
+            console.warn(`[memory] dropped result for unknown request ${command.requestId}`);
+          }
         }
         return;
       }
@@ -2469,6 +2510,9 @@ export class SessionSupervisor {
           triggerTurn: command.triggerTurn,
           ...(command.origin ? { origin: command.origin } : {}),
           ...(command.sender ? { sender: command.sender } : {}),
+          ...(typeof command.ownerConfirm === 'boolean'
+            ? { ownerConfirm: command.ownerConfirm }
+            : {}),
         });
         if (!delivered?.ok) {
           console.warn('[plugin-inject]', delivered?.error ?? '会话未接受注入');
@@ -2932,6 +2976,7 @@ export class SessionSupervisor {
         commandGuard: withTempRootGuard(
           dcgPath ? withDcgExemptions(createDcgGuard(dcgPath), dcgExemptRules) : undefined
         ),
+        sessionTempDir: remote ? null : sessionTempDir(sessionId, { cwd }),
       }
     );
     const checkpoints = new CheckpointManager(
@@ -3011,7 +3056,14 @@ export class SessionSupervisor {
               grep: createRemoteGrepToolDefinition(cwd, sshExecutor) as unknown as Def,
             }
           : {
-              read: withPathHints(wrapRead(createReadToolDefinition(cwd) as unknown as Def), cwd),
+              read: withPathHints(
+                wrapRead(
+                  createReadToolDefinition(cwd, {
+                    operations: localReadOperations,
+                  }) as unknown as Def
+                ),
+                cwd
+              ),
               grep: withPathHints(createGrepToolDefinition(cwd) as unknown as Def, cwd),
             };
       // grep 显式指向密钥文件时同样会把内容带回来（pi 的 grep 带 --hidden），与 read 一起受底线约束
@@ -3654,7 +3706,7 @@ export class SessionSupervisor {
               : withApproval(gate, 'mcp', tool)
           )
         : []),
-      ...builtin('ask_user', [createAskTool(askManager)]),
+      ...builtin('ask_user', [createAskTool(askManager, { secretary: secretaryMode })]),
       ...builtin('subagent', [unifiedSubagentTool]),
       ...builtin('workflow', [
         createWorkflowTool({
@@ -3726,7 +3778,14 @@ export class SessionSupervisor {
             readonlyAgentTypes,
             agentTypeOf: (agentId) => spawnedAgentTypes.get(agentId),
           }),
-          ownerGate
+          ownerGate,
+          (entry) => {
+            if (!this.options.dataDir) return;
+            appendCappedLog(
+              path.join(this.options.dataDir, OWNER_GATE_AUDIT_LOG),
+              `owner-gate session=${sessionId} ${JSON.stringify(entry)}`
+            );
+          }
         )
       );
     // 秘书按名字做允许列表：黑名单只能关掉已知分组，核心工具、插件工具与自造工具都不在其中。
@@ -3906,6 +3965,8 @@ export class SessionSupervisor {
             ...(resolution?.by ? { by: resolution.by } : {}),
             ...(resolution?.answer ? { answer: resolution.answer } : {}),
             ...(resolution?.name ? { name: resolution.name } : {}),
+            ...(resolution?.relatesTo ? { relatesTo: resolution.relatesTo } : {}),
+            ...(resolution?.askedAt !== undefined ? { askedAt: resolution.askedAt } : {}),
           });
         }
       },
@@ -6284,6 +6345,9 @@ export class SessionSupervisor {
     // 去抖中的完成通知先投递：闲会话被唤起（回合在跑），停在边界的会话进持久化待投递队列
     for (const sessionId of this.sessions.keys()) this.notifier.flush(sessionId);
     for (const managed of this.sessions.values()) {
+      // 重启时父会话若正停在阻塞等待（如 subagent wait），主动解除等待而不打断子代理：
+      // 父会话随即到 model-request 安全点，子会话也不再被父会话的 toolStartAt 挡住
+      this.bgTasks.detachBlockingWaits(managed.identity.sessionId, 'restart');
       // 停在边界后用户又插话 / 排了 follow-up：pi 要等 prepareNextTurn 返回后才把它写进会话文件，
       // 这时落断点新进程就丢了这句话。放开挂起让 loop 先写入，回合接着跑，到下一个边界或空闲再判
       const queued = managed.session.pendingMessageCount > 0;
@@ -6785,13 +6849,15 @@ export class SessionSupervisor {
           session.gate.snapshot().some((item) => item.requestId === info.requestId)
         )?.messages ?? []
       );
-      const result = await runtime.classify(
-        model,
-        buildApprovalClassifierRequest(
-          { tool: info.tool, kind: info.kind, summary: info.summary, recentMessages },
-          { managed }
-        ),
-        { signal: combined, ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}) }
+      const result = await runWithProviderProxy(credentials.proxy, () =>
+        runtime.classify(
+          model,
+          buildApprovalClassifierRequest(
+            { tool: info.tool, kind: info.kind, summary: info.summary, recentMessages },
+            { managed }
+          ),
+          { signal: combined, ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}) }
+        )
       );
       if (result.stopReason !== 'stop') {
         return {
@@ -6936,22 +7002,24 @@ export class SessionSupervisor {
     try {
       const runtime = await this.getRuntime();
       const model = resolveClassifierModel(runtime, command.classifier);
-      const result = await runtime.classify(
-        model,
-        {
-          state: command.state as never,
-          questions: {
-            choice: {
-              type: 'choice',
-              instructions: command.instructions,
-              criteria: command.criteria,
+      const result = await runWithProviderProxy(command.classifier.proxy, () =>
+        runtime.classify(
+          model,
+          {
+            state: command.state as never,
+            questions: {
+              choice: {
+                type: 'choice',
+                instructions: command.instructions,
+                criteria: command.criteria,
+              },
             },
           },
-        },
-        {
-          signal: AbortSignal.any([userAbort.signal, timeout.signal]),
-          ...(command.classifier.apiKey ? { apiKey: command.classifier.apiKey } : {}),
-        }
+          {
+            signal: AbortSignal.any([userAbort.signal, timeout.signal]),
+            ...(command.classifier.apiKey ? { apiKey: command.classifier.apiKey } : {}),
+          }
+        )
       );
       const answer = result.answers.choice;
       if (result.stopReason !== 'stop' || answer?.type !== 'choice') {
@@ -7496,6 +7564,7 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
       baseUrl: model.baseUrl,
       apiKey: model.apiKey,
       ...(model.headers ? { headers: model.headers } : {}),
+      ...(model.proxy ? { proxy: model.proxy } : {}),
     },
     [entry]
   );

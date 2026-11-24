@@ -9,7 +9,9 @@ import type { SecretarySkillView, SecretaryState, SecretarySummary } from '@shar
 import { resumesAfterQuit } from '../services/agentHost';
 import { backgroundTaskStates } from '../services/backgroundTaskTracker';
 import { coldResumedSessionIds, onColdResumeFailed } from '../services/coldRestart';
+import { getDemandThreadStore } from '../services/demandThreads';
 import { notifyDesktop } from '../services/desktopHooks';
+import { getEventClaimStore } from '../services/eventClaims';
 import { interruptedTurnReason } from '../services/interruptedTurns';
 import { setSecretaryAvatarResolver } from '../services/localImageProtocol';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
@@ -23,10 +25,12 @@ import { appendDailyRecord } from '../services/secretary/dailyLog';
 import { mainSessionDefaultsFor } from '../services/secretary/defaults';
 import { resolveTarget } from '../services/secretary/deliveries';
 import {
+  answerNeedsUser,
   buildSecretaryState,
   dismissPending,
   dismissResult,
   dispatchPortsFor,
+  escalateNeedsUser,
   listTakeovers,
   listUntracked,
   loadPendingAttachments,
@@ -124,8 +128,10 @@ import { deleteUntouchedSessionBranch } from '../services/worktree/service';
 import {
   getSourceAuthorityRegistry,
   getUpstreamRecoveryService,
+  hasRestartResumingSubagent,
   isRootSessionAlive,
   observedBackgroundTasks,
+  observedOwnSessionStatus,
   observedSessionStatus,
   observedSubagentsRunning,
   promptRootFromMain,
@@ -328,6 +334,8 @@ const driverPorts: DispatchDriverPorts = {
     });
   },
   status: (conversationId) => observedSessionStatus(conversationId),
+  ownStatus: (conversationId) => observedOwnSessionStatus(conversationId),
+  subagentsRunning: (conversationId) => observedSubagentsRunning(conversationId),
   alive: (conversationId) => isRootSessionAlive(conversationId),
   prompt: (conversationId, delivery, deliveryId) =>
     promptRootFromMain(
@@ -369,7 +377,7 @@ function viewedConversation(): string | null {
   return typeof store?.state?.activeId === 'string' ? store.state.activeId : null;
 }
 
-/** 当前打开的会话变了：之前因为正开着而没收走的已完成派出会话，这时归档 */
+/** 当前打开的会话变了：补判以前自动归档的派出会话要不要收回 */
 export function onViewedConversationChanged(sessionId: string | null): void {
   viewedSession = sessionId;
   for (const instance of hosts.values()) instance.sweepAutoArchive();
@@ -421,6 +429,17 @@ function hostPortsFor(
     },
     isSecretaryConversation: (conversationId) =>
       secretaryIdOfConversation(conversationId) === ctx.id,
+    answerNeedsUser: (link, answer, askedAt) => {
+      void answerNeedsUser(dispatchPorts, link, answer, askedAt).catch((error: unknown) => {
+        console.warn(
+          '[secretary] needsUser answer failed:',
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+    },
+    escalateNeedsUser: (link, text) => {
+      escalateNeedsUser(dispatchPorts, link, text, 'ask');
+    },
     publish: () => broadcastState(),
     now: () => Date.now(),
     backgroundStalls: (now) => driver?.watch(now) ?? [],
@@ -433,7 +452,8 @@ function hostPortsFor(
       interruptedTurnReason(path.join(app.getPath('userData'), 'agent'), conversationId),
     // 写进恢复清单的会话新实例接着跑：退出与冷启动恢复都不报失败、中断
     continuesAfterExit: (conversationId) => resumesAfterQuit(conversationId),
-    coldResumed: (conversationId) => coldResumedSessionIds().has(conversationId),
+    coldResumed: (conversationId) =>
+      coldResumedSessionIds().has(conversationId) || hasRestartResumingSubagent(conversationId),
     startPending: (pendingIds, now) => {
       void startPendingDispatches(dispatchPorts, pendingIds, now).catch((error: unknown) => {
         console.warn(
@@ -691,7 +711,9 @@ const NO_SECRETARY = { ok: false as const, error: 'secretary-required' };
 
 export function registerSecretaryHandlers(): void {
   setSecretaryStateListener(broadcastState);
-  // worker 报完启动时的任务表：启动时没敢判的自动归档、被误归档的会话在这里补判
+  getEventClaimStore().onChanged(broadcastState);
+  getDemandThreadStore().onChanged(broadcastState);
+  // worker 报完启动时的任务表：启动时没敢判的、以前自动归档仍有任务在跑的会话在这里补判收回
   backgroundTaskStates.onReported(() => {
     for (const instance of hosts.values()) instance.sweepAutoArchive();
   });
@@ -718,7 +740,7 @@ export function registerSecretaryHandlers(): void {
   );
   const queued = createQueuedSessions(queuedSessionPorts());
   setQueuedSessions(queued);
-  // 用户点确认后立刻把「已确认，正在执行」投给秘书，不等下一分钟的 tick
+  // 用户点确认或提案执行完立刻投给秘书，不等下一分钟的 tick
   setProposalAcceptedListener(() => {
     for (const instance of hosts.values()) instance.flushNow();
   });
@@ -802,15 +824,16 @@ export function registerSecretaryHandlers(): void {
     if (!ctx) return { ok: false, error: 'not-found' };
     // 二次确认：界面先拿预览、用户再点一次确认，才会带上这个标记
     if (parsed.confirmed !== true) return { ok: false, error: 'confirmation-required' };
-    const host = hosts.get(ctx.id);
-    host?.stop();
-    hosts.delete(ctx.id);
-    resumeFailureSubscriptions.get(ctx.id)?.();
-    resumeFailureSubscriptions.delete(ctx.id);
-    statePublishers.delete(ctx.id);
-    await contacts?.remove(ctx.id, true);
     const result = await deleteSecretary(ctx, {
       forget: (conversationId) => driver?.forget(conversationId),
+      stop: async () => {
+        hosts.get(ctx.id)?.stop();
+        hosts.delete(ctx.id);
+        resumeFailureSubscriptions.get(ctx.id)?.();
+        resumeFailureSubscriptions.delete(ctx.id);
+        statePublishers.delete(ctx.id);
+        await contacts?.remove(ctx.id, true);
+      },
     });
     notifySecretariesChanged();
     broadcastState();

@@ -1,14 +1,18 @@
+import type { SessionReminder } from '@shared/reminders';
 import {
   buildSecretaryDaily,
   DAILY_RETENTION_DAYS,
+  type DailySessionMeta,
   dayKey,
   parseDayKey,
 } from '@shared/secretary/daily';
 import type { ProjectAuthority } from '@shared/types/agent';
 import type { SecretaryDaily, SecretaryDispatchFile, SecretaryTodo } from '@shared/types/secretary';
+import { readSessionReminders } from '../sessionReminders';
 import { readAudit } from './audit';
 import { readDailyRecords } from './dailyLog';
 import { projectAliasesFromSettings, secretaryProjectName } from './projectLabel';
+import { secretaryLiveIn } from './results';
 import type { SecretaryContext } from './secretaries';
 import { SecretaryStore } from './store';
 
@@ -20,8 +24,11 @@ export interface SecretaryDailyPorts {
   dispatchFile(): SecretaryDispatchFile;
   todos(): MaybePromise<SecretaryTodo[]>;
   rows(): MaybePromise<Record<string, Record<string, unknown>>>;
+  /** 秘书功能开关：关着时 needsUser 不等筛选；缺省按开着 */
+  secretaryEnabled?(): MaybePromise<boolean>;
   projects(): MaybePromise<readonly ProjectAuthority[]>;
   projectAliases?(): MaybePromise<Readonly<Record<string, string>>>;
+  reminders?(conversationId: string): readonly SessionReminder[];
   now(): number;
 }
 
@@ -41,6 +48,7 @@ export function parseDailyRequest(value: unknown, now: number): string | null {
 export async function buildDaily(ports: SecretaryDailyPorts, day: string): Promise<SecretaryDaily> {
   const file = ports.dispatchFile();
   const rows = await ports.rows();
+  const enabled = (await ports.secretaryEnabled?.()) ?? true;
   const projects = await ports.projects();
   const aliases = (await ports.projectAliases?.()) ?? {};
   const results = readDailyRecords(ports.dir());
@@ -53,7 +61,7 @@ export async function buildDaily(ports: SecretaryDailyPorts, day: string): Promi
     return secretaryProjectName(project, aliases);
   };
 
-  const session = (conversationId: string): { title?: string; projectName?: string } => {
+  const session = (conversationId: string): DailySessionMeta => {
     const row = rows[conversationId];
     if (!row) return {};
     const title = typeof row.title === 'string' && row.title.trim() ? row.title : undefined;
@@ -61,6 +69,7 @@ export async function buildDaily(ports: SecretaryDailyPorts, day: string): Promi
     return {
       ...(title ? { title } : {}),
       ...(projectId ? { projectName: projectName(projectId) } : {}),
+      ...(row.archived === true ? { archived: true as const } : {}),
     };
   };
 
@@ -73,7 +82,9 @@ export async function buildDaily(ports: SecretaryDailyPorts, day: string): Promi
     todos,
     audit,
     session,
+    ...(ports.reminders ? { reminders: ports.reminders } : {}),
     projectName,
+    secretaryLive: (conversationId) => secretaryLiveIn(rows, conversationId, enabled),
     ...(earliest ? { earliest } : {}),
     retentionDays: DAILY_RETENTION_DAYS,
   });
@@ -109,11 +120,13 @@ export function dailyPortsFor(ctx: SecretaryContext): SecretaryDailyPorts {
     dispatchFile: () => store().dispatch(),
     todos: () => store().todos(),
     rows: async () => (await import('../../ipc/settings')).readPersistedConversations(),
+    secretaryEnabled: async () => (await import('./enabled')).secretaryEnabled(),
     projects: async () =>
       (await import('../../ipc/agent')).getSourceAuthorityRegistry()?.projection().projects ?? [],
     async projectAliases() {
       return projectAliasesFromSettings((await import('../../ipc/settings')).readSettings());
     },
+    reminders: (conversationId) => readSessionReminders(conversationId),
     now: () => Date.now(),
   };
 }

@@ -1,5 +1,14 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { selectChatChrome, selectEmptyChatState } from './chatChrome';
+import { searchFiles } from '../../../main/services/fileSearch';
+import {
+  chatProjectRoot,
+  chatWorkspacePath,
+  selectChatChrome,
+  selectEmptyChatState,
+} from './chatChrome';
 import type { Conversation } from './index';
 
 const conv = (id: string, extra: Partial<Conversation> = {}): Conversation =>
@@ -61,5 +70,56 @@ describe('selectChatChrome', () => {
     expect(selectEmptyChatState(null, true)).toBe('empty');
     expect(selectEmptyChatState(chrome, false)).toBeNull();
     expect(selectEmptyChatState(chrome, true)).toBeNull();
+  });
+});
+
+describe('chatWorkspacePath', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+  const chromeOf = (extra: Partial<Conversation> = {}) =>
+    selectChatChrome({ activeId: ID, conversations: { [ID]: conv(ID, extra) } });
+
+  it('临时会话指向 scratch/<会话 id>，而不是 scratch 根目录', () => {
+    expect(chatWorkspacePath(chromeOf(), { kind: 'scratch', path: '/data/scratch' })).toBe(
+      `/data/scratch/${ID}`
+    );
+  });
+
+  it('普通项目仍是项目路径，有 worktree 时是 worktree', () => {
+    const project = { kind: 'local', path: '/repo' };
+    expect(chatWorkspacePath(chromeOf(), project)).toBe('/repo');
+    expect(
+      chatWorkspacePath(
+        chromeOf({ worktree: { path: '/wt/feature', branch: 'feature' } } as Partial<Conversation>),
+        project
+      )
+    ).toBe('/wt/feature');
+  });
+});
+
+describe('chatProjectRoot', () => {
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+
+  it('临时会话的 @ 搜索只覆盖自己的目录，看不到其他临时会话的文件', () => {
+    const scratch = mkdtempSync(path.join(tmpdir(), 'enso-scratch-'));
+    try {
+      for (const [id, file] of [
+        [A, 'mine.md'],
+        [B, 'theirs.md'],
+      ]) {
+        mkdirSync(path.join(scratch, id));
+        writeFileSync(path.join(scratch, id, file), '');
+      }
+      const root = chatProjectRoot(A, { kind: 'scratch', path: scratch });
+      const hits = searchFiles(root as string, '.md').map((hit) => hit.relativePath);
+      expect(hits).toEqual(['mine.md']);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('普通项目仍是项目根，不跟 worktree', () => {
+    expect(chatProjectRoot(A, { kind: 'local', path: '/repo' })).toBe('/repo');
+    expect(chatProjectRoot(A, { path: '/repo' })).toBe('/repo');
   });
 });

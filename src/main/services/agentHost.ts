@@ -3,6 +3,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { agentWorkerPath, app, resourcesPath, utilityProcess, type WorkerProcess } from '@platform';
 import { describeAgentWorkerExit } from '@shared/agentWorkerExit';
+import { APP_LOGGING_ENV, isAppLoggingEnabled } from '@shared/appLogFile';
 import {
   type ApprovalAllowThreshold,
   DEFAULT_APPROVAL_ALLOW_THRESHOLD,
@@ -51,7 +52,9 @@ import { parsePrivacyMaskSettings } from '@shared/privacyMask/settings';
 import { isClassifierOnlyProvider } from '@shared/providerCatalog';
 import { parseProviderHeaders } from '@shared/providers/providerHeaders';
 import { providerKeyFor } from '@shared/providers/providerKey';
+import { parseProviderProxy } from '@shared/providers/providerProxy';
 import { proxyEnvPatchFromEnv } from '@shared/proxy';
+import { reminderReviveDelay } from '@shared/reminders';
 import { appUserImageDirs } from '@shared/secretary/imageView';
 import {
   SECRETARY_ALWAYS_ENABLED_TOOLS,
@@ -130,6 +133,7 @@ import {
 } from '@shared/virtualModels';
 import { parseWebSearchChain, type WebSearchChainEntry } from '@shared/webSearchChain';
 import { parseWindowsLocalShell } from '@shared/windowsLocalShell';
+import { MCP_SERVER_REGISTRY_DIR, sweepOrphanMcpServers } from '../../agent/mcpStdio';
 import { readSettings } from '../ipc/settings';
 import { agentCommandDispatch } from './agentCommandDispatch';
 import {
@@ -195,6 +199,7 @@ import {
   writeRestartManifest,
 } from './restartManifest';
 import { bundledRtkPath } from './rtkBinary';
+import { readAllSessionReminders } from './sessionReminders';
 import { pickSubagentModelRefs, type SubagentModelRef } from './subagentModels';
 import { readStoredSystemPrompt } from './systemPromptStore';
 import { titleModelCandidates } from './titleSummary';
@@ -330,6 +335,8 @@ let workerExited = false;
  * 随应用退出又停掉，交接清单就此用掉，新版本里任务凭空消失（2026-11-23 更新重启现场）
  */
 let quitStopped = false;
+/** worker 意外退出后为挂着的提醒拉起它：提醒定时器在 worker 里，没有 worker 就没人到点叫醒 */
+let reminderRevive: ReturnType<typeof setTimeout> | undefined;
 const gracefulRestart = new GracefulWorkerRestart<WorkerProcess>();
 /** 不可闲置回收的会话，按来源（桌面查看 / 手机订阅）分桶；worker 重启后需重发并集 */
 const pinnedBySource = new Map<string, readonly string[]>();
@@ -365,8 +372,20 @@ export function customWorkflowPresetDir(): string {
   return path.join(agentDataDir(), 'workflows');
 }
 
+/** worker 没来得及收尾的 stdio MCP server（被强杀、随应用被直接结束）：按 worker 的登记清扫 */
+function sweepMcpServers(exitedWorker?: number): void {
+  try {
+    sweepOrphanMcpServers(path.join(agentDataDir(), MCP_SERVER_REGISTRY_DIR), exitedWorker);
+  } catch (error) {
+    console.error('[agent] sweep MCP servers failed:', error);
+  }
+}
+
 export function startAgentWorker(options: { restartCheckpointFile?: string } = {}): void {
   if (worker || quitStopped) return;
+  clearTimeout(reminderRevive);
+  reminderRevive = undefined;
+  sweepMcpServers();
   const askpass = ensureElevationServer();
   const child = utilityProcess.fork(agentWorkerPath, [], {
     serviceName: AGENT_WORKER_SERVICE_NAME,
@@ -377,6 +396,7 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
       ...(options.restartCheckpointFile
         ? { [RESTART_CHECKPOINT_ENV]: options.restartCheckpointFile }
         : {}),
+      [APP_LOGGING_ENV]: isAppLoggingEnabled() ? '1' : '0',
       ENSO_AGENT_DATA_DIR: agentDataDir(),
       // 编码会话的 image_view 白名单：应用存放用户图片的目录（bot-chats/<chatId>/media）
       ENSO_USER_IMAGE_DIRS: appUserImageDirs(app.getPath('userData')).join(path.delimiter),
@@ -548,15 +568,28 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
       if (!swap.swap) parentInstanceIds.clear();
     }
     const dataDir = agentDataDir();
+    sweepMcpServers(childPid);
     const crash = takeAgentWorkerCrash(dataDir, childPid);
-    const detail = `${describeAgentWorkerExit(code, crash)}${swap.swap ? ' (graceful restart)' : ''}`;
-    console.error(`[agent] worker exited pid=${childPid ?? '?'} ${detail}`);
+    // 换代、主动停掉（已不是当前 worker）、退出应用 / 安装更新时终止，都是预期退出；崩溃一律算异常
+    const expectedStop = swap.swap || !current || quitStopped;
+    const normal = !crash && (code === 0 || expectedStop);
+    const reason = swap.swap
+      ? ' (graceful restart)'
+      : expectedStop && code !== 0
+        ? ' (expected stop)'
+        : '';
+    const detail = `${describeAgentWorkerExit(code, crash)}${reason}`;
+    (normal ? console.info : console.error)(
+      `[agent] worker exited pid=${childPid ?? '?'} ${detail}`
+    );
     appendAgentWorkerExitLog(
       dataDir,
       `exit pid=${childPid ?? '?'} ${detail}${crash?.stack ? `\n${crash.stack}` : ''}`
     );
     void output.settled().then((tail) => {
-      if (tail) appendAgentWorkerExitLog(dataDir, `output tail pid=${childPid ?? '?'}\n${tail}`);
+      if (!tail) return;
+      const mark = normal ? ' (normal exit)' : '';
+      appendAgentWorkerExitLog(dataDir, `output tail pid=${childPid ?? '?'}${mark}\n${tail}`);
     });
     pendingReloads.failAll('agent worker exited');
     workspaceLocks.failAll('agent worker exited');
@@ -583,7 +616,22 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
     // 超时退出时 worker 收尾落的断点先写成清单：订阅者收到退出事件时就知道哪些会话重启后接着跑
     if (current && quitCheckpoint) writePendingLateManifest(quitCheckpoint);
     onEvent?.({ type: 'worker-exited', detail });
+    if (current && !quitStopped) scheduleReminderRevive();
   });
+}
+
+function scheduleReminderRevive(): void {
+  const dueAts = Object.values(readAllSessionReminders(path.join(agentDataDir(), 'sessions')))
+    .flat()
+    .map((item) => item.dueAt);
+  const delay = reminderReviveDelay(dueAts, Date.now());
+  if (delay === undefined) return;
+  clearTimeout(reminderRevive);
+  reminderRevive = setTimeout(() => {
+    reminderRevive = undefined;
+    if (!worker && workerExited && !quitStopped) startAgentWorker();
+  }, delay);
+  reminderRevive.unref?.();
 }
 
 /** worker 输出必须持续读走（否则管道写满会卡住 worker）；保留尾部供退出时落日志，dev 照常转到终端 */
@@ -1376,11 +1424,15 @@ function classifierCredentialsFor(
   } else if (!provider.apiKey) {
     return undefined;
   }
+  // 坏代理不下发分类器：不能退回全局代理
+  const proxy = provider.oauthAccountKey ? undefined : parseProviderProxy(provider.proxy);
+  if (proxy === null) return undefined;
   return {
     provider: piProvider,
     modelId,
     ...(provider.oauthAccountKey ? {} : { apiKey: provider.apiKey }),
     ...(baseUrl ? { baseUrl } : {}),
+    ...(proxy ? { proxy } : {}),
   };
 }
 
@@ -1399,6 +1451,9 @@ function resolvePhysicalModelSelection(
   }
   const provider = providers.find((entry) => entry.id === providerId);
   if (!provider) return { ok: false, error: 'Model provider is unavailable.' };
+  if (!provider.oauthAccountKey && parseProviderProxy(provider.proxy) === null) {
+    return { ok: false, error: 'Model provider proxy configuration is invalid.' };
+  }
   const config = spawnModelConfig(provider, modelId);
   return {
     ok: true,
@@ -2256,6 +2311,9 @@ export function registerPluginSessionBridge(
         text,
         ...(decision?.origin ? { origin: decision.origin } : {}),
         ...(sender ? { sender } : {}),
+        ...(typeof decision?.ownerConfirm === 'boolean'
+          ? { ownerConfirm: decision.ownerConfirm }
+          : {}),
         ...(images.length ? { images } : {}),
       });
       if (!sent.ok) return { ok: false, error: sent.error ?? '无法注入消息' };
@@ -3226,6 +3284,15 @@ export function pushLongCacheRetention(): void {
   } satisfies AgentCommand);
 }
 
+/** worker 跟随 Main 当前的应用日志开关 */
+export function pushAppLogging(): void {
+  if (!worker || !workerReady) return;
+  worker.postMessage({
+    type: 'set-app-logging',
+    enabled: isAppLoggingEnabled(),
+  } satisfies AgentCommand);
+}
+
 export function pushPrivacyMasking(): void {
   if (!worker || !workerReady) return;
   worker.postMessage({
@@ -3325,7 +3392,7 @@ function bindModelDirectoryListener(): void {
   });
 }
 
-function customProvidersForWorker(): WorkerCustomProvider[] {
+export function customProvidersForWorker(): WorkerCustomProvider[] {
   const out: WorkerCustomProvider[] = [];
   for (const item of providersFromSettings()) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
@@ -3342,6 +3409,9 @@ function customProvidersForWorker(): WorkerCustomProvider[] {
     }
     if (!Array.isArray(provider.models)) continue;
     const headers = parseProviderHeaders(provider.headers);
+    // 坏代理整条不下发：降级成跟随全局会把请求发到用户没选的出口
+    const proxy = parseProviderProxy(provider.proxy);
+    if (proxy === null) continue;
     out.push({
       settingsId: provider.id,
       name: provider.name,
@@ -3350,6 +3420,7 @@ function customProvidersForWorker(): WorkerCustomProvider[] {
       apiKey: provider.apiKey,
       models: provider.models,
       ...(headers ? { headers } : {}),
+      ...(proxy ? { proxy } : {}),
     });
   }
   return out;
@@ -3408,6 +3479,8 @@ function spawnModelConfig(
     throw new Error('Invalid ChatGPT OAuth pool configuration.');
   const entry = provider.models.find((model: ModelEntry) => model.id === modelId);
   const headers = parseProviderHeaders(provider.headers);
+  // 订阅条目不支持独立代理；坏值已在 resolvePhysicalModelSelection 拒绝
+  const proxy = provider.oauthAccountKey ? undefined : parseProviderProxy(provider.proxy);
   return {
     api: provider.api,
     baseUrl: provider.baseUrl,
@@ -3415,6 +3488,7 @@ function spawnModelConfig(
     modelId,
     settingsProviderId: provider.id,
     ...(headers ? { headers } : {}),
+    ...(proxy ? { proxy } : {}),
     ...(provider.oauthAccountKey ? { oauthAccountKey: provider.oauthAccountKey } : {}),
     ...(isOauthAccountPool(provider) ? { oauthAccountPool: provider.oauthAccountPool } : {}),
     // 统一目录后 OAuth 条目 models 只承载稀疏用户覆盖（enabled/别名/能力/档位），

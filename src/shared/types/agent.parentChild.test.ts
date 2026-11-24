@@ -228,6 +228,15 @@ describe('parent/child commands', () => {
     ).toBeNull();
   });
 
+  it('set-app-logging 只接受布尔 enabled', () => {
+    expect(parseAgentCommand({ type: 'set-app-logging', enabled: false })).toEqual({
+      type: 'set-app-logging',
+      enabled: false,
+    });
+    expect(parseAgentCommand({ type: 'set-app-logging', enabled: 1 })).toBeNull();
+    expect(parseAgentCommand({ type: 'set-app-logging', enabled: true, extra: 1 })).toBeNull();
+  });
+
   it('set-disabled-workflow-presets 只接受合法 id 数组', () => {
     expect(
       parseAgentCommand({ type: 'set-disabled-workflow-presets', ids: ['parallel-review'] })
@@ -647,6 +656,31 @@ describe('parent/child commands', () => {
         model: { ...model, headers: { nope: 1 } },
       })
     ).toEqual({ ...command, model });
+  });
+
+  it('spawn model 严格校验独立代理：合法透传并去空白，非法结构 / URL / OAuth 条目拒收', () => {
+    const spawn = (proxy: unknown, extra: Record<string, unknown> = {}) =>
+      parseAgentCommand({
+        type: 'spawn-parent',
+        identity: parent,
+        cwd: '/repo',
+        model: { ...model, ...extra, proxy },
+      });
+    expect(spawn({ mode: 'none' })).toMatchObject({ model: { proxy: { mode: 'none' } } });
+    expect(spawn({ mode: 'custom', url: ' http://127.0.0.1:7890 ' })).toMatchObject({
+      model: { proxy: { mode: 'custom', url: 'http://127.0.0.1:7890' } },
+    });
+    for (const bad of [
+      null,
+      'none',
+      { mode: 'global' },
+      { mode: 'custom', url: 'socks5://h:1' },
+      { mode: 'custom', url: '' },
+      { mode: 'none', url: 'http://h:1' },
+    ]) {
+      expect(spawn(bad)).toBeNull();
+    }
+    expect(spawn({ mode: 'none' }, { oauthAccountKey: 'anthropic' })).toBeNull();
   });
 
   it('set-web-search-config 链收窄：合法透传，非法/超限拒收', () => {

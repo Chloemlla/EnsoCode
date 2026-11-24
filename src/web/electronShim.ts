@@ -2,12 +2,15 @@
  * 浏览器里替代 `electron` 模块：web-preload 构建时把 preload 的 electron 导入指到这里，
  * ipcRenderer 走父页面（PWA 壳）持有的加密隧道；作用于宿主桌面的通道在本地实现。
  */
+
+import { coalesceRuns } from '@shared/coalesceRuns';
 import {
   REMOTE_LOCAL_PREFIXES,
   type RemoteBridge,
   type RemoteFrameKind,
 } from '@shared/remoteBridge';
 import {
+  REREAD_MARK,
   RemoteReadClient,
   type RemoteReadStore,
   RemoteWriteClient,
@@ -44,15 +47,21 @@ const CACHED_READS: ReadonlySet<string> = new Set([
   IPC_CHANNELS.CONVERSATIONS_READ,
   // 插件脚本与样式每次启动都要取，单个可达数百 KB
   IPC_CHANNELS.EXTENSION_PLUGINS_ASSET,
+  // 每 30s 轮询与启动高频读取的大包：没变直接回 same，避免反复重传百 KB 级列表
+  IPC_CHANNELS.WORKTREE_LIST,
+  IPC_CHANNELS.WORKTREE_STATUSES,
+  IPC_CHANNELS.EXTENSION_PLUGINS_LIST,
+  // 秘书面板状态可达数百 KB：冷启动与重载没变直接回 same，变了走增量
+  IPC_CHANNELS.SECRETARY_GET_STATE,
 ]);
 /** 只合并同时发出的相同请求（结果随会话变化或依赖发起方，不跨次缓存） */
 const SHARED_READS: ReadonlySet<string> = new Set([
   IPC_CHANNELS.OAUTH_CREDENTIAL_KEYS_LIST,
-  IPC_CHANNELS.WORKTREE_LIST,
-  IPC_CHANNELS.WORKTREE_STATUSES,
   IPC_CHANNELS.WORKTREE_BRANCHES,
   IPC_CHANNELS.PROJECTS_CODE_SOURCES,
-  IPC_CHANNELS.EXTENSION_PLUGINS_LIST,
+  // 秘书状态变化时多个面板同时刷新
+  IPC_CHANNELS.SECRETARY_FEED,
+  IPC_CHANNELS.SECRETARY_SCHEDULES_LIST,
 ]);
 
 // 缓存放父页面（父 realm 的 Map，只存字符串）：iframe 重载、设置页 iframe 都能复用
@@ -143,6 +152,27 @@ function expandUpsert(raw: unknown): unknown {
 const channelListeners = new Map<string, Set<(...args: unknown[]) => void>>();
 const channelOff = new Map<string, () => void>();
 
+/** 秘书重读通知：同一秘书在途时合并成一次尾随重读，每次重读的结果分发一次 */
+const secretaryRereads = new Map<string, () => Promise<void>>();
+function rereadSecretary(secretaryId: string): void {
+  let run = secretaryRereads.get(secretaryId);
+  if (!run) {
+    run = coalesceRuns(async () => {
+      const state = await invokeEncoded(IPC_CHANNELS.SECRETARY_GET_STATE, [secretaryId]);
+      const set = channelListeners.get(IPC_CHANNELS.SECRETARY_STATE_CHANGED);
+      for (const fn of [...(set ?? [])]) fn(state);
+    });
+    secretaryRereads.set(secretaryId, run);
+  }
+  void run().catch(() => undefined);
+}
+
+function rereadTarget(raw: unknown): string | null {
+  const first = Array.isArray(raw) ? (raw[0] as Record<string, unknown> | undefined) : undefined;
+  const id = first && typeof first === 'object' ? first[REREAD_MARK] : undefined;
+  return typeof id === 'string' ? id : null;
+}
+
 /** 编解码都在本 iframe 的 realm 内完成；每个通道只订阅一次、解码一次再分发（同 Electron 语义） */
 export const remoteFrame = {
   invoke(channel: string, args: unknown[]): Promise<unknown> {
@@ -166,6 +196,13 @@ export const remoteFrame = {
           let raw: unknown = JSON.parse(payload);
           if (channel === IPC_CHANNELS.AGENT_EVENT) raw = expandUpsert(raw);
           if (raw === null) return;
+          if (channel === IPC_CHANNELS.SECRETARY_STATE_CHANGED) {
+            const secretaryId = rereadTarget(raw);
+            if (secretaryId) {
+              rereadSecretary(secretaryId);
+              return;
+            }
+          }
           const args = decodeRemoteValue<unknown>(raw);
           const list = Array.isArray(args) ? args : [];
           for (const fn of [...set]) fn(...list);

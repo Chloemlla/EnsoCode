@@ -1,11 +1,18 @@
 import {
+  nextPendingReminder,
+  type PendingReminderView,
+  type SessionReminder,
+} from '@shared/reminders';
+import {
   formatGoalResultChecks,
   formatGoalResultClaims,
   hasNeedsUser,
+  needsUserItems,
+  shownNeedsUser,
 } from '@shared/secretary/goalResult';
 import { queuedStartOf, queuePositions } from '@shared/secretary/queuedSession';
 import { wrapUntrusted } from '@shared/secretary/transcript';
-import type { ProjectAuthority, TurnReport } from '@shared/types/agent';
+import type { AgentRunProgress, ProjectAuthority, TurnReport } from '@shared/types/agent';
 import { TURN_REPORT_MAX_CHARS } from '@shared/types/agentConstants';
 import {
   type DispatchRecord,
@@ -13,9 +20,11 @@ import {
   type PendingDispatch,
   type SecretaryBoard,
   type SecretaryCard,
+  type SecretaryDemandThreadView,
   type SecretaryDispatchFile,
   type SecretaryProposal,
   type SecretaryResultKind,
+  type SecretarySubagentView,
   type SecretaryTakeoverView,
   type SecretaryTodo,
   type SecretaryUntrackedView,
@@ -384,9 +393,11 @@ export function sessionLiveState(
 export function sessionStateOf(
   record: DispatchRecord,
   row: Record<string, unknown> | undefined,
-  status: SecretarySessionStatus | undefined
+  status: SecretarySessionStatus | undefined,
+  hasSubagents = false
 ): SessionLiveState {
   const live = sessionLiveState(row, status);
+  if (hasSubagents && (live === 'idle' || live === 'not-started')) return 'running';
   // 秘书停止过的不算：停止写了 idle，残留的 running 是停止之前的旧记录
   if (record.stoppedAt !== undefined) return live;
   // 会话文件还没出现时实时状态是 not-started：记录已经标回运行中，照样算在跑，
@@ -410,6 +421,7 @@ export function sessionStillGoing(input: {
   recordedState?: DispatchRecord['lastState'];
   goalStatus?: string;
   backgroundRunning?: boolean;
+  reminderPending?: boolean;
   lastResult?: DispatchRecord['lastResult'];
   /** 终态之后被重新唤起、这一轮还没结束 */
   reopened?: boolean;
@@ -423,6 +435,7 @@ export function sessionStillGoing(input: {
   if (input.stopped) return false;
   if (input.recordedState === 'running') return true;
   if (input.backgroundRunning) return true;
+  if (input.reminderPending) return true;
   return input.goalStatus === 'active';
 }
 
@@ -440,12 +453,14 @@ export function upstreamRetryOf(
 export function countsAsRunning(
   record: DispatchRecord,
   row: Record<string, unknown> | undefined,
-  status: SecretarySessionStatus | undefined
+  status: SecretarySessionStatus | undefined,
+  hasSubagents = false,
+  reminderPending = false
 ): boolean {
   // 正在启动的排队会话已经占了名额：否则启动期间并发的派发会多建一个
   const queued = queuedStartOf(row);
   if (queued) return queued.startingAt !== undefined;
-  const state = sessionStateOf(record, row, status);
+  const state = sessionStateOf(record, row, status, hasSubagents);
   if (sessionNeedsUser(record, state)) return false;
   if (record.stoppedAt !== undefined && state !== 'running') return false;
   if (upstreamRetryOf(row)) return true;
@@ -456,6 +471,7 @@ export function countsAsRunning(
     recordedState: record.lastState,
     goalStatus: goalStatusOf(row),
     backgroundRunning: record.backgroundRunning === true,
+    reminderPending,
     lastResult: record.lastResult,
     reopened: record.reopenedAt !== undefined,
     stopped: record.stoppedAt !== undefined,
@@ -464,6 +480,8 @@ export function countsAsRunning(
 
 export function sessionNeedsUser(record: DispatchRecord, state: SessionLiveState): boolean {
   if (state === 'waiting') return true;
+  // 运行中（且非 waiting，说明此刻没有待审批或待回答提问）：历史结果已过时，不能占「需要你处理」
+  if (state === 'running') return false;
   const result = record.lastResult;
   if (!result || result.dismissed) return false;
   if (result.kind === 'goal-complete' || result.kind === 'goal-blocked') {
@@ -477,15 +495,22 @@ export function linkedTodoSession(
   record: DispatchRecord | undefined,
   row: Record<string, unknown> | undefined,
   status: { state: 'running' | 'idle' | 'waiting' | 'error' } | undefined,
-  aborted = false
+  aborted = false,
+  hasSubagents = false,
+  reminderPending = false
 ) {
   const view = todoSessionView(row, status, record?.lastResult?.kind, aborted);
-  if (!record || !view.present || view.state !== 'idle') return view;
+  if (!view.present) return view;
+  if (hasSubagents && (view.state === 'idle' || view.state === 'not-started')) {
+    return { ...view, state: 'running' as const };
+  }
+  if (!record || view.state !== 'idle') return view;
   const going = sessionStillGoing({
     state: view.state,
     recordedState: record.lastState,
     goalStatus: goalStatusOf(row),
     backgroundRunning: record.backgroundRunning === true,
+    reminderPending,
     lastResult: record.lastResult,
     reopened: record.reopenedAt !== undefined,
     stopped: record.stoppedAt !== undefined,
@@ -496,12 +521,47 @@ export function linkedTodoSession(
 export interface BoardInput {
   rows: Readonly<Record<string, Record<string, unknown>>>;
   statuses: Readonly<Record<string, SecretarySessionStatus>>;
+  subagents?: Readonly<Record<string, readonly AgentRunProgress[]>>;
+  reminders?: Readonly<Record<string, readonly SessionReminder[]>>;
+  now?: number;
   projects: readonly ProjectAuthority[];
   todos: readonly SecretaryTodo[];
   aliases?: Readonly<Record<string, string>>;
+  threads?: readonly SecretaryDemandThreadView[];
+  /** 秘书功能关着时 needsUser 不等筛选；缺省按开着 */
+  secretaryEnabled?: boolean;
+}
+
+function boardSubagents(
+  runs: readonly AgentRunProgress[] | undefined
+): SecretarySubagentView[] | undefined {
+  if (!runs || runs.length === 0) return undefined;
+  return runs.map((run) => {
+    const activity =
+      run.activity?.phase === 'tool'
+        ? [run.activity.tool, run.activity.detail].filter(Boolean).join(' ')
+        : run.activity?.phase;
+    return {
+      agentId: run.agentId,
+      runId: run.runId,
+      ...(run.title ? { title: redactSecrets(run.title) } : {}),
+      elapsedMs: run.elapsedMs,
+      ...(activity ? { activity: redactSecrets(activity) } : {}),
+    };
+  });
 }
 
 type SessionCard = Extract<SecretaryCard, { kind: 'session' }>;
+
+/** 秘书功能开着、秘书会话还在（没删没归档）：结果能先交给它筛选 */
+export function secretaryLiveIn(
+  rows: Readonly<Record<string, Record<string, unknown>>>,
+  conversationId: string,
+  enabled = true
+): boolean {
+  const row = rows[conversationId];
+  return enabled && Boolean(row) && row.archived !== true;
+}
 
 /** 工作台投影：与 session_list 同源（会话行 + 会话状态 + 项目），不另建一份任务数据 */
 export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): SecretaryBoard {
@@ -509,6 +569,8 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
     const project = input.projects.find((candidate) => candidate.projectId === projectId);
     return secretaryProjectName(project, input.aliases);
   };
+  const secretaryLive = (conversationId: string) =>
+    secretaryLiveIn(input.rows, conversationId, input.secretaryEnabled ?? true);
 
   const needsYou: SecretaryCard[] = Object.values(file.proposals)
     .filter((proposal) => proposal.status === 'pending')
@@ -525,17 +587,56 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
   const queuedCards: { card: SecretaryCard; at: number }[] = [];
   const done: SessionCard[] = [];
   const positions = queuePositions(input.rows);
+  const now = input.now ?? Date.now();
+  const waitingReminderBySession = new Map<string, PendingReminderView>();
   for (const record of Object.values(file.dispatched)) {
     const row = input.rows[record.conversationId];
     if (!row) continue;
     // 用户从看板上移出：记录与会话都还在，只是不再占工作台的列
     if (record.dismissedFromBoard === true) continue;
+    const archived = row.archived === true;
     const status = input.statuses[record.conversationId];
-    const state = sessionStateOf(record, row, status);
-    const going = countsAsRunning(record, row, status);
+    const hasSubagents = (input.subagents?.[record.conversationId]?.length ?? 0) > 0;
+    const pendingReminder = nextPendingReminder(
+      input.reminders?.[record.conversationId] ?? [],
+      now
+    );
+    const state = sessionStateOf(record, row, status, hasSubagents);
+    const going = countsAsRunning(record, row, status, hasSubagents, pendingReminder !== undefined);
     const queued = queuedStartOf(row);
     const upstreamRetry = upstreamRetryOf(row);
     const position = positions.get(record.conversationId);
+    const waitingReminder =
+      going && state !== 'running' && !upstreamRetry && pendingReminder !== undefined
+        ? pendingReminder
+        : undefined;
+    if (waitingReminder) waitingReminderBySession.set(record.conversationId, waitingReminder);
+    // 正在运行的会话不展示过期的终态结果（如重启误标的 interrupted / 旧 failed），以最新实际状态为准
+    const visibleResult =
+      going && record.lastResult && SETTLED_RESULTS.has(record.lastResult.kind)
+        ? undefined
+        : record.lastResult;
+    const pendingNeeds =
+      !archived &&
+      visibleResult &&
+      !visibleResult.dismissed &&
+      !visibleResult.manual &&
+      (visibleResult.kind === 'goal-complete' || visibleResult.kind === 'goal-blocked');
+    // 派出或跟踪的完成结果先经秘书筛选；goal-blocked 照旧直接给用户
+    const shown = shownNeedsUser(
+      pendingNeeds ? record.goalResult : undefined,
+      visibleResult?.kind === 'goal-complete' && secretaryLive(record.secretaryConversationId),
+      now
+    );
+    const needsUser = (shown.triaging ? needsUserItems(record.goalResult) : shown.items).map(
+      (item) => redactSecrets(item)
+    );
+    const needsUserAnswers = shown.answers;
+    const summarySource = record.goalResult?.result.summary?.trim() ?? '';
+    const summary =
+      visibleResult?.kind === 'goal-complete' && !visibleResult.manual && summarySource
+        ? redactSecrets(summarySource).trim()
+        : '';
     // 巡检报过停住、之后没有新活动：进行中列表标「已停住」，等它真的动起来才消失
     const stalled =
       going &&
@@ -555,14 +656,27 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
       stateSince: record.stateSince ?? Math.max(record.createdAt, record.lastResult?.at ?? 0),
       secretaryConversationId: record.secretaryConversationId,
       ...(record.lastText ? { lastText: redactSecrets(record.lastText) } : {}),
-      ...(record.lastResult
-        ? { result: record.lastResult.kind, resultAt: record.lastResult.at }
-        : {}),
+      ...(visibleResult ? { result: visibleResult.kind, resultAt: visibleResult.at } : {}),
+      ...(needsUser.length > 0 ? { needsUser } : {}),
+      ...(needsUserAnswers.length > 0 ? { needsUserAnswers } : {}),
+      ...(shown.triaging ? { triage: true as const } : {}),
+      ...(summary ? { summary } : {}),
       ...(record.lastResult?.manual ? { manual: true as const } : {}),
-      ...(going && state !== 'running' ? { continuing: true as const } : {}),
+      ...(going &&
+      state !== 'running' &&
+      !waitingReminder &&
+      !upstreamRetry &&
+      !record.backgroundRunning &&
+      !hasSubagents
+        ? { continuing: true as const }
+        : {}),
+      ...(waitingReminder ? { pendingReminder: waitingReminder } : {}),
       ...(upstreamRetry ? { upstreamRetry } : {}),
       ...(going && record.backgroundRunning ? { backgroundRunning: true as const } : {}),
       ...(going && record.backgroundPersistent ? { backgroundPersistent: true as const } : {}),
+      ...(going && boardSubagents(input.subagents?.[record.conversationId])
+        ? { subagents: boardSubagents(input.subagents?.[record.conversationId]) }
+        : {}),
       ...(stalled ? { stalled } : {}),
       ...(!going && record.leftoverTasks
         ? { leftoverTasks: { count: record.leftoverTasks.count } }
@@ -581,7 +695,9 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
       else queuedCards.push({ card, at: queued.queuedAt });
       continue;
     }
-    const needsYouNow = sessionNeedsUser(record, state);
+    // 归档了就是用户已经处理过，不再占「需要你处理」
+    const needsYouNow =
+      !archived && (state === 'waiting' || (!shown.triaging && sessionNeedsUser(record, state)));
     if (needsYouNow) needsYou.push(card);
     else if (going) running.push(card);
     else done.push(card);
@@ -614,11 +730,20 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
     running,
     done,
     todos: input.todos.flatMap((todo) => {
+      const hasSubagents = todo.conversationId
+        ? (input.subagents?.[todo.conversationId]?.length ?? 0) > 0
+        : false;
+      const todoReminder = todo.conversationId
+        ? waitingReminderBySession.get(todo.conversationId)
+        : undefined;
       const session = todo.conversationId
         ? linkedTodoSession(
             file.dispatched[todo.conversationId],
             input.rows[todo.conversationId],
-            input.statuses[todo.conversationId]
+            input.statuses[todo.conversationId],
+            false,
+            hasSubagents,
+            todoReminder !== undefined
           )
         : null;
       const phase = todoStatus(todo, session);
@@ -626,19 +751,23 @@ export function buildBoard(file: SecretaryDispatchFile, input: BoardInput): Secr
       const project = todo.projectId
         ? input.projects.find((candidate) => candidate.projectId === todo.projectId)
         : undefined;
+      const { problem, ...baseTodo } = todo;
       return [
         {
-          ...todo,
+          ...baseTodo,
+          ...(phase === 'problem' && problem ? { problem } : {}),
           phase,
           ...(project ? { projectName: secretaryProjectName(project, input.aliases) } : {}),
           ...(session?.title ? { sessionTitle: redactSecrets(session.title) } : {}),
           ...(todo.conversationId
             ? { sessionState: session?.present ? session.state : ('gone' as const) }
             : {}),
+          ...(todoReminder ? { pendingReminder: todoReminder } : {}),
         },
       ];
     }),
     ...(file.activity && file.activity.length > 0 ? { activity: file.activity } : {}),
+    ...(input.threads && input.threads.length > 0 ? { threads: [...input.threads] } : {}),
   };
 }
 

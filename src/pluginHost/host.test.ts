@@ -137,6 +137,59 @@ describe('runPluginHost', () => {
     });
   });
 
+  it('contact.call 抛出带 code 与 userMessage 的结构化错误时原样透传；普通 Error 向后兼容', async () => {
+    const h = harness(`export function activate(enso) {
+      void enso.contact.register('wechat', {
+        caps: {},
+        sendText: async (_peerId, msg) => {
+          if (msg.text === 'structured') {
+            throw Object.assign(new Error('sendmessage ret=-2 prepare failed'), {
+              code: 'SESSION_EXPIRED',
+              userMessage: '微信会话已过期，请在微信里给机器人发任意一条消息',
+            });
+          }
+          throw new Error('legacy failure');
+        },
+      });
+    }`);
+    const register = await h.next((m) => m.t === 'call' && m.api === 'contact.register');
+    if (register.t !== 'call') return;
+    h.deliver({ t: 'res', id: register.id, ok: true, value: null });
+    await h.next((m) => m.t === 'ready');
+    const contactCall = (id: string, text: string) =>
+      ({
+        t: 'call',
+        id,
+        method: 'contact.call',
+        payload: { channelId: 'wechat', op: 'sendText', peerId: 'wx-me', text },
+        invocationId: `inv-${id}`,
+        sessionId: null,
+        projectRoot: null,
+      }) as unknown as MainToPluginHost;
+    await new Promise((r) => setTimeout(r, 10));
+    h.deliver(contactCall('e1', 'structured'));
+    expect(await h.next((m) => m.t === 'res' && m.id === 'e1')).toEqual({
+      t: 'res',
+      id: 'e1',
+      ok: false,
+      error: {
+        code: 'SESSION_EXPIRED',
+        message: 'sendmessage ret=-2 prepare failed',
+        userMessage: '微信会话已过期，请在微信里给机器人发任意一条消息',
+      },
+    });
+    h.deliver(contactCall('e2', 'legacy'));
+    expect(await h.next((m) => m.t === 'res' && m.id === 'e2')).toEqual({
+      t: 'res',
+      id: 'e2',
+      ok: false,
+      error: {
+        code: 'PLUGIN_ERROR',
+        message: 'legacy failure',
+      },
+    });
+  });
+
   it('执行工具并把字符串结果规整成 { content }', async () => {
     const h = harness(
       `export function activate(enso) { enso.tools.register('lookup', async (args, ctx) => 'hi ' + args.q + ' ' + ctx.sessionId); }`
@@ -173,6 +226,41 @@ describe('runPluginHost', () => {
       level: 'error',
       message: expect.stringMatching(/command\.run[\s\S]*kaput/),
     });
+  });
+
+  it('调用被取消记 debug；插件标了 expected 的业务错误记 info 且原样回传；其余照旧记 error', async () => {
+    const h = harness(`export function activate(enso) {
+      enso.commands.register('wait', (ctx) => new Promise((_, reject) => {
+        ctx.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }));
+      enso.commands.register('coded', async () => { throw Object.assign(new Error('调用已取消'), { code: 'ABORTED' }); });
+      enso.commands.register('origin', async () => {
+        throw Object.assign(new Error('当前项目的 origin 不是 GitHub 仓库'), { code: 'NOT_GITHUB', expected: true });
+      });
+      enso.commands.register('bad', async () => { throw new Error('kaput'); });
+    }`);
+    await h.next((m) => m.t === 'ready');
+    const logOf = async (id: string) => {
+      await h.next((m) => m.t === 'res' && m.id === id);
+      return h.sent.filter((m) => m.t === 'log').at(-1);
+    };
+    h.deliver(call('c1', 'command.run', { id: 'wait' }));
+    await new Promise((r) => setTimeout(r, 10));
+    h.deliver({ t: 'cancel', invocationId: 'inv-c1' });
+    expect(await logOf('c1')).toMatchObject({ level: 'debug' });
+    h.deliver(call('c2', 'command.run', { id: 'coded' }));
+    expect(await logOf('c2')).toMatchObject({ level: 'debug' });
+    h.deliver(call('c3', 'command.run', { id: 'origin' }));
+    expect(await logOf('c3')).toMatchObject({
+      level: 'info',
+      message: expect.stringContaining('origin 不是 GitHub'),
+    });
+    expect(h.sent.find((m) => m.t === 'res' && m.id === 'c3')).toMatchObject({
+      ok: false,
+      error: { code: 'NOT_GITHUB', expected: true },
+    });
+    h.deliver(call('c4', 'command.run', { id: 'bad' }));
+    expect(await logOf('c4')).toMatchObject({ level: 'error' });
   });
 
   it('未注册的处理器返回 NOT_FOUND', async () => {
@@ -388,6 +476,36 @@ describe('子进程收敛', () => {
     for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => setTimeout(r, 10));
     expect(alive(pid)).toBe(false);
   });
+
+  it.runIf(process.platform !== 'win32')('子进程派生的孙进程在 shutdown 后也退出', async () => {
+    const grandchild = `const g = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(g.pid); setInterval(() => {}, 1000);`;
+    const h = harness(`import { spawn } from 'node:child_process';
+      export function activate(enso) {
+        const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}]);
+        let out = '';
+        child.stdout.on('data', (chunk) => { out += chunk; });
+        enso.tools.register('pid', () => out.trim());
+      }`);
+    await h.next((m) => m.t === 'ready');
+    let pid = 0;
+    for (let i = 0; i < 100 && !pid; i++) {
+      h.deliver(call(`c${i}`, 'tool.execute', { name: 'pid', args: {} }));
+      const res = await h.next((m) => m.t === 'res' && m.id === `c${i}`);
+      pid = Number((res as { value: { content: string } }).value.content);
+      if (!pid) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(alive(pid)).toBe(true);
+    try {
+      h.deliver({ t: 'shutdown' });
+      await h.next(() => h.exited() !== null);
+      for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => setTimeout(r, 10));
+      expect(alive(pid)).toBe(false);
+    } finally {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {}
+    }
+  });
 });
 
 describe('createProcessTransport', () => {
@@ -452,5 +570,75 @@ describe('captureConsole', () => {
       level: 'error',
       message: expect.stringContaining('Error: e'),
     });
+  });
+
+  it('日志开关关闭时不采集 console 输出，打开后立即恢复采集', () => {
+    const sent: PluginHostToMain[] = [];
+    const noop = (..._args: unknown[]) => {};
+    const target = { log: noop, info: noop, warn: noop, error: noop, debug: noop };
+    let enabled = false;
+    captureConsole(
+      target,
+      (m) => sent.push(m),
+      () => enabled
+    );
+    target.log('muted-info');
+    target.warn('muted-warn');
+    target.error('muted-error');
+    expect(sent).toHaveLength(0);
+    enabled = true;
+    target.log('live-info');
+    expect(sent).toEqual([{ t: 'log', level: 'info', message: 'live-info' }]);
+  });
+
+  it('init 与 set-logging 热切换采集，无需重启宿主', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'plugin-host-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'main.mjs'), 'export function activate() {}');
+    const sent: PluginHostToMain[] = [];
+    const changes: boolean[] = [];
+    let enabled = true;
+    const noop = (..._args: unknown[]) => {};
+    const target = { log: noop, info: noop, warn: noop, error: noop, debug: noop };
+    captureConsole(
+      target,
+      (m) => sent.push(m),
+      () => enabled
+    );
+    let handler: (msg: unknown) => void = () => {};
+    runPluginHost(
+      {
+        send: (m) => sent.push(m),
+        onMessage: (h) => {
+          handler = h;
+        },
+      },
+      {
+        onLoggingChange: (next) => {
+          enabled = next;
+          changes.push(next);
+        },
+      }
+    );
+    handler({
+      t: 'init',
+      pluginId: 'a.b',
+      pluginRoot: dir,
+      main: 'main.mjs',
+      dataDir: dir,
+      loggingEnabled: false,
+    });
+    expect(changes).toEqual([false]);
+    target.log('muted');
+    handler({ t: 'set-logging', enabled: true });
+    target.log('live');
+    handler({ t: 'set-logging', enabled: false });
+    target.warn('muted-again');
+    handler({ t: 'set-logging', enabled: 'yes' });
+    expect(enabled).toBe(false);
+    expect(changes).toEqual([false, true, false]);
+    expect(sent.filter((m) => m.t === 'log')).toEqual([
+      { t: 'log', level: 'info', message: 'live' },
+    ]);
   });
 });

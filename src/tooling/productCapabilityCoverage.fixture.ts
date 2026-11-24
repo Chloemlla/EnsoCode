@@ -104,6 +104,12 @@ export const SETTINGS_DATA_COVERAGE = {
   pluginAutoUpdate: excluded(
     'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
   ),
+  pluginLoggingEnabled: excluded(
+    'Device-local plugin logging diagnostics switch, not an Enso capability.'
+  ),
+  appLoggingEnabled: excluded(
+    'Device-local app logging diagnostics switch, not an Enso capability.'
+  ),
   proxyMode: surfaces('general.proxy-mode'),
   customProxyUrl: surfaces('general.custom-proxy-url'),
   customCaCertPath: excluded('Device-local CA certificate file path for TLS trust.'),
@@ -299,6 +305,12 @@ export const SETTINGS_ACTION_COVERAGE = {
   setUpdateChannel: excluded('Device update channel policy; not an Enso capability.'),
   setPluginAutoUpdate: excluded(
     'Automatic Enso plugin updates are a device-local preference, not an Enso capability.'
+  ),
+  setPluginLoggingEnabled: excluded(
+    'Device-local plugin logging diagnostics switch, not an Enso capability.'
+  ),
+  setAppLoggingEnabled: excluded(
+    'Device-local app logging diagnostics switch, not an Enso capability.'
   ),
   setProxyMode: surfaces('general.proxy-mode'),
   setCustomProxyUrl: surfaces('general.custom-proxy-url'),
@@ -552,6 +564,9 @@ export const IPC_PRODUCT_COVERAGE = {
   SECRETARY_CONTACT_FORGET_BOT: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_TEST: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_SETTINGS: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_CONTACT_GITHUB_SUGGEST: excluded(
+    'Experimental secretary agent; not an Enso capability.'
+  ),
   SECRETARY_CONTACT_FOLLOWING: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_CONTACT_TELEGRAM_TOPICS: excluded(
     'Experimental secretary agent; not an Enso capability.'
@@ -757,6 +772,12 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   AGENT_SUBAGENT_PROGRESS_CHANGED: excluded(
     'Main-to-renderer push of running subagent progress snapshots for the desktop wait row.'
+  ),
+  AGENT_REMINDERS_LIST: excluded(
+    'Read-only snapshot of pending session reminders shown in the desktop sidebar and GoalBar; renderer-only, not an Enso capability.'
+  ),
+  AGENT_REMINDERS_CHANGED: excluded(
+    'Main-to-renderer push of pending session reminder updates for the desktop sidebar and GoalBar.'
   ),
   AGENT_WORKFLOW_STOP: excluded('Side panel control to stop a running workflow run.'),
   AGENT_SUBAGENT_STOP: excluded(

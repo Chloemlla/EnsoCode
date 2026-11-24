@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { app, ipcMain, type RendererContents } from '@platform';
+import { isAppLoggingEnabled, setAppLoggingEnabled } from '@shared/appLogFile';
 import { diffConversations, isEmptyConversationsStore } from '@shared/conversationsPatch';
 import {
   type ContextMenuOpen,
@@ -98,6 +99,8 @@ export const SETTINGS_STATE_FIELDS = [
   'autoRestartForUpdate',
   'updateChannel',
   'pluginAutoUpdate',
+  'pluginLoggingEnabled',
+  'appLoggingEnabled',
   'proxyMode',
   'customProxyUrl',
   'customCaCertPath',
@@ -233,6 +236,8 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'updateChannel',
   'longCacheRetention',
   'pluginAutoUpdate',
+  'pluginLoggingEnabled',
+  'appLoggingEnabled',
   'proxyMode',
   'customProxyUrl',
   'customCaCertPath',
@@ -520,6 +525,21 @@ function scheduleWrite(
     ) {
       void import('./bots').then(({ syncBotDiscussMode }) => syncBotDiscussMode()).catch(() => {});
     }
+    const nextPluginLogging = settingsStateOf(data).pluginLoggingEnabled === true;
+    const nextAppLogging = settingsStateOf(data).appLoggingEnabled === true;
+    if (isAppLoggingEnabled() !== nextAppLogging) {
+      setAppLoggingEnabled(nextAppLogging);
+      void import('../services/agentHost')
+        .then(({ pushAppLogging }) => pushAppLogging())
+        .catch(() => {});
+    }
+    if ((settingsStateOf(previous).pluginLoggingEnabled === true) !== nextPluginLogging) {
+      void import('../services/extensionPlugins')
+        .then(({ peekExtensionPlugins }) =>
+          peekExtensionPlugins()?.setLoggingEnabled(nextPluginLogging)
+        )
+        .catch(() => {});
+    }
 
     // 普通 store 写排除 sender；Gateway 写显式选择 all-renderers。
     for (const contents of localUi()?.allContents() ?? []) {
@@ -527,12 +547,14 @@ function scheduleWrite(
         contents.send(IPC_CHANNELS.SETTINGS_CHANGED);
       }
     }
-    sendToRemoteRenderers(
-      IPC_CHANNELS.SETTINGS_CHANGED,
-      [],
-      broadcast === 'all-renderers' ? undefined : sender?.id,
-      patchedRemoteMain ? 'main' : undefined
-    );
+    // 远端 settings:read 已剥离 enso-conversations，主界面走会话补丁、设置页不消费会话，无需唤醒任何远端重读
+    if (!patchedRemoteMain) {
+      sendToRemoteRenderers(
+        IPC_CHANNELS.SETTINGS_CHANGED,
+        [],
+        broadcast === 'all-renderers' ? undefined : sender?.id
+      );
+    }
 
     if (pendingWrite) {
       clearTimeout(pendingWrite);
@@ -840,7 +862,13 @@ export function reloadSettingsFromDisk(): boolean {
   isDirty = false;
   cachedSettings = null;
   const data = readSettings();
-  if (data !== null) return scheduleWrite(data, undefined, 'all-renderers');
+  if (data !== null) {
+    const ok = scheduleWrite(data, undefined, 'all-renderers');
+    void import('../services/extensionPlugins')
+      .then(({ peekExtensionPlugins }) => peekExtensionPlugins()?.syncLoggingEnabled())
+      .catch(() => {});
+    return ok;
+  }
   providerModelRefresh?.sync();
   return false;
 }

@@ -58,6 +58,8 @@ import {
   cleanTitleSummarySource,
   extractRepresentativeTitle,
 } from '@/components/chat/mentionComposer';
+import { useSessionRemindersStore } from '@/stores/sessionReminders';
+import { useSubagentRunsStore } from '@/stores/subagentRuns';
 import { useWorkflowRunsStore } from '@/stores/workflowRuns';
 
 /** 会话目标(pi-goal 式):active 时每次轮次收束自动续跑一次,直到终止信号或安全限制 */
@@ -1302,6 +1304,20 @@ export const useSessionsStore = create<SessionsState>()(
           restore: { kind: 'goal' },
         });
       });
+      window.electronAPI.agent.onSubagentProgress?.((push) => {
+        useSubagentRunsStore.getState().replace(push.sessionId, push.runs);
+      });
+      window.electronAPI.agent.onRemindersChanged?.((push) => {
+        useSessionRemindersStore.getState().replace(push.sessionId, push.reminders);
+      });
+      void window.electronAPI.agent
+        .listReminders?.()
+        .then((all) => {
+          if (all && typeof all === 'object') {
+            useSessionRemindersStore.getState().replaceAll(all);
+          }
+        })
+        .catch(() => {});
       window.electronAPI.agent.onEvent((event) => {
         if (event.type === 'worker-exited') {
           set((state) => {

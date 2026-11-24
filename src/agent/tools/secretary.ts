@@ -17,7 +17,7 @@ type JsonSchema = Record<string, unknown>;
 const MODEL_SCHEMA: JsonSchema = {
   type: 'object',
   description:
-    "Optional: an exact provider and model, checked before anything is created. An unknown, disabled or credential-less provider or model is refused with an error and is never silently replaced by the default. Omit it to follow the project's default model.",
+    'Optional: an exact provider and model, checked before anything is created. For a virtual model the user configured (such as Auto), pass providerId "enso-virtual" and modelId the virtual model id. An unknown, disabled or credential-less provider or model is refused with an error that lists the usable models, virtual models included, and is never silently replaced by the default. Omit it to follow the project\'s default model.',
   properties: {
     providerId: { type: 'string', minLength: 1, maxLength: 200 },
     modelId: { type: 'string', minLength: 1, maxLength: 200 },
@@ -46,6 +46,11 @@ const SPECS: Record<SecretaryOp, OpSpec> = {
     aliases: { id: 'projectId', dir: 'path', directory: 'path', cwd: 'path', sha: 'contains' },
   },
   session_list: { keys: ['projectId', 'limit'], numbers: ['limit'] },
+  claims_list: { keys: ['prefix', 'sessionId', 'pluginId'] },
+  threads_list: {
+    keys: ['status', 'sessionId', 'repo', 'activeOnly'],
+    booleans: ['activeOnly'],
+  },
   session_read: {
     keys: ['conversationId', 'limit', 'before', 'index', 'entryId', 'offset'],
     numbers: ['limit', 'before', 'index', 'offset'],
@@ -131,6 +136,11 @@ const SPECS: Record<SecretaryOp, OpSpec> = {
     arrays: ['ids'],
     aliases: { sessionId: 'conversationId', conversationIds: 'ids', id: 'ids' },
   },
+  session_unarchive: {
+    keys: ['conversationId', 'ids'],
+    arrays: ['ids'],
+    aliases: { sessionId: 'conversationId', conversationIds: 'ids', id: 'ids' },
+  },
   result_mark_done: {
     keys: ['conversationId'],
     aliases: { sessionId: 'conversationId', id: 'conversationId' },
@@ -138,6 +148,17 @@ const SPECS: Record<SecretaryOp, OpSpec> = {
   result_mark_undo: {
     keys: ['conversationId'],
     aliases: { sessionId: 'conversationId', id: 'conversationId' },
+  },
+  needs_user_escalate: {
+    keys: ['conversationId', 'needsUserIndex', 'text'],
+    numbers: ['needsUserIndex'],
+    aliases: {
+      sessionId: 'conversationId',
+      id: 'conversationId',
+      index: 'needsUserIndex',
+      needsUser: 'needsUserIndex',
+      message: 'text',
+    },
   },
   session_answer: {
     keys: ['conversationId', 'askId', 'answer'],
@@ -434,10 +455,46 @@ const SCHEMAS: Record<
   },
   session_list: {
     description:
-      'List root sessions across the projects you can see, newest first, with state and a short summary. Child sessions, archived sessions and other secretaries are excluded.',
+      'List root sessions across the projects you can see, newest first, with state and a short summary. Child sessions, sessions the user archived and other secretaries are excluded. A session you dispatched that an earlier version archived automatically when it finished is still listed, marked archived: true.',
     parameters: object({
       projectId: id('Optional: only sessions of this project'),
       limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Max rows (default 50)' },
+    }),
+  },
+  claims_list: {
+    description:
+      'List active object claims: which session currently receives events for an external object such as a pull request or a chat. Optional filters are prefix, sessionId and pluginId.',
+    parameters: object({
+      prefix: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 256,
+        description: 'Only claims whose key starts with this prefix',
+      },
+      sessionId: id('Only claims held by this session'),
+      pluginId: id('Only claims created by this plugin'),
+    }),
+  },
+  threads_list: {
+    description:
+      'List demand threads that tie a source message to the session responsible for it and, once known, its pull request. Read-only. Optional filters are status, sessionId, repo and activeOnly.',
+    parameters: object({
+      status: {
+        type: 'string',
+        enum: ['open', 'in_progress', 'pr_opened', 'ci_failed', 'needs_human', 'merged', 'closed'],
+        description: 'Only threads in this status',
+      },
+      sessionId: id('Only threads owned by this session'),
+      repo: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 200,
+        description: 'Only threads bound to this owner/repo',
+      },
+      activeOnly: {
+        type: 'boolean',
+        description: 'Omit merged and closed threads',
+      },
     }),
   },
   session_read: {
@@ -611,9 +668,23 @@ const SCHEMAS: Record<
       },
     }),
   },
+  session_unarchive: {
+    description:
+      'Pull back sessions you dispatched or track, and only ones you archived (session_archive, cleanup_apply, or the older automatic archive). Pass one conversationId or up to 20 ids. A session the user archived by hand returns archived-by-user and must not be retried; ask the user to unarchive it. Unarchiving is the same as the user unarchiving it by hand: it returns to its place in the sidebar and shows up in session_list. You can session_send afterwards, and a finished session can continue with a goal. The call is audited per session and returns one row per id: status unarchived, skipped or failed, with the reason. Already deleted, not archived, not a session you manage, or in a project you cannot see are skipped.',
+    parameters: object({
+      conversationId: id('Session id from session_list or session_tasks'),
+      ids: {
+        type: 'array',
+        items: { type: 'string', minLength: 1, maxLength: SECRETARY_ID_MAX },
+        minItems: 1,
+        maxItems: 20,
+        description: 'Session ids to unarchive in one call, at most 20',
+      },
+    }),
+  },
   result_mark_done: {
     description:
-      'Close out a dispatch you know is finished but that still shows as in progress on the board. It is the same action as the "mark done" button on the board card: the dispatch record gets a manual goal-complete result and the session stops counting as running. A blocked or paused goal on the session is closed with it, so a later session_send with goal is not refused; result_mark_undo puts that goal back. Only sessions you dispatched or track are accepted; nothing else in the session is touched and nothing is stopped. The call is audited as a manual mark by the secretary. Use it when the session clearly finished its work but its result never arrived; if it is really still working, leave it alone.',
+      'Close out a dispatch you know is finished but that still shows as in progress on the board. It is the same action as the "mark done" button on the board card: the dispatch record gets a manual goal-complete result and the session stops counting as running. A blocked or paused goal on the session is closed with it, so a later session_send with goal is not refused; result_mark_undo puts that goal back. Only sessions you dispatched or track are accepted; nothing else in the session is touched and nothing is stopped. The call is audited as a manual mark by the secretary. Use it when the session clearly finished its work but its result never arrived; if it is really still working, leave it alone. Also use it after you settled every needs-user[N] item of a goal-complete yourself, so the card leaves "with secretary" and lands in done. A needsUser card you put to the user through ask_user with relatesTo clears itself once every item is answered, so do not mark it; if items you never escalated remain after an answer, the card comes back to you, and you mark it once you handled them.',
     parameters: object({ conversationId: id('Session id from session_list or the board') }, [
       'conversationId',
     ]),
@@ -624,6 +695,27 @@ const SCHEMAS: Record<
     parameters: object({ conversationId: id('Session id from session_list or the board') }, [
       'conversationId',
     ]),
+  },
+  needs_user_escalate: {
+    description:
+      'Put one needs-user[N] item of a goal-complete result in front of the user without asking a question, for something only they can do by hand (for example "click confirm in the Mac title bar"). needsUser items of sessions you dispatched or track first wait for you under "with secretary" and do not reach the user\'s "needs you" list until you escalate them. Escalate only what the user personally has to decide or do; while an escalated item waits on the user, the items you did not escalate stay hidden. Pass text to reword the item as one plain sentence saying what the user should do; the card shows it as "Needs you: <text>". When you need an answer instead, use ask_user with relatesTo, which escalates the item too. Items nobody escalates, answers or settles reach the user on their own 30 minutes after the last escalation or answer. The call is audited.',
+    parameters: object(
+      {
+        conversationId: id('Session id shown as session:<id> in the result update'),
+        needsUserIndex: {
+          type: 'integer',
+          minimum: 0,
+          description: 'N from the needs-user[N] line',
+        },
+        text: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 300,
+          description: 'Optional: the item reworded as one plain sentence of what the user must do',
+        },
+      },
+      ['conversationId', 'needsUserIndex']
+    ),
   },
   session_answer: {
     description:

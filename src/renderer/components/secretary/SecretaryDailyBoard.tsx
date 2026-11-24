@@ -1,3 +1,4 @@
+import { formatReminderClock, formatReminderTooltip } from '@shared/reminders';
 import { dayKey, shiftDay } from '@shared/secretary/daily';
 import type { BackgroundTaskInfo } from '@shared/types/agent';
 import type {
@@ -10,6 +11,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Inbox,
   Link2,
   Undo2,
@@ -147,6 +149,7 @@ function DailyCard({
   const [stopping, setStopping] = useState(false);
   const body = item.summary ?? item.detail;
   const detail = item.detail ?? item.summary;
+  const needsUser = item.needsUser && item.needsUser.length > 0 ? item.needsUser : undefined;
   // 待办卡把新增与完成时间都挂在卡上，已完成的划掉，与未完成区分开
   const done = item.doneAt !== undefined;
   const times = [
@@ -280,15 +283,69 @@ function DailyCard({
         >
           {item.title}
         </span>
-        {body && (
-          <span
-            className={cn(
-              'mt-[3px] block whitespace-pre-wrap break-words text-[12px] text-muted-foreground',
-              expanded ? undefined : 'line-clamp-3'
+        {needsUser ? (
+          <>
+            {item.summary && (
+              <span
+                data-enso="secretary-daily-needs-user-summary"
+                title={item.summary}
+                className="mt-[4px] block line-clamp-1 break-words text-[12px] text-muted-foreground"
+              >
+                {item.summary}
+              </span>
             )}
-          >
-            {expanded ? detail : body}
-          </span>
+            <ul
+              data-enso="secretary-daily-needs-user"
+              className="mt-[4px] flex flex-col gap-0.5 text-[12px] text-foreground/90"
+            >
+              {needsUser.map((entry, index) => {
+                const answered = item.goalResult?.answers?.find((a) => a.index === index);
+                return (
+                  <li
+                    key={entry}
+                    data-enso="secretary-daily-needs-user-item"
+                    data-answered={answered ? 'true' : undefined}
+                    title={entry}
+                    className="break-words"
+                  >
+                    <span
+                      className={cn(
+                        'line-clamp-2',
+                        answered && 'text-muted-foreground line-through'
+                      )}
+                    >
+                      {t('Needs you: {{item}}', { item: entry })}
+                    </span>
+                    {answered && (
+                      <span
+                        data-enso="secretary-daily-needs-user-answer"
+                        title={answered.answer}
+                        className="line-clamp-1 text-success"
+                      >
+                        {t('Answered: {{answer}}', { answer: answered.answer })}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            {expanded && detail && (
+              <span className="mt-1.5 block whitespace-pre-wrap break-words border-t border-border/60 pt-1 text-[11.5px] text-muted-foreground">
+                {detail}
+              </span>
+            )}
+          </>
+        ) : (
+          body && (
+            <span
+              className={cn(
+                'mt-[3px] block whitespace-pre-wrap break-words text-[12px] text-muted-foreground',
+                expanded ? undefined : 'line-clamp-3'
+              )}
+            >
+              {expanded ? detail : body}
+            </span>
+          )
         )}
       </button>
       {leftovers.length > 0 && item.conversationId && (
@@ -328,6 +385,21 @@ function DailyCard({
             {t('Service running')}
           </span>
         )}
+        {item.pendingReminder && (
+          <span
+            data-enso="secretary-daily-reminder"
+            title={formatReminderTooltip(item.pendingReminder, Date.now(), t)}
+            className={cn(CHIP_CLASS, 'bg-sky-500/15 text-sky-600 tabular-nums dark:text-sky-400')}
+          >
+            <Clock className="size-[11px] shrink-0" aria-hidden />
+            <span className="truncate">
+              {t('Waiting for reminder · {{time}}', {
+                time: formatReminderClock(item.pendingReminder.dueAt),
+              })}
+              {item.pendingReminder.label ? ` · ${item.pendingReminder.label}` : ''}
+            </span>
+          </span>
+        )}
         {item.branch && (
           <span data-enso="secretary-daily-branch" className={cn(CHIP_CLASS, 'font-mono')}>
             {item.branch}
@@ -354,7 +426,12 @@ function DailyCard({
             <span className="truncate">{t('Session')}</span>
           </button>
         )}
-        {item.goalResult && <GoalResultFacts view={item.goalResult} />}
+        {item.goalResult && (
+          <GoalResultFacts
+            view={item.goalResult}
+            hideNeedsUser={column.key === 'done' || Boolean(needsUser)}
+          />
+        )}
         <span data-enso="secretary-daily-times" className="tabular-nums">
           {times.length > 0 ? times.join(' · ') : stampOf(item.at, day, locale)}
         </span>

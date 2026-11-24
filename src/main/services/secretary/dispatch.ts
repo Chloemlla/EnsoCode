@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { SessionReminder } from '@shared/reminders';
 import {
   describeForwardedImages,
   type ForwardedImage,
@@ -7,7 +8,15 @@ import {
   type UnavailableImage,
 } from '@shared/secretary/attachments';
 import { type FeedPage, type FeedQuery, feedEvents, pageFeed } from '@shared/secretary/feed';
-import { hasNeedsUser } from '@shared/secretary/goalResult';
+import {
+  answerGoalResultNeedsUser,
+  escalateGoalResultNeedsUser,
+  type GoalResultView,
+  hasNeedsUser,
+  needsUserItems,
+  shownNeedsUser,
+  stripGoalResultNeedsUser,
+} from '@shared/secretary/goalResult';
 import { probeImageView, readImageView } from '@shared/secretary/imageView';
 import { parseProfile, RELAY_ASK_MAX_CHARS } from '@shared/secretary/parse';
 import { type DependencyFacts, pendingOutcome } from '@shared/secretary/pending';
@@ -36,6 +45,8 @@ import {
 } from '@shared/secretary/tools';
 import { wrapUntrusted } from '@shared/secretary/transcript';
 import type {
+  AgentRunProgress,
+  AskRelatesTo,
   AttachedImage,
   ConversationAuthority,
   ProjectAuthority,
@@ -47,6 +58,7 @@ import {
   type ClosedGoal,
   type DispatchDraft,
   type DispatchModelRef,
+  type DispatchRecord,
   NEEDS_YOU_RESULTS,
   type PendingDispatch,
   type PendingProblem,
@@ -54,6 +66,7 @@ import {
   type SecretaryAuditEntry,
   type SecretaryBoard,
   type SecretaryDailyRecord,
+  type SecretaryDemandThreadView,
   type SecretaryDispatchFile,
   type SecretaryProfile,
   type SecretaryProfileDraft,
@@ -71,6 +84,7 @@ import { classifyUpstreamError, nextPendingRetryDelayMs } from '@shared/upstream
 import type { ObservedTask } from '../backgroundTaskTracker';
 import { redactSecrets } from '../memory/distill';
 import { appendAudit } from './audit';
+import { archivedBySecretary } from './autoArchive';
 import { applyCleanup, type CleanupPorts, cleanupReportText, realCleanupPorts } from './cleanup';
 import { appendDailyRecord } from './dailyLog';
 import { todoDispatchPrompt } from './dispatchBrief';
@@ -93,6 +107,7 @@ import {
   pendingUpdate,
   proposalUpdate,
   SETTLED_RESULTS,
+  secretaryLiveIn,
   takeoverViews,
   untrackedViews,
 } from './results';
@@ -122,7 +137,7 @@ export const MAX_DISPATCH_DEPENDENCIES = 10;
 export const MAX_ARCHIVE_IDS = 20;
 
 /** 归档一条会话的结果：skipped 是前置条件不满足，failed 是写盘出错 */
-export type ArchiveStatus = 'archived' | 'skipped' | 'failed';
+export type ArchiveStatus = 'archived' | 'unarchived' | 'skipped' | 'failed';
 
 export interface ArchiveOutcome {
   conversationId: string;
@@ -142,6 +157,18 @@ const ARCHIVE_REFUSALS: Record<string, string> = {
     'skipped (running): the session is still running or still has an unfinished background task; stop it first with session_stop or session_task_stop',
   'needs-user':
     'skipped (needs-user): the session is waiting for the user to answer a question or approve a tool call',
+};
+
+/** 取消归档被拒的原因码，模型看到的是可读说明 */
+const UNARCHIVE_REFUSALS: Record<string, string> = {
+  'not-operable':
+    'skipped (not-operable): only sessions you dispatched or already track can be unarchived; this one is not yours',
+  'not-found': 'skipped (not-found): no such session, it may already be deleted',
+  'not-visible':
+    "skipped (not-visible): the session's project is not in the secretary's visible projects",
+  'not-archived': 'skipped (not-archived): this session is not archived',
+  'archived-by-user':
+    'skipped (archived-by-user): the user archived this session, or an older archive whose source cannot be told apart (both count as the user). Ask the user to unarchive it in the app; do not retry',
 };
 
 /** 手动收口被拒的原因码，模型看到的是可读说明 */
@@ -181,7 +208,14 @@ export interface SecretaryDispatchPorts {
   projectAliases?(): MaybePromise<Readonly<Record<string, string>>>;
   conversations(): MaybePromise<readonly ConversationAuthority[]>;
   rows(): MaybePromise<Record<string, Record<string, unknown>>>;
+  /** 秘书功能开关：关着时 needsUser 不等筛选；缺省按开着 */
+  secretaryEnabled?(): MaybePromise<boolean>;
   status(conversationId: string): MaybePromise<SecretarySessionStatus>;
+  /** 主会话自身状态（不含子代理运行态）：自身空闲时直接 prompt，不必排队干等子代理结束 */
+  ownStatus?(conversationId: string): MaybePromise<SecretarySessionStatus>;
+  subagents?(conversationId: string): MaybePromise<readonly AgentRunProgress[]>;
+  reminders?(conversationId: string): MaybePromise<readonly SessionReminder[]>;
+  threads?(): MaybePromise<readonly SecretaryDemandThreadView[]>;
   createSession(request: MainSessionRequest): Promise<MainSessionResult>;
   prompt(
     conversationId: string,
@@ -317,8 +351,10 @@ const DISPATCH_OPS = [
   'session_stop',
   'session_task_stop',
   'session_archive',
+  'session_unarchive',
   'result_mark_done',
   'result_mark_undo',
+  'needs_user_escalate',
   'session_answer',
   'session_takeover_propose',
   'todo_list',
@@ -629,7 +665,7 @@ export function notifySecretaryChanged(): void {
 }
 
 /**
- * 用户点了确认：立刻把「已确认，正在执行」投给秘书，不等下一分钟的 tick。
+ * 用户点了确认或提案执行完：立刻把进展投给秘书，不等下一分钟的 tick。
  * 由 IPC 层注册，避免本模块静态依赖回传宿主。
  */
 let acceptedListener: (() => void) | null = null;
@@ -743,6 +779,7 @@ async function noteDispatchResumed(
   // 不会被旧终态或旧的停滞标记去重掉。收掉的旧目标也随手动标记一起作废
   record.reopenedAt = now;
   delete record.lastResult;
+  delete record.goalResult;
   delete record.manualUndoneAt;
   delete record.closedGoal;
   delete record.stalledTurn;
@@ -1595,6 +1632,26 @@ async function archiveRefusal(
 }
 
 /**
+ * 取消归档的前置条件。只认派发或接管跟踪的记录，且这次归档必须是秘书做的
+ * （session_archive、cleanup_apply，或旧版自动归档）。返回原因码，null 表示可以拉回。
+ */
+async function unarchiveRefusal(
+  ports: SecretaryDispatchPorts,
+  conversationId: string,
+  profile: SecretaryProfile
+): Promise<string | null> {
+  const record = ports.dispatchFile().dispatched[conversationId];
+  if (!record) return 'not-operable';
+  const row = (await ports.rows())[conversationId];
+  if (!row) return 'not-found';
+  const visible = visibleProjects(await ports.projects(), profile);
+  if (!visible.some((project) => project.projectId === record.projectId)) return 'not-visible';
+  if (row.archived !== true) return 'not-archived';
+  if (!archivedBySecretary(record, row)) return 'archived-by-user';
+  return null;
+}
+
+/**
  * 范围接管的会话第一次被真正用上：从这一刻起才跟踪它的状态与结果。
  * 之前不建记录，所以范围里的其他会话不会被推给秘书，也不改未读与静音。
  */
@@ -1882,7 +1939,8 @@ export function createSecretaryDispatchHandlers(
           ports.saveDispatch(file);
         }
       }
-      if (status.state === 'running') {
+      const ownStatus = ports.ownStatus ? await ports.ownStatus(conversationId) : status;
+      if (ownStatus.state === 'running') {
         // 插话复用用户自己的 steer 通道：pi 在当前工具调用结束后读到它，不等整轮结束
         if (mode === 'steer') {
           const body = await message();
@@ -2180,7 +2238,7 @@ export function createSecretaryDispatchHandlers(
           continue;
         }
         try {
-          await ports.cleanup.archive(conversationId, ports.now());
+          await ports.cleanup.archive(conversationId, ports.now(), 'session_archive');
           results.push({ conversationId, status: 'archived' });
           // 归档的会话不会再报结果：关注项一并移除
           ports.unfollow?.(conversationId);
@@ -2222,6 +2280,79 @@ export function createSecretaryDispatchHandlers(
       };
     },
 
+    /**
+     * 取消归档：拉回自己派出或跟踪、且由秘书归档的会话。效果与用户手动取消归档一致。
+     * 用户自己归档的、或分不清来源的，拒绝。
+     */
+    async session_unarchive(params, ctx) {
+      const ids = archiveIds(params);
+      if (!ids) {
+        return {
+          ok: false,
+          error: `invalid arguments: pass "conversationId" or "ids" with 1-${MAX_ARCHIVE_IDS} session ids`,
+        };
+      }
+      const profile = await profileOf(ports);
+      const results: ArchiveOutcome[] = [];
+      for (const conversationId of ids) {
+        const refusal = await unarchiveRefusal(ports, conversationId, profile);
+        if (refusal) {
+          results.push({ conversationId, status: 'skipped', reason: refusal });
+          ports.audit({
+            at: ports.now(),
+            secretaryConversationId: ctx.secretaryConversationId,
+            op: 'session_unarchive',
+            targetId: conversationId,
+            ok: false,
+            detail: refusal,
+          });
+          continue;
+        }
+        const via = archivedBySecretary(
+          ports.dispatchFile().dispatched[conversationId]!,
+          (await ports.rows())[conversationId]
+        );
+        try {
+          await ports.cleanup.unarchive(conversationId);
+          results.push({ conversationId, status: 'unarchived' });
+          ports.audit({
+            at: ports.now(),
+            secretaryConversationId: ctx.secretaryConversationId,
+            op: 'session_unarchive',
+            targetId: conversationId,
+            ok: true,
+            detail: `unarchived (${via})`,
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'unarchive failed';
+          results.push({ conversationId, status: 'failed', reason });
+          ports.audit({
+            at: ports.now(),
+            secretaryConversationId: ctx.secretaryConversationId,
+            op: 'session_unarchive',
+            targetId: conversationId,
+            ok: false,
+            detail: reason,
+          });
+        }
+      }
+      notifySecretaryChanged();
+      const count = (status: ArchiveStatus) =>
+        results.filter((entry) => entry.status === status).length;
+      return {
+        ok: true,
+        result: {
+          results: results.map((entry) => ({
+            ...entry,
+            ...(entry.reason ? { reason: UNARCHIVE_REFUSALS[entry.reason] ?? entry.reason } : {}),
+          })),
+          unarchived: count('unarchived'),
+          skipped: count('skipped'),
+          failed: count('failed'),
+        },
+      };
+    },
+
     /** 看板「标记完成」：把派发记录收口为完成，与用户点按钮走同一条逻辑 */
     async result_mark_done(params, ctx) {
       return markResultOp(ports, ctx, params, 'done');
@@ -2230,6 +2361,33 @@ export function createSecretaryDispatchHandlers(
     /** 看板「撤销标记」：只撤销手动标记的完成 */
     async result_mark_undo(params, ctx) {
       return markResultOp(ports, ctx, params, 'undo');
+    },
+
+    /** 筛选过的 needsUser：确实要用户亲手做或决定的那条升级进「需要你」 */
+    async needs_user_escalate(params, ctx) {
+      const { conversationId, needsUserIndex, text } = params;
+      const extra = Object.keys(params).filter((key) => !ESCALATE_FIELDS.includes(key));
+      if (
+        extra.length > 0 ||
+        typeof conversationId !== 'string' ||
+        !conversationId.trim() ||
+        typeof needsUserIndex !== 'number' ||
+        !Number.isInteger(needsUserIndex) ||
+        needsUserIndex < 0 ||
+        (text !== undefined && typeof text !== 'string')
+      ) {
+        return {
+          ok: false,
+          error: `invalid arguments: pass conversationId (string), needsUserIndex (integer N from needs-user[N]) and optionally text (string); allowed fields: ${ESCALATE_FIELDS.join(', ')}`,
+        };
+      }
+      const link = { conversationId: conversationId.trim(), needsUserIndex };
+      const result = escalateNeedsUser(ports, link, text, 'secretary');
+      if (!result.ok) {
+        auditFailure(ports, ctx, 'needs_user_escalate', result.error, link.conversationId);
+        return { ok: false, error: ESCALATE_REFUSALS[result.error] ?? result.error };
+      }
+      return { ok: true, result: { status: 'escalated', ...link } };
     },
 
     async session_answer(params, ctx) {
@@ -2351,7 +2509,9 @@ export function createSecretaryDispatchHandlers(
           ? linkedTodoSession(
               file.dispatched[todo.conversationId],
               rows[todo.conversationId],
-              await ports.status(todo.conversationId)
+              await ports.status(todo.conversationId),
+              false,
+              ((await ports.subagents?.(todo.conversationId))?.length ?? 0) > 0
             )
           : null;
         const phase = todoStatus(todo, session);
@@ -2595,6 +2755,7 @@ async function finishProposal(
     detail: outcome.ok ? 'succeeded' : (outcome.error ?? 'failed'),
   });
   notifySecretaryChanged();
+  notifyProposalAccepted();
   return { ok: true, proposal: transitioned.proposal };
 }
 
@@ -2641,7 +2802,15 @@ export async function resolveProposal(
   file.proposals[proposalId] = transitioned.proposal;
   // 点了就推：确认先推「已确认，正在执行」，取消直接推「已取消」。
   // 等执行完再推，秘书会以为卡还没被点，于是又提一张。
-  file.outbox = enqueueUpdate(file.outbox, proposalUpdate(transitioned.proposal, now));
+  // 档案、技能、工具只是写盘，转眼就完，且写完要释放秘书会话：只推终态，否则释放会中止这次投递
+  const writesKit =
+    action === 'confirm' &&
+    (transitioned.proposal.kind === 'profile' ||
+      transitioned.proposal.kind === 'skill' ||
+      transitioned.proposal.kind === 'tool');
+  if (!writesKit) {
+    file.outbox = enqueueUpdate(file.outbox, proposalUpdate(transitioned.proposal, now));
+  }
   ports.saveDispatch(file);
   ports.audit({
     at: now,
@@ -2658,7 +2827,7 @@ export async function resolveProposal(
     return { ok: true, proposal: transitioned.proposal };
   }
   // 立刻投递，不等下一分钟的 tick
-  notifyProposalAccepted();
+  if (!writesKit) notifyProposalAccepted();
   // 档案提案走同一套状态机，确认后才写入；拒绝不写
   if (transitioned.proposal.kind === 'profile') {
     const applied = await ports.applyProfile(
@@ -2755,8 +2924,14 @@ export type MarkResultAction = 'done' | 'undo' | 'dismiss';
 
 export type MarkResultResult = { ok: true } | { ok: false; error: string };
 
-/** 谁点的：用户界面按钮，还是秘书的工具调用。审计里分开记 */
-export type MarkResultSource = 'ui' | 'secretary';
+/** 谁点的：用户界面按钮、秘书的工具调用，还是用户答完了秘书带关联转问的全部 needsUser */
+export type MarkResultSource = 'ui' | 'secretary' | 'answer';
+
+const MARK_SOURCE_DETAIL: Record<MarkResultSource, string> = {
+  ui: 'manual',
+  secretary: 'secretary',
+  answer: 'answered',
+};
 
 /**
  * 用户手动收口一条派发记录：done 记成完成并标 manual（卡片给撤销），
@@ -2795,6 +2970,9 @@ export async function markResult(
         : 'result_dismiss_board';
   if (action === 'done') {
     record.lastResult = { kind: 'goal-complete', turn: record.turn, at: now, manual: true };
+    const cleanedGoalResult = stripGoalResultNeedsUser(record.goalResult);
+    if (cleanedGoalResult) record.goalResult = cleanedGoalResult;
+    else delete record.goalResult;
     if (record.lastState !== 'idle') record.stateSince = now;
     record.lastState = 'idle';
     delete record.stoppedAt;
@@ -2844,10 +3022,147 @@ export async function markResult(
     op,
     targetId: conversationId,
     ok: true,
-    detail: [source === 'secretary' ? 'secretary' : 'manual', goalNote].filter(Boolean).join('; '),
+    detail: [MARK_SOURCE_DETAIL[source], goalNote].filter(Boolean).join('; '),
   });
   notifySecretaryChanged();
   return { ok: true };
+}
+
+export type AnswerNeedsUserResult = { ok: true; cleared: boolean } | { ok: false; error: string };
+
+const ANSWER_MAX_CHARS = 500;
+const ESCALATE_TEXT_MAX_CHARS = 300;
+const ESCALATE_FIELDS: readonly string[] = ['conversationId', 'needsUserIndex', 'text'];
+
+const ESCALATE_REFUSALS: Record<string, string> = {
+  'not-found':
+    'refused (not-found): only a session you dispatched or track has needsUser items to escalate',
+  'nothing-pending':
+    'refused (nothing-pending): this session has no unsettled goal-complete result with needsUser; a goal-blocked result already goes to the user directly',
+  'bad-index': 'refused (bad-index): needsUserIndex is past the end of the needs-user[N] list',
+};
+
+/** 只认没收口的 goal-complete：goal-blocked 的 needsUser 不经筛选，答了也不能记成完成 */
+function pendingNeedsUser(record: DispatchRecord): GoalResultView | undefined {
+  const result = record.lastResult;
+  const pending =
+    result !== undefined &&
+    result.kind === 'goal-complete' &&
+    !result.manual &&
+    !result.dismissed &&
+    hasNeedsUser(record.goalResult);
+  return pending ? record.goalResult : undefined;
+}
+
+/**
+ * 秘书把一条 needsUser 升级给用户：卡片进「需要你」，显示改写后的文字。
+ * 秘书带 relatesTo 提问时宿主也走这里（via ask），不用秘书再调工具。
+ */
+export function escalateNeedsUser(
+  ports: SecretaryDispatchPorts,
+  link: AskRelatesTo,
+  text?: string,
+  via: 'secretary' | 'ask' = 'secretary'
+): { ok: true } | { ok: false; error: string } {
+  const { conversationId, needsUserIndex } = link;
+  const file = ports.dispatchFile();
+  const record = file.dispatched[conversationId];
+  // 秘书工具的失败由 handler 记审计；带关联提问的由宿主触发，在这里记
+  const refuse = (error: string): { ok: false; error: string } => {
+    if (via === 'ask')
+      ports.audit({
+        at: ports.now(),
+        secretaryConversationId: record?.secretaryConversationId ?? null,
+        op: 'needs_user_escalate',
+        targetId: conversationId,
+        ok: false,
+        detail: `ask: ${error}`,
+      });
+    return { ok: false, error };
+  };
+  if (!record) return refuse('not-found');
+  const view = pendingNeedsUser(record);
+  if (!view) return refuse('nothing-pending');
+  const count = needsUserItems(view).length;
+  if (needsUserIndex !== undefined && needsUserIndex >= count) return refuse('bad-index');
+  const now = ports.now();
+  const rewritten = text ? redactSecrets(text.trim()).slice(0, ESCALATE_TEXT_MAX_CHARS) : '';
+  record.goalResult = escalateGoalResultNeedsUser(
+    view,
+    needsUserIndex,
+    rewritten || undefined,
+    now
+  );
+  ports.saveDispatch(file);
+  const targets = needsUserIndex === undefined ? [...Array(count).keys()] : [needsUserIndex];
+  ports.audit({
+    at: now,
+    secretaryConversationId: record.secretaryConversationId,
+    op: 'needs_user_escalate',
+    targetId: conversationId,
+    ok: true,
+    detail: [`${via} #${targets.join(',')}`, rewritten].filter(Boolean).join(': '),
+  });
+  notifySecretaryChanged();
+  return { ok: true };
+}
+
+/**
+ * 秘书带 relatesTo 转问的 needsUser 被用户答复：答复记到那份结果上，卡片标出已答复；
+ * 答复同时算升级；全部条目都答了就按 result_mark_done 收口，不用秘书再手动标；
+ * 还剩没升级的条目时回到秘书手里，由它接着问、升级或手动收口。
+ * 只认 goal-complete：goal-blocked 的活没干完，答了也不能记成完成。
+ * 提问之后才到的新结果不认这次答复，免得旧问题的答案落到新条目上。
+ */
+export async function answerNeedsUser(
+  ports: SecretaryDispatchPorts,
+  link: AskRelatesTo,
+  answer: string,
+  askedAt: number
+): Promise<AnswerNeedsUserResult> {
+  const { conversationId, needsUserIndex } = link;
+  const rows = await ports.rows();
+  const file = ports.dispatchFile();
+  const record = file.dispatched[conversationId];
+  if (!record) return { ok: false, error: 'not-found' };
+  const view = pendingNeedsUser(record);
+  if (!view) return { ok: false, error: 'nothing-pending' };
+  if (view.at > askedAt) return { ok: false, error: 'stale' };
+  const count = needsUserItems(view).length;
+  if (needsUserIndex !== undefined && needsUserIndex >= count)
+    return { ok: false, error: 'bad-index' };
+  const now = ports.now();
+  const text = redactSecrets(answer.trim()).slice(0, ANSWER_MAX_CHARS);
+  const targets = needsUserIndex === undefined ? [...Array(count).keys()] : [needsUserIndex];
+  const escalated = new Set((view.escalations ?? []).map((item) => item.index));
+  const withEscalation = targets
+    .filter((target) => !escalated.has(target))
+    .reduce((next, target) => escalateGoalResultNeedsUser(next, target, undefined, now), view);
+  record.goalResult = answerGoalResultNeedsUser(withEscalation, needsUserIndex, text, now);
+  ports.saveDispatch(file);
+  ports.audit({
+    at: now,
+    secretaryConversationId: record.secretaryConversationId,
+    op: 'needs_user_answered',
+    targetId: conversationId,
+    ok: true,
+    detail: `#${targets.join(',')}: ${text}`,
+  });
+  const shown = shownNeedsUser(
+    record.goalResult,
+    secretaryLiveIn(
+      rows,
+      record.secretaryConversationId,
+      (await ports.secretaryEnabled?.()) ?? true
+    ),
+    now
+  );
+  if (shown.triaging || shown.answers.length < shown.items.length) {
+    notifySecretaryChanged();
+    return { ok: true, cleared: false };
+  }
+  const marked = await markResult(ports, conversationId, 'done', 'answer');
+  return marked.ok ? { ok: true, cleared: true } : marked;
 }
 
 /** 用户点过「知道了」：只标记这条结果，会话本身不动；新结果整体替换 lastResult，标记自然失效 */
@@ -3028,6 +3343,11 @@ export interface SecretaryStatePorts {
   projects(): MaybePromise<readonly ProjectAuthority[]>;
   projectAliases?(): MaybePromise<Readonly<Record<string, string>>>;
   status(conversationId: string): MaybePromise<SecretarySessionStatus>;
+  subagents?(conversationId: string): MaybePromise<readonly AgentRunProgress[]>;
+  reminders?(conversationId: string): MaybePromise<readonly SessionReminder[]>;
+  threads?(): MaybePromise<readonly SecretaryDemandThreadView[]>;
+  /** 秘书功能开关；缺省按开着 */
+  secretaryEnabled?(): MaybePromise<boolean>;
 }
 
 export async function buildSecretaryState(
@@ -3073,16 +3393,32 @@ async function loadSecretaryBoard(ports: SecretaryStatePorts): Promise<{
   const projects = await ports.projects();
   const aliases = (await ports.projectAliases?.()) ?? {};
   const statuses: Record<string, SecretarySessionStatus> = {};
+  const subagents: Record<string, readonly AgentRunProgress[]> = {};
+  const reminders: Record<string, readonly SessionReminder[]> = {};
   for (const record of Object.values(file.dispatched)) {
     if (!rows[record.conversationId]) continue;
     statuses[record.conversationId] = await ports.status(record.conversationId);
+    const runs = await ports.subagents?.(record.conversationId);
+    if (runs && runs.length > 0) subagents[record.conversationId] = runs;
+    const items = await ports.reminders?.(record.conversationId);
+    if (items && items.length > 0) reminders[record.conversationId] = items;
   }
   return {
     file,
     rows,
     projects,
     aliases,
-    board: buildBoard(file, { rows, statuses, projects, aliases, todos: await ports.todos() }),
+    board: buildBoard(file, {
+      rows,
+      statuses,
+      subagents,
+      reminders,
+      projects,
+      aliases,
+      todos: await ports.todos(),
+      threads: (await ports.threads?.()) ?? [],
+      secretaryEnabled: (await ports.secretaryEnabled?.()) ?? true,
+    }),
   };
 }
 
@@ -3096,6 +3432,7 @@ export function dispatchPortsFor(ctx: SecretaryContext): SecretaryDispatchPorts 
   return {
     secretaryId: ctx.id,
     secretaryProjectId: () => ctx.projectId,
+    secretaryEnabled: async () => (await import('./enabled')).secretaryEnabled(),
     managedElsewhere: async (conversationId) =>
       (await import('./crossSecretary')).managedElsewhere(ctx.id, conversationId),
     runningTotal: async () => (await import('./crossSecretary')).runningTotal(),
@@ -3128,6 +3465,16 @@ export function dispatchPortsFor(ctx: SecretaryContext): SecretaryDispatchPorts 
     rows: async () => (await import('../../ipc/settings')).readPersistedConversations(),
     status: async (conversationId) =>
       (await import('../../ipc/agent')).observedSessionStatus(conversationId),
+    ownStatus: async (conversationId) =>
+      (await import('../../ipc/agent')).observedOwnSessionStatus(conversationId),
+    subagents: async (conversationId) =>
+      (await import('../../ipc/agent')).observedSubagentProgress(conversationId),
+    reminders: async (conversationId) =>
+      (await import('../sessionReminders')).readSessionReminders(conversationId),
+    async threads() {
+      const rows = await (await import('../../ipc/settings')).readPersistedConversations();
+      return (await import('../demandThreads')).secretaryDemandThreadViews(rows);
+    },
     createSession: async (request) =>
       (await import('../../ipc/secretary')).createSessionViaMain(request),
     prompt: async (conversationId, text, deliveryId, images) =>
@@ -3277,12 +3624,15 @@ export function dispatchPortsFor(ctx: SecretaryContext): SecretaryDispatchPorts 
      * 模型行启用；虚拟模型按目录解析。这里只判定，不改任何配置。
      */
     resolveModel: async (ref) => {
-      const { modelRefForSpawnConfig, providersFromSettings, resolveModelSelection } = await import(
-        '../agentHost'
-      );
+      const {
+        modelRefForSpawnConfig,
+        providersFromSettings,
+        resolveModelSelection,
+        virtualModelsFromSettings,
+      } = await import('../agentHost');
       const { readStoredOauthCredentialKeys } = await import('../oauthProviders');
       const { modelUsability } = await import('@shared/defaultModel');
-      const { dispatchModelChoices, dispatchProviderId } = await import('./dispatchModel');
+      const { resolveDispatchModel } = await import('./dispatchModel');
       let keys: ReadonlySet<string>;
       try {
         keys = await readStoredOauthCredentialKeys();
@@ -3290,31 +3640,22 @@ export function dispatchPortsFor(ctx: SecretaryContext): SecretaryDispatchPorts 
         return { ok: false, error: 'model credentials unavailable' };
       }
       const providers = providersFromSettings();
-      const providerId = dispatchProviderId(ref.providerId, providers);
-      const resolved = resolveModelSelection(providerId, ref.modelId, keys, {
-        allowVirtual: true,
-      });
-      if (!resolved.ok) {
-        const credentials = {
-          oauthCredentials: { status: 'ready' as const, authenticatedAccountKeys: keys },
-        };
-        const choices = dispatchModelChoices(
-          providers,
-          (id, modelId) =>
-            modelUsability({ providerId: id, modelId }, providers, credentials) === 'usable'
-        );
-        return {
-          ok: false,
-          error: choices
-            ? `${resolved.error}. providerId must be an exact id below (not a name), or omit model to follow the project's default model:\n${choices}`
-            : resolved.error,
-        };
-      }
-      const model = modelRefForSpawnConfig(resolved.selection.config);
-      return {
-        ok: true,
-        model: { ...model, ...(ref.thinkingLevel ? { thinkingLevel: ref.thinkingLevel } : {}) },
+      const credentials = {
+        oauthCredentials: { status: 'ready' as const, authenticatedAccountKeys: keys },
       };
+      return resolveDispatchModel(ref, {
+        providers,
+        virtualModels: virtualModelsFromSettings(),
+        resolve: (wanted) => {
+          const resolved = resolveModelSelection(wanted.providerId, wanted.modelId, keys, {
+            allowVirtual: true,
+          });
+          return resolved.ok
+            ? { ok: true, ref: modelRefForSpawnConfig(resolved.selection.config) }
+            : resolved;
+        },
+        usable: (wanted) => modelUsability(wanted, providers, credentials) === 'usable',
+      });
     },
     follow: (input) => {
       recordPhoneFollow(

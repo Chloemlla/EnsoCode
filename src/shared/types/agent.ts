@@ -93,6 +93,8 @@ import {
 import { type PrivacyMaskSettings, parsePrivacyMaskSettings } from '../privacyMask/settings';
 import { PRODUCT_SURFACE_INVENTORY, type ProductSurfaceId } from '../productSurfaces';
 import { parseProviderHeaders } from '../providers/providerHeaders';
+import { type ProviderProxyConfig, parseProviderProxy } from '../providers/providerProxy';
+import type { SessionReminderSummary } from '../reminders';
 import { parseRequestBodyUsage, type RequestBodyUsage } from '../requestBodyUsage';
 import { parseRtkToolStats, type RtkToolStats } from '../rtk';
 import { parseSecretaryToolDescriptors } from '../secretary/customTools';
@@ -162,6 +164,7 @@ export interface WorkerCustomProvider {
   apiKey: string;
   models: ModelEntry[];
   headers?: Record<string, string>;
+  proxy?: ProviderProxyConfig;
 }
 
 /** 会话状态。waiting/done 属权限门与 subagent 刀，M1 不引入 */
@@ -232,6 +235,8 @@ export interface SpawnModelConfig extends ModelCapabilityOverrides {
   oauthAccountPool?: { accountKeys: string[] };
   /** 该供应商的额外 HTTP 请求头。空表不下发。 */
   headers?: Record<string, string>;
+  /** API Key 供应商的独立代理；缺省跟随全局代理。 */
+  proxy?: ProviderProxyConfig;
 }
 
 /** pi catalog 里的分类器 provider/model 与凭证 */
@@ -241,6 +246,8 @@ export interface VirtualClassifierCredentials {
   apiKey?: string;
   /** System One 兼容网关地址；缺省用 pi catalog 内置地址 */
   baseUrl?: string;
+  /** API Key 供应商的独立代理；缺省跟随全局代理 */
+  proxy?: ProviderProxyConfig;
 }
 
 export interface VirtualSpawnClassifier {
@@ -333,6 +340,38 @@ export interface ApprovalRequestInfo {
 export const ASK_ANSWER_BY = ['user', 'relay', 'timeout'] as const;
 export type AskAnswerBy = (typeof ASK_ANSWER_BY)[number];
 
+/** 秘书转问派出会话结果里的 needsUser：用户答复后宿主据此把那条记为已答复 */
+export interface AskRelatesTo {
+  conversationId: string;
+  /** needsUser 列表里从 0 开始的位置；缺省表示这一问覆盖全部条目 */
+  needsUserIndex?: number;
+}
+
+/** 序号给了但不合法时整段作废：丢掉序号会被当成「覆盖全部条目」 */
+export function parseAskRelatesTo(raw: unknown): AskRelatesTo | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { conversationId, needsUserIndex } = raw as Record<string, unknown>;
+  if (typeof conversationId !== 'string' || !conversationId.trim()) return undefined;
+  if (needsUserIndex === undefined || needsUserIndex === null)
+    return { conversationId: conversationId.trim() };
+  const index =
+    typeof needsUserIndex === 'string' && needsUserIndex.trim()
+      ? Number(needsUserIndex)
+      : needsUserIndex;
+  if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return undefined;
+  return { conversationId: conversationId.trim(), needsUserIndex: index };
+}
+
+/** ask-resolved 的关联字段坏了只剥掉它，提问照常收尾；关联与提问时间必须成对 */
+function withAskLink(value: Record<string, unknown>): Record<string, unknown> {
+  if (value.relatesTo === undefined && value.askedAt === undefined) return value;
+  const { relatesTo, askedAt, ...rest } = value;
+  const link = parseAskRelatesTo(relatesTo);
+  return link && typeof askedAt === 'number' && Number.isFinite(askedAt)
+    ? { ...rest, relatesTo: link, askedAt }
+    : rest;
+}
+
 /** agent 向用户的提问（ask_user 工具,阻塞等答复） */
 export interface AskRequestInfo {
   requestId: string;
@@ -345,6 +384,8 @@ export interface AskRequestInfo {
   expiresAt?: number;
   /** 已转给秘书：原会话不弹给用户，只留一行「已转给 X」，用户仍可直接回答 */
   relay?: { name: string };
+  /** 秘书在替这条派出会话的 needsUser 问用户 */
+  relatesTo?: AskRelatesTo;
   /** 渲染层投影：提问已收尾，用来在原会话里留一行状态；worker 不下发 */
   answered?: { by: AskAnswerBy; name?: string; answer?: string };
 }
@@ -1574,6 +1615,8 @@ export type AgentCommand =
   | { type: 'set-auto-retry-limit'; limit: number }
   /** 长缓存：会话请求对 Anthropic Messages 模型用 1h prompt cache，下一次请求生效 */
   | { type: 'set-long-cache-retention'; enabled: boolean }
+  /** 「记录应用日志」热切换：worker 的 agent.log / compaction.log 是否落盘 */
+  | { type: 'set-app-logging'; enabled: boolean }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
   | { type: 'set-disabled-workflow-presets'; ids: string[] }
   /** 设置变更后 Main 按会话推送当前禁用的内置工具；worker 只增删已注册的可热切工具 */
@@ -1674,6 +1717,7 @@ export type AgentCommand =
       triggerTurn: boolean;
       origin?: PluginInjectOrigin;
       sender?: PluginInjectSender;
+      ownerConfirm?: boolean;
     }
   | {
       type: 'rewind';
@@ -2091,6 +2135,7 @@ export type RendererAgentEvent =
       | { type: 'background-tasks-detached' }
       | { type: 'session-wake-requested' }
       | { type: 'session-reminder-due' }
+      | { type: 'session-reminders-changed' }
       | Extract<
           AgentWorkerEvent,
           {
@@ -2332,6 +2377,10 @@ export type AgentWorkerEvent =
       answer?: string;
       /** 秘书代答时的名字 */
       name?: string;
+      /** 提问带的 needsUser 关联，原样带回 */
+      relatesTo?: AskRelatesTo;
+      /** 带关联时提问发出的时间：晚于它的新结果不认这次答复 */
+      askedAt?: number;
     }
   | { type: 'subagent-update'; identity: SessionIdentity; seq: number; agent: SubagentInfo }
   | {
@@ -2505,6 +2554,12 @@ export type AgentWorkerEvent =
       /** 根会话的自定提醒到点：Main 判定会话还在（未删除、未归档）后回 reminders-fire，冷会话先打开。旁路消费 */
       type: 'session-reminder-due';
       sessionId: string;
+    }
+  | {
+      /** 根会话（含子会话）未到点提醒快照变更：Main 转发给渲染层并刷新秘书看板。旁路消费 */
+      type: 'session-reminders-changed';
+      sessionId: string;
+      reminders: SessionReminderSummary[];
     }
   | {
       /**
@@ -3186,11 +3241,12 @@ function parseVirtualSpawnClassifier(value: unknown): boolean {
 function parseClassifierCredentials(value: unknown): value is VirtualClassifierCredentials {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ['provider', 'modelId', 'apiKey', 'baseUrl']) &&
+    hasOnlyKeys(value, ['provider', 'modelId', 'apiKey', 'baseUrl', 'proxy']) &&
     isNonEmptyString(value.provider) &&
     isNonEmptyString(value.modelId) &&
     (value.apiKey === undefined || typeof value.apiKey === 'string') &&
-    (value.baseUrl === undefined || isNonEmptyString(value.baseUrl))
+    (value.baseUrl === undefined || isNonEmptyString(value.baseUrl)) &&
+    (value.proxy === undefined || Boolean(parseProviderProxy(value.proxy)))
   );
 }
 
@@ -3239,6 +3295,7 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
       'contextWindow',
       'maxTokens',
       'headers',
+      'proxy',
     ]) ||
     !MODEL_API_KINDS.includes(value.api as ModelApiKind) ||
     typeof value.baseUrl !== 'string' ||
@@ -3249,10 +3306,13 @@ function parsePhysicalSpawnModelConfig(value: unknown): SpawnModelConfig | null 
     (value.oauthAccountPool !== undefined &&
       (!parseOauthAccountPool(value.oauthAccountPool) ||
         !isCodexAccountKey(value.oauthAccountKey) ||
-        value.apiKey !== ''))
+        value.apiKey !== '')) ||
+    (value.proxy !== undefined &&
+      (value.oauthAccountKey !== undefined || !parseProviderProxy(value.proxy)))
   ) {
     return null;
   }
+  if (value.proxy !== undefined) value.proxy = parseProviderProxy(value.proxy);
   if (value.headers !== undefined) {
     const headers = parseProviderHeaders(value.headers);
     if (headers) value.headers = headers;
@@ -4423,6 +4483,11 @@ const agentCommandParsers = {
       ? (value as unknown as AgentCommand)
       : null;
   },
+  'set-app-logging': (value: Record<string, unknown>): AgentCommand | null => {
+    return hasExactKeys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'
+      ? (value as unknown as AgentCommand)
+      : null;
+  },
   'set-shell-limits': (value: Record<string, unknown>): AgentCommand | null => {
     return hasExactKeys(value, ['type', 'limits']) &&
       isRecord(value.limits) &&
@@ -4530,9 +4595,10 @@ const agentCommandParsers = {
     if (value.sender !== undefined && !sender) return null;
     const origin = value.origin === undefined ? undefined : parsePluginInjectOrigin(value.origin);
     if (value.origin !== undefined && !origin) return null;
+    if (value.ownerConfirm !== undefined && typeof value.ownerConfirm !== 'boolean') return null;
     if (
       !(
-        hasOnlyKeys(value, [...PLUGIN_INJECT_KEYS, 'images', 'origin', 'sender']) &&
+        hasOnlyKeys(value, [...PLUGIN_INJECT_KEYS, 'images', 'origin', 'sender', 'ownerConfirm']) &&
         PLUGIN_INJECT_KEYS.every((key) => key in value) &&
         parsePluginInjectImages(value.images) !== null &&
         parseSessionIdentity(value.identity) &&
@@ -5024,6 +5090,29 @@ const agentWorkerEventParsers = {
       ? (value as unknown as AgentWorkerEvent)
       : null;
   },
+  'session-reminders-changed': (value: Record<string, unknown>): AgentWorkerEvent | null => {
+    if (
+      !hasExactKeys(value, ['type', 'sessionId', 'reminders']) ||
+      !isNonEmptyString(value.sessionId) ||
+      !Array.isArray(value.reminders)
+    ) {
+      return null;
+    }
+    for (const item of value.reminders) {
+      if (
+        !isRecord(item) ||
+        !hasOnlyKeys(item, ['id', 'dueAt', 'label']) ||
+        !isNonEmptyString(item.id) ||
+        typeof item.dueAt !== 'number' ||
+        !Number.isFinite(item.dueAt) ||
+        item.dueAt < 0 ||
+        (item.label !== undefined && typeof item.label !== 'string')
+      ) {
+        return null;
+      }
+    }
+    return value as unknown as AgentWorkerEvent;
+  },
   'unopened-background-tasks': (value: Record<string, unknown>): AgentWorkerEvent | null => {
     return hasExactKeys(value, ['type', 'sessionId', 'tasks']) &&
       isNonEmptyString(value.sessionId) &&
@@ -5470,7 +5559,7 @@ const agentWorkerEventParsers = {
         (value.by === undefined || (ASK_ANSWER_BY as readonly unknown[]).includes(value.by)) &&
         (value.answer === undefined || typeof value.answer === 'string') &&
         (value.name === undefined || isNonEmptyString(value.name))
-        ? (value as unknown as AgentWorkerEvent)
+        ? (withAskLink(value) as unknown as AgentWorkerEvent)
         : null;
     }
   ),

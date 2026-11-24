@@ -15,6 +15,10 @@ const mocks = vi.hoisted(() => {
     onAppEvent: vi.fn(),
     syncBotModeServices: vi.fn(),
     syncBotDiscussMode: vi.fn(),
+    pluginLogs: {
+      setLoggingEnabled: vi.fn(),
+      syncLoggingEnabled: vi.fn(),
+    },
     listModels: vi.fn(),
     windows: [] as Array<{
       isDestroyed: () => boolean;
@@ -26,6 +30,9 @@ const mocks = vi.hoisted(() => {
 vi.mock('./bots', () => ({
   syncBotModeServices: mocks.syncBotModeServices,
   syncBotDiscussMode: mocks.syncBotDiscussMode,
+}));
+vi.mock('../services/extensionPlugins', () => ({
+  peekExtensionPlugins: () => mocks.pluginLogs,
 }));
 
 // scheduleWrite 成功后会动态通知统一模型目录；mock 掉避免动态 import 链
@@ -230,6 +237,40 @@ describe('settings广播策略', () => {
     });
     reloaded.patchSettingsState('secretaryEnabled', false);
     reloaded.flushSettings();
+  });
+
+  it('应用日志开关是本机字段，写入即切换 Main 落盘', async () => {
+    vi.resetModules();
+    const settings = await import('./settings');
+    const { isAppLoggingEnabled } = await import('@shared/appLogFile');
+    expect(settings.SETTINGS_STATE_FIELDS).toContain('appLoggingEnabled');
+    expect(settings.CONFIG_SYNC_COMMIT_FIELDS).not.toContain('appLoggingEnabled');
+    expect(isAppLoggingEnabled()).toBe(false);
+    expect(settings.patchSettingsState('appLoggingEnabled', true)).toMatchObject({ ok: true });
+    expect(isAppLoggingEnabled()).toBe(true);
+    expect(settings.patchSettingsState('appLoggingEnabled', false)).toMatchObject({ ok: true });
+    expect(isAppLoggingEnabled()).toBe(false);
+    settings.flushSettings();
+  });
+
+  it('插件日志开关是本机字段，变化时热通知插件服务', async () => {
+    vi.resetModules();
+    mocks.pluginLogs.setLoggingEnabled.mockClear();
+    mocks.pluginLogs.syncLoggingEnabled.mockClear();
+    const settings = await import('./settings');
+    expect(settings.SETTINGS_STATE_FIELDS).toContain('pluginLoggingEnabled');
+    expect(settings.CONFIG_SYNC_COMMIT_FIELDS).not.toContain('pluginLoggingEnabled');
+    expect(settings.patchSettingsState('pluginLoggingEnabled', true)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(mocks.pluginLogs.setLoggingEnabled).toHaveBeenCalledWith(true));
+    settings.patchSettingsState('pluginLoggingEnabled', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.pluginLogs.setLoggingEnabled).toHaveBeenCalledTimes(1);
+    expect(settings.patchSettingsState('pluginLoggingEnabled', false)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(mocks.pluginLogs.setLoggingEnabled).toHaveBeenCalledWith(false));
+    settings.flushSettings();
+    mocks.pluginLogs.syncLoggingEnabled.mockClear();
+    expect(settings.reloadSettingsFromDisk()).toBe(true);
+    await vi.waitFor(() => expect(mocks.pluginLogs.syncLoggingEnabled).toHaveBeenCalled());
   });
 
   it('秘书开关关掉后落盘为 false，重启重读仍是关', async () => {
@@ -490,7 +531,7 @@ describe('settings广播策略', () => {
     }
   });
 
-  it('会话写入对远端主界面只推补丁，不再触发整份 settings 重读', async () => {
+  it('会话写入对远端不再触发整份 settings 重读（主界面走补丁，设置页不消费会话）', async () => {
     const { registerSettingsHandlers } = await import('./settings');
     const { addRemoteSender, RemoteSender } = await import('../services/remoteRenderer/senders');
     registerSettingsHandlers();
@@ -509,11 +550,13 @@ describe('settings广播策略', () => {
     });
     const mainChannels = mainSends.mock.calls.map(([channel]) => channel);
     expect(mainChannels).not.toContain(IPC_CHANNELS.SETTINGS_CHANGED);
-    expect(settingsSends).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
+    expect(settingsSends).not.toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
 
     mainSends.mockClear();
+    settingsSends.mockClear();
     await handler({ sender: owner.webContents }, 'enso-settings', { state: { theme: 'dark' } });
     expect(mainSends).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
+    expect(settingsSends).toHaveBeenCalledWith(IPC_CHANNELS.SETTINGS_CHANGED);
     remote.destroy();
     remoteSettings.destroy();
   });

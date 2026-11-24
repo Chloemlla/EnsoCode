@@ -14,19 +14,23 @@ import type {
   SecretaryDispatchFile,
   SecretaryProfile,
   SecretaryProfileDraft,
+  SecretaryProposal,
   SecretaryRelayAsk,
   SecretarySkillDraft,
   SecretaryTodo,
   SecretaryToolDraft,
 } from '@shared/types/secretary';
+import { VIRTUAL_PROVIDER_ID, type VirtualModelEntry } from '@shared/virtualModels';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSecretaryTools, normalizeSecretaryParams } from '../../../agent/tools/secretary';
 import type { ObservedTask } from '../backgroundTaskTracker';
 import {
+  answerNeedsUser,
   buildSecretaryState,
   createSecretaryDispatchHandlers,
   dismissPending,
   dismissResult,
+  escalateNeedsUser,
   grantTakeover,
   listTakeovers,
   listUntracked,
@@ -38,10 +42,12 @@ import {
   type SecretaryDispatchPorts,
   type SecretaryQueuedMessage,
   saveCleanupProposal,
+  setProposalAcceptedListener,
   startPendingDispatches,
   stopLeftoverTasks,
   untrack,
 } from './dispatch';
+import { type DispatchModelDeps, resolveDispatchModel } from './dispatchModel';
 import {
   type FollowDeps,
   FollowingStore,
@@ -166,7 +172,8 @@ interface Harness {
   baseFacts: DispatchBaseFacts;
   baseFactsCalls: { projectPath: string; checkout?: string; baseRef?: string; branch?: string }[];
   forgotten: string[];
-  archived: { conversationId: string; at: number }[];
+  archived: { conversationId: string; at: number; via: string }[];
+  unarchived: string[];
   answers: { conversationId: string; askId: string; answer: string; name: string }[];
   relays: { conversationId: string; relay: { name: string } | null }[];
   /** 会话的后台任务投影与停任务记录 */
@@ -230,6 +237,7 @@ function harness(
     baseFactsCalls: [],
     forgotten: [],
     archived: [],
+    unarchived: [],
     answers: [],
     relays: [],
     tasks: new Map(Object.entries(options.tasks ?? {})),
@@ -361,8 +369,26 @@ function harness(
       rows: () => h.rows,
       dispatchFile: () => structuredClone(h.file),
       removeWorktree: async () => ({ status: 'failed', reason: 'rename-failed' }),
-      archive: (conversationId, at) => {
-        h.archived.push({ conversationId, at });
+      // 与生产端口同一契约：会话行标上归档，派发记录记下是哪个秘书操作归档的
+      archive: (conversationId, at, via) => {
+        h.archived.push({ conversationId, at, via });
+        const row = h.rows[conversationId];
+        if (row) h.rows[conversationId] = { ...row, archived: true, archivedAt: at };
+        const record = h.file.dispatched[conversationId];
+        if (record) record.secretaryArchived = { at, via };
+      },
+      unarchive: (conversationId) => {
+        h.unarchived.push(conversationId);
+        const row = h.rows[conversationId];
+        if (row) {
+          const { archived: _archived, archivedAt: _archivedAt, ...rest } = row;
+          h.rows[conversationId] = rest;
+        }
+        const record = h.file.dispatched[conversationId];
+        if (record) {
+          delete record.secretaryArchived;
+          delete record.autoArchivedAt;
+        }
       },
       audit: (entry) => {
         h.audits.push(entry);
@@ -937,6 +963,21 @@ describe('session_send', () => {
     if (result.ok) return;
     expect(result.error).toMatch(/^refused \(needs-user\): /u);
     expect(h.steers).toEqual([]);
+    expect(h.queued).toEqual([]);
+  });
+
+  it('聚合状态因等子代理为 running、但父会话自身 idle：普通发送与 steer 都直接 prompt，不堵在队列里', async () => {
+    const h = harness({
+      file: dispatchedFile(),
+      statuses: { c1: { state: 'running', pendingAsks: 0, pendingApprovals: 0 } },
+    });
+    h.ports.ownStatus = async () => ({ state: 'idle', pendingAsks: 0, pendingApprovals: 0 });
+    const result = await call(h.handlers.session_send, {
+      conversationId: 'c1',
+      message: '进度如何',
+    });
+    expect(result).toEqual({ ok: true, result: { status: 'sent' } });
+    expect(h.prompts).toEqual([{ conversationId: 'c1', text: '进度如何', deliveryId: 'id-1' }]);
     expect(h.queued).toEqual([]);
   });
 
@@ -2576,7 +2617,7 @@ describe('清理提案', () => {
     expect(resolved.proposal.kind === 'cleanup' && resolved.proposal.report).toContain(
       'archived 1'
     );
-    expect(h.archived).toEqual([{ conversationId: 'c-done', at: NOW }]);
+    expect(h.archived).toEqual([{ conversationId: 'c-done', at: NOW, via: 'cleanup_apply' }]);
     expect(h.audits.some((entry) => entry.op === 'cleanup_session')).toBe(true);
   });
 
@@ -2656,6 +2697,44 @@ describe('确认卡的两段式回传', () => {
       'proposal:cleanup-1:executing',
       'proposal:cleanup-1:succeeded',
     ]);
+  });
+
+  // 技能、档案、工具写盘后要释放秘书会话：先投「正在执行」，释放会把这次投递的模型请求中止（Request aborted）
+  it.each([
+    ['skill', { name: 'deploy-check', description: '发布前跑一遍', body: '# 步骤' }],
+    ['profile', { name: '小秘' }],
+    [
+      'tool',
+      {
+        name: 'upper-text',
+        description: '把文本转成大写',
+        runtime: 'node',
+        parameters: { type: 'object', properties: {} },
+        readOnly: true,
+        code: 'process.stdout.write("x")',
+      },
+    ],
+  ] as const)('确认 %s 提案：写完才投递，秘书只收到一条终态', async (kind, draft) => {
+    const h = harness();
+    h.file.proposals.p1 = {
+      id: 'p1',
+      secretaryConversationId: 'sec-1',
+      createdAt: NOW,
+      updatedAt: NOW,
+      status: 'pending',
+      kind,
+      draft,
+    } as SecretaryProposal;
+    const flushedWith: string[][] = [];
+    setProposalAcceptedListener(() => flushedWith.push(h.file.outbox.map((update) => update.key)));
+    try {
+      const result = await resolveProposal(h.ports, 'p1', 'confirm');
+      expect(result.ok && result.proposal.status).toBe('succeeded');
+    } finally {
+      setProposalAcceptedListener(null);
+    }
+    expect(h.file.outbox.map((update) => update.key)).toEqual(['proposal:p1:succeeded']);
+    expect(flushedWith).toEqual([['proposal:p1:succeeded']]);
   });
 
   it('取消时立刻推「已取消」', async () => {
@@ -3869,7 +3948,7 @@ const settledFile = (
   ),
 });
 
-const settledRows = (conversationIds: string[]) =>
+const settledRows = (conversationIds: string[]): Record<string, Record<string, unknown>> =>
   Object.fromEntries(
     conversationIds.map((id) => [
       id,
@@ -3894,7 +3973,7 @@ describe('session_archive', () => {
         failed: 0,
       },
     });
-    expect(h.archived).toEqual([{ conversationId: 'c1', at: NOW }]);
+    expect(h.archived).toEqual([{ conversationId: 'c1', at: NOW, via: 'session_archive' }]);
     expect(h.audits.at(-1)).toMatchObject({
       op: 'session_archive',
       targetId: 'c1',
@@ -3994,6 +4073,163 @@ describe('session_archive', () => {
   });
 });
 
+describe('session_unarchive', () => {
+  type Unarchived = {
+    results: { conversationId: string; status: string; reason?: string }[];
+    unarchived: number;
+    skipped: number;
+    failed: number;
+  };
+  const payload = (result: unknown) => (result as { result: Unarchived }).result;
+  /** 已经由秘书 session_archive 归档的派发会话 */
+  const archivedBySecretary = async (ids: string[] = ['c1']) => {
+    const h = harness({
+      file: settledFile(ids),
+      rows: settledRows(ids),
+      conversations: ids.map((id) => rootConversation(id)),
+    });
+    await call(h.handlers.session_archive, { ids });
+    expect(ids.every((id) => h.rows[id]?.archived === true)).toBe(true);
+    return h;
+  };
+
+  it('秘书归档的会话能拉回来，之后照常 session_send 带 goal 继续', async () => {
+    const h = await archivedBySecretary();
+    const result = await call(h.handlers.session_unarchive, { conversationId: 'c1' });
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        results: [{ conversationId: 'c1', status: 'unarchived' }],
+        unarchived: 1,
+        skipped: 0,
+        failed: 0,
+      },
+    });
+    expect(h.rows.c1?.archived).toBeUndefined();
+    expect(h.rows.c1?.archivedAt).toBeUndefined();
+    expect(h.audits.at(-1)).toMatchObject({
+      op: 'session_unarchive',
+      secretaryConversationId: 'sec-1',
+      targetId: 'c1',
+      ok: true,
+      detail: 'unarchived (session_archive)',
+    });
+    const sent = await call(h.handlers.session_send, {
+      conversationId: 'c1',
+      message: '用户审核后要改标题',
+      goal: '按用户意见改完标题并提交',
+    });
+    expect(sent.ok).toBe(true);
+    expect(h.attachedGoals).toEqual([{ conversationId: 'c1', goal: '按用户意见改完标题并提交' }]);
+  });
+
+  it('cleanup_apply 归档的与旧版 Main 自动归档的都能拉回来', async () => {
+    const file = settledFile(['c1', 'c2']);
+    file.dispatched.c1 = {
+      ...file.dispatched.c1,
+      secretaryArchived: { at: 800, via: 'cleanup_apply' },
+    } as DispatchRecord;
+    file.dispatched.c2 = { ...file.dispatched.c2, autoArchivedAt: 700 } as DispatchRecord;
+    const rows = settledRows(['c1', 'c2']);
+    rows.c1 = { ...rows.c1, archived: true, archivedAt: 800 };
+    rows.c2 = { ...rows.c2, archived: true, archivedAt: 700 };
+    const h = harness({ file, rows });
+    const result = await call(h.handlers.session_unarchive, { ids: ['c1', 'c2'] });
+    expect(payload(result).results).toEqual([
+      { conversationId: 'c1', status: 'unarchived' },
+      { conversationId: 'c2', status: 'unarchived' },
+    ]);
+    expect(h.unarchived).toEqual(['c1', 'c2']);
+  });
+
+  it('用户手动归档的拒绝，原因是 archived-by-user', async () => {
+    const rows = settledRows(['c1']);
+    rows.c1 = { ...rows.c1, archived: true, archivedAt: 700 };
+    const h = harness({ file: settledFile(['c1']), rows });
+    const result = await call(h.handlers.session_unarchive, { conversationId: 'c1' });
+    expect(payload(result).results[0]).toMatchObject({ conversationId: 'c1', status: 'skipped' });
+    expect(payload(result).results[0]?.reason).toContain('archived-by-user');
+    expect(h.rows.c1?.archived).toBe(true);
+    expect(h.unarchived).toEqual([]);
+    expect(h.audits.at(-1)).toMatchObject({
+      op: 'session_unarchive',
+      targetId: 'c1',
+      ok: false,
+      detail: 'archived-by-user',
+    });
+  });
+
+  it('秘书归档后用户取消又亲手归档：这次算用户的，拒绝', async () => {
+    const h = await archivedBySecretary();
+    h.rows.c1 = { ...h.rows.c1, archived: true, archivedAt: NOW + 5000 };
+    const result = await call(h.handlers.session_unarchive, { conversationId: 'c1' });
+    expect(payload(result).results[0]?.reason).toContain('archived-by-user');
+    expect(h.rows.c1?.archived).toBe(true);
+  });
+
+  it('不归秘书管、已删除、没归档、项目不可见的都跳过并说明原因', async () => {
+    const file = settledFile(['c1', 'gone', 'live']);
+    const rows = {
+      ...settledRows(['c1', 'live', 'other']),
+      c1: { ...settledRows(['c1']).c1, archived: true, archivedAt: 700 },
+      other: { ...settledRows(['other']).other, archived: true, archivedAt: 700 },
+    };
+    file.dispatched.c1 = {
+      ...file.dispatched.c1,
+      secretaryArchived: { at: 700, via: 'session_archive' },
+    } as DispatchRecord;
+    const cases: [string, string][] = [
+      ['other', 'not-operable'],
+      ['gone', 'not-found'],
+      ['live', 'not-archived'],
+    ];
+    const h = harness({ file, rows });
+    for (const [conversationId, code] of cases) {
+      const result = await call(h.handlers.session_unarchive, { conversationId });
+      expect(result.ok).toBe(true);
+      expect(payload(result).results[0]?.status).toBe('skipped');
+      expect(payload(result).results[0]?.reason).toContain(code);
+    }
+    const hidden = harness({ file, rows, profile: profile({ visibleProjectIds: ['p2'] }) });
+    const refused = await call(hidden.handlers.session_unarchive, { conversationId: 'c1' });
+    expect(payload(refused).results[0]?.reason).toContain('not-visible');
+    expect(h.unarchived).toEqual([]);
+    expect(hidden.unarchived).toEqual([]);
+  });
+
+  it('批量逐条给结果、逐条审计，写盘失败的报 failed 不影响其余', async () => {
+    const h = await archivedBySecretary(['c1', 'c2', 'c3']);
+    h.rows.c2 = { ...h.rows.c2, archivedAt: NOW + 1 };
+    const unarchive = h.ports.cleanup.unarchive;
+    h.ports.cleanup.unarchive = (conversationId) => {
+      if (conversationId === 'c3') throw new Error('disk full');
+      return unarchive(conversationId);
+    };
+    const result = await call(h.handlers.session_unarchive, { ids: ['c1', 'c2', 'c3', 'nope'] });
+    expect(result.ok).toBe(true);
+    const body = payload(result);
+    expect(body.results.map((entry) => [entry.conversationId, entry.status])).toEqual([
+      ['c1', 'unarchived'],
+      ['c2', 'skipped'],
+      ['c3', 'failed'],
+      ['nope', 'skipped'],
+    ]);
+    expect(body.results[2]?.reason).toContain('disk full');
+    expect([body.unarchived, body.skipped, body.failed]).toEqual([1, 2, 1]);
+    expect(h.audits.filter((entry) => entry.op === 'session_unarchive')).toHaveLength(4);
+  });
+
+  it('超过 20 个或没给 id 按参数错误拒绝', async () => {
+    const h = await archivedBySecretary();
+    const tooMany = await call(h.handlers.session_unarchive, {
+      ids: Array.from({ length: 21 }, (_, index) => `c${index}`),
+    });
+    expect(tooMany.ok).toBe(false);
+    expect((await call(h.handlers.session_unarchive, {})).ok).toBe(false);
+    expect(h.unarchived).toEqual([]);
+  });
+});
+
 describe('派发时指定模型', () => {
   const strong = { providerId: 'anthropic', modelId: 'opus', thinkingLevel: 'high' as const };
 
@@ -4078,6 +4314,80 @@ describe('派发时指定模型', () => {
     expect(h.audits.at(-1)).toMatchObject({
       op: 'todo_item_dispatch',
       detail: 'created · model anthropic/opus',
+    });
+  });
+
+  describe('虚拟模型', () => {
+    const AUTO_ID = '7b11a559-f632-4648-a52b-f0c2e536e19f';
+    const virtual = { providerId: VIRTUAL_PROVIDER_ID, modelId: AUTO_ID };
+    const providers = [{ id: 'max', name: 'Max', models: [{ id: 'opus' }] }];
+    const auto: VirtualModelEntry = {
+      id: AUTO_ID,
+      name: 'Auto',
+      enabled: true,
+      primary: { providerId: 'max', modelId: 'opus' },
+      fallbacks: [],
+    };
+
+    function virtualHarness(entries: VirtualModelEntry[] = [auto]) {
+      const h = harness({
+        profile: profile(),
+        todos: [{ id: 't1', text: '修构建', createdAt: 1, projectId: 'p1' } as SecretaryTodo],
+      });
+      const deps: DispatchModelDeps = {
+        providers,
+        virtualModels: entries,
+        resolve: (ref) =>
+          (
+            ref.providerId === VIRTUAL_PROVIDER_ID
+              ? entries.some((entry) => entry.id === ref.modelId && entry.enabled)
+              : ref.providerId === 'max' && ref.modelId === 'opus'
+          )
+            ? { ok: true, ref }
+            : { ok: false, error: 'Model is unavailable: model-missing' },
+        usable: () => true,
+      };
+      h.ports.resolveModel = (ref) => resolveDispatchModel(ref, deps);
+      h.handlers = createSecretaryDispatchHandlers(h.ports);
+      return h;
+    }
+
+    it('session_create 按名称指定虚拟模型：会话用的就是这个虚拟模型', async () => {
+      const h = virtualHarness();
+      const result = await run(h.handlers.session_create, {
+        projectId: 'p1',
+        prompt: '修构建',
+        model: { providerId: VIRTUAL_PROVIDER_ID, modelId: 'Auto', thinkingLevel: 'high' },
+      });
+      expect(result).toMatchObject({ status: 'created', conversationId: 'new-1' });
+      expect(h.created[0]?.model).toEqual(virtual);
+      expect(h.created[0]?.thinkingLevel).toBe('high');
+      expect(h.file.dispatched['new-1']?.model).toEqual({ ...virtual, thinkingLevel: 'high' });
+    });
+
+    it('todo_item_dispatch 的 modelId 直接填虚拟模型 id', async () => {
+      const h = virtualHarness();
+      const result = await run(h.handlers.todo_item_dispatch, {
+        todoId: 't1',
+        model: { providerId: 'Auto', modelId: AUTO_ID },
+      });
+      expect(result).toMatchObject({ status: 'created', conversationId: 'new-1' });
+      expect(h.created[0]?.model).toEqual(virtual);
+      expect(h.file.dispatched['new-1']?.model).toEqual(virtual);
+    });
+
+    it('无效模型的报错清单里列出可用虚拟模型，不建会话', async () => {
+      const h = virtualHarness();
+      const result = await call(h.handlers.session_create, {
+        projectId: 'p1',
+        prompt: '修构建',
+        model: { providerId: 'auto', modelId: 'auto' },
+      });
+      expect(result.ok).toBe(false);
+      expect((result as { error: string }).error).toContain(
+        `Auto (virtual model): providerId "${VIRTUAL_PROVIDER_ID}", modelId "${AUTO_ID}"`
+      );
+      expect(h.created).toEqual([]);
     });
   });
 });
@@ -4621,6 +4931,37 @@ describe('手动标完成写入 daily、新 goal 才解除锁定与停止清旧�
     expect(h.file.dispatched.c1.reopenedAt).toBe(NOW);
   });
 
+  it('result_mark_done 清除带 needsUser 的 goal-complete，去掉残留 needsUser 并保留客观事实，工作台不再留在需要你', async () => {
+    const file = dispatchedFile('c1', 'idle');
+    file.dispatched.c1.lastResult = { kind: 'goal-complete', turn: 1, at: NOW - 10_000 };
+    file.dispatched.c1.goalResult = {
+      at: NOW - 10_000,
+      result: {
+        summary: 'PR #62 review 完了',
+        prs: [{ repo: 'acme/plugins', number: 62, state: 'merged' }],
+        needsUser: ['是否合并上架 #62'],
+      },
+    };
+    const h = harness({
+      file,
+      rows: {
+        c1: { id: 'c1', title: 'Review PR #62', sessionFile: '/s/c1.jsonl', driver: 'main' },
+      },
+      statuses: { c1: idle },
+    });
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+
+    expect(await call(h.handlers.result_mark_done, { conversationId: 'c1' })).toEqual({
+      ok: true,
+      result: { status: 'marked-done', conversationId: 'c1' },
+    });
+    expect(h.file.dispatched.c1.lastResult).toMatchObject({ kind: 'goal-complete', manual: true });
+    expect(h.file.dispatched.c1.goalResult?.result.needsUser).toBeUndefined();
+    expect(h.file.dispatched.c1.goalResult?.result.prs).toEqual([
+      { repo: 'acme/plugins', number: 62, state: 'merged' },
+    ]);
+  });
+
   it('session_stop 清掉早先的 failed 结果，但保留停之前已经交过的 goal-complete', async () => {
     const h1 = harness({
       file: {
@@ -4648,5 +4989,233 @@ describe('手动标完成写入 daily、新 goal 才解除锁定与停止清旧�
     await call(h2.handlers.session_stop, { conversationId: 'c1' });
     expect(h2.file.dispatched.c1.stoppedAt).toBe(NOW);
     expect(h2.file.dispatched.c1.lastResult).toMatchObject({ kind: 'goal-complete' });
+  });
+});
+
+describe('answerNeedsUser：秘书带关联转问的 needsUser 被用户答复', () => {
+  const rows = {
+    c1: { id: 'c1', title: '清理孤儿进程', sessionFile: '/s/c1.jsonl', driver: 'main' },
+  };
+  const withNeeds = (needsUser: string[]) => {
+    const file = dispatchedFile('c1', 'idle');
+    file.dispatched.c1.lastResult = { kind: 'goal-complete', turn: 1, at: NOW - 10_000 };
+    file.dispatched.c1.goalResult = {
+      at: NOW - 10_000,
+      result: { summary: '做完了', commits: ['abc1234'], needsUser },
+    };
+    return harness({ file, rows, statuses: { c1: idle } });
+  };
+  const needsYou = (file: SecretaryDispatchFile) =>
+    buildBoard(file, { rows, statuses: { c1: idle }, projects: [localProject()], todos: [] })
+      .needsYou;
+
+  it('唯一一条被答复后卡片自动移出需要你，效果等同 result_mark_done', async () => {
+    const h = withNeeds(['是否清理孤儿进程']);
+    expect(needsYou(h.file)).toHaveLength(1);
+
+    expect(await answerNeedsUser(h.ports, { conversationId: 'c1' }, '清理', NOW)).toEqual({
+      ok: true,
+      cleared: true,
+    });
+    expect(needsYou(h.file)).toEqual([]);
+    expect(h.file.dispatched.c1.lastResult).toMatchObject({ kind: 'goal-complete', manual: true });
+    expect(h.file.dispatched.c1.goalResult?.result).toEqual({
+      summary: '做完了',
+      commits: ['abc1234'],
+    });
+    expect(h.audits.map((entry) => [entry.op, entry.detail])).toEqual([
+      ['needs_user_answered', '#0: 清理'],
+      ['result_mark_done', 'answered'],
+    ]);
+  });
+
+  it('多条只答一条：卡片留在需要你并标出哪条已答复、答复是什么；答完剩下的才移出', async () => {
+    const h = withNeeds(['是否清理孤儿进程', '是否发版']);
+
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 1 }, '先不发', NOW)
+    ).toEqual({ ok: true, cleared: false });
+    const [card] = needsYou(h.file);
+    expect(card).toMatchObject({
+      kind: 'session',
+      needsUser: ['是否清理孤儿进程', '是否发版'],
+      needsUserAnswers: [{ index: 1, answer: '先不发', at: NOW }],
+    });
+    // 落盘再读回来仍在
+    expect(parseDispatchFile(JSON.parse(JSON.stringify(h.file))).dispatched.c1.goalResult).toEqual(
+      h.file.dispatched.c1.goalResult
+    );
+
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 0 }, '清理', NOW)
+    ).toEqual({ ok: true, cleared: true });
+    expect(needsYou(h.file)).toEqual([]);
+  });
+
+  it('越界、已点「知道了」或未跟踪的会话不动卡片', async () => {
+    const h = withNeeds(['是否清理孤儿进程']);
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 3 }, '清理', NOW)
+    ).toEqual({ ok: false, error: 'bad-index' });
+    expect(await answerNeedsUser(h.ports, { conversationId: 'zz' }, '清理', NOW)).toEqual({
+      ok: false,
+      error: 'not-found',
+    });
+    expect(needsYou(h.file)).toHaveLength(1);
+
+    expect(dismissResult(h.ports, 'c1')).toEqual({ ok: true });
+    expect(await answerNeedsUser(h.ports, { conversationId: 'c1' }, '清理', NOW)).toEqual({
+      ok: false,
+      error: 'nothing-pending',
+    });
+    expect(h.file.dispatched.c1.lastResult?.manual).toBeUndefined();
+  });
+
+  it('提问之后才到的新结果、goal-blocked 的 needsUser 都不认这次答复', async () => {
+    const stale = withNeeds(['是否清理孤儿进程']);
+    expect(
+      await answerNeedsUser(stale.ports, { conversationId: 'c1' }, '清理', NOW - 20_000)
+    ).toEqual({ ok: false, error: 'stale' });
+    expect(needsYou(stale.file)).toHaveLength(1);
+
+    const blocked = withNeeds(['确认生产账号']);
+    blocked.file.dispatched.c1.lastResult = { kind: 'goal-blocked', turn: 1, at: NOW - 10_000 };
+    expect(await answerNeedsUser(blocked.ports, { conversationId: 'c1' }, '给了', NOW)).toEqual({
+      ok: false,
+      error: 'nothing-pending',
+    });
+    expect(blocked.file.dispatched.c1.lastResult?.manual).toBeUndefined();
+  });
+});
+
+describe('needs_user_escalate：秘书筛选后把 needsUser 升级给用户', () => {
+  const rows = {
+    c1: { id: 'c1', title: '清理孤儿进程', sessionFile: '/s/c1.jsonl', driver: 'main' },
+    'sec-1': { id: 'sec-1', title: '秘书', sessionFile: '/s/sec-1.jsonl' },
+  };
+  const withNeeds = (needsUser: string[]) => {
+    const file = dispatchedFile('c1', 'idle');
+    file.dispatched.c1.lastResult = { kind: 'goal-complete', turn: 1, at: NOW - 10_000 };
+    file.dispatched.c1.goalResult = { at: NOW - 10_000, result: { summary: '做完了', needsUser } };
+    return harness({ file, rows, statuses: { c1: idle } });
+  };
+  const boardOf = (file: SecretaryDispatchFile) =>
+    buildBoard(file, {
+      rows,
+      statuses: { c1: idle },
+      projects: [localProject()],
+      todos: [],
+      now: NOW,
+    });
+
+  it('升级前在「秘书处理中」；升级后改写文字进「需要你」，审计记一笔', async () => {
+    const h = withNeeds(['删临时文件', '在 Mac 上点确认']);
+    expect(boardOf(h.file).needsYou).toEqual([]);
+    expect(
+      await call(h.handlers.needs_user_escalate, {
+        conversationId: 'c1',
+        needsUserIndex: 1,
+        text: '在 Mac 顶栏点一下确认',
+      })
+    ).toEqual({
+      ok: true,
+      result: { status: 'escalated', conversationId: 'c1', needsUserIndex: 1 },
+    });
+    const [card] = boardOf(h.file).needsYou;
+    expect(card).toMatchObject({ conversationId: 'c1', needsUser: ['在 Mac 顶栏点一下确认'] });
+    expect(h.audits.at(-1)).toMatchObject({ op: 'needs_user_escalate', targetId: 'c1', ok: true });
+    // 落盘再读回来仍在
+    expect(parseDispatchFile(JSON.parse(JSON.stringify(h.file))).dispatched.c1.goalResult).toEqual(
+      h.file.dispatched.c1.goalResult
+    );
+  });
+
+  it('越界、没有待处理的 needsUser 都拒绝', async () => {
+    const h = withNeeds(['删临时文件']);
+    const bad = await call(h.handlers.needs_user_escalate, {
+      conversationId: 'c1',
+      needsUserIndex: 3,
+    });
+    expect(bad.ok).toBe(false);
+    expect(await escalateNeedsUser(h.ports, { conversationId: 'zz', needsUserIndex: 0 })).toEqual({
+      ok: false,
+      error: 'not-found',
+    });
+    h.file.dispatched.c1.lastResult = { kind: 'goal-blocked', turn: 1, at: NOW - 10_000 };
+    expect(await escalateNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 0 })).toEqual({
+      ok: false,
+      error: 'nothing-pending',
+    });
+  });
+
+  it('result_mark_done 后进完成，不再算秘书处理中', async () => {
+    const h = withNeeds(['删临时文件']);
+    await call(h.handlers.result_mark_done, { conversationId: 'c1' });
+    const board = boardOf(h.file);
+    expect(board.needsYou).toEqual([]);
+    expect(board.done[0]).toMatchObject({ conversationId: 'c1' });
+    expect(board.done[0]).not.toHaveProperty('triage');
+  });
+
+  it('逐条转问：答完一条回到秘书处理中，再问下一条照常升级，全部答完才收口', async () => {
+    const h = withNeeds(['删临时文件', '是否清理孤儿进程']);
+    expect(
+      await escalateNeedsUser(
+        h.ports,
+        { conversationId: 'c1', needsUserIndex: 1 },
+        '要清理孤儿进程吗？',
+        'ask'
+      )
+    ).toEqual({ ok: true });
+    expect(boardOf(h.file).needsYou).toHaveLength(1);
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 1 }, '清理', NOW)
+    ).toEqual({ ok: true, cleared: false });
+    expect(boardOf(h.file).needsYou).toEqual([]);
+    expect(boardOf(h.file).done[0]).toMatchObject({ conversationId: 'c1', triage: true });
+    expect(
+      await escalateNeedsUser(
+        h.ports,
+        { conversationId: 'c1', needsUserIndex: 0 },
+        '要删吗？',
+        'ask'
+      )
+    ).toEqual({ ok: true });
+    expect(boardOf(h.file).needsYou).toHaveLength(1);
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 0 }, '删', NOW)
+    ).toEqual({ ok: true, cleared: true });
+    expect(boardOf(h.file).needsYou).toEqual([]);
+    expect(h.file.dispatched.c1.lastResult).toMatchObject({ kind: 'goal-complete', manual: true });
+  });
+
+  it('提问时没记到升级，答复本身也算升级；只答一条不收口', async () => {
+    const h = withNeeds(['删临时文件', '是否清理孤儿进程']);
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 1 }, '清理', NOW)
+    ).toEqual({ ok: true, cleared: false });
+    expect(h.file.dispatched.c1.goalResult?.escalations).toMatchObject([{ index: 1 }]);
+  });
+
+  it('秘书功能关着：条目全都直接给用户，只答一条不收口', async () => {
+    const h = withNeeds(['删临时文件', '是否清理孤儿进程']);
+    h.ports.secretaryEnabled = () => false;
+    expect(
+      await answerNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 1 }, '清理', NOW)
+    ).toEqual({ ok: true, cleared: false });
+  });
+
+  it('带关联提问的升级没落上时记一笔失败审计', () => {
+    const h = withNeeds(['删临时文件']);
+    h.file.dispatched.c1.lastResult = { kind: 'goal-blocked', turn: 1, at: NOW - 10_000 };
+    expect(
+      escalateNeedsUser(h.ports, { conversationId: 'c1', needsUserIndex: 0 }, '要删吗？', 'ask')
+    ).toEqual({ ok: false, error: 'nothing-pending' });
+    expect(h.audits.at(-1)).toMatchObject({
+      op: 'needs_user_escalate',
+      targetId: 'c1',
+      ok: false,
+      detail: 'ask: nothing-pending',
+    });
   });
 });

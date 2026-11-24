@@ -3,7 +3,11 @@ import { createWriteStream, mkdirSync, statSync, type WriteStream } from 'node:f
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
-import { getPowerShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
+import {
+  getPowerShellConfig,
+  getShellConfig,
+  type ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
 import { SHELL_READ_HINT, SHELL_SLEEP_HINT, SHELL_TIMEOUT_HINT } from '@shared/shellHints';
 import { SHELL_LIMITS, type ShellLimits } from '@shared/shellLimits';
 import type { BackgroundTaskInfo, BackgroundTaskKeep } from '@shared/types/agent';
@@ -234,6 +238,7 @@ export interface UnreadOutput {
 /** 可被插话 / 用户「转后台」解除的在跑工具调用：前台命令移交后台，阻塞等待提前返回 */
 interface DetachableCall {
   detach(reason: DetachReason): string | null;
+  blockingWait?: true;
 }
 
 export interface BlockingWait {
@@ -245,8 +250,11 @@ export interface BlockingWait {
 
 /** 阻塞等待被解除后给模型的说明：被等的对象继续跑，结束会自动通知 */
 export function detachedWaitNote(reason: DetachReason, subject: string): string {
+  if (reason === 'restart') {
+    return `Paused waiting because EnsoCode is restarting. The ${subject} keeps running across the restart and you will be notified automatically when it finishes (or you can wait for it again after restart).`;
+  }
   return reason === 'steer'
-    ? `Stopped waiting because the user sent a new message. The ${subject} keeps running and you will be notified automatically when it finishes — read and answer the user's message first.`
+    ? `Stopped waiting because the user sent a new message. The ${subject} keeps running in the background and you will be notified automatically when it finishes (or you can wait for it again later) — read and answer the user's message first.`
     : `The user chose to stop waiting. The ${subject} keeps running and you will be notified automatically when it finishes; do not wait for it again unless the user asks.`;
 }
 
@@ -291,6 +299,8 @@ export class BackgroundTaskManager {
     spawnOpts?: {
       file?: string;
       argsPrefix?: string[];
+      /** stdin：命令写进 stdin 而不是追加在 argv（WSL 的 System32\bash.exe，与前台一致） */
+      commandTransport?: 'argv' | 'stdin';
       displayCommand?: string;
       details?: unknown;
       finalize?: () => Promise<unknown>;
@@ -303,11 +313,13 @@ export class BackgroundTaskManager {
   ): string {
     const taskId = this.reserveId(sessionId);
     const run =
-      spawnOpts?.detachable && !spawnOpts.file && process.platform !== 'win32'
+      spawnOpts?.detachable &&
+      spawnOpts.file &&
+      spawnOpts.commandTransport !== 'stdin' &&
+      process.platform !== 'win32'
         ? spawnFileBacked({
-            // 与 spawn(command, { shell: true }) 同一个 shell
-            shell: '/bin/sh',
-            args: ['-c'],
+            shell: spawnOpts.file,
+            args: spawnOpts.argsPrefix ?? [],
             command,
             cwd,
             env: spawnOpts.env,
@@ -438,6 +450,7 @@ export class BackgroundTaskManager {
     const controller = new AbortController();
     let detachedBy: DetachReason | undefined;
     const untrack = this.trackForeground(sessionId, toolCallId, {
+      blockingWait: true,
       detach: (reason) => {
         if (!controller.signal.aborted) {
           detachedBy = reason;
@@ -457,6 +470,15 @@ export class BackgroundTaskManager {
   backgroundAllForeground(sessionId: string, reason: DetachReason): string[] {
     const commands = [...(this.foreground.get(sessionId)?.values() ?? [])];
     return commands.flatMap((command) => command.detach(reason) ?? []);
+  }
+
+  /** 只解除阻塞等待（subagent wait / task_output 等待），不提前转后台普通前台命令 */
+  detachBlockingWaits(sessionId: string, reason: DetachReason): number {
+    const calls = [...(this.foreground.get(sessionId)?.values() ?? [])].filter(
+      (call) => call.blockingWait === true
+    );
+    for (const call of calls) call.detach(reason);
+    return calls.length;
   }
 
   private reserveId(sessionId: string): string {
@@ -1292,21 +1314,32 @@ export function backgroundSpawnMode(platform: string): {
 function spawnBackground(
   command: string,
   cwd: string,
-  spawnOpts?: { file?: string; argsPrefix?: string[]; env?: NodeJS.ProcessEnv }
+  spawnOpts?: {
+    file?: string;
+    argsPrefix?: string[];
+    commandTransport?: 'argv' | 'stdin';
+    env?: NodeJS.ProcessEnv;
+  }
 ) {
   const env = spawnOpts?.env ?? process.env;
   // stdin 关闭与前台（pi bash）一致：读 stdin 立即 EOF，交互提示 fail-fast 而不是挂到让位点；远程包装即 ssh -n
-  const stdio: ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe'];
   const mode = backgroundSpawnMode(process.platform);
   if (spawnOpts?.file) {
-    return spawn(spawnOpts.file, [...(spawnOpts.argsPrefix ?? []), command], {
+    const viaStdin = spawnOpts.commandTransport === 'stdin';
+    const args = spawnOpts.argsPrefix ?? [];
+    const child = spawn(spawnOpts.file, viaStdin ? [...args] : [...args, command], {
       cwd,
       env,
       ...mode,
-      stdio,
+      stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
+    if (viaStdin) {
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(command);
+    }
+    return child;
   }
-  return spawn(command, { shell: true, cwd, env, ...mode, stdio });
+  return spawn(command, { shell: true, cwd, env, ...mode, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 export { processAlive };
@@ -1316,21 +1349,35 @@ export type BackgroundLaunch = {
   cwd: string;
   file?: string;
   argsPrefix?: string[];
+  commandTransport?: 'argv' | 'stdin';
 };
+
+type ShellConfig = { shell: string; args: string[]; commandTransport?: 'argv' | 'stdin' };
 
 export function resolveBackgroundLaunch(
   toolName: string,
   command: string,
   cwd: string,
   transform?: (command: string, cwd: string) => { command: string; cwd: string },
-  resolvePowerShell?: () => { shell: string; args: string[] }
+  deps: {
+    resolvePowerShell?: () => ShellConfig;
+    resolveBash?: () => ShellConfig;
+  } = {}
 ): BackgroundLaunch {
   if (transform) return transform(command, cwd);
   if (toolName === 'powershell') {
-    const ps = (resolvePowerShell ?? getPowerShellConfig)();
+    const ps = (deps.resolvePowerShell ?? getPowerShellConfig)();
     return { command, cwd, file: ps.shell, argsPrefix: [...ps.args] };
   }
-  return { command, cwd };
+  // 与前台 bash 同一 getShellConfig：不落到 shell:true 的 cmd.exe / /bin/sh（Linux 上常是 dash）
+  const bash = (deps.resolveBash ?? (() => getShellConfig()))();
+  return {
+    command,
+    cwd,
+    file: bash.shell,
+    argsPrefix: [...bash.args],
+    commandTransport: bash.commandTransport,
+  };
 }
 
 const asRecord = (params: unknown): Record<string, unknown> =>
@@ -1568,6 +1615,7 @@ export function withBackground(
           taskId = manager.start(sessionId, launch.command, launch.cwd, {
             file: launch.file,
             argsPrefix: launch.argsPrefix,
+            commandTransport: launch.commandTransport,
             displayCommand: hooks ? record.command : undefined,
             details: prepared.details,
             finalize: prepared.finalize,

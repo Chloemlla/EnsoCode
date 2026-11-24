@@ -53,6 +53,7 @@ function contactState(groups: SecretaryContactState['telegram']['groups']): Secr
       poll: { state: 'running' },
       secure: true,
     },
+    owner: { githubLogins: [], externalConfirm: false },
   };
 }
 
@@ -185,6 +186,62 @@ describe('连不上 api.telegram.org 提示', () => {
       ).click();
     });
     expect(errorBanner()).toContain(UNREACHABLE);
+  });
+});
+
+describe('主人身份', () => {
+  const setInput = async (selector: string, value: string) => {
+    const input = container.querySelector(selector) as HTMLInputElement;
+    const key = Object.keys(input).find((name) => name.startsWith('__reactProps'));
+    const props = (key ? (input as unknown as Record<string, unknown>)[key] : null) as {
+      onChange?: (event: { target: { value: string } }) => void;
+    } | null;
+    await act(async () => {
+      props?.onChange?.({ target: { value } });
+    });
+  };
+
+  it('联系方式关掉也显示；保存才提交账号，填入不保存，确认开关单独提交', async () => {
+    const suggest = vi.fn(async () => ({ login: 'J3n5en' }));
+    (
+      window as unknown as {
+        electronAPI: { secretary: { contactGithubSuggest: typeof suggest } };
+      }
+    ).electronAPI.secretary.contactGithubSuggest = suggest;
+    state = {
+      ...contactState([]),
+      enabled: false,
+      owner: { githubLogins: [], externalConfirm: false },
+    };
+    await render('sec-a');
+    expect(container.querySelector('[data-enso="secretary-contact-owner"]')).not.toBeNull();
+    expect(container.textContent).toContain('J3n5en');
+    const fill = container.querySelector(
+      '[data-enso="secretary-contact-github-fill"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      fill.click();
+    });
+    expect(contactSettings).not.toHaveBeenCalled();
+    expect(
+      (container.querySelector('[data-enso="secretary-contact-github-logins"]') as HTMLInputElement)
+        .value
+    ).toBe('J3n5en');
+    await setInput('[data-enso="secretary-contact-github-logins"]', 'J3n5en, octocat');
+    await act(async () => {
+      (
+        container.querySelector('[data-enso="secretary-contact-github-save"]') as HTMLButtonElement
+      ).click();
+    });
+    expect(contactSettings).toHaveBeenCalledWith({ githubLogins: ['J3n5en', 'octocat'] }, 'sec-a');
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-enso="secretary-contact-external-confirm"]'
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(contactSettings).toHaveBeenLastCalledWith({ externalConfirm: true }, 'sec-a');
   });
 });
 
@@ -545,5 +602,94 @@ describe('群和话题入口', () => {
     expect(
       container.querySelectorAll('[data-enso="secretary-contact-topic-command"]')
     ).toHaveLength(1);
+  });
+});
+
+describe('插件渠道出站失败', () => {
+  function withWechat(
+    outbound?: SecretaryContactState['channels'][number]['outbound']
+  ): SecretaryContactState {
+    const base = contactState([]);
+    const telegram = base.channels[0];
+    if (!telegram) throw new Error('missing telegram');
+    return {
+      ...base,
+      channels: [
+        telegram,
+        {
+          ...telegram,
+          id: 'enso.clawbot:wechat',
+          title: '微信',
+          builtin: false,
+          pluginId: 'enso.clawbot',
+          ...(outbound ? { outbound } : {}),
+        },
+      ],
+    };
+  }
+  const wechatCard = () =>
+    container.querySelector(
+      '[data-enso="secretary-contact-channel"][data-channel="enso.clawbot:wechat"]'
+    );
+
+  it('暂停中：标出暂停推送，插件提示原样展示，带原因、最近失败时间与被拦下的条数', async () => {
+    state = withWechat({
+      state: 'paused',
+      consecutiveFailures: 3,
+      lastErrorAt: Date.now() - 60_000,
+      lastErrorCode: 'api',
+      detail: '[SESSION_EXPIRED] sendmessage ret=-2 prepare failed',
+      pluginCode: 'SESSION_EXPIRED',
+      userMessage: '微信会话已过期，请在微信里给机器人发任意一条消息',
+      pausedUntil: Date.now() + 5 * 60_000,
+      suppressedCount: 4,
+    });
+    await render('sec-a');
+    const card = wechatCard();
+    expect(
+      card?.querySelector('[data-enso="secretary-contact-channel-outbound"]')?.textContent
+    ).toBe('Pushes paused');
+    const notice = card?.querySelector('[data-enso="secretary-contact-outbound"]');
+    expect(notice?.getAttribute('data-state')).toBe('paused');
+    expect(notice?.textContent).toContain('Pushes paused: 3 sends failed in a row');
+    expect(
+      notice?.querySelector('[data-enso="secretary-contact-outbound-hint"]')?.textContent
+    ).toBe('微信会话已过期，请在微信里给机器人发任意一条消息');
+    expect(
+      notice?.querySelector('[data-enso="secretary-contact-outbound-detail"]')?.textContent
+    ).toBe('[SESSION_EXPIRED] sendmessage ret=-2 prepare failed');
+    expect(notice?.textContent).toContain('Last failure:');
+    expect(notice?.textContent).toContain('4 pushes held back.');
+    // Telegram 卡片不受影响
+    expect(
+      container.querySelector('[data-channel="telegram"] [data-enso="secretary-contact-outbound"]')
+    ).toBeNull();
+  });
+
+  it('立即重试：按渠道 id 调测试接口；发送失败的原因留在卡片上，不在顶部报 Telegram 错误', async () => {
+    state = withWechat({
+      state: 'degraded',
+      consecutiveFailures: 1,
+      lastErrorAt: Date.now(),
+      lastErrorCode: 'api',
+      detail: 'sendmessage ret=-2 prepare failed',
+      suppressedCount: 0,
+    });
+    contactTest.mockResolvedValueOnce({ ok: false, error: 'api' });
+    await render('sec-a');
+    const retry = container.querySelector(
+      '[data-channel="enso.clawbot:wechat"] [data-enso="secretary-contact-outbound-retry"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      retry.click();
+    });
+    expect(contactTest).toHaveBeenCalledWith('sec-a', 'enso.clawbot:wechat');
+    expect(errorBanner()).toBeNull();
+  });
+
+  it('发送正常时不显示失败块', async () => {
+    state = withWechat();
+    await render('sec-a');
+    expect(wechatCard()?.querySelector('[data-enso="secretary-contact-outbound"]')).toBeNull();
   });
 });

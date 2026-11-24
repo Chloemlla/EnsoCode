@@ -7,6 +7,8 @@ import type {
 import {
   ArrowDown,
   ArrowUp,
+  ChevronDown,
+  ChevronRight,
   Download,
   FileDiff,
   GitBranch,
@@ -19,16 +21,32 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ReactElement,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ConfirmDialog } from '@/components/chat/ConfirmDialog';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuItem,
+  ContextMenuPopup,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from '@/components/ui/menu';
 import { Textarea } from '@/components/ui/textarea';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useSessionsStore } from '@/stores/sessions';
 import { GitDiffPreview } from './GitDiffPreview';
-import { GitFileList, GitFileViewToggle } from './GitFileList';
+import { type GitFileDirectory, GitFileList, GitFileViewToggle } from './GitFileList';
 import { GitFileRow } from './GitFileRow';
 import { GitHistoryView } from './GitHistoryView';
 import { GitPanelLayout } from './GitPanelLayout';
@@ -36,6 +54,13 @@ import { usePanelVisibility } from './panelVisibility';
 
 type Status = Extract<GitStatusResult, { ok: true }>;
 type Selection = { path: string; staged: boolean };
+type BulkDiscard = {
+  kind: 'all' | 'untracked';
+  tracked: string[];
+  untracked: string[];
+  /** 仅从树状视图文件夹右键触发时设置，用于确认弹窗明确标注目标目录 */
+  directory?: string;
+};
 
 export function GitChangesView({
   conversationId,
@@ -66,6 +91,8 @@ export function GitChangesView({
   const filterInput = useRef<HTMLInputElement>(null);
   const [selected, setSelected] = useState<Selection | null>(null);
   const [discard, setDiscard] = useState<GitFile | null>(null);
+  const [bulkDiscard, setBulkDiscard] = useState<BulkDiscard | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ staged: true });
   const [diff, setDiff] = useState<GitFileDiffResult | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -245,6 +272,31 @@ export function GitChangesView({
     files: group.files.filter((file) => file.path.toLowerCase().includes(filter)),
   }));
   const visibleCount = visibleGroups.reduce((count, group) => count + group.files.length, 0);
+  // 有冲突时 Main 会整批拒绝写操作，批量入口直接禁用
+  const conflicted = groups[1].files.filter((file) => file.status === 'conflicted').length;
+  const trackedPaths = groups[1].files.map((file) => file.path);
+  const untrackedPaths = groups[2].files.map((file) => file.path);
+  const bulkDescription = bulkDiscard
+    ? [
+        bulkDiscard.tracked.length > 0 &&
+          t(
+            bulkDiscard.directory
+              ? 'Unstaged changes in {{count}} tracked files in {{path}} will be lost; the files are restored to their staged version.'
+              : 'Unstaged changes in {{count}} tracked files will be lost; the files are restored to their staged version.',
+            { count: bulkDiscard.tracked.length, path: bulkDiscard.directory ?? '' }
+          ),
+        bulkDiscard.untracked.length > 0 &&
+          t(
+            bulkDiscard.directory
+              ? '{{count}} untracked files in {{path}} will be permanently deleted and cannot be recovered.'
+              : '{{count}} untracked files will be permanently deleted and cannot be recovered.',
+            { count: bulkDiscard.untracked.length, path: bulkDiscard.directory ?? '' }
+          ),
+        bulkDiscard.kind === 'untracked' && t('Tracked files are not changed.'),
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : '';
   const commit = () => {
     if (canCommit) {
       void perform(
@@ -379,7 +431,72 @@ export function GitChangesView({
         <GitPanelLayout
           title={t('Changed files')}
           hasSelection={selected !== null}
-          actions={<GitFileViewToggle tree={tree} onToggle={() => setTree((value) => !value)} />}
+          actions={
+            <>
+              <Menu>
+                <MenuTrigger
+                  render={<Button variant="ghost" size="icon-xs" />}
+                  title={t('Discard…')}
+                  aria-label={t('Discard…')}
+                  disabled={blocked}
+                >
+                  <Undo2 className="size-3.5" />
+                </MenuTrigger>
+                <MenuPopup align="end" className="min-w-56">
+                  <MenuItem
+                    variant="destructive"
+                    data-discard-option="all"
+                    disabled={conflicted > 0 || trackedPaths.length + untrackedPaths.length === 0}
+                    onClick={() =>
+                      setBulkDiscard({
+                        kind: 'all',
+                        tracked: trackedPaths,
+                        untracked: untrackedPaths,
+                      })
+                    }
+                  >
+                    <span className="flex flex-col">
+                      {t('Discard all')}
+                      <span className="text-[11px] text-muted-foreground">
+                        {conflicted > 0
+                          ? t('Resolve conflicts first.')
+                          : t(
+                              'Discard {{tracked}} tracked changes, delete {{untracked}} untracked files',
+                              { tracked: trackedPaths.length, untracked: untrackedPaths.length }
+                            )}
+                      </span>
+                    </span>
+                  </MenuItem>
+                  <MenuItem
+                    variant="destructive"
+                    data-discard-option="untracked"
+                    disabled={conflicted > 0 || untrackedPaths.length === 0}
+                    onClick={() =>
+                      setBulkDiscard({
+                        kind: 'untracked',
+                        tracked: [],
+                        untracked: untrackedPaths,
+                      })
+                    }
+                  >
+                    <span className="flex flex-col">
+                      {t('Discard untracked')}
+                      <span className="text-[11px] text-muted-foreground">
+                        {conflicted > 0
+                          ? t('Resolve conflicts first.')
+                          : t('Permanently delete {{count}} untracked files', {
+                              count: untrackedPaths.length,
+                            })}
+                      </span>
+                    </span>
+                  </MenuItem>
+                  <MenuSeparator />
+                  <MenuItem data-discard-option="cancel">{t('Cancel')}</MenuItem>
+                </MenuPopup>
+              </Menu>
+              <GitFileViewToggle tree={tree} onToggle={() => setTree((value) => !value)} />
+            </>
+          }
           navigation={
             <>
               <div className="shrink-0 px-2 pb-1.5">
@@ -412,15 +529,39 @@ export function GitChangesView({
                   )}
                 </InputGroup>
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-1">
-                {visibleGroups.map((group) =>
-                  group.files.length === 0 ? null : (
-                    <section key={group.id} className="mb-2 last:mb-0">
+              <div className="relative min-h-0 flex-1 overflow-y-auto px-1 pb-1">
+                {visibleGroups.map((group) => {
+                  if (group.files.length === 0) return null;
+                  // 搜索命中时强制展开，免得结果被折叠挡住
+                  const expanded = Boolean(filter) || !collapsed[group.id];
+                  const hiddenConflicts = expanded
+                    ? 0
+                    : group.files.filter((file) => file.status === 'conflicted').length;
+                  return (
+                    <section key={group.id} data-git-group={group.id} className="mb-2 last:mb-0">
                       <div className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-muted-foreground">
-                        <span className="min-w-0 flex-1 truncate">
-                          {group.title}{' '}
-                          <span className="ml-1 font-normal">{group.files.length}</span>
-                        </span>
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-1 text-left hover:text-foreground"
+                          aria-expanded={expanded}
+                          onClick={() => {
+                            if (!filter)
+                              setCollapsed((value) => ({ ...value, [group.id]: !value[group.id] }));
+                          }}
+                        >
+                          <span className="min-w-0 truncate">{group.title}</span>
+                          <span className="shrink-0 font-normal">· {group.files.length}</span>
+                          {hiddenConflicts > 0 && (
+                            <span className="shrink-0 font-normal text-destructive">
+                              {t('{{count}} conflicted', { count: hiddenConflicts })}
+                            </span>
+                          )}
+                          {expanded ? (
+                            <ChevronDown className="size-3 shrink-0" />
+                          ) : (
+                            <ChevronRight className="size-3 shrink-0" />
+                          )}
+                        </button>
                         <GitAction
                           title={t(group.staged ? 'Unstage all' : 'Stage all')}
                           disabled={blocked}
@@ -440,56 +581,144 @@ export function GitChangesView({
                           )}
                         </GitAction>
                       </div>
-                      <GitFileList key={filter} files={group.files} tree={tree}>
-                        {(file) => (
-                          <GitFileRow
-                            file={file}
-                            showDirectory={!tree}
-                            selected={
-                              selected?.path === file.path && selected.staged === group.staged
-                            }
-                            onSelect={() => select(file, group.staged)}
-                            actions={
-                              <>
-                                {!group.staged && (
-                                  <GitAction
-                                    title={t(
-                                      file.status === 'untracked'
-                                        ? 'Delete untracked file'
-                                        : 'Discard changes'
-                                    )}
-                                    disabled={blocked || file.status === 'conflicted'}
-                                    onClick={() => setDiscard(file)}
+                      {expanded && (
+                        <GitFileList
+                          key={filter}
+                          files={group.files}
+                          tree={tree}
+                          renderDirectory={(directory: GitFileDirectory, trigger: ReactElement) => {
+                            const paths = directory.files.map((file) => file.path);
+                            const count = paths.length;
+                            const isUntrackedGroup = group.id === 'untracked';
+                            return (
+                              <ContextMenu>
+                                <ContextMenuTrigger
+                                  render={trigger as ReactElement<Record<string, unknown>>}
+                                />
+                                <ContextMenuPopup className="min-w-44">
+                                  <ContextMenuItem
+                                    data-git-dir-action={group.staged ? 'unstage' : 'stage'}
+                                    data-git-dir-path={directory.path}
+                                    disabled={blocked || count === 0}
+                                    onClick={() =>
+                                      void perform(group.staged ? 'Unstage' : 'Stage', () =>
+                                        window.electronAPI.git[group.staged ? 'unstage' : 'stage']({
+                                          ...request,
+                                          paths,
+                                        })
+                                      )
+                                    }
                                   >
-                                    <Undo2 className="size-3.5" />
-                                  </GitAction>
-                                )}
-                                <GitAction
-                                  title={t(group.staged ? 'Unstage' : 'Stage')}
-                                  disabled={blocked}
-                                  onClick={() =>
-                                    void perform(group.staged ? 'Unstage' : 'Stage', () =>
-                                      window.electronAPI.git[group.staged ? 'unstage' : 'stage']({
-                                        ...request,
-                                        paths: [file.path],
-                                      })
-                                    )
-                                  }
-                                >
-                                  {group.staged ? (
-                                    <Minus className="size-3.5" />
-                                  ) : (
-                                    <Plus className="size-3.5" />
+                                    {group.staged ? (
+                                      <Minus className="size-3.5" />
+                                    ) : (
+                                      <Plus className="size-3.5" />
+                                    )}
+                                    <span className="flex-1">
+                                      {t(group.staged ? 'Unstage' : 'Stage')}
+                                    </span>
+                                    <span className="font-mono text-[11px] opacity-70">
+                                      {count}
+                                    </span>
+                                  </ContextMenuItem>
+                                  {!group.staged && (
+                                    <>
+                                      <ContextMenuSeparator />
+                                      <ContextMenuItem
+                                        variant="destructive"
+                                        data-git-dir-action="discard"
+                                        data-git-dir-path={directory.path}
+                                        disabled={blocked || conflicted > 0 || count === 0}
+                                        onClick={() => {
+                                          const tracked = directory.files
+                                            .filter((file) => file.status !== 'untracked')
+                                            .map((file) => file.path);
+                                          const untracked = directory.files
+                                            .filter((file) => file.status === 'untracked')
+                                            .map((file) => file.path);
+                                          if (!tracked.length && !untracked.length) return;
+                                          setBulkDiscard({
+                                            kind: isUntrackedGroup ? 'untracked' : 'all',
+                                            tracked,
+                                            untracked,
+                                            directory: directory.path,
+                                          });
+                                        }}
+                                      >
+                                        <Undo2 className="size-3.5" />
+                                        <span className="flex flex-1 flex-col">
+                                          {t(
+                                            isUntrackedGroup
+                                              ? 'Delete untracked files'
+                                              : 'Discard changes'
+                                          )}
+                                          {conflicted > 0 && (
+                                            <span className="text-[11px] text-muted-foreground">
+                                              {t('Resolve conflicts first.')}
+                                            </span>
+                                          )}
+                                        </span>
+                                        <span className="font-mono text-[11px] opacity-70">
+                                          {count}
+                                        </span>
+                                      </ContextMenuItem>
+                                    </>
                                   )}
-                                </GitAction>
-                              </>
-                            }
-                          />
-                        )}
-                      </GitFileList>
+                                </ContextMenuPopup>
+                              </ContextMenu>
+                            );
+                          }}
+                        >
+                          {(file) => (
+                            <GitFileRow
+                              file={file}
+                              showDirectory={!tree}
+                              selected={
+                                selected?.path === file.path && selected.staged === group.staged
+                              }
+                              onSelect={() => select(file, group.staged)}
+                              actions={
+                                <>
+                                  {!group.staged && (
+                                    <GitAction
+                                      title={t(
+                                        file.status === 'untracked'
+                                          ? 'Delete untracked file'
+                                          : 'Discard changes'
+                                      )}
+                                      disabled={blocked || file.status === 'conflicted'}
+                                      onClick={() => setDiscard(file)}
+                                    >
+                                      <Undo2 className="size-3.5" />
+                                    </GitAction>
+                                  )}
+                                  <GitAction
+                                    title={t(group.staged ? 'Unstage' : 'Stage')}
+                                    disabled={blocked}
+                                    onClick={() =>
+                                      void perform(group.staged ? 'Unstage' : 'Stage', () =>
+                                        window.electronAPI.git[group.staged ? 'unstage' : 'stage']({
+                                          ...request,
+                                          paths: [file.path],
+                                        })
+                                      )
+                                    }
+                                  >
+                                    {group.staged ? (
+                                      <Minus className="size-3.5" />
+                                    ) : (
+                                      <Plus className="size-3.5" />
+                                    )}
+                                  </GitAction>
+                                </>
+                              }
+                            />
+                          )}
+                        </GitFileList>
+                      )}
                     </section>
-                  )
-                )}
+                  );
+                })}
                 {visibleCount === 0 && (
                   <p className="m-1 rounded-md border border-dashed px-2 py-5 text-center text-xs text-muted-foreground">
                     {t(
@@ -573,6 +802,53 @@ export function GitChangesView({
                 confirmUntracked: discard.status === 'untracked',
               })
             );
+          }
+        }}
+      />
+      <ConfirmDialog
+        open={bulkDiscard !== null && !blocked}
+        onOpenChange={(open) => {
+          if (!open) setBulkDiscard(null);
+        }}
+        title={t(
+          bulkDiscard?.directory
+            ? bulkDiscard.kind === 'untracked'
+              ? 'Delete untracked files'
+              : 'Discard changes'
+            : bulkDiscard?.kind === 'untracked'
+              ? 'Discard untracked'
+              : 'Discard all'
+        )}
+        description={bulkDescription}
+        confirmLabel={
+          bulkDiscard?.untracked.length
+            ? t(
+                bulkDiscard.kind === 'all'
+                  ? 'Discard and delete {{count}} untracked files'
+                  : 'Delete {{count}} untracked files',
+                { count: bulkDiscard.untracked.length }
+              )
+            : t(bulkDiscard?.directory ? 'Discard' : 'Discard all')
+        }
+        onConfirm={() => {
+          if (bulkDiscard) {
+            const { tracked, untracked } = bulkDiscard;
+            // 分两次调用：已跟踪那批不放行删除，确认期间若有文件变成未跟踪，Main 会拒绝而不是删掉
+            void perform('Discard', async () => {
+              if (tracked.length) {
+                const result = await window.electronAPI.git.discard({
+                  ...request,
+                  paths: tracked,
+                  confirmUntracked: false,
+                });
+                if (!result.ok || !untracked.length) return result;
+              }
+              return window.electronAPI.git.discard({
+                ...request,
+                paths: untracked,
+                confirmUntracked: true,
+              });
+            });
           }
         }}
       />

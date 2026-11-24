@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => ({
   forkSession: vi.fn(() => ({ ok: true })),
   sessionWorktree: vi.fn(),
   sessionWorktreeBusy: vi.fn(() => false),
+  workspaceRoot: vi.fn((id: string) => id),
   shareSessionWorktree: vi.fn(),
   removeRegisteredWorktree: vi.fn(async () => {}),
   cleanupSessionFiles: vi.fn(),
@@ -189,6 +190,7 @@ vi.mock('./sessionIndex', () => ({
     sessionFile: mocks.sessionFile,
     isAlive: vi.fn(() => false),
     isDetached: mocks.isDetached,
+    workspaceRoot: mocks.workspaceRoot,
   },
 }));
 vi.mock('./settings', () => ({
@@ -230,6 +232,7 @@ import { appUserImageDirs } from '@shared/secretary/imageView';
 import { parseProfile } from '@shared/secretary/parse';
 import { app } from 'electron';
 import { resolveSubagentModelSelection, rewindSession } from '../services/agentHost';
+import { searchFiles } from '../services/fileSearch';
 import { SecretaryStore } from '../services/secretary/store';
 import {
   abortRootFromMain,
@@ -392,7 +395,7 @@ describe('agent IPC Main identity boundary', () => {
     const text =
       'GitHub 动态\n<untrusted-content source="plugin:enso.github">\n- PR #409\n</untrusted-content>';
     const wrapped =
-      '<untrusted-content source="plugin:enso.github">GitHub 动态\n<\\untrusted-content source="plugin:enso.github">\n- PR #409\n<\\/untrusted-content></untrusted-content>';
+      '<untrusted-content source="plugin:enso.github" role="external">GitHub 动态\n<\\untrusted-content source="plugin:enso.github">\n- PR #409\n<\\/untrusted-content></untrusted-content>';
     const github = {
       pluginId: 'enso.github',
       requestedTrusted: false,
@@ -408,7 +411,7 @@ describe('agent IPC Main identity boundary', () => {
     expect(prepare('sec', { ...github, text }).origin).toBe('external');
     expect(prepare('sec', { ...github, text: 'token: abcdefgh' }).text).toContain('[REDACTED]');
     expect(prepare('sec', { ...scheduler, text: '跑一遍测试' }).text).toBe(
-      '<untrusted-content source="plugin:enso.scheduler">跑一遍测试</untrusted-content>'
+      '<untrusted-content source="plugin:enso.scheduler" role="owner">跑一遍测试</untrusted-content>'
     );
     project.mockReturnValue({
       projectId: 'sp',
@@ -452,7 +455,21 @@ describe('agent IPC Main identity boundary', () => {
           text: '我自己的任务',
           sender: { channel: 'telegram', userId: '1', displayName: 'Ada' },
         })
-      ).toMatchObject({ text: '我自己的任务', origin: 'owner' });
+      ).toMatchObject({ origin: 'owner' });
+      expect(
+        prepare('sec', {
+          ...trusted,
+          text: '我自己的任务',
+          sender: { channel: 'telegram', userId: '1', displayName: 'Ada' },
+        }).text
+      ).toContain('role="owner"');
+      expect(
+        prepare('sec', {
+          ...trusted,
+          text: '我自己的任务',
+          sender: { channel: 'telegram', userId: '1', displayName: 'Ada' },
+        }).text
+      ).toContain('我自己的任务');
     } finally {
       setPluginOwnerBindingsProbe(null);
     }
@@ -1319,6 +1336,118 @@ describe('agent IPC Main identity boundary', () => {
     });
   });
 
+  // FILES_SEARCH 曾直接收 renderer 传来的 root 磁盘路径，等于能搜遍整盘；现在只收会话标识
+  describe('FILES_SEARCH 只按会话标识推导 @ 搜索根', () => {
+    const scratchId = '11111111-1111-4111-8111-111111111111';
+    const otherScratchId = '22222222-2222-4222-8222-222222222222';
+    const coworkerId = 'coworker-1';
+    let tmp: string;
+    let projectRoot: string;
+    let scratchRoot: string;
+    const search = async (...args: unknown[]) =>
+      (await mocks.handlers.get(IPC_CHANNELS.FILES_SEARCH)?.(event, ...args)) as {
+        relativePath: string;
+      }[];
+    const paths = async (...args: unknown[]) =>
+      (await search(...args)).map((hit) => hit.relativePath);
+
+    beforeEach(async () => {
+      const actual =
+        await vi.importActual<typeof import('../services/fileSearch')>('../services/fileSearch');
+      vi.mocked(searchFiles).mockImplementation(actual.searchFiles);
+      tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'enso-files-search-')));
+      projectRoot = path.join(tmp, 'repo');
+      scratchRoot = path.join(tmp, 'scratch');
+      mkdirSync(path.join(projectRoot, 'src'), { recursive: true });
+      writeFileSync(path.join(projectRoot, 'src', 'repo-note.md'), '');
+      mkdirSync(path.join(scratchRoot, scratchId), { recursive: true });
+      mkdirSync(path.join(scratchRoot, otherScratchId), { recursive: true });
+      writeFileSync(path.join(scratchRoot, scratchId, 'mine-note.md'), '');
+      writeFileSync(path.join(scratchRoot, otherScratchId, 'theirs-note.md'), '');
+      writeFileSync(path.join(tmp, 'secret-note.md'), '');
+      const authority = getSourceAuthorityRegistry()!;
+      vi.spyOn(authority, 'conversation').mockImplementation((id) =>
+        id === 'conv-repo' || id === scratchId || id === otherScratchId
+          ? {
+              conversationId: id,
+              projectId: id === 'conv-repo' ? 'p-repo' : 'p-scratch',
+              kind: 'root',
+              lifecycle: 'ready',
+              version: 1,
+            }
+          : undefined
+      );
+      vi.spyOn(authority, 'project').mockImplementation((id) =>
+        id === 'p-repo'
+          ? { projectId: id, canonicalPath: projectRoot, state: 'active', version: 1 }
+          : id === 'p-scratch'
+            ? {
+                projectId: id,
+                canonicalPath: scratchRoot,
+                state: 'active',
+                version: 1,
+                kind: 'scratch',
+              }
+            : undefined
+      );
+      mocks.workspaceRoot.mockImplementation((id: string) => (id === coworkerId ? scratchId : id));
+    });
+
+    afterEach(() => {
+      vi.mocked(searchFiles).mockReset().mockReturnValue([]);
+      mocks.workspaceRoot.mockReset().mockImplementation((id: string) => id);
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it('普通项目搜项目根，不跟 worktree', async () => {
+      const worktree = path.join(tmp, 'wt');
+      mkdirSync(worktree);
+      writeFileSync(path.join(worktree, 'wt-note.md'), '');
+      mocks.sessionWorktree.mockReturnValue({ path: worktree });
+      await expect(paths({ conversationId: 'conv-repo', query: 'note' })).resolves.toEqual([
+        'src/repo-note.md',
+      ]);
+    });
+
+    it('临时会话只搜 scratch/<会话 id>', async () => {
+      await expect(paths({ conversationId: scratchId, query: 'note' })).resolves.toEqual([
+        'mine-note.md',
+      ]);
+    });
+
+    it('coworker 子会话用父会话的目录', async () => {
+      await expect(paths({ conversationId: coworkerId, query: 'note' })).resolves.toEqual([
+        'mine-note.md',
+      ]);
+    });
+
+    it.each([
+      ['旧形状：直接传磁盘路径', () => [tmp, 'note']],
+      ['额外带 root 字段', () => [{ conversationId: 'conv-repo', query: 'note', root: tmp }]],
+      ['不存在的会话', () => [{ conversationId: 'gone', query: 'note' }]],
+      ['query 不是字符串', () => [{ conversationId: 'conv-repo', query: 1 }]],
+    ])('%s 一律不搜', async (_case, args) => {
+      await expect(search(...args())).resolves.toEqual([]);
+    });
+
+    it('scratch 会话目录是指向外部的符号链接时拒绝', async () => {
+      rmSync(path.join(scratchRoot, scratchId), { recursive: true });
+      symlinkSync(tmp, path.join(scratchRoot, scratchId));
+      await expect(search({ conversationId: scratchId, query: 'note' })).resolves.toEqual([]);
+    });
+
+    it('SSH 项目的路径不在本机，不搜本机同名目录', async () => {
+      vi.spyOn(getSourceAuthorityRegistry()!, 'project').mockReturnValue({
+        projectId: 'p-repo',
+        canonicalPath: projectRoot,
+        state: 'active',
+        version: 1,
+        kind: 'ssh',
+      });
+      await expect(search({ conversationId: 'conv-repo', query: 'note' })).resolves.toEqual([]);
+    });
+  });
+
   // 审计 J5a：FILES_READ 曾收任意磁盘路径原样读出（≤2MB），files.read('<userData>/settings.json')
   // 直接拿到明文 key；远端（手机/远程桌面）同样可调，绕过 SETTINGS_READ 的脱敏。
   // 现在只收 { conversationId, projectId, rel }，根目录由 Main 按会话权威记录推导。
@@ -1995,6 +2124,46 @@ describe('压缩完成触发记忆整理', () => {
       expect.objectContaining({ sessionId: 'conv-1' }),
       { continueFromLastJob: true }
     );
+  });
+
+  it('秘书会话结束：秘书还在就进它的私有空间；秘书已删（隐藏项目已撤）就不再蒸馏，不落进全局', () => {
+    conversation();
+    const project = vi.spyOn(getSourceAuthorityRegistry()!, 'project');
+    const secretary = { projectId: 'p', kind: 'secretary', canonicalPath: '/s', version: 1 };
+    project.mockReturnValue({ ...secretary, state: 'active' } as never);
+    emit({ type: 'parent-ended' });
+    expect(mocks.scheduleMemoryDistill).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'conv-1', projectId: 'p' }),
+      { continueFromLastJob: true }
+    );
+    mocks.scheduleMemoryDistill.mockClear();
+    project.mockReturnValue({ ...secretary, state: 'removed' } as never);
+    emit({ type: 'parent-ended' });
+    expect(mocks.scheduleMemoryDistill).not.toHaveBeenCalled();
+    project.mockRestore();
+  });
+
+  it('调度失败（服务超时 / 退出）只记一条结构化 warn，不留未处理的 rejection', async () => {
+    conversation();
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocks.scheduleMemoryDistill.mockRejectedValueOnce(
+      new Error('memory service exited; in-flight ops rejected')
+    );
+    try {
+      emit({ type: 'parent-ended' });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith('[memory] schedule distill failed', {
+        sessionId: 'conv-1',
+        error: 'memory service exited; in-flight ops rejected',
+      });
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      warn.mockRestore();
+    }
   });
 
   it('Bot 群聊会话：压缩后走 Bot 记忆整理并标记下次补群状态', () => {

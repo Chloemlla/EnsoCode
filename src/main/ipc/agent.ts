@@ -23,6 +23,7 @@ import {
   type AgentControlContext,
   type AgentControlToolResponse,
   type AgentRemoteConfig,
+  type AgentRunProgress,
   type AgentSpawnRequest,
   type AgentWorkerEvent,
   type ApprovalMode,
@@ -154,8 +155,22 @@ import {
   wakeColdRestartSession,
 } from '../services/coldRestart';
 import { reloadConversation } from '../services/conversationReload';
-import { spawnCwdFromAuthority } from '../services/conversationSpawnCwd';
+import { mentionSearchRoot, spawnCwdFromAuthority } from '../services/conversationSpawnCwd';
+import { getDemandThreadRouter } from '../services/demandThreadRouter';
+import {
+  demandRequesterIsOwner,
+  getDemandThreadStore,
+  peekDemandThreadStore,
+  releaseReassignedDemandClaims,
+  setDemandOwnerResolver,
+  setDemandSessionReassignedHook,
+} from '../services/demandThreads';
 import { notifyDesktop, sessionDesktop } from '../services/desktopHooks';
+import {
+  peekEventClaimStore,
+  setClaimSessionProtectedCheck,
+  setPreferredClaimOwnerResolver,
+} from '../services/eventClaims';
 import { takeInterruptedTurns } from '../services/exitInterruptHost';
 import { exitInterruptionOf } from '../services/exitWindow';
 import {
@@ -186,13 +201,14 @@ import {
   configurePairSessionHost,
   handlePairHeadlessAgentEvent,
 } from '../services/pairSessionHost';
-import { planReminderWake } from '../services/reminderWake';
+import { planReminderWake, reminderResumeFromAuthority } from '../services/reminderWake';
 import { remoteCandidates } from '../services/remoteModels';
 import { webContentsOrRemote } from '../services/remoteRenderer/lookup';
 import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import type { RestartManifestEntry } from '../services/restartManifest';
 import { ContactStore, hasContactRoutes } from '../services/secretary/contact/store';
 import { secretaryToolDescriptors, secretaryToolsDir } from '../services/secretary/customTools';
+import { notifySecretaryChanged } from '../services/secretary/dispatch';
 import { secretaryEnabled } from '../services/secretary/enabled';
 import { unfollowTargetEverywhere } from '../services/secretary/following';
 import { isSecretaryConversation, isSecretaryProject } from '../services/secretary/identity';
@@ -245,6 +261,7 @@ import {
   readExternalSession,
 } from '../services/sessionImport';
 import { setSessionMuteOverride } from '../services/sessionMuteGate';
+import { readAllSessionReminders } from '../services/sessionReminders';
 import { SourceAuthorityRegistry } from '../services/sourceAuthorityRegistry';
 import { getSshConnectionStore } from '../services/sshConnectionStore';
 import { SubagentProgressPush } from '../services/subagentProgressPush';
@@ -372,6 +389,14 @@ export function observedSessionStatus(sessionId: string): PluginSessionStatus {
     : status;
 }
 
+/** 仅主会话自身状态（不含子代理运行态）：驱动者据此判断是否可泵出排队消息 */
+export function observedOwnSessionStatus(sessionId: string): PluginSessionStatus {
+  const status = pluginSessionStates.ownStatus(sessionId);
+  return status.state === 'idle' && agentSessionIndex.rootRunning(status.sessionId)
+    ? { ...status, state: 'running' }
+    : status;
+}
+
 /** 秘书 session_tasks 与自动归档的数据源：会话及其子代理起的后台任务（worker 在 Main 的最近一次投影） */
 export function observedBackgroundTasks(sessionId: string): ObservedTask[] {
   return backgroundTaskStates.tasksInTree(sessionId);
@@ -380,6 +405,16 @@ export function observedBackgroundTasks(sessionId: string): ObservedTask[] {
 /** 主会话名下还有没结束的子代理 Run：结束时 AgentService 会通知并叫醒主会话 */
 export function observedSubagentsRunning(sessionId: string): boolean {
   return (agentService?.progress(sessionId).length ?? 0) > 0;
+}
+
+/** 主会话名下正在运行的子代理进度快照（秘书查询、看板、侧栏同源） */
+export function observedSubagentProgress(sessionId: string): AgentRunProgress[] {
+  return agentService?.progress(sessionId) ?? [];
+}
+
+/** 冷启动时该父会话是否有停在安全点、正在按 #418 自动续跑的子代理 Run */
+export function hasRestartResumingSubagent(sessionId: string): boolean {
+  return agentService?.hasRestartPendingOwner(sessionId) ?? false;
 }
 
 /** Bot 会话宿主订阅 worker 事件（turn 结果、运行态） */
@@ -408,6 +443,54 @@ function markExitInterrupted<T extends AgentWorkerEvent | WorkerExitedEvent>(eve
   const interruption = exitInterruptionOf(event.error, Date.now());
   if (!interruption) return event;
   return { ...event, interrupted: { at: interruption.at, kind: interruption.kind } } as T;
+}
+
+function noteClaimLiveness(event: AgentWorkerEvent | WorkerExitedEvent): void {
+  noteDemandThreadSignal(event);
+  const store = peekEventClaimStore();
+  if (!store) return;
+  if (event.type === 'worker-exited') {
+    for (const claim of store.list()) {
+      if (resumesAfterQuit(claim.sessionId)) continue;
+      if (upstreamRecovery?.getWaiter(claim.sessionId)) continue;
+      store.release(claim.key, claim.sessionId);
+    }
+    return;
+  }
+  if (!('identity' in event) || !event.identity) return;
+  const root = rootSessionId(event.identity);
+  if (event.type === 'parent-ended') {
+    store.releaseSession(event.identity.sessionId);
+    return;
+  }
+  if (event.type === 'turn-failed' && event.identity.sessionId === root) {
+    if (event.interrupted || upstreamRecovery?.getWaiter(root)) return;
+    store.releaseSession(root);
+    return;
+  }
+  if (
+    event.type === 'goal-signal' &&
+    event.kind === 'complete' &&
+    event.identity.sessionId === root
+  ) {
+    store.releaseSession(root);
+    return;
+  }
+  store.heartbeat(root);
+}
+
+function noteDemandThreadSignal(event: AgentWorkerEvent | WorkerExitedEvent): void {
+  if (event.type !== 'goal-signal') return;
+  const root = rootSessionId(event.identity);
+  if (event.identity.sessionId !== root) return;
+  const summary = event.note.trim();
+  if (event.kind === 'complete') {
+    void getDemandThreadRouter().onSessionGoalCompleted(root, summary ? { summary } : undefined);
+    return;
+  }
+  if (event.kind === 'blocked') {
+    void getDemandThreadRouter().onSessionNeedsHuman(root, summary, summary);
+  }
 }
 
 function broadcastAgentEvent(event: RendererAgentEvent): void {
@@ -548,6 +631,7 @@ function removeConversationFiles(conversation: {
 }): void {
   const project = sourceAuthority?.project(conversation.projectId);
   peekExtensionPlugins()?.forgetSession(conversation.conversationId);
+  peekEventClaimStore()?.releaseSession(conversation.conversationId);
   getSecretaryImageStore()?.remove(conversation.conversationId);
   getSecretaryReportStore()?.remove(conversation.conversationId);
   removeConversationSessionFiles({
@@ -928,6 +1012,7 @@ export function abortRootFromMain(sessionId: string): void {
 
 /** 用户（或替用户的秘书）停止：根会话名下在跑的子代理一并停掉；插话立即发送 / 卡死重试只断当前轮 */
 function stopWithSubagents(identity: SessionIdentity): AgentActionResult {
+  peekEventClaimStore()?.releaseSession(identity.sessionId);
   const result = abortSession(identity);
   if (!('parent' in identity)) void agentService?.cancelOwner(identity.sessionId);
   return result;
@@ -939,6 +1024,7 @@ async function wakeForReminder(sessionId: string): Promise<void> {
     row: readPersistedConversation(sessionId),
     alive: agentSessionIndex.isAlive(sessionId),
     lifecycle: sourceAuthority?.conversation(sessionId)?.lifecycle,
+    known: Boolean(sourceAuthority?.conversation(sessionId)),
   });
   const tag = `[reminder] due ${sessionId.slice(0, 8)}`;
   if (plan === 'clear') {
@@ -954,6 +1040,15 @@ async function wakeForReminder(sessionId: string): Promise<void> {
   let result = await wakeColdRestartSession(sessionId, resumeRootFromRestartManifest);
   if (result.error === 'not in restart manifest' || result.error === 'already woken')
     result = await resumeRootFromMain(sessionId);
+  // 强杀丢掉 settings 投影里的会话行：权威注册表同步落盘，按它恢复
+  if (!result.ok && result.error === 'unknown session') {
+    const fromAuthority = reminderResumeFromAuthority({
+      sessionId,
+      authority: sourceAuthority?.conversation(sessionId),
+      cwd: authoritativeSpawnCwd(sessionId),
+    });
+    if (fromAuthority) result = await spawnRootFromMain(fromAuthority);
+  }
   console.log(`${tag}: resume ${result.ok ? 'ok' : `skipped: ${result.error}`}`);
 }
 
@@ -1476,14 +1571,20 @@ function distillSessionMemory(identity: SessionIdentity) {
   if (sessionFile) {
     const project = conversation ? sourceAuthority?.project(conversation.projectId) : undefined;
     if (conversation?.bot) void getBotServices()?.memory.distill({ ...conversation, sessionFile });
-    else
-      void scheduleMemoryDistill(
+    // 已删秘书的会话：私有空间已删，项目一撤 projectId 就成了 null，会落进全局
+    else if (!isSecretaryProject(project) || project?.state === 'active')
+      scheduleMemoryDistill(
         {
           sessionId: identity.sessionId,
           sessionFile,
           projectId: project?.state === 'active' ? project.projectId : null,
         },
         { continueFromLastJob: true }
+      ).catch((error: unknown) =>
+        console.warn('[memory] schedule distill failed', {
+          sessionId: identity.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
       );
   }
   return conversation?.bot;
@@ -1837,6 +1938,12 @@ async function runAgentControl(
 }
 
 export function registerAgentHandlers(): void {
+  setDemandOwnerResolver((source) => demandRequesterIsOwner(source, pluginOwnerBindings()));
+  setDemandSessionReassignedHook(releaseReassignedDemandClaims);
+  getDemandThreadStore();
+  setPreferredClaimOwnerResolver(
+    (key) => peekDemandThreadStore()?.resolveOwnerForClaimKey(key) ?? null
+  );
   registerPluginSessionBridge(
     (sessionId) => {
       const identity = agentSessionIndex.currentIdentity(sessionId);
@@ -2018,6 +2125,9 @@ export function registerAgentHandlers(): void {
       }
     },
   });
+  setClaimSessionProtectedCheck(
+    (sessionId) => upstreamRecovery?.getWaiter(sessionId) !== undefined
+  );
 
   agentService = new AgentService({
     ledger: fileAgentRunLedger(path.join(app.getPath('userData'), 'agent', 'subagent-runs.json')),
@@ -2121,6 +2231,7 @@ export function registerAgentHandlers(): void {
       return;
     }
     const workerEvent = markExitInterrupted(incomingEvent);
+    noteClaimLiveness(workerEvent);
     // MCP 旁路事件不属于任何会话：只转发到独立通道 / 落 token，不进 dispatch 与会话广播
     if (workerEvent.type === 'mcp-status') {
       recordMcpStatus(workerEvent);
@@ -2160,6 +2271,18 @@ export function registerAgentHandlers(): void {
       void wakeForReminder(workerEvent.sessionId).catch((error: unknown) =>
         console.warn('[reminder] wake failed:', error instanceof Error ? error.message : error)
       );
+      return;
+    }
+    if (workerEvent.type === 'session-reminders-changed') {
+      try {
+        broadcastToRenderers(IPC_CHANNELS.AGENT_REMINDERS_CHANGED, {
+          sessionId: workerEvent.sessionId,
+          reminders: workerEvent.reminders,
+        });
+      } catch {
+        // renderer 已崩但 webContents 对象还在
+      }
+      notifySecretaryChanged();
       return;
     }
     // 断点已落盘：记下停在安全点的子会话，worker 退出时它们的 Run 等父会话就绪后接着跑
@@ -3057,8 +3180,12 @@ export function registerAgentHandlers(): void {
       const flag = (key: 'stopSubagents' | 'cancelReminders') =>
         typeof options === 'object' && options !== null && Reflect.get(options, key) === true;
       // 用户停止才带 cancelReminders；卡死重试、插话立即发送不带，提醒照留
-      if (flag('cancelReminders')) clearSessionReminders(identity.sessionId);
+      const cancelReminders = flag('cancelReminders');
+      if (cancelReminders) clearSessionReminders(identity.sessionId);
       const stopSubagents = flag('stopSubagents');
+      if (stopSubagents || cancelReminders) {
+        peekEventClaimStore()?.releaseSession(identity.sessionId);
+      }
       return stopSubagents ? stopWithSubagents(identity) : abortSession(identity);
     }
   );
@@ -3597,9 +3724,19 @@ export function registerAgentHandlers(): void {
     }
   );
 
-  ipcMain.handle(IPC_CHANNELS.FILES_SEARCH, (_event, root: unknown, query: unknown) => {
-    if (!isNonEmptyString(root) || typeof query !== 'string') return [];
-    return searchFiles(root, query);
+  ipcMain.handle(IPC_CHANNELS.AGENT_REMINDERS_LIST, () => readAllSessionReminders());
+
+  // 只收会话标识，根目录由 Main 推导；子会话/coworker 归到父会话的工作区
+  ipcMain.handle(IPC_CHANNELS.FILES_SEARCH, (_event, request: unknown) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) return [];
+    const { conversationId, query, ...rest } = request as Record<string, unknown>;
+    if (!isNonEmptyString(conversationId) || typeof query !== 'string' || Object.keys(rest).length)
+      return [];
+    const root = mentionSearchRoot(
+      getSourceAuthorityRegistry(),
+      agentSessionIndex.workspaceRoot(conversationId)
+    );
+    return root ? searchFiles(root, query) : [];
   });
 
   // 不收任意路径（那等于开放任意文件读取，远端同样可调）：工作区相对路径、会话写过的外部文件，或任务日志
@@ -3610,26 +3747,12 @@ export function registerAgentHandlers(): void {
     return listExternalSessions(projectPath);
   });
 
-  ipcMain.handle(
-    IPC_CHANNELS.SESSIONS_READ_EXTERNAL,
-    (_event, sourceId: unknown, sessionPath: unknown) => {
-      if (!isNonEmptyString(sourceId) || !isNonEmptyString(sessionPath)) return [];
-      return readExternalSession(sourceId, sessionPath);
-    }
+  // 只收扫描发放的令牌，路径与项目目录由 Main 取回并校验
+  ipcMain.handle(IPC_CHANNELS.SESSIONS_READ_EXTERNAL, (_event, token: unknown) =>
+    readExternalSession(token)
   );
 
-  ipcMain.handle(
-    IPC_CHANNELS.SESSIONS_IMPORT_EXTERNAL,
-    (_event, sourceId: unknown, sessionPath: unknown, projectPath: unknown) => {
-      if (
-        !isNonEmptyString(sourceId) ||
-        !isNonEmptyString(sessionPath) ||
-        !isNonEmptyString(projectPath)
-      ) {
-        return null;
-      }
-      const sessionDir = path.join(app.getPath('userData'), 'agent', 'sessions');
-      return importExternalSession(sourceId, sessionPath, projectPath, sessionDir);
-    }
+  ipcMain.handle(IPC_CHANNELS.SESSIONS_IMPORT_EXTERNAL, (_event, token: unknown) =>
+    importExternalSession(token, path.join(app.getPath('userData'), 'agent', 'sessions'))
   );
 }

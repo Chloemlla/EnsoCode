@@ -242,6 +242,8 @@ const initialState = {
   autoRestartForUpdate: 'off' as AutoRestartMode,
   updateChannel: DEFAULT_UPDATE_CHANNEL,
   pluginAutoUpdate: true,
+  pluginLoggingEnabled: false,
+  appLoggingEnabled: false,
   proxyMode: 'system' as ProxyMode,
   customProxyUrl: '',
   customCaCertPath: '',
@@ -470,6 +472,10 @@ export const useSettingsStore = create<SettingsState>()(
       setUpdateChannel: (updateChannel) => set({ updateChannel }),
       setPluginAutoUpdate: (pluginAutoUpdate) =>
         set({ pluginAutoUpdate: pluginAutoUpdate !== false }),
+      setPluginLoggingEnabled: (pluginLoggingEnabled) =>
+        set({ pluginLoggingEnabled: pluginLoggingEnabled === true }),
+      setAppLoggingEnabled: (appLoggingEnabled) =>
+        set({ appLoggingEnabled: appLoggingEnabled === true }),
       setProxyMode: (proxyMode) => set({ proxyMode: normalizeProxyMode(proxyMode) }),
       setCustomProxyUrl: (customProxyUrl) => set({ customProxyUrl }),
       setCustomCaCertPath: (customCaCertPath) => set({ customCaCertPath }),
@@ -580,6 +586,8 @@ export const useSettingsStore = create<SettingsState>()(
             if (p.id !== id) return p;
             const next = { ...p, ...updates };
             if ('headers' in updates && updates.headers === undefined) delete next.headers;
+            // 跟随全局代理不落 proxy 字段
+            if ('proxy' in updates && updates.proxy === undefined) delete next.proxy;
             return next;
           }),
         }));
@@ -1295,6 +1303,12 @@ export const useSettingsStore = create<SettingsState>()(
         }
         if (typeof s.pluginAutoUpdate !== 'boolean') {
           useSettingsStore.setState({ pluginAutoUpdate: true });
+        }
+        if (typeof s.pluginLoggingEnabled !== 'boolean') {
+          useSettingsStore.setState({ pluginLoggingEnabled: false });
+        }
+        if (typeof s.appLoggingEnabled !== 'boolean') {
+          useSettingsStore.setState({ appLoggingEnabled: false });
         }
         const sshTimeoutSeconds = normalizeSshTimeoutSeconds(s.sshTimeoutSeconds);
         if (sshTimeoutSeconds !== s.sshTimeoutSeconds) {

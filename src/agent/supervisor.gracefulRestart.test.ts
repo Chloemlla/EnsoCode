@@ -39,12 +39,14 @@ function fakeSessionShape() {
   return {} as {
     messages: unknown[];
     sessionFile: string;
+    isStreaming: boolean;
     agent: {
       state: { messages: unknown[] };
       prepareRequest: (turn: unknown, signal?: AbortSignal) => Promise<unknown>;
     };
     requestPrepared: ReturnType<typeof vi.fn>;
     prompt: ReturnType<typeof vi.fn>;
+    steer: ReturnType<typeof vi.fn>;
     abort: ReturnType<typeof vi.fn>;
     emit(event: { type: string; [key: string]: unknown }): void;
   };
@@ -1343,7 +1345,11 @@ describe('SessionSupervisor 重启保留转后台命令', () => {
   it('未打开会话里的任务也能停：按会话 id 寻址，别的会话停不了，不开会话', async () => {
     const dataDir = mkdtempSync(path.join(tmpdir(), 'enso-task-stop-unopened-'));
     const { events, supervisor } = await startSupervisor(dataDir);
-    const taskId = bgTasksOf(supervisor).start('other', 'sleep 30', dataDir, { detachable: true });
+    const taskId = bgTasksOf(supervisor).start('other', 'sleep 30', dataDir, {
+      detachable: true,
+      file: '/bin/bash',
+      argsPrefix: ['-c'],
+    });
     const status = () =>
       ofType(events, 'unopened-background-tasks')
         .filter((event) => event.sessionId === 'other')
@@ -1581,5 +1587,58 @@ describe('SessionSupervisor 重启保留转后台命令', () => {
     expect(ofType(third.events, 'session-wake-requested')).toEqual([]);
     expect(bgTasksOf(third.supervisor).snapshot('parent')).toEqual([]);
     await third.supervisor.shutdown();
+  });
+
+  it('空闲父会话收到 steer（例如等异步子代理期间）：改为 promptFresh 开新轮，不落入无活轮的 steeringQueue', async () => {
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'enso-steer-idle-parent-'));
+    const { events, supervisor } = await startSupervisor(dataDir);
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+    });
+    await waitFor(events, 'parent-ready');
+    const session = mocks.sessions[0];
+    session.isStreaming = false;
+    supervisor.handleCommand({
+      type: 'steer',
+      identity: parent,
+      text: '在吗？进度如何',
+      deliveryId: 'd-idle-steer',
+    });
+    await settle();
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(String(session.prompt.mock.calls[0]?.[0])).toContain('在吗？进度如何');
+    expect(session.steer).not.toHaveBeenCalled();
+    await supervisor.shutdown();
+  });
+
+  it('优雅重启时父会话正停在阻塞等待（如 subagent wait）：主动 detach 该等待，让父子都干净到达安全点', async () => {
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'enso-graceful-detach-wait-'));
+    const { events, supervisor } = await startSupervisor(dataDir);
+    supervisor.handleCommand({
+      type: 'spawn-parent',
+      identity: parent,
+      cwd: '/workspace',
+      model,
+    });
+    await waitFor(events, 'parent-ready');
+    const session = mocks.sessions[0];
+    const wait = bgTasksOf(supervisor).trackBlockingWait('parent', 'call-wait');
+    session.emit({ type: 'agent_start' });
+    session.emit({ type: 'turn_start' });
+    session.emit({
+      type: 'tool_execution_start',
+      toolCallId: 'call-wait',
+      toolName: 'subagent',
+      args: { operation: 'wait', runId: 'r-1' },
+    });
+    supervisor.handleCommand({ type: 'graceful-restart' });
+    await settle();
+    expect(wait.signal.aborted).toBe(true);
+    expect(wait.reason()).toBe('restart');
+    wait.untrack();
+    await supervisor.shutdown();
   });
 });

@@ -65,7 +65,7 @@ enso config get providers.<id>            # apiKey、Authorization 等显示为 
 | 文件路径 | `worktreeRoot`、`backgroundImagePath`、`backgroundFolderPath`，以及任一段是 `path`、`dir`、`root`、`cwd` 或以 `Path`、`Dir`、`Root` 结尾的键 | 可读 | 拒绝 |
 | 执行命令 | `terminalShell`、`windowsLocalShell`、`fileOpenRules`、`contextMenuOpen`，以及任一段是 `command` 或 `args` 的键（例如 MCP 的启动命令） | 可读 | 拒绝 |
 | 技能 / 指令装卸 | 整体替换或增删 `skills`、`instructions` 的条目 | 可读 | 拒绝；条目内的字段（如 `skills.<id>.enabled`）可以写 |
-| 供应商端点 | `providers.<id>.api`、`providers.<id>.baseUrl`、`providers.<id>.headers` 及其子键：它们决定 API Key 发往哪里，改了端点会让自动拉取立刻带着 key 请求新地址 | 可读（密钥仍显示为 `***`） | 拒绝，只能在设置页改 |
+| 供应商端点 | `providers.<id>.api`、`providers.<id>.baseUrl`、`providers.<id>.headers`、`providers.<id>.proxy` 及其子键：它们决定 API Key 发往哪里、经哪个出口发送，改了会让自动拉取立刻带着 key 请求新地址或新代理 | 可读（密钥仍显示为 `***`，`proxy.url` 里的账密显示为 `***@`） | 拒绝，只能在设置页改 |
 | 项目数据 | `projects`、`projectGroups`，由 Main 权威投影维护 | 拒绝 | 拒绝 |
 | 未登记字段 | 第一段不是设置字段 | 拒绝 | 拒绝 |
 
@@ -97,6 +97,10 @@ enso config get providers.<id>            # apiKey、Authorization 等显示为 
 `recentModels` 是模型选择器「最近使用」列表：`{ providerId, modelId }` 数组，最近的在前，最多 10 条且不重复；不符合的整体写入会被拒绝。它只存 id，不是密钥、路径或执行入口，热生效，不参与配置同步（引用本机 provider id）。
 
 `quoteSelectionButton`（布尔，默认 `true`）控制会话里选中文字时是否浮出「引用」按钮，只接受布尔值，热生效，无需重启。
+
+`pluginLoggingEnabled`（布尔，缺省 `false`）控制是否记录插件控制台输出与运行日志。关闭时不采集、不进缓冲、不写盘，启动失败和崩溃等错误状态仍然显示。只接受布尔值，热生效，无需重启插件或应用，不参与配置同步。
+
+`appLoggingEnabled`（布尔，缺省 `false`）控制是否记录应用日志：`agent/logs/main.log`、`agent/logs/agent.log`、`agent/worker-exits.log`、`agent/compaction.log`、`agent/interrupted-turns.log`。关闭时这些文件不写盘，console 照常输出到 stdout/stderr；重启恢复等功能性文件（如 `interrupted-turns.json`、`worker-crash.json`、后台任务输出）照常写，已有日志不删除，仍可在设置 → 日志查看和导出。只接受布尔值，主进程与 agent worker 热生效，无需重启，不参与配置同步。与 `pluginLoggingEnabled` 相互独立。
 
 以下键由更新器在启动时读取，设置页修改时还会另外调用专用 IPC，只改设置不会生效：
 

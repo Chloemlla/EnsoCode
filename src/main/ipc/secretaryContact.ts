@@ -7,6 +7,7 @@ import {
   findRouteConflict,
 } from '@shared/secretary/contact';
 import { projectReadableMessages } from '@shared/secretary/transcript';
+import type { DemandThreadSource } from '@shared/types/demandThreads';
 import { IPC_CHANNELS } from '@shared/types/ipc';
 import type {
   SecretaryContactChannelPrefs,
@@ -23,6 +24,7 @@ import { redactSecrets } from '../services/memory/distill';
 import { broadcastToRenderers, isMainRenderer, isSettingsRenderer } from '../services/renderers';
 import { appendAudit } from '../services/secretary/audit';
 import { createContactCommands } from '../services/secretary/contact/commands';
+import { suggestGithubLogin } from '../services/secretary/contact/githubSuggest';
 import { TelegramHub } from '../services/secretary/contact/hub';
 import {
   connectPluginChannels,
@@ -63,6 +65,23 @@ import {
   resumeRootFromMain,
 } from './agent';
 import { readSettingsState } from './settings';
+
+let replyOrigin:
+  | ((
+      source: DemandThreadSource,
+      text: string,
+      secretaryId?: string
+    ) => Promise<{ ok: true; messageId?: string } | { ok: false; error: string }>)
+  | null = null;
+
+export function replyToDemandThreadSource(
+  source: DemandThreadSource,
+  text: string,
+  secretaryId?: string
+): Promise<{ ok: true; messageId?: string } | { ok: false; error: string }> {
+  if (!replyOrigin) return Promise.resolve({ ok: false, error: '秘书联系方式还没就绪' });
+  return replyOrigin(source, text, secretaryId);
+}
 
 /**
  * 联系方式的 Main 侧装配：每个秘书一份联系方式服务（自己的 contact.json、token、路由、关注），
@@ -118,7 +137,7 @@ function readToken(request: unknown): string | undefined {
 
 function readFlag(
   request: unknown,
-  key: 'allowCardConfirm' | 'allowMemory' | 'enabled'
+  key: 'allowCardConfirm' | 'allowMemory' | 'enabled' | 'externalConfirm'
 ): boolean | null {
   if (!request || typeof request !== 'object' || Array.isArray(request)) return null;
   const value = (request as Record<string, unknown>)[key];
@@ -172,6 +191,13 @@ function readTelegramGroupScope(request: unknown): { chatId: string; scope: unkn
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const { chatId, scope } = raw as Record<string, unknown>;
   return typeof chatId === 'string' ? { chatId, scope } : null;
+}
+
+/** { githubLogins: string[] }。缺这键就不是这份设置；值本身交给 service 校验 */
+function readGithubLogins(request: unknown): { value: unknown } | null {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return null;
+  if (!Object.hasOwn(request, 'githubLogins')) return null;
+  return { value: (request as Record<string, unknown>).githubLogins };
 }
 
 /** 没有服务时给界面的空视图：不含 token */
@@ -264,12 +290,32 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
     },
   });
   const services = new Map<string, ContactService>();
+  replyOrigin = async (source, text, secretaryId) => {
+    const channelId =
+      source.channel === 'tg' || source.channel === 'telegram'
+        ? TELEGRAM_CHANNEL_ID
+        : source.channel;
+    const named = secretaryId ? services.get(secretaryId) : undefined;
+    const service = named?.canReplyToOrigin(channelId, source.chatId)
+      ? named
+      : [...services.values()].find((item) => item.canReplyToOrigin(channelId, source.chatId));
+    if (!service) return { ok: false, error: '没有可回复的渠道' };
+    return service.replyToOrigin({
+      channelId,
+      peerId: source.chatId,
+      ...(source.topicId ? { topicId: source.topicId } : {}),
+      replyToMessageId: source.messageId,
+      text,
+    });
+  };
 
   function publishOwnerBindings(): void {
     setPluginOwnerBindingsProbe(() => {
       const telegramOwnerIds = new Set<string>();
       const telegramPrivateChatIds = new Set<string>();
       const channelOwnerIds = new Map<string, Set<string>>();
+      const githubLogins = new Set<string>();
+      let externalConfirm = false;
       for (const service of services.values()) {
         const bindings = service.ownerBindings();
         if (bindings.telegramOwnerId) telegramOwnerIds.add(bindings.telegramOwnerId);
@@ -281,11 +327,15 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
           for (const peer of channel.peers) peers.add(peer);
           channelOwnerIds.set(key, peers);
         }
+        for (const login of bindings.githubLogins) githubLogins.add(login);
+        if (bindings.externalConfirm) externalConfirm = true;
       }
       const bindings: OwnerBindings = {
         telegramOwnerIds,
         telegramPrivateChatIds,
         channelOwnerIds,
+        githubLogins,
+        externalConfirm,
       };
       return bindings;
     });
@@ -361,8 +411,10 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
       openInApp: (target) => deps.openInApp(target),
       // 手机关注的任务：派发与定时写、这里读与取消，重启后还在
       following: new FollowingStore(ctx.dir),
-      onError: (code, detail) => {
-        console.warn(`[secretary-contact] ${code}${detail ? `: ${detail}` : ''}`);
+      onError: (code, detail, channelId) => {
+        console.warn(
+          `[secretary-contact] ${channelId ? `${channelId} ` : ''}${code}${detail ? `: ${detail}` : ''}`
+        );
       },
       hub,
       secretaryId: ctx.id,
@@ -468,6 +520,7 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
     },
 
     async stop() {
+      replyOrigin = null;
       setPluginContactBridge(null);
       setPluginOwnerBindingsProbe(null);
       plugins?.dispose();
@@ -485,6 +538,7 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
             enabled: false,
             channels: [],
             telegram: { ...(state?.telegram ?? emptyTelegramView()), status: 'unbound' },
+            owner: state?.owner ?? { githubLogins: [], externalConfirm: false },
           };
         }
         return { ...service.state(), secretaryId: resolveSecretaryRequest(secretaryId)?.id };
@@ -525,12 +579,22 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
         }
       );
 
-      ipcMain.handle(IPC_CHANNELS.SECRETARY_CONTACT_TEST, async (event, secretaryId: unknown) => {
-        if (!isEditor(event.sender.id)) return { ok: false, error: 'invalid sender' };
-        const service = target(secretaryId);
-        if (!service) return { ok: false, error: 'secretary-required' };
-        return service.sendTest();
-      });
+      // 不带渠道是 Telegram 的测试消息；带插件渠道 id 是「立即重试」：解除暂停并发一条测试消息
+      ipcMain.handle(
+        IPC_CHANNELS.SECRETARY_CONTACT_TEST,
+        async (event, secretaryId: unknown, request: unknown) => {
+          if (!isEditor(event.sender.id)) return { ok: false, error: 'invalid sender' };
+          const service = target(secretaryId);
+          if (!service) return { ok: false, error: 'secretary-required' };
+          const channelId =
+            request && typeof request === 'object' && !Array.isArray(request)
+              ? (request as Record<string, unknown>).channelId
+              : undefined;
+          if (typeof channelId === 'string' && channelId && channelId !== TELEGRAM_CHANNEL_ID)
+            return service.retryChannel(channelId);
+          return service.sendTest();
+        }
+      );
 
       ipcMain.handle(
         IPC_CHANNELS.SECRETARY_CONTACT_SETTINGS,
@@ -546,17 +610,26 @@ export function createSecretaryContacts(deps: SecretaryContactDeps): SecretaryCo
           if (route) return service.removeTelegramRoute(route.chatId, route.topicId);
           const scope = readTelegramGroupScope(request);
           if (scope) return service.setTelegramGroupScope(scope.chatId, scope.scope);
+          const logins = readGithubLogins(request);
+          if (logins) return service.setGithubLogins(logins.value);
           const enabled = readFlag(request, 'enabled');
           const cards = readFlag(request, 'allowCardConfirm');
           const memory = readFlag(request, 'allowMemory');
-          if (enabled === null && cards === null && memory === null)
+          const externalConfirm = readFlag(request, 'externalConfirm');
+          if (enabled === null && cards === null && memory === null && externalConfirm === null)
             return { ok: false, error: 'invalid request' };
           if (enabled !== null) await service.setEnabled(enabled);
           if (cards !== null) service.setAllowCardConfirm(cards);
           if (memory !== null) service.setAllowMemory(memory);
+          if (externalConfirm !== null) service.setExternalConfirm(externalConfirm);
           return { ok: true };
         }
       );
+
+      ipcMain.handle(IPC_CHANNELS.SECRETARY_CONTACT_GITHUB_SUGGEST, async (event) => {
+        if (!isEditor(event.sender.id)) return { login: null };
+        return { login: await suggestGithubLogin() };
+      });
 
       // 手机关注的任务：取消一项或全清；列表跟着联系方式状态一起推
       ipcMain.handle(

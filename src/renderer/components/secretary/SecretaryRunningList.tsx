@@ -1,7 +1,8 @@
+import { formatReminderClock, formatReminderTooltip } from '@shared/reminders';
 import { type ContactBadge, sessionBadge } from '@shared/secretary/commands';
 import type { PendingDispatch, SecretaryCard } from '@shared/types/secretary';
 import { formatRetryClock } from '@shared/upstreamRecovery';
-import { ArrowUpRight, Check, RotateCcw } from 'lucide-react';
+import { ArrowUpRight, Check, Clock, RotateCcw } from 'lucide-react';
 import { useState } from 'react';
 import { HOVER_ROW_CLASS, HoverActions } from '@/components/ui/hover-actions';
 import { useI18n } from '@/i18n';
@@ -25,7 +26,12 @@ const BADGE_STYLE: Record<ContactBadge, { label: string; className: string }> = 
   waiting: { label: 'Waiting for you', className: 'bg-warning/15 text-warning' },
   running: { label: 'Running', className: 'bg-success/15 text-success' },
   background: { label: 'Waiting on a background task', className: 'bg-warning/15 text-warning' },
+  reminder: {
+    label: 'Waiting for reminder',
+    className: 'bg-sky-500/15 text-sky-600 dark:text-sky-400',
+  },
   persistent: { label: 'Service running', className: 'bg-warning/15 text-warning' },
+  subagent: { label: 'Waiting on subagent', className: 'bg-warning/15 text-warning' },
   continuing: { label: 'Continuing', className: 'bg-success/15 text-success' },
   interrupted: { label: 'Interrupted', className: 'bg-warning/15 text-warning' },
   stalled: { label: 'Stalled, no activity', className: 'bg-destructive/15 text-destructive' },
@@ -40,9 +46,10 @@ function badgeOf(card: SessionCard): { label: string; className: string } {
 function RunningRow({ card }: { card: SessionCard }) {
   const { t, locale } = useI18n();
   const providers = useSettingsStore((state) => state.providers) ?? [];
+  const virtualModels = useSettingsStore((state) => state.virtualModels);
   const [expanded, setExpanded] = useState(false);
   const badge = badgeOf(card);
-  const model = modelLabel(providers, card.model);
+  const model = modelLabel(providers, card.model, virtualModels);
   const upstreamRetry = card.upstreamRetry;
   const upstreamLabel = upstreamRetry
     ? upstreamRetry.kind === 'quota'
@@ -59,6 +66,12 @@ function RunningRow({ card }: { card: SessionCard }) {
           ? t('Queued · #{{n}}', { n: card.queuePosition })
           : t('Queued')
       : null;
+  const reminder = !upstreamLabel && !queuedLabel ? card.pendingReminder : undefined;
+  const reminderNow = Date.now();
+  const reminderLabel = reminder
+    ? t('Waiting for reminder · {{time}}', { time: formatReminderClock(reminder.dueAt) })
+    : null;
+  const reminderTooltip = reminder ? formatReminderTooltip(reminder, reminderNow, t) : undefined;
   return (
     <div
       data-enso="secretary-running-row"
@@ -80,18 +93,24 @@ function RunningRow({ card }: { card: SessionCard }) {
                 ? 'secretary-upstream-waiting'
                 : queuedLabel
                   ? 'secretary-queued-card'
-                  : 'secretary-running-badge'
+                  : reminderLabel
+                    ? 'secretary-reminder-waiting'
+                    : 'secretary-running-badge'
             }
+            title={reminderTooltip}
             className={cn(
               BADGE_CLASS,
               upstreamLabel
                 ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                 : queuedLabel
                   ? 'bg-orange-500/15 text-orange-600'
-                  : badge.className
+                  : reminderLabel
+                    ? 'inline-flex items-center gap-1 bg-sky-500/15 text-sky-600 tabular-nums dark:text-sky-400'
+                    : badge.className
             )}
           >
-            {upstreamLabel ?? queuedLabel ?? t(badge.label)}
+            {reminderLabel && <Clock className="h-2.5 w-2.5 shrink-0" aria-hidden />}
+            {upstreamLabel ?? queuedLabel ?? reminderLabel ?? t(badge.label)}
           </span>
           {card.takeover && (
             <span
@@ -124,6 +143,34 @@ function RunningRow({ card }: { card: SessionCard }) {
             className="mt-0.5 block truncate text-[11.5px] text-subtle-foreground"
           >
             {t('Model: {{model}}', { model })}
+          </span>
+        )}
+        {card.subagents && card.subagents.length > 0 && (
+          <span
+            data-enso="secretary-running-subagents"
+            className="mt-0.5 block space-y-0.5 text-[11.5px] text-muted-foreground"
+          >
+            {card.subagents.map((run) => {
+              const minutes = Math.floor(run.elapsedMs / 60_000);
+              const label = run.title || run.agentId.slice(0, 8);
+              return (
+                <span key={run.runId} className="block truncate">
+                  {minutes >= 1
+                    ? t('Waiting on subagent {{title}} ({{minutes}}m)', { title: label, minutes })
+                    : t('Waiting on subagent {{title}} (<1m)', { title: label })}
+                  {run.activity ? ` · ${run.activity}` : ''}
+                </span>
+              );
+            })}
+          </span>
+        )}
+        {reminder?.label && (
+          <span
+            data-enso="secretary-running-reminder"
+            title={reminderTooltip}
+            className="mt-0.5 block truncate text-[11.5px] text-muted-foreground"
+          >
+            {reminder.label}
           </span>
         )}
         {card.lastText && (
@@ -227,6 +274,17 @@ function PendingRow({ pending }: { pending: PendingDispatch }) {
   );
 }
 
+/** 进行中的每一行：会话卡和等依赖的派发 */
+export function RunningCards({ running }: { running: readonly SecretaryCard[] }) {
+  return running.map((card) =>
+    card.kind === 'session' ? (
+      <RunningRow key={card.conversationId} card={card} />
+    ) : card.kind === 'pending' ? (
+      <PendingRow key={card.pending.id} pending={card.pending} />
+    ) : null
+  );
+}
+
 /** 「进行中 N」展开后的明细：和摘要里的数字共用 board.running，条数天然一致 */
 export function SecretaryRunningList({ secretaryId }: { secretaryId?: string } = {}) {
   const { t } = useI18n();
@@ -252,13 +310,7 @@ export function SecretaryRunningList({ secretaryId }: { secretaryId?: string } =
           {t('Nothing running')}
         </p>
       ) : (
-        running.map((card) =>
-          card.kind === 'session' ? (
-            <RunningRow key={card.conversationId} card={card} />
-          ) : card.kind === 'pending' ? (
-            <PendingRow key={card.pending.id} pending={card.pending} />
-          ) : null
-        )
+        <RunningCards running={running} />
       )}
     </section>
   );

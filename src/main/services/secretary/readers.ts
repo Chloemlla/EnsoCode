@@ -9,13 +9,21 @@ import {
   wrapUntrusted,
 } from '@shared/secretary/transcript';
 import type {
+  AgentRunProgress,
   ConversationAuthority,
   ParentHistoryTailResult,
   ProjectAuthority,
   ProjectedMessage,
 } from '@shared/types/agent';
-import type { SecretaryProfile } from '@shared/types/secretary';
+import { parseDemandStatus } from '@shared/types/demandThreads';
+import type {
+  SecretaryClaimView,
+  SecretaryDemandThreadView,
+  SecretaryProfile,
+} from '@shared/types/secretary';
 import type { ObservedTask } from '../backgroundTaskTracker';
+import { secretaryDemandThreadViews } from '../demandThreads';
+import { peekEventClaimStore } from '../eventClaims';
 import { redactSecrets } from '../memory/distill';
 import {
   ACTIVITY_LIMIT_DEFAULT,
@@ -86,6 +94,8 @@ export interface SecretaryReadPorts {
   activity(sessionFile: string | undefined, limit: number): MaybePromise<SessionToolActivity[]>;
   /** 该会话的后台任务（Main 侧对 worker 事件流的投影） */
   tasks(conversationId: string): MaybePromise<ObservedTask[]>;
+  /** 该会话名下正在运行的子代理进度；缺省表示没有 */
+  subagents?(conversationId: string): MaybePromise<readonly AgentRunProgress[]>;
   /** 会话（含子代理）挂着的自定提醒；缺省表示没有 */
   reminders?(conversationId: string): MaybePromise<readonly SessionReminder[]>;
   /** 派发记录上的结构化结果；缺省表示没有 */
@@ -94,6 +104,10 @@ export interface SecretaryReadPorts {
   autoArchived?(conversationId: string, row: Record<string, unknown>): MaybePromise<boolean>;
   /** 只读 git；路径越界校验与采集都在 repoStatus 里 */
   repo: RepoStatusDeps;
+  /** 当前未过期的对象认领；缺省表示没有 */
+  claims?(): MaybePromise<readonly SecretaryClaimView[]>;
+  /** 需求线程；缺省表示没有 */
+  threads?(): MaybePromise<readonly SecretaryDemandThreadView[]>;
 }
 
 export interface SecretaryReadHandlers {
@@ -101,6 +115,8 @@ export interface SecretaryReadHandlers {
   project_info: SecretaryOpHandler;
   repo_status: SecretaryOpHandler;
   session_list: SecretaryOpHandler;
+  claims_list: SecretaryOpHandler;
+  threads_list: SecretaryOpHandler;
   session_read: SecretaryOpHandler;
   session_tasks: SecretaryOpHandler;
   session_activity: SecretaryOpHandler;
@@ -116,6 +132,8 @@ interface ListedSession {
   goal?: { text: string; status: string };
   /** 排队会话：位次，或自动启动失败的原因 */
   queue?: { position: number } | { failed: string };
+  /** 以前完成后被 Main 自动归档、用户没再动过 */
+  archived?: true;
 }
 
 const invalidArguments: SecretaryOpResult = { ok: false, error: 'invalid arguments' };
@@ -189,14 +207,11 @@ export function visibleProjects(
 }
 
 /**
- * 秘书可见的会话：可见项目里的根会话，排除 child、bot、已归档与没有权威记录的残留行。
+ * 秘书可见的会话：可见项目里的根会话，排除 child、bot、用户归档与没有权威记录的残留行。
+ * 以前被 Main 自动归档的派出会话仍可见，免得秘书再也找不到它们。
  * 排序在调用方按需截断，保证 session_list 与 project_info 的最近活跃口径一致。
  */
-async function collect(
-  ports: SecretaryReadPorts,
-  /** session_read 读完成结果：放行 Main 自动归档的派出会话，用户手动归档的仍不可见 */
-  withAutoArchived = false
-): Promise<{
+async function collect(ports: SecretaryReadPorts): Promise<{
   projects: ProjectAuthority[];
   sessions: ListedSession[];
 }> {
@@ -211,11 +226,8 @@ async function collect(
   const positions = queuePositions(rows);
   for (const [conversationId, row] of Object.entries(rows)) {
     if (row.parentId !== undefined || row.btwParentId !== undefined) continue;
-    if (
-      row.archived === true &&
-      !(withAutoArchived && (await ports.autoArchived?.(conversationId, row)) === true)
-    )
-      continue;
+    const archived = row.archived === true;
+    if (archived && (await ports.autoArchived?.(conversationId, row)) !== true) continue;
     const projectId = typeof row.projectId === 'string' ? row.projectId : undefined;
     if (!projectId || !visibleIds.has(projectId)) continue;
     const authority = authorities.get(conversationId);
@@ -237,6 +249,7 @@ async function collect(
         : queued && position !== undefined
           ? { queue: { position } }
           : {}),
+      ...(archived ? { archived: true as const } : {}),
     });
   }
   sessions.sort(
@@ -282,6 +295,30 @@ function queueFields(session: ListedSession): Record<string, unknown> {
   return 'failed' in session.queue
     ? { queueFailed: redactSecrets(session.queue.failed) }
     : { queuePosition: session.queue.position };
+}
+
+function subagentActivityText(run: AgentRunProgress): string | undefined {
+  const activity = run.activity;
+  if (!activity) return undefined;
+  if (activity.phase === 'tool') {
+    return [activity.tool, activity.detail].filter(Boolean).join(' ') || 'tool';
+  }
+  return activity.phase;
+}
+
+function presentSubagents(runs: readonly AgentRunProgress[], source: string) {
+  return runs.map((run) => {
+    const activity = subagentActivityText(run);
+    return {
+      agentId: run.agentId,
+      runId: run.runId,
+      ...(run.title ? { title: wrapUntrusted(source, redactSecrets(run.title)) } : {}),
+      status: run.status,
+      elapsedMs: run.elapsedMs,
+      elapsedMinutes: Math.max(0, Math.floor(run.elapsedMs / 60_000)),
+      ...(activity ? { activity: wrapUntrusted(source, redactSecrets(activity)) } : {}),
+    };
+  });
 }
 
 /**
@@ -401,21 +438,73 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
       const scoped = projectId
         ? sessions.filter((session) => session.projectId === projectId)
         : sessions;
+      const held = new Map<string, string[]>();
+      for (const claim of (await ports.claims?.()) ?? []) {
+        const keys = held.get(claim.sessionId) ?? [];
+        keys.push(claim.key);
+        held.set(claim.sessionId, keys);
+      }
       const rows = [];
       for (const session of scoped.slice(0, limit)) {
         const status = await ports.status(session.conversationId);
+        const subagents = presentSubagents(
+          (await ports.subagents?.(session.conversationId)) ?? [],
+          `session:${session.conversationId}`
+        );
+        const claims = held.get(session.conversationId);
         rows.push({
           conversationId: session.conversationId,
           projectId: session.projectId,
           title: session.title,
           state: sessionState(session, status),
           ...queueFields(session),
+          ...(session.archived ? { archived: true } : {}),
           pending: { approvals: status.pendingApprovals, asks: status.pendingAsks },
           lastActiveAt: session.lastActiveAt,
           ...(session.goal ? { goal: session.goal } : {}),
+          ...(subagents.length > 0 ? { subagents } : {}),
+          ...(claims && claims.length > 0 ? { claims } : {}),
         });
       }
       return { ok: true, result: { sessions: rows } };
+    },
+
+    async claims_list(params) {
+      const prefix = optionalFilter(params, 'prefix');
+      const sessionId = optionalFilter(params, 'sessionId');
+      const pluginId = optionalFilter(params, 'pluginId');
+      if (prefix === null || sessionId === null || pluginId === null) return invalidArguments;
+      const claims = ((await ports.claims?.()) ?? []).filter((claim) => {
+        if (prefix && !claim.key.startsWith(prefix)) return false;
+        if (sessionId && claim.sessionId !== sessionId) return false;
+        if (pluginId && claim.pluginId !== pluginId) return false;
+        return true;
+      });
+      return { ok: true, result: { claims } };
+    },
+
+    async threads_list(params) {
+      const status = optionalFilter(params, 'status');
+      const sessionId = optionalFilter(params, 'sessionId');
+      const repo = optionalFilter(params, 'repo');
+      if (status === null || sessionId === null || repo === null) return invalidArguments;
+      if (status !== undefined && !parseDemandStatus(status)) return invalidArguments;
+      if (params.activeOnly !== undefined && typeof params.activeOnly !== 'boolean') {
+        return invalidArguments;
+      }
+      const threads = ((await ports.threads?.()) ?? []).filter((thread) => {
+        if (status && thread.status !== status) return false;
+        if (sessionId && thread.sessionId !== sessionId) return false;
+        if (repo && thread.pr?.repo.toLowerCase() !== repo.toLowerCase()) return false;
+        if (
+          params.activeOnly === true &&
+          (thread.status === 'merged' || thread.status === 'closed')
+        ) {
+          return false;
+        }
+        return true;
+      });
+      return { ok: true, result: { threads } };
     },
 
     async session_read(params) {
@@ -427,7 +516,7 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
       const entryId = stringParam(params, 'entryId');
       const target =
         entryId !== undefined ? { entryId } : index !== undefined ? { index } : undefined;
-      const { sessions } = await collect(ports, true);
+      const { sessions } = await collect(ports);
       const session = sessions.find((candidate) => candidate.conversationId === conversationId);
       if (!session) return notFound;
       // 全文模式：按 entryId（优先）或 index 读单条消息，按 offset 分页；只放行 user / assistant，工具输出不外泄
@@ -474,6 +563,7 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
       }));
       const nextBefore = page.ok ? (messages[0]?.index ?? page.baseIndex) : (before ?? 0);
       const reminders = (await ports.reminders?.(conversationId)) ?? [];
+      const subagents = presentSubagents((await ports.subagents?.(conversationId)) ?? [], source);
       return {
         ok: true,
         result: {
@@ -497,6 +587,7 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
                 })),
               }
             : {}),
+          ...(subagents.length > 0 ? { subagents } : {}),
           ...goal,
         },
       };
@@ -535,12 +626,17 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
         };
       });
       const reminders = (await ports.reminders?.(conversationId)) ?? [];
+      const subagents = presentSubagents(
+        (await ports.subagents?.(conversationId)) ?? [],
+        `session:${conversationId}`
+      );
       return {
         ok: true,
         result: {
           conversationId,
           projectId: session.projectId,
           tasks,
+          ...(subagents.length > 0 ? { subagents } : {}),
           ...(reminders.length > 0
             ? {
                 reminders: reminders.map((item) => ({
@@ -571,9 +667,15 @@ export function createSecretaryReadHandlers(ports: SecretaryReadPorts): Secretar
         ...(call.at === undefined ? {} : { at: call.at }),
         ...(call.command ? { command: wrapUntrusted(source, redactSecrets(call.command)) } : {}),
       }));
+      const subagents = presentSubagents((await ports.subagents?.(conversationId)) ?? [], source);
       return {
         ok: true,
-        result: { conversationId, projectId: session.projectId, calls },
+        result: {
+          conversationId,
+          projectId: session.projectId,
+          calls,
+          ...(subagents.length > 0 ? { subagents } : {}),
+        },
       };
     },
 
@@ -668,6 +770,9 @@ export function readPortsFor(
     async tasks(conversationId) {
       return (await import('../../ipc/agent')).observedBackgroundTasks(conversationId);
     },
+    async subagents(conversationId) {
+      return (await import('../../ipc/agent')).observedSubagentProgress(conversationId);
+    },
     async reminders(conversationId) {
       return (await import('../sessionReminders')).readSessionReminders(conversationId);
     },
@@ -679,5 +784,35 @@ export function readPortsFor(
       return record ? autoArchived(record, row) : false;
     },
     repo: realRepoDeps,
+    async claims() {
+      const store = peekEventClaimStore();
+      if (!store) return [];
+      const rows = await (await import('../../ipc/settings')).readPersistedConversations();
+      return store.list().map((claim) => ({
+        key: claim.key,
+        sessionId: claim.sessionId,
+        sessionTitle: sessionTitle(rows[claim.sessionId], claim.sessionId),
+        pluginId: claim.pluginId,
+        ...(claim.label !== undefined ? { label: claim.label } : {}),
+        ...(claim.group !== undefined ? { group: claim.group } : {}),
+        claimedAt: claim.claimedAt,
+        lastHeartbeatAt: claim.lastHeartbeatAt,
+        active: claim.active,
+      }));
+    },
+    async threads() {
+      const rows = await (await import('../../ipc/settings')).readPersistedConversations();
+      return secretaryDemandThreadViews(rows);
+    },
   };
+}
+
+function optionalFilter(params: Record<string, unknown>, key: string): string | null | undefined {
+  if (params[key] === undefined) return undefined;
+  return stringParam(params, key) ?? null;
+}
+
+function sessionTitle(row: Record<string, unknown> | undefined, sessionId: string): string {
+  const title = row?.title;
+  return typeof title === 'string' && title.trim() ? title : sessionId;
 }

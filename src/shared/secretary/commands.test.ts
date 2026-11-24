@@ -179,7 +179,15 @@ describe('/board', () => {
   const daily: SecretaryDaily = {
     day: '2026-05-20',
     today: true,
-    counts: { dispatched: 3, completed: 2, failed: 1, needsYou: 1, todosDone: 0, merged: 0 },
+    counts: {
+      dispatched: 3,
+      completed: 2,
+      completedEarlier: 0,
+      failed: 1,
+      needsYou: 1,
+      todosDone: 0,
+      merged: 0,
+    },
     groups: [
       {
         key: 'done',
@@ -199,6 +207,16 @@ describe('/board', () => {
     expect(text).toContain('<b>完成 2</b>');
     expect(text).toContain('enso://secretary?conversation=c1');
     expect(text).toContain('▸ 写文档');
+  });
+
+  it('完成里有之前派出或接手的，统计行注明，不和派出数矛盾', () => {
+    const mixed = { ...daily, counts: { ...daily.counts, completedEarlier: 1 } };
+    expect(formatBoardMessage('zh', mixed)).toContain(
+      '派出 3 · 完成 2（含之前派出或接手的 1） · 失败 1 · 需要你 1'
+    );
+    expect(formatBoardMessage('en', mixed)).toContain(
+      'dispatched 3 · done 2 (1 earlier or taken over) · failed 1 · needs you 1'
+    );
   });
 
   it('一列太长就截断并说明还有几条', () => {
@@ -342,5 +360,42 @@ describe('会话徽标', () => {
     expect(sessionBadge({ state: 'idle', backgroundRunning: true })).toBe('background');
     expect(badgeText('zh', 'stalled')).toBe('已停住');
     expect(badgeText('en', 'stalled')).toBe('Stalled, no activity');
+  });
+
+  it('有在跑子代理的会话显示等子代理徽标', () => {
+    expect(
+      sessionBadge({
+        state: 'running',
+        subagents: [{ agentId: 'a1', runId: 'r1', title: 'worker', elapsedMs: 120_000 }],
+      })
+    ).toBe('subagent');
+    expect(badgeText('zh', 'subagent')).toBe('等子代理');
+    expect(badgeText('en', 'subagent')).toBe('Waiting on subagent');
+  });
+
+  it('空闲且挂着未到点提醒时徽标是 reminder（等提醒），进入运行中后切回 running', () => {
+    const dueAt = new Date(2026, 4, 1, 14, 25, 0).getTime();
+    const pendingReminder = { id: 'r00000001', dueAt, label: '检查 Beta #153', count: 1 };
+    expect(sessionBadge({ state: 'idle', continuing: true, pendingReminder })).toBe('reminder');
+    expect(sessionBadge({ state: 'idle', pendingReminder })).toBe('reminder');
+    expect(sessionBadge({ state: 'running', pendingReminder })).toBe('running');
+    expect(badgeText('zh', 'reminder')).toBe('等提醒');
+    expect(badgeText('en', 'reminder')).toBe('Waiting for reminder');
+    const status = formatStatusMessage('zh', {
+      running: [
+        {
+          title: 'Beta mac 构建排队',
+          projectName: 'enso-code',
+          badge: 'reminder',
+          pendingReminder,
+          since: dueAt - 120_000,
+          conversationId: '45b1a6d7',
+        },
+      ],
+      needsYou: [],
+      now: dueAt - 60_000,
+    });
+    expect(status).toContain('等提醒 · 14:25');
+    expect(status).not.toContain('续跑中');
   });
 });

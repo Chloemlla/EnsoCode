@@ -141,6 +141,7 @@ function identityOf(
           | 'background-tasks-detached'
           | 'session-wake-requested'
           | 'session-reminder-due'
+          | 'session-reminders-changed'
           | 'unopened-background-tasks';
       }
     | McpWorkerEvent
@@ -321,6 +322,12 @@ export class AgentSessionIndex {
         return true;
     }
     return false;
+  }
+
+  /** 仅根会话自身是否在跑（不含子会话 / 子代理） */
+  rootRunning(rootId: string): boolean {
+    const session = this.sessions.get(rootId);
+    return Boolean(session?.alive && (!session.ready || session.status === 'running'));
   }
 
   linkBtw(sessionId: string, parentConversationId: string): void {
@@ -569,6 +576,7 @@ export class AgentSessionIndex {
       event.type === 'background-tasks-detached' ||
       event.type === 'session-wake-requested' ||
       event.type === 'session-reminder-due' ||
+      event.type === 'session-reminders-changed' ||
       event.type === 'unopened-background-tasks'
     )
       return false;

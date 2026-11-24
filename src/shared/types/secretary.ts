@@ -1,6 +1,8 @@
-import type { GoalResultView } from '../secretary/goalResult';
+import type { PendingReminderView } from '../reminders';
+import type { GoalResultView, NeedsUserAnswer } from '../secretary/goalResult';
 import type { GoalUpstreamRetry } from '../upstreamRecovery';
 import type { ModelRef, ThinkingLevel } from './agent';
+import type { DemandMilestoneKind, DemandThreadStatus } from './demandThreads';
 
 /**
  * 秘书可以接管的会话范围：逐个授权（确认卡）、勾选的项目、所有可见项目。
@@ -345,6 +347,11 @@ export interface ClosedGoal {
   note?: string;
 }
 
+/** 秘书经 Main 归档的来源。旧版 Main 自动归档不在这里，靠 autoArchivedAt 认 */
+export const SECRETARY_ARCHIVE_VIAS = ['session_archive', 'cleanup_apply'] as const;
+
+export type SecretaryArchiveVia = (typeof SECRETARY_ARCHIVE_VIAS)[number];
+
 export interface DispatchRecord {
   conversationId: string;
   projectId: string;
@@ -422,6 +429,11 @@ export interface DispatchRecord {
   autoArchivedAt?: number;
   /** 已经自动归档过的那次结果（lastResult.at）：用户手动取消归档后，同一次结果不再归档 */
   autoArchiveResultAt?: number;
+  /**
+   * 秘书经 session_archive 或 cleanup_apply 归档的时刻与来源，等于会话行 archivedAt 才算。
+   * 用户取消后再手动归档会对不上，按用户归档处理。
+   */
+  secretaryArchived?: { at: number; via: SecretaryArchiveVia };
   /** 已经报过的巡检异常：同一会话同一原因只推一次，恢复后清除 */
   patrol?: { reason: PatrolReason; turn: number; at: number };
   /**
@@ -478,6 +490,9 @@ export interface SecretaryActivity {
   conversationId: string;
   kind: SecretaryResultKind | 'seen';
   text: string;
+  /** goal-complete 当时的待决定事项和 summary。历史是那一刻的事实，「知道了」不回改 */
+  needsUser?: string[];
+  summary?: string;
 }
 
 export interface SecretaryDispatchFile {
@@ -506,7 +521,8 @@ export interface SecretaryDispatchFile {
     nextAttemptAt: number;
     /** 到点且会话刚变空闲时，留给紧随其后的 turn-completed 的窗口；过了才当结束事件丢失重投 */
     idleGraceUntil?: number;
-    settled?: boolean;
+    /** worker 回执这一批已上屏（delivery-settled）：之后的轮次结束才是投递这一轮的结局 */
+    started?: boolean;
   };
 }
 
@@ -539,6 +555,8 @@ export interface SecretaryBoardTodo extends SecretaryTodo {
   projectName?: string;
   sessionTitle?: string;
   sessionState?: 'running' | 'idle' | 'waiting' | 'error' | 'not-started' | 'gone' | 'queued';
+  /** 关联会话空闲且挂着未到点提醒：工作台待办显示「等提醒 · HH:MM」，不显示「运行中」 */
+  pendingReminder?: PendingReminderView;
 }
 
 /** 界面对待办的操作；dispatch 是用户亲手点出，直接派发 */
@@ -602,6 +620,14 @@ export interface SecretaryAuditEntry {
   detail?: string;
 }
 
+export interface SecretarySubagentView {
+  agentId: string;
+  runId: string;
+  title?: string;
+  elapsedMs: number;
+  activity?: string;
+}
+
 export type SecretaryCard =
   | {
       kind: 'session';
@@ -622,14 +648,26 @@ export type SecretaryCard =
       result?: SecretaryResultKind;
       /** 与 result 同时出现：结果发生的时间 */
       resultAt?: number;
+      /** 结构化结果里待用户处理的条目（已脱敏，未清除时展示） */
+      needsUser?: readonly string[];
+      /** 用户已答复的条目（秘书带关联转问）：index 对应 needsUser 的位置 */
+      needsUserAnswers?: readonly NeedsUserAnswer[];
+      /** needsUser 还在等秘书筛选：卡片留在 done，工作台列在「秘书处理中」，不计入「需要你」 */
+      triage?: true;
+      /** goal-complete 的 summary（已脱敏）。点「知道了」后仍保留，手动标完成不带 */
+      summary?: string;
       /** 会话不在跑，但目标还要续或还在等后台任务。动态不能再显示上一轮的完成 */
       continuing?: true;
+      /** 会话空闲但挂着未到点的 remind_me 提醒：看板与工作台标「等提醒 · HH:MM」，不标「续跑中」 */
+      pendingReminder?: PendingReminderView;
       /** 目标因上游瞬态/配额故障等待自动恢复 */
       upstreamRetry?: GoalUpstreamRetry;
       /** 会话空闲但还有没结束的后台任务：进行中列表要把它和续跑区分开 */
       backgroundRunning?: true;
       /** 会话空闲但还有常驻服务在跑：显示成「有常驻服务」，与「正在跑」区分 */
       backgroundPersistent?: true;
+      /** 会话正在等子代理运行：看板与侧栏显示子代理名称与已运行时间 */
+      subagents?: readonly SecretarySubagentView[];
       /** 巡检判定停住：进行中列表标「已停住」，会话有了新活动就消失 */
       stalled?: { reason: PatrolReason; at: number };
       /** 已收口但还有没结束的后台任务：完成列显示「已完成（有遗留任务）」 */
@@ -656,6 +694,41 @@ export interface SecretaryBoard {
   todos: SecretaryBoardTodo[];
   done: SecretaryCard[];
   activity?: SecretaryActivity[];
+  threads?: SecretaryDemandThreadView[];
+}
+
+/** 一条需求从群消息到负责会话和 PR 的关联 */
+export interface SecretaryDemandThreadView {
+  id: string;
+  channel: string;
+  chatId: string;
+  messageId: string;
+  topicId?: string;
+  senderName?: string;
+  summary?: string;
+  requesterIsOwner: boolean;
+  sessionId: string;
+  sessionTitle: string;
+  subagentId?: string;
+  pr?: { repo: string; number: number; url?: string; title?: string };
+  status: DemandThreadStatus;
+  milestones: DemandMilestoneKind[];
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+/** 一个外部对象当前被哪个会话认领 */
+export interface SecretaryClaimView {
+  key: string;
+  sessionId: string;
+  sessionTitle: string;
+  pluginId: string;
+  label?: string;
+  group?: string;
+  claimedAt: number;
+  lastHeartbeatAt: number;
+  active: boolean;
 }
 
 /** 会话界面、侧栏与设置页共用的接管清单 */
@@ -754,12 +827,19 @@ export interface SecretaryDailyItem {
   leftover?: { count: number };
   /** 还在跑但带着常驻服务：卡片标「有常驻服务」，与「正在跑」区分 */
   persistent?: true;
+  /** 空闲且挂着未到点的 remind_me 提醒：每日看板卡片标「等提醒 · HH:MM」 */
+  pendingReminder?: PendingReminderView;
   goalResult?: GoalResultView;
+  /** 结构化结果里待用户处理的条目（未清除时在需要你列直接展示） */
+  needsUser?: readonly string[];
 }
 
 export interface SecretaryDailyCounts {
   dispatched: number;
+  /** 完成列的会话数，含 completedEarlier */
   completed: number;
+  /** 完成里不是当天派出的：之前派出或接手的会话 */
+  completedEarlier: number;
   failed: number;
   needsYou: number;
   todosDone: number;
@@ -969,6 +1049,8 @@ export interface SecretaryContactState {
   /** 渠道卡片：Telegram 内置固定第一位，插件渠道跟在后面 */
   channels: SecretaryContactChannelView[];
   telegram: SecretaryContactTelegram;
+  /** 主人身份：GitHub 账号，以及非主人消息要不要硬拦 */
+  owner: { githubLogins: string[]; externalConfirm: boolean };
 }
 
 export type SecretaryContactChannelStatus = 'unconfigured' | 'pending' | 'connected' | 'error';
@@ -1014,4 +1096,24 @@ export interface SecretaryContactChannelView {
   detail?: string;
   caps: SecretaryContactCaps;
   prefs: SecretaryContactChannelPrefs;
+  /** 出站发送连续失败的情况；最近一次发送成功就没有 */
+  outbound?: SecretaryContactOutboundHealth;
+}
+
+/** 插件渠道出站失败：degraded 还在照常发，paused 已暂停推送，冷却到期、入站或手动重试后再发 */
+export interface SecretaryContactOutboundHealth {
+  state: 'degraded' | 'paused';
+  consecutiveFailures: number;
+  lastErrorAt: number;
+  lastErrorCode: string;
+  /** 插件给的原因，已脱敏截断 */
+  detail?: string;
+  /** 插件抛错时带的 code */
+  pluginCode?: string;
+  /** 插件给用户看的提示，原样展示 */
+  userMessage?: string;
+  /** 暂停到什么时候；到点后下一条推送试一次 */
+  pausedUntil?: number;
+  /** 暂停期间没发出去的推送条数 */
+  suppressedCount: number;
 }

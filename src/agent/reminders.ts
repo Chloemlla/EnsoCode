@@ -6,11 +6,13 @@ import {
   ownedByRoot,
   parseReminderFile,
   REMINDER_LABEL_MAX,
+  REMINDER_LATE_MS,
   REMINDER_MAX_CHAIN,
   REMINDER_MAX_PER_OWNER,
   REMINDER_MIN_DELAY_MS,
   REMINDER_PROMPT_MAX,
   type ReminderFile,
+  rootIdOfReminder,
   type SessionReminder,
 } from '@shared/reminders';
 
@@ -24,17 +26,30 @@ export class ReminderStore {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private retryAt: number | undefined;
   private disposed = false;
+  /** 加载时就已过点的：重启或 worker 停着期间到点 */
+  private readonly lateAtLoad: ReadonlySet<string>;
 
   constructor(
     private readonly file: string,
-    private readonly onTick: () => void
+    private readonly onTick: () => void,
+    private readonly onChange?: (changedRootIds: readonly string[]) => void
   ) {
     let raw: unknown;
     try {
       raw = JSON.parse(readFileSync(file, 'utf8'));
     } catch {}
     this.data = parseReminderFile(raw);
+    const loadedAt = Date.now();
+    this.lateAtLoad = new Set(
+      this.data.reminders
+        .filter((item) => loadedAt - item.dueAt > REMINDER_LATE_MS)
+        .map((item) => item.id)
+    );
     this.arm();
+  }
+
+  missedWhileDown(id: string): boolean {
+    return this.lateAtLoad.has(id);
   }
 
   list(owner: string): SessionReminder[] {
@@ -63,7 +78,7 @@ export class ReminderStore {
 
   add(reminder: SessionReminder): void {
     this.data.reminders.push(reminder);
-    this.commit();
+    this.commit([rootIdOfReminder(reminder.sessionId)]);
   }
 
   cancel(owner: string, id: string): boolean {
@@ -72,7 +87,7 @@ export class ReminderStore {
       (item) => !(item.sessionId === owner && item.id === id)
     );
     if (this.data.reminders.length === before) return false;
-    this.commit();
+    this.commit([rootIdOfReminder(owner)]);
     return true;
   }
 
@@ -80,7 +95,7 @@ export class ReminderStore {
     const before = this.data.reminders.length;
     this.data.reminders = this.data.reminders.filter((item) => item.sessionId !== owner);
     const removed = before - this.data.reminders.length;
-    if (removed > 0) this.commit();
+    if (removed > 0) this.commit([rootIdOfReminder(owner)]);
     return removed;
   }
 
@@ -92,7 +107,9 @@ export class ReminderStore {
     );
     const chains = Object.keys(this.data.chains).filter((key) => ownedByRoot(key, rootId));
     for (const key of chains) delete this.data.chains[key];
-    if (this.data.reminders.length !== before || chains.length > 0) this.commit();
+    if (this.data.reminders.length !== before || chains.length > 0) {
+      this.commit(this.data.reminders.length !== before ? [rootId] : []);
+    }
   }
 
   /** 先从存储删再交出：保证只投递一次 */
@@ -100,7 +117,7 @@ export class ReminderStore {
     const found = this.data.reminders.find((item) => item.id === id);
     if (!found) return undefined;
     this.data.reminders = this.data.reminders.filter((item) => item !== found);
-    this.commit();
+    this.commit([rootIdOfReminder(found.sessionId)]);
     return found;
   }
 
@@ -126,9 +143,10 @@ export class ReminderStore {
     this.timer = undefined;
   }
 
-  private commit(): void {
+  private commit(changedRootIds: readonly string[] = []): void {
     this.save();
     this.arm();
+    if (changedRootIds.length > 0) this.onChange?.(changedRootIds);
   }
 
   private save(): void {
@@ -386,10 +404,14 @@ export function createReminderTools(
 }
 
 /** 到点注入的文本：标明是自己用 remind_me 定的，原样附上 prompt */
-export function reminderNotice(reminder: SessionReminder): string {
+export function reminderNotice(reminder: SessionReminder, deliveredLateAt?: number): string {
+  const late =
+    deliveredLateAt === undefined
+      ? ''
+      : ` It came due while EnsoCode was restarting or not running, so it is delivered late (now ${localIso(deliveredLateAt)}).`;
   return [
     `Reminder ${reminder.id}${reminder.label ? ` "${reminder.label}"` : ''} is due: you set it yourself with remind_me ` +
-      `at ${localIso(reminder.createdAt)}, due ${localIso(reminder.dueAt)}. Your note:`,
+      `at ${localIso(reminder.createdAt)}, due ${localIso(reminder.dueAt)}.${late} Your note:`,
     reminder.prompt,
   ].join('\n');
 }

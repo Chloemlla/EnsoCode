@@ -471,6 +471,67 @@ describe('session_list', () => {
       'c',
     ]);
   });
+
+  it('会话持有认领时附上 key，claims_list 按前缀过滤', async () => {
+    const claim = {
+      key: 'github:acme/app#1:review',
+      sessionId: 's1',
+      sessionTitle: '审查',
+      pluginId: 'github',
+      claimedAt: 1,
+      lastHeartbeatAt: 2,
+      active: true,
+    };
+    const handlers = createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({ s1: row({ title: '审查' }) }),
+        conversations: () => [conversation('s1', 'p1')],
+        claims: () => [claim],
+      })
+    );
+    const listed = await run(handlers.session_list);
+    expect(listed.sessions).toEqual([
+      expect.objectContaining({ conversationId: 's1', claims: [claim.key] }),
+    ]);
+    expect((await run(handlers.claims_list, { prefix: 'github:' })).claims).toEqual([claim]);
+    expect((await run(handlers.claims_list, { prefix: 'tg:' })).claims).toEqual([]);
+  });
+
+  it('threads_list 按状态和仓库过滤，activeOnly 去掉终态', async () => {
+    const open = {
+      id: 'dt-1',
+      channel: 'telegram',
+      chatId: '-100',
+      messageId: '7',
+      summary: '修登录',
+      requesterIsOwner: true,
+      sessionId: 's1',
+      sessionTitle: '审查',
+      pr: { repo: 'Enso/App', number: 4 },
+      status: 'pr_opened' as const,
+      milestones: ['pr_opened' as const],
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const done = {
+      ...open,
+      id: 'dt-2',
+      status: 'merged' as const,
+      milestones: ['merged' as const],
+    };
+    const handlers = createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({ s1: row({ title: '审查' }) }),
+        conversations: () => [conversation('s1', 'p1')],
+        threads: () => [open, done],
+      })
+    );
+    expect((await run(handlers.threads_list, { repo: 'enso/app' })).threads).toEqual([open, done]);
+    expect((await run(handlers.threads_list, { status: 'merged' })).threads).toEqual([done]);
+    expect((await run(handlers.threads_list, { activeOnly: true })).threads).toEqual([open]);
+  });
 });
 
 describe('session_read', () => {
@@ -587,7 +648,7 @@ describe('session_read', () => {
     expect(result.historyError).toBe('not-found');
   });
 
-  it('完成后被自动归档的派出会话仍可读；用户手动归档的仍 not-found', async () => {
+  it('以前被自动归档的派出会话仍可列出、可读并标 archived；用户手动归档的仍不可见', async () => {
     const handlers = createSecretaryReadHandlers(
       makePorts({
         projects: () => [project()],
@@ -611,8 +672,14 @@ describe('session_read', () => {
         { secretaryConversationId: 'sec-1' }
       )
     ).toEqual({ ok: false, error: 'not-found' });
-    const listed = await handlers.session_list({}, { secretaryConversationId: 'sec-1' });
-    expect(JSON.stringify(listed)).not.toContain('"auto"');
+    const rows = (await run(handlers.session_list)).sessions as {
+      conversationId: string;
+      archived?: true;
+    }[];
+    expect(rows.map((session) => [session.conversationId, session.archived])).toEqual([
+      ['auto', true],
+    ]);
+    await run(handlers.session_tasks, { conversationId: 'auto' });
   });
 
   it('child、已归档、未知会话与不可见项目一律 not-found', async () => {
@@ -1238,5 +1305,58 @@ describe('排队会话的读取', () => {
   it('session_read 同样显示 queued 与位次', async () => {
     const result = await run(handlers().session_read, { conversationId: 'q2' });
     expect(result).toMatchObject({ state: 'queued', queuePosition: 2 });
+  });
+});
+
+describe('等子代理的可见性', () => {
+  it('session_activity / session_tasks / session_read / session_list 都返回在跑子代理的名称、已运行时长与当前活动', async () => {
+    const handlers = createSecretaryReadHandlers(
+      makePorts({
+        projects: () => [project()],
+        rows: () => ({ s1: row() }),
+        conversations: () => [conversation('s1', 'p1')],
+        status: () => ({ state: 'running', pendingAsks: 0, pendingApprovals: 0 }),
+        subagents: () => [
+          {
+            agentId: 'a-1',
+            runId: 'r-1',
+            title: `实现子代理 ${SECRET}`,
+            status: 'running',
+            elapsedMs: 5 * 60_000 + 12_000,
+            activity: { phase: 'tool', tool: 'bash', detail: `pnpm test ${SECRET}` },
+          },
+        ],
+      })
+    );
+
+    const activity = await run(handlers.session_activity, { conversationId: 's1' });
+    const tasks = await run(handlers.session_tasks, { conversationId: 's1' });
+    const read = await run(handlers.session_read, { conversationId: 's1' });
+    const list = await run(handlers.session_list);
+
+    for (const payload of [activity, tasks, read]) {
+      expect(payload.subagents).toEqual([
+        expect.objectContaining({
+          agentId: 'a-1',
+          runId: 'r-1',
+          status: 'running',
+          elapsedMs: 5 * 60_000 + 12_000,
+          elapsedMinutes: 5,
+        }),
+      ]);
+      const serialized = JSON.stringify(payload.subagents);
+      expect(serialized).toContain('实现子代理');
+      expect(serialized).toContain('bash');
+      expect(serialized).not.toContain(SECRET);
+    }
+    expect(
+      (list.sessions as Array<{ conversationId: string; subagents?: unknown[] }>)[0]?.subagents
+    ).toEqual([
+      expect.objectContaining({
+        agentId: 'a-1',
+        runId: 'r-1',
+        elapsedMinutes: 5,
+      }),
+    ]);
   });
 });

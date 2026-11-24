@@ -53,6 +53,7 @@ import {
   type PluginInjectImage,
   type PluginInjectSender,
   type PluginToolResult,
+  pluginFailureLogLevel,
 } from '@shared/extensionPlugins/protocol';
 import { mergeStatusItems, type StatusPatch } from '@shared/extensionPlugins/statusItems';
 import { parsePluginToolName, pluginToolName } from '@shared/extensionPlugins/toolName';
@@ -68,6 +69,9 @@ import type {
 } from '@shared/extensionPlugins/types';
 import type { McpServerSpawnConfig, SpawnModelConfig } from '@shared/types/agent';
 import type { WorkerForkOptions, WorkerProcess } from '../../platform/types';
+import { getDemandThreadRouter } from '../demandThreadRouter';
+import { getDemandThreadStore } from '../demandThreads';
+import { getEventClaimStore, peekEventClaimStore } from '../eventClaims';
 import type {
   NativeAgentTypeSource,
   NativePluginAgentDef,
@@ -224,6 +228,8 @@ export interface ExtensionPluginServiceOptions {
   prepareTimeoutMs?: number;
   /** 缺省开启。返回 false 时市场更新只提示，不安装 */
   autoUpdatePlugins?: () => boolean;
+  /** 缺省关闭。返回 true 时才把插件日志放进缓冲并写盘 */
+  pluginLoggingEnabled?: () => boolean;
   /** 开发模式的目录监听；缺省 fs.watch 递归监听，测试可替换 */
   devWatch?: (dir: string, onChange: () => void) => { close(): void };
   /** 开发模式里改动停下多久才重装，缺省 400ms */
@@ -365,6 +371,24 @@ export class ExtensionPluginService {
       abort: (pluginId, sessionId) => {
         const bridge = this.enabledManifest(pluginId) ? this.options.sessionBridge?.() : null;
         return bridge ? bridge.abort(sessionId) : { ok: false, error: '当前环境不能中止会话' };
+      },
+      claims: {
+        claim: (input) => getEventClaimStore().acquire(input),
+        renew: (key, sessionId) => getEventClaimStore().renew(key, sessionId),
+        release: (key, sessionId) => getEventClaimStore().release(key, sessionId),
+        list: (filter) => getEventClaimStore().list(filter),
+        releaseSession: (sessionId) => getEventClaimStore().releaseSession(sessionId),
+      },
+      threads: {
+        open: (input) => getDemandThreadStore().open(input),
+        bindPr: (target, pr) => getDemandThreadStore().bindPr(target, pr),
+        routePrEvent: (pluginId, event) => getDemandThreadRouter().routePrEvent(pluginId, event),
+        list: (filter) => getDemandThreadStore().list(filter),
+        findById: (id) => getDemandThreadStore().findById(id),
+        findBySource: (channel, chatId, messageId) =>
+          getDemandThreadStore().findBySource(channel, chatId, messageId),
+        findByPr: (repo, number) => getDemandThreadStore().findByPr(repo, number),
+        findActiveBySession: (sessionId) => getDemandThreadStore().findActiveBySession(sessionId),
       },
       agentRun: (pluginId, input) => this.startAgentRun(pluginId, input),
       agentModel: (pluginId) => this.agentModel(pluginId),
@@ -1485,6 +1509,7 @@ export class ExtensionPluginService {
   /** 会话删除：插件不再据它判定可见范围 */
   forgetSession(sessionId: string): void {
     this.gate.forgetSession(sessionId);
+    peekEventClaimStore()?.releaseSession(sessionId);
   }
 
   async intercept<E extends PluginInterceptEvent>(input: {
@@ -1757,8 +1782,21 @@ export class ExtensionPluginService {
 
   /** 插件进程的输出与异常，落在 Main 私有目录；超过 1MB 轮转一次 */
   appendLog(id: string, level: PluginLogLevel, message: string): void {
-    this.logger.append(id, level, message);
     if (level === 'error') this.recordError(id, message);
+    if (!this.isPluginLoggingEnabled()) return;
+    this.logger.append(id, level, message);
+  }
+
+  isPluginLoggingEnabled(): boolean {
+    return this.options.pluginLoggingEnabled?.() === true;
+  }
+
+  setLoggingEnabled(enabled: boolean): void {
+    for (const proc of this.processes.values()) proc.setLoggingEnabled(enabled);
+  }
+
+  syncLoggingEnabled(): void {
+    this.setLoggingEnabled(this.isPluginLoggingEnabled());
   }
 
   recordError(id: string, message: string): void {
@@ -2044,6 +2082,7 @@ export class ExtensionPluginService {
           onExit(unexpected);
         },
         onLog: (level, message) => this.appendLog(manifest.id, level, message),
+        loggingEnabled: () => this.isPluginLoggingEnabled(),
       },
       (pending) => {
         this.lastSpawn.set(proc, pending);
@@ -2167,16 +2206,36 @@ export class ExtensionPluginService {
 
   private inject(
     pluginId: string,
-    input: {
-      sessionId: string;
-      text: string;
-      images: PluginInjectImage[];
-      deliverAs: 'steer' | 'followUp' | 'nextTurn';
-      triggerTurn: boolean;
-      trusted: boolean;
-      sender?: PluginInjectSender;
-    }
-  ): { ok: true } | { ok: false; error: string } {
+    input: Parameters<NonNullable<GateDeps['inject']>>[1]
+  ): SessionAttempt {
+    return this.injectMessage(pluginId, input);
+  }
+
+  injectOwned(input: {
+    pluginId: string;
+    sessionId: string;
+    text: string;
+    claimKey: string;
+    claimLabel?: string;
+    sender?: PluginInjectSender;
+  }): SessionAttempt {
+    return this.injectMessage(input.pluginId, {
+      sessionId: input.sessionId,
+      text: input.text,
+      images: [],
+      deliverAs: 'followUp',
+      triggerTurn: true,
+      trusted: false,
+      claimKey: input.claimKey,
+      ...(input.claimLabel ? { claimLabel: input.claimLabel } : {}),
+      ...(input.sender ? { sender: input.sender } : {}),
+    });
+  }
+
+  private injectMessage(
+    pluginId: string,
+    input: Parameters<NonNullable<GateDeps['inject']>>[1]
+  ): SessionAttempt {
     const manifest = this.enabledManifest(pluginId) ?? this.gateManifests.get(pluginId);
     const bridge = this.options.sessionBridge?.() ?? null;
     if (!manifest || !bridge) return { ok: false, error: '当前环境不能注入消息' };
@@ -2188,8 +2247,8 @@ export class ExtensionPluginService {
       source,
     });
     if (trust.ignored)
-      this.logger.append(pluginId, 'warn', 'trusted 已忽略：清单没有声明 agent.injectTrusted');
-    const result = bridge.inject(input.sessionId, {
+      this.appendLog(pluginId, 'warn', 'trusted 已忽略：清单没有声明 agent.injectTrusted');
+    const message = {
       pluginId,
       pluginName: manifest.name,
       text: input.text,
@@ -2201,10 +2260,32 @@ export class ExtensionPluginService {
       permissions: manifest.permissions,
       ...(source ? { source } : {}),
       ...(input.sender ? { sender: input.sender } : {}),
+    };
+    if (!input.claimKey) {
+      const result = bridge.inject(input.sessionId, message);
+      if (result.ok && result.trustedOverriddenByExternal)
+        this.appendLog(pluginId, 'warn', 'trusted 已忽略：投递带有非 owner 的外部原文');
+      return result;
+    }
+    const store = getEventClaimStore();
+    const acquired = store.acquire({
+      key: input.claimKey,
+      sessionId: input.sessionId,
+      pluginId,
+      ...(input.claimLabel !== undefined ? { label: input.claimLabel } : {}),
+      ...(input.claimGroup !== undefined ? { group: input.claimGroup } : {}),
+      ...(input.claimSubscribedAt !== undefined ? { subscribedAt: input.claimSubscribedAt } : {}),
+      ...(input.claimCandidates !== undefined ? { candidates: input.claimCandidates } : {}),
     });
-    if (result.ok && result.trustedOverriddenByExternal)
-      this.logger.append(pluginId, 'warn', 'trusted 已忽略：投递带有非 owner 的外部原文');
-    return result;
+    if (!acquired.acquired) {
+      return { ok: true, skipped: true, ownerSessionId: acquired.ownerSessionId };
+    }
+    const sent = bridge.inject(input.sessionId, message);
+    if (!sent.ok && acquired.status === 'claimed') store.release(input.claimKey, input.sessionId);
+    if (!sent.ok) return sent;
+    if (sent.trustedOverriddenByExternal)
+      this.appendLog(pluginId, 'warn', 'trusted 已忽略：投递带有非 owner 的外部原文');
+    return { ok: true, claimStatus: acquired.status, ownerSessionId: input.sessionId };
   }
 
   private callExport(
@@ -2395,7 +2476,9 @@ export class ExtensionPluginService {
     const state = this.scheduleRuns.get(key);
     if (this.isDisposed || !state || state.running || !this.enabledManifest(pluginId)) return;
     state.running = true;
+    let proc: PluginProcess | undefined;
     try {
+      proc = this.processFor(pluginId);
       await this.invoke(
         pluginId,
         'schedule.run',
@@ -2411,9 +2494,16 @@ export class ExtensionPluginService {
       state.lastRunAt = Date.now();
       delete state.lastError;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const level = pluginFailureLogLevel(error, { stopped: proc?.stopped === true });
+      // 停用、卸载、换版或退出时进程被停掉：任务只是被打断，不算这次运行失败
+      if (level === 'debug') {
+        this.appendLog(pluginId, 'debug', `定时任务 ${schedule.id} 中断：${message}`);
+        return;
+      }
       state.lastRunAt = Date.now();
-      state.lastError = error instanceof Error ? error.message : String(error);
-      this.appendLog(pluginId, 'error', `定时任务 ${schedule.id} 失败：${state.lastError}`);
+      state.lastError = message;
+      this.appendLog(pluginId, level, `定时任务 ${schedule.id} 失败：${message}`);
     } finally {
       if (this.scheduleRuns.get(key) === state) state.running = false;
       this.touch();

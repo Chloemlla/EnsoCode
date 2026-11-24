@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
@@ -197,13 +197,9 @@ describe('resolveBackgroundLaunch', () => {
   });
 
   it('工具名为 powershell 且无 transform 时,带上 resolvePowerShell 给出的 file/argsPrefix', () => {
-    const result = resolveBackgroundLaunch(
-      'powershell',
-      'Get-Process',
-      'C:\\proj',
-      undefined,
-      () => ({ shell: 'pwsh.exe', args: ['-NoProfile', '-Command'] })
-    );
+    const result = resolveBackgroundLaunch('powershell', 'Get-Process', 'C:\\proj', undefined, {
+      resolvePowerShell: () => ({ shell: 'pwsh.exe', args: ['-NoProfile', '-Command'] }),
+    });
     expect(result).toEqual({
       command: 'Get-Process',
       cwd: 'C:\\proj',
@@ -212,9 +208,17 @@ describe('resolveBackgroundLaunch', () => {
     });
   });
 
-  it('工具名为 bash 且无 transform 时,只回原样 command/cwd', () => {
-    const result = resolveBackgroundLaunch('bash', 'echo hi', '/tmp');
-    expect(result).toEqual({ command: 'echo hi', cwd: '/tmp' });
+  it('bash 且无 transform 时,带上 resolveBash 给出的 shell 与参数', () => {
+    const result = resolveBackgroundLaunch('bash', 'echo hi', '/tmp', undefined, {
+      resolveBash: () => ({ shell: '/usr/local/bin/bash', args: ['-c'] }),
+    });
+    expect(result).toEqual({
+      command: 'echo hi',
+      cwd: '/tmp',
+      file: '/usr/local/bin/bash',
+      argsPrefix: ['-c'],
+      commandTransport: undefined,
+    });
   });
 
   it('win32 下 powershell 走 file 分支：powershell.exe + 完整参数前缀，命令作为最后一个参数', () => {
@@ -224,7 +228,7 @@ describe('resolveBackgroundLaunch', () => {
       'Write-Output ENSO_NATIVE_STARTED; exit 23',
       'C:\\proj',
       undefined,
-      () => ({ shell: 'powershell.exe', args })
+      { resolvePowerShell: () => ({ shell: 'powershell.exe', args }) }
     );
     expect(result).toEqual({
       command: 'Write-Output ENSO_NATIVE_STARTED; exit 23',
@@ -374,7 +378,7 @@ describe('BackgroundTaskManager', () => {
   });
 
   it.skipIf(process.platform === 'win32').each([
-    ['输出直写文件', { detachable: true }],
+    ['输出直写文件', { detachable: true, file: '/bin/bash', argsPrefix: ['-c'] }],
     ['管道', undefined],
   ])(
     '只写 stderr 的命令（%s）：运行中面板 tail 就有内容，outputBytes 计数',
@@ -397,6 +401,39 @@ describe('BackgroundTaskManager', () => {
       }
     }
   );
+
+  // 验收脚本 spawn 的 Electron 带 detached（独立会话），只杀根进程组会把它留成孤儿
+  it.skipIf(process.platform === 'win32').each([
+    ['输出直写文件', { detachable: true, file: '/bin/bash', argsPrefix: ['-c'] }],
+    ['管道', undefined],
+  ])('stop（%s）连带结束自立进程组的子孙进程', async (_kind, opts) => {
+    const { manager, ended } = makeManager({ killGraceMs: 200 });
+    const dir = mkdtempSync(path.join(tmpdir(), 'enso-bg-tree-'));
+    const script = path.join(dir, 'spawner.cjs');
+    writeFileSync(
+      script,
+      "const c = require('node:child_process').spawn('sleep', ['300'], { detached: true, stdio: 'ignore' });\n" +
+        "console.log('grandchild=' + c.pid);\n" +
+        'setInterval(() => {}, 1000);\n'
+    );
+    const taskId = manager.start('s1', `"${process.execPath}" "${script}"`, dir, opts);
+    let grandchild = 0;
+    try {
+      await until(() => {
+        const match = /grandchild=(\d+)/.exec(manager.snapshot('s1')[0]?.tail ?? '');
+        grandchild = match ? Number(match[1]) : 0;
+        return grandchild > 0;
+      });
+      expect(processAlive(grandchild)).toBe(true);
+      manager.stop(taskId);
+      await until(() => ended.includes(taskId));
+      await until(() => !processAlive(grandchild), 3000).catch(() => {});
+      expect(processAlive(grandchild)).toBe(false);
+    } finally {
+      manager.stop(taskId);
+      if (grandchild > 0 && processAlive(grandchild)) process.kill(grandchild, 'SIGKILL');
+    }
+  });
 
   it('进程退出后等待 finalize，再由 task_output 返回最终 details', async () => {
     const { manager, ended } = makeManager();

@@ -342,6 +342,27 @@ describe('parseDispatchFile', () => {
     expect(file.dispatched.c1).toMatchObject({ autoArchivedAt: 30, autoArchiveResultAt: 20 });
   });
 
+  it('秘书归档的来源读回来还在，来源不认识的整条丢掉', () => {
+    const record = (secretaryArchived: unknown) => ({
+      conversationId: 'c1',
+      projectId: 'p1',
+      secretaryConversationId: 's1',
+      createdAt: 10,
+      lastEventAt: 10,
+      lastState: 'idle',
+      secretaryArchived,
+    });
+    const file = parseDispatchFile({
+      dispatched: {
+        c1: record({ at: 30, via: 'cleanup_apply' }),
+        c2: { ...record({ at: 30, via: 'user' }), conversationId: 'c2' },
+      },
+    });
+    expect(file.dispatched.c1?.secretaryArchived).toEqual({ at: 30, via: 'cleanup_apply' });
+    expect(file.dispatched.c2).toBeDefined();
+    expect(file.dispatched.c2?.secretaryArchived).toBeUndefined();
+  });
+
   it('手动标记、重新打开、撤销与收掉的目标读回来还在：重启后撤销标记与追加跟踪照常', () => {
     const base = {
       conversationId: 'c1',
@@ -590,7 +611,7 @@ describe('parseDispatchFile', () => {
         keys: ['k1', 'k1'],
         attempt: 9,
         nextAttemptAt: 30,
-        settled: true,
+        started: true,
       },
     });
     expect(file.dispatched.c1?.turn).toBe(0);
@@ -601,7 +622,7 @@ describe('parseDispatchFile', () => {
       keys: ['k1'],
       attempt: 6,
       nextAttemptAt: 30,
-      settled: true,
+      started: true,
     });
     expect(parseDispatchFile({ inflight: { attempt: 0 } }).inflight).toBeUndefined();
     expect(
@@ -730,6 +751,46 @@ describe('parseDispatchFile', () => {
     });
     expect(file.outbox[1]).toMatchObject({ kind: 'failed' });
     expect(file.outbox[1]).not.toHaveProperty('goalResult');
+  });
+
+  it('动态的 needsUser 和 summary 读回来，坏字段丢掉但不丢条目', () => {
+    const extra = Array.from({ length: 22 }, (_, index) => `事项${index}`);
+    const file = parseDispatchFile({
+      activity: [
+        {
+          at: 1,
+          conversationId: 'c1',
+          kind: 'goal-complete',
+          text: 'noise',
+          needsUser: [' 确认 ', '', '   ', 1, '发版', ...extra],
+          summary: ' 已完成 ',
+        },
+        {
+          at: 2,
+          conversationId: 'c1',
+          kind: 'goal-complete',
+          text: 'plain',
+          needsUser: 'nope',
+          summary: '   ',
+        },
+        { at: 3, conversationId: 'c2', kind: 'not-a-kind', text: 'drop' },
+      ],
+    });
+    expect(file.activity).toHaveLength(2);
+    expect(file.activity?.[0]).toEqual({
+      at: 1,
+      conversationId: 'c1',
+      kind: 'goal-complete',
+      text: 'noise',
+      needsUser: ['确认', '发版', ...extra.slice(0, 18)],
+      summary: '已完成',
+    });
+    expect(file.activity?.[1]).toEqual({
+      at: 2,
+      conversationId: 'c1',
+      kind: 'goal-complete',
+      text: 'plain',
+    });
   });
 });
 

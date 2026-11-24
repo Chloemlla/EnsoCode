@@ -8,6 +8,17 @@ export const zhTranslations: Record<string, string> = {
   'Waiting to bind': '等待绑定',
   'Enable {{name}}': '启用{{name}}',
   'Push to this channel': '主动推送',
+  'Pushes paused': '已暂停推送',
+  'Send failed': '发送失败',
+  'Pushes paused: {{count}} sends failed in a row': '已暂停推送：连续 {{count}} 次发送失败',
+  'The last send failed ({{count}} in a row)': '最近一次发送失败（连续 {{count}} 次）',
+  'Last failure: {{time}}': '最近一次失败：{{time}}',
+  'Next try at {{time}}. A message from this channel or Retry now resumes pushes right away.':
+    '{{time}} 再试一次。从这个渠道发来任意一条消息，或点「立即重试」，会马上恢复推送。',
+  'The next push will try again.': '下一条推送会再试一次。',
+  '{{count}} pushes held back.': '已有 {{count}} 条推送没发出去。',
+  'Sends a test message to this channel.': '会往这个渠道发一条测试消息。',
+  'Pushes to this channel are paused after repeated failures': '这个渠道连续发送失败，推送已暂停',
   'Milestones, questions from the secretary, cards and approval notices go out here.':
     '里程碑、秘书的提问、确认卡与审批提示会推到这里。',
   'Confirm cards from the phone': '手机确认卡',
@@ -27,6 +38,18 @@ export const zhTranslations: Record<string, string> = {
   "The Telegram remote plugin (enso.telegram) is enabled. Do not give both the same bot token: only one place can poll a bot, so they would steal each other's messages.":
     '已启用 Telegram 远程插件（enso.telegram）。两边不要用同一个 bot token：一个 bot 只能有一处在轮询，会互相抢消息。',
   'Enable contacts': '启用联系方式',
+  'Owner identity': '主人身份',
+  'GitHub accounts that count as you. Events from anyone else are left to the agent unless you require confirmation.':
+    '这些 GitHub 账号算你本人。其他人的事件默认交给 agent 判断，除非你要求必须确认。',
+  'GitHub accounts': 'GitHub 账号',
+  'Comma or space separated': '用逗号或空格分隔',
+  'Detected the gh login {{login}} on this machine': '检测到本机 gh 登录账号 {{login}}',
+  'Fill in': '填入',
+  'Save GitHub accounts': '保存',
+  'That is not a GitHub login': '这不是合法的 GitHub 账号',
+  'Messages that are not from you': '外部渠道的非主人消息',
+  'Let the agent decide': '交给 agent 判断',
+  'Require your confirmation': '必须主人确认',
   'Contacts are off: nothing is sent or received on any channel.':
     '联系方式已关闭：所有渠道都不收不发。',
   'Find more contact channels in the plugin market': '从插件市场找更多联系方式',
@@ -455,9 +478,29 @@ export const zhTranslations: Record<string, string> = {
   'Unstage all': '取消全部暂存',
   'Discard changes': '丢弃修改',
   'Delete untracked file': '删除未跟踪文件',
+  'Delete untracked files': '删除未跟踪文件',
   'Delete untracked file {{path}} permanently?': '永久删除未跟踪文件 {{path}}？',
   'Restore {{path}} to its staged version? Unstaged changes will be lost.':
     '将 {{path}} 恢复为暂存版本？未暂存的修改将丢失。',
+  'Discard…': '放弃…',
+  'Discard all': '放弃所有',
+  'Discard untracked': '放弃跟踪',
+  'Discard {{tracked}} tracked changes, delete {{untracked}} untracked files':
+    '丢弃 {{tracked}} 个已跟踪文件的修改，删除 {{untracked}} 个未跟踪文件',
+  'Permanently delete {{count}} untracked files': '永久删除 {{count}} 个未跟踪文件',
+  'Unstaged changes in {{count}} tracked files will be lost; the files are restored to their staged version.':
+    '{{count}} 个已跟踪文件的未暂存修改将丢失，文件本身保留并恢复为暂存版本。',
+  'Unstaged changes in {{count}} tracked files in {{path}} will be lost; the files are restored to their staged version.':
+    '{{path}} 中 {{count}} 个已跟踪文件的未暂存修改将丢失，文件本身保留并恢复为暂存版本。',
+  '{{count}} untracked files will be permanently deleted and cannot be recovered.':
+    '{{count}} 个未跟踪文件将被永久删除，删除后无法恢复。',
+  '{{count}} untracked files in {{path}} will be permanently deleted and cannot be recovered.':
+    '{{path}} 中的 {{count}} 个未跟踪文件将被永久删除，删除后无法恢复。',
+  'Tracked files are not changed.': '已跟踪文件不受影响。',
+  'Resolve conflicts first.': '请先解决冲突。',
+  '{{count}} conflicted': '{{count}} 个冲突',
+  'Discard and delete {{count}} untracked files': '放弃修改并删除 {{count}} 个未跟踪文件',
+  'Delete {{count}} untracked files': '删除 {{count}} 个未跟踪文件',
   'Commit message': '提交信息',
   'Enter commit message…': '输入提交信息…',
   '{{count}} staged files': '已暂存 {{count}} 个文件',
@@ -534,6 +577,18 @@ export const zhTranslations: Record<string, string> = {
   'dcg required confirmation without details.': 'dcg 要求人工确认（未提供规则详情）。',
   'Deletes in the shared system Temp folder root, which holds files of other apps; delete only inside the session temp folder.':
     '在系统共用的 Temp 根目录里删除，那里有其他程序的文件；只应在会话专属临时目录内删除。',
+  'Safety floor rule — still requires confirmation in full-access mode. Click Adjust to target a specific subdirectory or session temp folder, or Allow once.':
+    '属于安全底线规则，即使在完全放行模式下也会拦截。可点「调整」改用具体子目录或会话专属临时目录，或确认无误后单次放行。',
+  'Blocked by built-in guard — still requires confirmation in full-access mode. Review the command, click Adjust, or Allow once.':
+    '由内置守卫拦截，即使在完全放行模式下也会确认。请核对命令内容，可点「调整」或确认无误后单次放行。',
+  'Command guard could not finish rechecking the remaining command; confirm before running.':
+    '命令守卫未能完成其余语句的复检，执行前请人工确认。',
+  'High-risk safety floor (cannot be exempted) — still requires confirmation in full-access mode. Click Adjust for a safer command or path, or Allow once.':
+    '属于高危安全底线（不可豁免），即使在完全放行模式下也会拦截。可点「调整」更换更安全的命令或路径，或确认无误后单次放行。',
+  'Guard rule requires confirmation each time — still prompts in full-access mode. Click Adjust for a safer command, or Allow once.':
+    '该守卫规则要求每次确认，即使在完全放行模式下也会拦截。可点「调整」换用更安全的命令，或确认无误后单次放行。',
+  'Triggered by command guard — still prompts in full-access mode. Click Adjust to change the command or path, or manage exemptions in Settings (auto-suggested after 5 allows).':
+    '由命令守卫拦截，即使在完全放行模式下也会确认。可点「调整」更换命令或路径，或在设置中管理豁免（单次放行 5 次后也可在此直接豁免）。',
   'Destructive command guard (dcg)': '破坏性命令守卫（dcg）',
   'Check bash and PowerShell commands with dcg before running. Matches such as git reset --hard or recursive deletes always require your confirmation, even in full-access mode. Takes effect on new conversations.':
     '执行 bash 和 PowerShell 命令前先用 dcg 检查。命中 git reset --hard、递归删除等危险命令时，即使在完全放行模式下也必须由你确认。新会话生效。',
@@ -1962,6 +2017,7 @@ export const zhTranslations: Record<string, string> = {
   'Synthesized from': '合成自',
   'Related versions': '相关版本',
   'Delete permanently': '永久删除',
+  'Deleting…': '删除中…',
   'Delete this memory permanently?': '永久删除这条记忆?',
   'All space types': '全部空间类型',
   'Recorded {{date}}': '记录于 {{date}}',
@@ -2105,6 +2161,22 @@ export const zhTranslations: Record<string, string> = {
   'Update plugins automatically': '自动更新插件',
   'Marketplace updates that do not ask for new permissions install on their own.':
     '权限不变的市场更新会自动装上。需要新权限的仍等你同意。',
+  'Record plugin logs': '记录插件日志',
+  'Off by default. Record plugin console output and runtime logs to disk. Startup failures and crashes are still shown.':
+    '默认关闭。开启后将插件控制台输出与运行日志写入磁盘；关闭时启动失败和崩溃等错误状态仍会显示。',
+  'Plugin logging is off': '插件日志未开启',
+  'New plugin logs are not recorded while off. Existing log files are kept.':
+    '当前不会记录新的插件日志，已有日志文件不会删除。',
+  'Enable plugin logging': '开启插件日志',
+  'Record app logs': '记录应用日志',
+  'Off by default. Write main process and agent logs to disk. Files needed for restart recovery are always kept.':
+    '默认关闭。开启后将主进程与 Agent 日志写入磁盘；重启恢复等功能需要的文件始终照常保存。',
+  'App logging is off': '应用日志未开启',
+  'New app logs are not recorded while off. Existing logs are kept below.':
+    '当前不会记录新的应用日志，已有日志不会删除，仍在下方显示。',
+  'Enable app logging': '开启应用日志',
+  'App logging is off. The export only includes logs recorded earlier.':
+    '应用日志未开启，导出只包含之前已记录的日志。',
   '{{name}} tried to message another session and was blocked':
     '插件 {{name}} 想向其他会话发消息，已拦截',
   'Turn on': '去开启',
@@ -2474,6 +2546,10 @@ export const zhTranslations: Record<string, string> = {
     '从本地 AI 应用导入 {{name}} 项目下的对话历史。',
   'No sessions found for this project': '没有找到该项目的会话',
   'Select a session to preview': '选择一个会话预览',
+  'The session list is out of date. Please rescan.': '会话列表已过期，请重新扫描。',
+  'This session is outside the allowed folders and cannot be read.':
+    '该会话已不在允许的目录内，无法读取。',
+  'This session has no messages to import.': '该会话没有可导入的消息。',
   Untitled: '未命名',
   '{{count}} messages': '{{count}} 条消息',
   Import: '导入',
@@ -2540,6 +2616,15 @@ export const zhTranslations: Record<string, string> = {
   'Refusal retry prompt': '拒答补发正文',
   Advanced: '高级',
   'Request headers': '请求头',
+  Proxy: '代理',
+  'Follow global proxy': '跟随全局代理',
+  'No proxy (direct)': '不使用代理（直连）',
+  'Uses the network proxy in Settings → General.': '沿用「设置 → 通用 → 网络代理」的配置。',
+  'All requests to this provider connect directly, ignoring the global and system proxy.':
+    '该服务商的所有请求都直连，不走全局或系统代理。',
+  'All requests to this provider go through this proxy.': '该服务商的所有请求都经这个代理发送。',
+  'Show proxy URL': '显示代理地址',
+  'Hide proxy URL': '隐藏代理地址',
   'Add header': '添加请求头',
   'Remove header': '移除请求头',
   'Header values can only contain tab and single-byte characters (no Chinese, newlines, or NUL).':
@@ -2632,6 +2717,9 @@ export const zhTranslations: Record<string, string> = {
     '将永久删除「{{name}}」这项配置。',
   'Sign-out failed: {{message}}': '退登失败：{{message}}',
   Retry: '重试',
+  'This panel crashed': '面板出错了',
+  'Copy error': '复制错误',
+  'Loading secretary…': '正在读取秘书状态…',
   'Auto-retrying ({{attempt}}/{{max}})': '自动重试中 ({{attempt}}/{{max}})',
   'Auto-retrying ({{attempt}})': '自动重试中（第 {{attempt}} 次）',
   'retrying in {{seconds}}s': '{{seconds}}s 后重试',
@@ -3203,6 +3291,10 @@ export const zhTranslations: Record<string, string> = {
   Planning: '思考',
   Busy: '执行',
   'Needs you': '等待',
+  'Demand threads': '需求线程',
+  'Thread owner': '绑定主人',
+  'Thread external': '外部',
+  'Handled by {{session}}': '负责会话 {{session}}',
   Stuck: '异常',
   Finished: '完成',
   'In line': '排队中',
@@ -3290,6 +3382,22 @@ export const zhTranslations: Record<string, string> = {
   'Telegram messages are not end-to-end encrypted and stay on Telegram servers. /status, /board and /feed show titles and short summaries; /last and /sync send conversation text. Memory text and tool output never leave the app.':
     'Telegram 消息不是端到端加密的，会存在 Telegram 的服务器上。/status、/board、/feed 只显示标题与简短摘要；/last 与 /sync 会发会话正文。记忆正文与工具输出不会离开应用。',
   'Waiting on a background task': '等后台任务',
+  'Waiting for reminder': '等提醒',
+  'Waiting for reminder · {{time}}': '等提醒 · {{time}}',
+  'due now': '即将到点',
+  '<1m': '不足 1 分钟',
+  'in {{minutes}}m': '{{minutes}} 分钟后',
+  'in {{hours}}h': '{{hours}} 小时后',
+  'in {{hours}}h {{minutes}}m': '{{hours}} 小时 {{minutes}} 分钟后',
+  '{{count}} reminders': '共 {{count}} 条提醒',
+  'Waiting on subagent': '等子代理',
+  'Waiting on subagent {{title}} ({{minutes}}m)':
+    '正在等子代理 {{title}}（已运行 {{minutes}} 分钟）',
+  'Waiting on subagent {{title}} (<1m)': '正在等子代理 {{title}}（不足 1 分钟）',
+  'Waiting on {{n}} subagents ({{title}} · {{minutes}}m)':
+    '正在等 {{n}} 个子代理（{{title}} · 已运行 {{minutes}} 分钟）',
+  'Waiting on {{n}} subagents ({{title}} · <1m)':
+    '正在等 {{n}} 个子代理（{{title}} · 不足 1 分钟）',
   'Service running': '有常驻服务',
   'Done ({{count}} leftover tasks)': '已完成（{{count}} 个遗留任务）',
   'Stop leftover tasks': '停止遗留任务',
@@ -3860,10 +3968,16 @@ export const zhTranslations: Record<string, string> = {
   'Good afternoon': '下午好',
   'Good evening': '晚上好',
   'Today {{dispatched}} dispatched, {{completed}} completed, {{failed}} failed':
-    '今天派出 {{dispatched}} 件，完成 {{completed}} 件，{{failed}} 件失败',
+    '今天派出 {{dispatched}} 件，已完成 {{completed}} 件，{{failed}} 件失败',
+  '; plus {{count}} earlier or taken over completed': '；另完成之前派出或接手的 {{count}} 件',
+  'No new dispatches today; {{count}} earlier or taken over completed':
+    '今天没派新活，完成了之前派出或接手的 {{count}} 件',
   'Nothing dispatched today': '今天还没派活',
   Started: '开始执行',
   'Goal complete': '目标完成',
+  'Done · needs you': '完成 · 需要你',
+  'Done · with secretary': '完成 · 秘书处理中',
+  'Needs you: {{item}}': '需要你：{{item}}',
   'Turn ended': '这一轮结束',
   Stalled: '停滞',
   'Stalled, no activity': '已停住',

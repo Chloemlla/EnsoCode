@@ -54,15 +54,145 @@ export interface GoalResultCheck {
   detail?: string;
 }
 
-export interface GoalResultView {
-  result: GoalResult;
-  checks?: GoalResultCheck[];
+/** 用户对某条 needsUser 的答复；index 是 needsUserItems 里的位置 */
+export interface NeedsUserAnswer {
+  index: number;
+  answer: string;
   at: number;
 }
 
+/** 秘书把某条 needsUser 升级给用户；text 是改写后给用户看的一句话，缺省用原文 */
+export interface NeedsUserEscalation {
+  index: number;
+  text?: string;
+  at: number;
+}
+
+export interface GoalResultView {
+  result: GoalResult;
+  checks?: GoalResultCheck[];
+  /** 秘书带关联转问后用户的答复；属于这一份结果，新结果整体替换时自然清空 */
+  answers?: NeedsUserAnswer[];
+  /** 秘书筛选后升级给用户的条目；同样随新结果整体替换 */
+  escalations?: NeedsUserEscalation[];
+  at: number;
+}
+
+function listNeedsUser(result: GoalResult): string[] {
+  return (result.needsUser ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
 /** 结构化结果里是否明确列出了需要用户亲自处理的事项 */
+export function needsUserItems(view: GoalResultView | undefined): string[] {
+  return view ? listNeedsUser(view.result) : [];
+}
+
 export function hasNeedsUser(view: GoalResultView | undefined): boolean {
-  return (view?.result.needsUser ?? []).some((item) => item.trim().length > 0);
+  return needsUserItems(view).length > 0;
+}
+
+/** 记下一次答复：index 缺省表示覆盖全部条目，同一条再答以新的为准 */
+export function answerGoalResultNeedsUser(
+  view: GoalResultView,
+  index: number | undefined,
+  answer: string,
+  at: number
+): GoalResultView {
+  const count = needsUserItems(view).length;
+  const targets = index === undefined ? [...Array(count).keys()] : [index];
+  const kept = (view.answers ?? []).filter((item) => !targets.includes(item.index));
+  const added = targets.map((target) => ({ index: target, answer, at }));
+  return { ...view, answers: [...kept, ...added].sort((a, b) => a.index - b.index) };
+}
+
+export function unansweredNeedsUserCount(view: GoalResultView | undefined): number {
+  const answered = new Set((view?.answers ?? []).map((item) => item.index));
+  return needsUserItems(view).filter((_, index) => !answered.has(index)).length;
+}
+
+/** 秘书没在这段时间里升级或处理，needsUser 照旧直接给用户 */
+export const NEEDS_USER_TRIAGE_MS = 30 * 60_000;
+
+/** 秘书筛选的截止时间：从完成或秘书最后一次升级、用户最后一次答复算起 */
+export function needsUserTriageDeadline(view: GoalResultView): number {
+  const touched = [...(view.escalations ?? []), ...(view.answers ?? [])].map((item) => item.at);
+  return Math.max(view.at, ...touched) + NEEDS_USER_TRIAGE_MS;
+}
+
+/** 记下一次升级：index 缺省表示全部条目（保留原文），同一条再升级以新的为准 */
+export function escalateGoalResultNeedsUser(
+  view: GoalResultView,
+  index: number | undefined,
+  text: string | undefined,
+  at: number
+): GoalResultView {
+  const count = needsUserItems(view).length;
+  const targets = index === undefined ? [...Array(count).keys()] : [index];
+  const kept = (view.escalations ?? []).filter((item) => !targets.includes(item.index));
+  const added = targets.map((target) => ({
+    index: target,
+    ...(index !== undefined && text ? { text } : {}),
+    at,
+  }));
+  return { ...view, escalations: [...kept, ...added].sort((a, b) => a.index - b.index) };
+}
+
+export interface ShownNeedsUser {
+  /** 此刻还在等秘书筛选：不进「需要你」 */
+  triaging: boolean;
+  /** 给用户看的条目，升级过的用改写后的文字 */
+  items: string[];
+  /** 答复按 items 里的位置重新编号 */
+  answers: NeedsUserAnswer[];
+}
+
+/**
+ * 用户此刻该看到哪些 needsUser。triage 表示这份结果先经秘书（派出或跟踪、秘书会话还在）。
+ * 有升级了还没答的条目，只给升级的；升级的都答完（或没升级过）而还剩没处理的条目，
+ * 截止前回到秘书手里，超时全部给用户；不经秘书的全部照旧给用户。
+ */
+export function shownNeedsUser(
+  view: GoalResultView | undefined,
+  triage: boolean,
+  now: number
+): ShownNeedsUser {
+  const all = needsUserItems(view);
+  if (!view || all.length === 0) return { triaging: false, items: [], answers: [] };
+  const escalated = new Map(
+    (view.escalations ?? [])
+      .filter((item) => item.index < all.length)
+      .map((item) => [item.index, item.text])
+  );
+  const answered = new Set((view.answers ?? []).map((item) => item.index));
+  const awaiting = [...escalated.keys()].some((index) => !answered.has(index));
+  const untouched = all.some((_, index) => !escalated.has(index) && !answered.has(index));
+  if (triage && !awaiting && untouched && now < needsUserTriageDeadline(view))
+    return { triaging: true, items: [], answers: [] };
+  const indexes =
+    triage && (awaiting || !untouched)
+      ? [...escalated.keys()].sort((a, b) => a - b)
+      : [...all.keys()];
+  const position = new Map(indexes.map((index, at) => [index, at]));
+  return {
+    triaging: false,
+    items: indexes.map((index) => escalated.get(index) || all[index]),
+    answers: (view.answers ?? []).flatMap((answer) => {
+      const at = position.get(answer.index);
+      return at === undefined ? [] : [{ ...answer, index: at }];
+    }),
+  };
+}
+
+/** 清除已处理的 needsUser 与答复，保留 PR/commit/checks 等客观事实；无剩余内容时返回 undefined */
+export function stripGoalResultNeedsUser(
+  view: GoalResultView | undefined
+): GoalResultView | undefined {
+  if (!view?.result.needsUser && !view?.answers && !view?.escalations) return view;
+  const { needsUser: _needsUser, ...rest } = view.result;
+  const { answers: _answers, escalations: _escalations, ...base } = view;
+  const hasRest = Object.keys(rest).length > 0 || (view.checks?.length ?? 0) > 0;
+  if (!hasRest) return undefined;
+  return { ...base, result: rest };
 }
 
 export type GoalResultParse = { ok: true; value: GoalResult } | { ok: false; error: string };
@@ -462,6 +592,10 @@ export function parseGoalResultView(raw: unknown): GoalResultView | undefined {
   if (!parsed.ok) return undefined;
   if (typeof raw.at !== 'number' || !Number.isFinite(raw.at)) return undefined;
   const view: GoalResultView = { result: parsed.value, at: raw.at };
+  const answers = parseAnswers(raw.answers);
+  if (answers.length > 0) view.answers = answers;
+  const escalations = parseEscalations(raw.escalations);
+  if (escalations.length > 0) view.escalations = escalations;
   if (!Array.isArray(raw.checks)) return view;
   const checks = raw.checks.flatMap((item) => {
     const check = parseCheck(item);
@@ -469,6 +603,29 @@ export function parseGoalResultView(raw: unknown): GoalResultView | undefined {
   });
   if (checks.length > 0) view.checks = checks;
   return view;
+}
+
+function parseAnswers(raw: unknown): NeedsUserAnswer[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, MAX_ITEMS).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const { index, answer, at } = item;
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return [];
+    if (typeof answer !== 'string' || typeof at !== 'number' || !Number.isFinite(at)) return [];
+    return [{ index, answer: answer.slice(0, MAX_TEXT), at }];
+  });
+}
+
+function parseEscalations(raw: unknown): NeedsUserEscalation[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, MAX_ITEMS).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const { index, text, at } = item;
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return [];
+    if (typeof at !== 'number' || !Number.isFinite(at)) return [];
+    if (text !== undefined && typeof text !== 'string') return [];
+    return [{ index, ...(text ? { text: text.slice(0, MAX_TEXT) } : {}), at }];
+  });
 }
 
 function shortSha(sha: string): string {
@@ -573,7 +730,8 @@ export function formatGoalResultClaims(result: GoalResult): string {
     lines.push(shot.caption ? `截图 ${shot.path} ${shot.caption}` : `截图 ${shot.path}`);
   }
   for (const item of result.followUps ?? []) lines.push(`follow-up: ${item}`);
-  for (const item of result.needsUser ?? []) lines.push(`needs-user: ${item}`);
+  for (const [index, item] of listNeedsUser(result).entries())
+    lines.push(`needs-user[${index}]: ${item}`);
   if (result.deploy) {
     const bits = [
       result.deploy.needed ? 'needed' : '',
@@ -671,8 +829,23 @@ export const GOAL_RESULT_SCHEMA = {
         },
       },
     },
-    followUps: { type: 'array', maxItems: MAX_ITEMS, items: textSchema() },
-    needsUser: { type: 'array', maxItems: MAX_ITEMS, items: textSchema() },
+    followUps: {
+      type: 'array',
+      maxItems: MAX_ITEMS,
+      items: textSchema(),
+      description:
+        'Optional cleanup, suggestions and notes for the secretary. Nobody is required to act on them.',
+    },
+    needsUser: {
+      type: 'array',
+      maxItems: MAX_ITEMS,
+      items: textSchema(),
+      description:
+        'Only what the user must decide or do by hand; only the user can do it, not you or the secretary. ' +
+        'One short imperative sentence per item naming the action, e.g. "Decide whether to publish tgclient 0.7.1" ' +
+        'or "Delete /tmp/enso-relay-upload-59dc0c2 on server ali". Optional cleanup, suggestions and notes go in followUps. ' +
+        'Do not write relay phrasing such as "waiting for the secretary to ask the user". Omit it when nothing needs the user.',
+    },
     deploy: {
       type: 'object',
       additionalProperties: false,

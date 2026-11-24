@@ -16,6 +16,7 @@ import { normalizeLocale, translate } from '@shared/i18n';
 import type { ForgettingSettings } from '@shared/memory/forgetting';
 import { normalizeMemoryModelIdleMinutes } from '@shared/memory/modelIdle';
 import { remoteEmbeddingIssue, remoteEmbeddingIssueMessage } from '@shared/memory/remoteEmbedding';
+import { parseProviderProxy } from '@shared/providers/providerProxy';
 import type { MemoryOp } from '@shared/types/agent';
 import type { ModelProvider } from '@shared/types/llm';
 import type { Complete, DistillJob } from './memory/distill';
@@ -92,7 +93,7 @@ const client = new MemoryServiceClient({
   onDownloadProgress: (progress) => downloadProgressSink?.(progress),
   llmResolver: async () => (await llmResolver?.()) ?? null,
   transcriptReader: readTranscriptMain,
-  log: (message) => console.warn(message),
+  log: (level, message) => console[level](message),
 });
 
 /** 测试 / 诊断用：当前服务进程是否活着 */
@@ -178,6 +179,10 @@ export function getMemoryReembedProgress(): Promise<ReembedJob | null> {
 
 export function awaitMemoryDistill(): Promise<void> {
   return memoryServiceOp('await-distill').then(() => undefined);
+}
+
+export function awaitSessionDistill(sessionId: string): Promise<void> {
+  return memoryServiceOp('await-session-distill', { sessionId }).then(() => undefined);
 }
 
 export function awaitMemoryKg(): Promise<void> {
@@ -306,8 +311,12 @@ export function syncMemoryEmbeddingFromSettings(state: Record<string, unknown>):
         (key, params) => translate(locale, key, params)
       )
     : null;
+  // 坏代理不给凭证：不能退回全局代理把记忆正文发到用户没选的出口
+  const proxy = parseProviderProxy(selected?.proxy);
   const credentials: RemoteEmbeddingOptions | null =
-    remote && !issue && selected ? { baseUrl: selected.baseUrl, apiKey: selected.apiKey } : null;
+    remote && !issue && selected && proxy !== null
+      ? { baseUrl: selected.baseUrl, apiKey: selected.apiKey, ...(proxy ? { proxy } : {}) }
+      : null;
   client.configure({
     embedding: {
       modelId,

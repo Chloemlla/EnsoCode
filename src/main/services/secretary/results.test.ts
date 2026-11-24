@@ -446,12 +446,96 @@ describe('工作台投影', () => {
     });
     expect(board.needsYou.map((card) => card.kind)).toEqual(['proposal', 'session']);
     expect(board.needsYou[1]).toMatchObject({ conversationId: 'waiting', state: 'waiting' });
+    expect(board.threads).toBeUndefined();
+    const threaded = buildBoard(file, {
+      rows: { running: { id: 'running', title: '在跑', sessionFile: '/tmp/r.jsonl' } },
+      statuses: { running },
+      projects,
+      todos: [],
+      threads: [
+        {
+          id: 'dt-1',
+          channel: 'telegram',
+          chatId: '-1',
+          messageId: '9',
+          requesterIsOwner: false,
+          sessionId: 'running',
+          sessionTitle: '在跑',
+          status: 'open',
+          milestones: [],
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+    });
+    expect(threaded.threads).toEqual([
+      expect.objectContaining({ id: 'dt-1', sessionTitle: '在跑' }),
+    ]);
     expect(
       board.running.map((card) => (card.kind === 'session' ? card.conversationId : ''))
     ).toEqual(['running']);
     expect(board.done.map((card) => (card.kind === 'session' ? card.conversationId : ''))).toEqual([
       'done',
     ]);
+  });
+
+  it('已归档、标记完成、needsUser 已清掉的会话不算需要你处理', () => {
+    const goalResult = (needsUser: string[]) => ({
+      result: { summary: '做完了', needsUser },
+      at: 1,
+    });
+    const file = emptyFile({
+      dispatched: {
+        failed: record({
+          conversationId: 'failed',
+          lastState: 'idle',
+          lastResult: { kind: 'failed', turn: 1, at: 5 },
+        }),
+        archived: record({
+          conversationId: 'archived',
+          lastState: 'idle',
+          lastResult: { kind: 'failed', turn: 1, at: 5 },
+        }),
+        marked: record({
+          conversationId: 'marked',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 5, manual: true },
+        }),
+        cleared: record({
+          conversationId: 'cleared',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 5, dismissed: true },
+          goalResult: goalResult(['合并吗']),
+        } as Partial<DispatchRecord>),
+        empty: record({
+          conversationId: 'empty',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 5 },
+          goalResult: goalResult([]),
+        } as Partial<DispatchRecord>),
+      },
+    });
+    const row = (id: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      title: id,
+      sessionFile: `/tmp/${id}.jsonl`,
+      ...extra,
+    });
+    const board = buildBoard(file, {
+      rows: {
+        failed: row('failed'),
+        archived: row('archived', { archived: true, archivedAt: 6 }),
+        marked: row('marked'),
+        cleared: row('cleared'),
+        empty: row('empty'),
+      },
+      statuses: { failed: idle, archived: idle, marked: idle, cleared: idle, empty: idle },
+      projects,
+      todos: [],
+    });
+    expect(
+      board.needsYou.map((card) => (card.kind === 'session' ? card.conversationId : card.kind))
+    ).toEqual(['failed']);
   });
 
   it('有别名时卡片项目名用别名', () => {
@@ -1205,6 +1289,116 @@ describe('排队会话', () => {
     expect(board.todos[0]).toMatchObject({ phase: 'active', sessionState: 'queued' });
   });
 
+  it('看板：正在等子代理的进行中会话附带脱敏后的子代理标题、耗时与活动', () => {
+    const file = emptyFile({
+      dispatched: {
+        run: record({ conversationId: 'run', projectId: 'p1' }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: { run: { id: 'run', title: '父会话', sessionFile: '/tmp/r.jsonl' } },
+      statuses: { run: running },
+      subagents: {
+        run: [
+          {
+            agentId: 'a1',
+            runId: 'r1',
+            title: '实现子代理',
+            status: 'running',
+            elapsedMs: 360_000,
+            activity: { phase: 'tool', tool: 'read', detail: 'src/a.ts' },
+          },
+        ],
+      },
+      projects,
+      todos: [],
+    });
+    expect(board.running[0]).toMatchObject({
+      conversationId: 'run',
+      subagents: [
+        {
+          agentId: 'a1',
+          runId: 'r1',
+          title: '实现子代理',
+          elapsedMs: 360_000,
+          activity: 'read src/a.ts',
+        },
+      ],
+    });
+  });
+
+  it('三处一致性：曾被误标成 interrupted/stopped 的会话恢复运行或有在跑子代理时，卡片、待办与会话状态全为运行中且无 problem', () => {
+    const file = emptyFile({
+      dispatched: {
+        c1: record({
+          conversationId: 'c1',
+          projectId: 'p1',
+          lastState: 'idle',
+          lastResult: { kind: 'interrupted', turn: 1, at: 9 },
+        }),
+        c2: record({
+          conversationId: 'c2',
+          projectId: 'p1',
+          lastState: 'idle',
+          lastResult: { kind: 'interrupted', turn: 1, at: 9 },
+        }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: {
+        c1: { id: 'c1', title: '自动续跑会话', sessionFile: '/tmp/c1.jsonl' },
+        c2: { id: 'c2', title: '等子代理续跑', sessionFile: '/tmp/c2.jsonl' },
+      },
+      statuses: { c1: running, c2: idle },
+      subagents: {
+        c2: [
+          {
+            agentId: 'a1',
+            runId: 'r1',
+            title: '子代理',
+            status: 'running',
+            elapsedMs: 60_000,
+          },
+        ],
+      },
+      projects,
+      todos: [
+        {
+          id: 't1',
+          text: '待办1',
+          createdAt: 1,
+          updatedAt: 1,
+          conversationId: 'c1',
+          problem: 'stopped',
+        },
+        {
+          id: 't2',
+          text: '待办2',
+          createdAt: 1,
+          updatedAt: 1,
+          conversationId: 'c2',
+          problem: 'stopped',
+        },
+      ],
+    });
+    expect(
+      board.running
+        .map((card) => (card.kind === 'session' ? card.conversationId : card.kind))
+        .sort()
+    ).toEqual(['c1', 'c2']);
+    expect(board.done).toEqual([]);
+    for (const card of board.running) {
+      expect(card).toMatchObject({ kind: 'session', state: 'running' });
+      if (card.kind === 'session') expect(card.result).toBeUndefined();
+    }
+    expect(board.todos).toEqual([
+      expect.objectContaining({ id: 't1', phase: 'active', sessionState: 'running' }),
+      expect.objectContaining({ id: 't2', phase: 'active', sessionState: 'running' }),
+    ]);
+    expect(board.todos[0].problem).toBeUndefined();
+    expect(board.todos[1].problem).toBeUndefined();
+  });
+
   it('结构化结果 needsUser 非空时进工作台「需要你处理」，为空或手动标完成时进「完成」', () => {
     const file = emptyFile({
       dispatched: {
@@ -1245,5 +1439,393 @@ describe('排队会话', () => {
       'done',
       'manual',
     ]);
+    const needCard = board.needsYou[0];
+    expect(needCard).toMatchObject({
+      kind: 'session',
+      conversationId: 'need',
+      needsUser: ['确认账号'],
+    });
+    const manualCard = board.done.find(
+      (c) => c.kind === 'session' && c.conversationId === 'manual'
+    );
+    expect(manualCard).not.toHaveProperty('needsUser');
+  });
+
+  it('已归档会话的 needsUser / needs-user 结果不计入「需要你处理」，归入「完成」且不带 needsUser', () => {
+    const file = emptyFile({
+      dispatched: {
+        archivedNeed: record({
+          conversationId: 'archivedNeed',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10 },
+          goalResult: {
+            at: 10,
+            result: { summary: '已部署', needsUser: ['在服务器 ali 删除 /tmp/x'] },
+          },
+        }),
+        archivedAsk: record({
+          conversationId: 'archivedAsk',
+          lastState: 'idle',
+          lastResult: { kind: 'needs-user', turn: 1, at: 11 },
+        }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: {
+        archivedNeed: { title: '部署', sessionFile: '/s/a.jsonl', archived: true },
+        archivedAsk: { title: '提问', sessionFile: '/s/b.jsonl', archived: true },
+      },
+      statuses: { archivedNeed: idle, archivedAsk: idle },
+      projects,
+      todos: [],
+    });
+    expect(board.needsYou).toEqual([]);
+    expect(board.done.map((c) => (c.kind === 'session' ? c.conversationId : '')).sort()).toEqual([
+      'archivedAsk',
+      'archivedNeed',
+    ]);
+    for (const card of board.done) expect(card).not.toHaveProperty('needsUser');
+  });
+
+  it('点「知道了」(dismissed) 后，带 needsUser 的 goal-complete 移出「需要你处理」进入「完成」且不再带 needsUser', () => {
+    const file = emptyFile({
+      dispatched: {
+        dismissedNeed: record({
+          conversationId: 'dismissedNeed',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10, dismissed: true },
+          goalResult: {
+            at: 10,
+            result: { summary: 'PR #62 review 完了', needsUser: ['是否合并上架 #62'] },
+          },
+        }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: { dismissedNeed: { title: 'Review PR #62', sessionFile: '/s/d.jsonl' } },
+      statuses: { dismissedNeed: idle },
+      projects,
+      todos: [],
+    });
+    expect(board.needsYou).toEqual([]);
+    expect(board.done).toHaveLength(1);
+    expect(board.done[0]).toMatchObject({ kind: 'session', conversationId: 'dismissedNeed' });
+    expect(board.done[0]).not.toHaveProperty('needsUser');
+  });
+
+  it('goal-complete 会话卡带 summary：知道了之后仍在，手动标完成和空白不带', () => {
+    const secret = 'sk-abcdefghijklmnopqrstuvwxyz123456';
+    const file = emptyFile({
+      dispatched: {
+        done: record({
+          conversationId: 'done',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10 },
+          goalResult: { at: 10, result: { summary: `  已合并 ${secret}  ` } },
+        }),
+        dismissed: record({
+          conversationId: 'dismissed',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 11, dismissed: true },
+          goalResult: { at: 11, result: { summary: 'PR 已合', needsUser: ['是否上架'] } },
+        }),
+        manual: record({
+          conversationId: 'manual',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 12, manual: true },
+          goalResult: { at: 12, result: { summary: '手动那条', needsUser: ['旧提示'] } },
+        }),
+        blank: record({
+          conversationId: 'blank',
+          lastState: 'idle',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 13 },
+          goalResult: { at: 13, result: { summary: '   ' } },
+        }),
+      },
+    });
+    const board = buildBoard(file, {
+      rows: {
+        done: { title: '完成', sessionFile: '/s/done.jsonl' },
+        dismissed: { title: '已知', sessionFile: '/s/dismissed.jsonl' },
+        manual: { title: '手动', sessionFile: '/s/manual.jsonl' },
+        blank: { title: '空白', sessionFile: '/s/blank.jsonl' },
+      },
+      statuses: { done: idle, dismissed: idle, manual: idle, blank: idle },
+      projects,
+      todos: [],
+    });
+    const card = (id: string) =>
+      [...board.needsYou, ...board.done].find(
+        (item) => item.kind === 'session' && item.conversationId === id
+      );
+    expect(card('done')).toMatchObject({ summary: '已合并 [REDACTED]' });
+    expect(JSON.stringify(card('done'))).not.toContain(secret);
+    expect(card('dismissed')).toMatchObject({ summary: 'PR 已合' });
+    expect(card('dismissed')).not.toHaveProperty('needsUser');
+    expect(card('manual')).not.toHaveProperty('summary');
+    expect(card('blank')).not.toHaveProperty('summary');
+  });
+
+  it('运行中的会话（无待审批/提问）即使带历史残留结果也进「进行中」，不进「需要你处理」', () => {
+    const file = emptyFile({
+      dispatched: {
+        started: record({
+          conversationId: 'started',
+          lastState: 'running',
+        }),
+        staleNeedsUser: record({
+          conversationId: 'staleNeedsUser',
+          lastState: 'running',
+          lastResult: { kind: 'needs-user', turn: 1, at: 10 },
+        }),
+        staleFailed: record({
+          conversationId: 'staleFailed',
+          lastState: 'running',
+          lastResult: { kind: 'failed', turn: 1, at: 10 },
+        }),
+        staleGoalNeed: record({
+          conversationId: 'staleGoalNeed',
+          lastState: 'running',
+          lastResult: { kind: 'goal-complete', turn: 1, at: 10 },
+          goalResult: { at: 10, result: { summary: '旧结果', needsUser: ['旧待确认'] } },
+        }),
+        realWait: record({
+          conversationId: 'realWait',
+          lastState: 'waiting',
+          lastResult: { kind: 'needs-user', turn: 1, at: 10 },
+        }),
+      },
+    });
+    const rows = {
+      started: { title: '刚派出正在跑', sessionFile: '/s/started.jsonl' },
+      staleNeedsUser: { title: '审批过后继续运行', sessionFile: '/s/staleNeedsUser.jsonl' },
+      staleFailed: { title: '失败后恢复运行', sessionFile: '/s/staleFailed.jsonl' },
+      staleGoalNeed: { title: '旧 needsUser 重跑中', sessionFile: '/s/staleGoalNeed.jsonl' },
+      realWait: { title: '真实待审批', sessionFile: '/s/realWait.jsonl' },
+    };
+    const statuses = {
+      started: running,
+      staleNeedsUser: running,
+      staleFailed: running,
+      staleGoalNeed: running,
+      realWait: waiting,
+    };
+    const board = buildBoard(file, { rows, statuses, projects, todos: [] });
+    expect(board.needsYou.map((c) => (c.kind === 'session' ? c.conversationId : ''))).toEqual([
+      'realWait',
+    ]);
+    expect(board.running.map((c) => (c.kind === 'session' ? c.conversationId : '')).sort()).toEqual(
+      ['staleFailed', 'staleGoalNeed', 'staleNeedsUser', 'started']
+    );
+    expect(countsAsRunning(file.dispatched.staleNeedsUser, rows.staleNeedsUser, running)).toBe(
+      true
+    );
+    expect(countsAsRunning(file.dispatched.staleGoalNeed, rows.staleGoalNeed, running)).toBe(true);
+  });
+
+  it('空闲且 goal active 并挂着未到点提醒时：留在进行中、标 pendingReminder 且不标 continuing；提醒到点开新一轮后切回 running', () => {
+    const now = new Date(2026, 4, 1, 14, 20, 0).getTime();
+    const dueAt = new Date(2026, 4, 1, 14, 23, 0).getTime();
+    const file = emptyFile({
+      dispatched: {
+        rem: record({ conversationId: 'rem', lastState: 'idle' }),
+      },
+    });
+    const rows = {
+      rem: {
+        title: 'Beta mac 构建排队',
+        sessionFile: '/tmp/rem.jsonl',
+        goal: { status: 'active', text: '等新版 Beta 跑完' },
+      },
+    };
+    const reminders = {
+      rem: [
+        {
+          id: 'r00000001',
+          sessionId: 'rem',
+          dueAt,
+          createdAt: now - 30_000,
+          prompt: '检查 Beta #153 结果',
+          label: '检查合并后首轮新版 Beta (#153) 运行结果',
+          ifIdle: true,
+          chain: 1,
+        },
+      ],
+    };
+    const waitingBoard = buildBoard(file, {
+      rows,
+      statuses: { rem: idle },
+      reminders,
+      now,
+      projects,
+      todos: [
+        {
+          id: 't-rem',
+          text: '跟进 Beta 构建',
+          conversationId: 'rem',
+          createdAt: now - 60_000,
+          updatedAt: now - 60_000,
+        },
+      ],
+    });
+    expect(waitingBoard.running).toHaveLength(1);
+    const waitingCard = waitingBoard.running[0];
+    expect(waitingCard).toMatchObject({
+      kind: 'session',
+      conversationId: 'rem',
+      state: 'idle',
+      pendingReminder: {
+        id: 'r00000001',
+        dueAt,
+        label: '检查合并后首轮新版 Beta (#153) 运行结果',
+        count: 1,
+      },
+    });
+    expect(waitingCard?.kind === 'session' ? waitingCard.continuing : undefined).toBeUndefined();
+    expect(waitingBoard.todos[0]).toMatchObject({
+      id: 't-rem',
+      phase: 'active',
+      pendingReminder: {
+        id: 'r00000001',
+        dueAt,
+        label: '检查合并后首轮新版 Beta (#153) 运行结果',
+        count: 1,
+      },
+    });
+
+    // 提醒到点开始新一轮后，切回 running，不再标 pendingReminder 或 continuing
+    const wokenBoard = buildBoard(
+      emptyFile({ dispatched: { rem: record({ conversationId: 'rem', lastState: 'running' }) } }),
+      {
+        rows,
+        statuses: { rem: running },
+        reminders: {},
+        now: dueAt + 1_000,
+        projects,
+        todos: [],
+      }
+    );
+    const wokenCard = wokenBoard.running[0];
+    expect(wokenCard).toMatchObject({
+      kind: 'session',
+      conversationId: 'rem',
+      state: 'running',
+    });
+    expect(wokenCard?.kind === 'session' ? wokenCard.pendingReminder : undefined).toBeUndefined();
+    expect(wokenCard?.kind === 'session' ? wokenCard.continuing : undefined).toBeUndefined();
+  });
+});
+
+describe('needsUser 先经秘书筛选', () => {
+  const NOW = 100 * MINUTE;
+  const at = NOW - 5 * MINUTE;
+  const sec = { title: '秘书', sessionFile: '/s/s1.jsonl' };
+  const need = (extra: Partial<DispatchRecord> = {}) =>
+    record({
+      conversationId: 'need',
+      lastState: 'idle',
+      lastResult: { kind: 'goal-complete', turn: 1, at },
+      goalResult: {
+        at,
+        result: { summary: '做完了', needsUser: ['删临时文件', '在 Mac 上点确认'] },
+      },
+      ...extra,
+    });
+  const boardOf = (
+    dispatched: Record<string, DispatchRecord>,
+    rows: Record<string, Record<string, unknown>> = { s1: sec },
+    now = NOW
+  ) =>
+    buildBoard(emptyFile({ dispatched }), {
+      rows: { need: { title: '需用户确认', sessionFile: '/s/need.jsonl' }, ...rows },
+      statuses: { need: idle },
+      projects: [],
+      todos: [],
+      now,
+    });
+  const ids = (cards: readonly { kind: string }[]) =>
+    cards.map((card) => ('conversationId' in card ? card.conversationId : card.kind));
+
+  it('秘书在、未升级：不进「需要你」，作为「秘书处理中」留在 done 里并带原条目', () => {
+    const board = boardOf({ need: need() });
+    expect(board.needsYou).toEqual([]);
+    expect(board.done).toHaveLength(1);
+    expect(board.done[0]).toMatchObject({
+      conversationId: 'need',
+      triage: true,
+      needsUser: ['删临时文件', '在 Mac 上点确认'],
+    });
+  });
+
+  it('秘书升级了一条：只这一条以改写后的文字进「需要你」；答完后没升级的回到秘书处理中', () => {
+    const board = boardOf({
+      need: need({
+        goalResult: {
+          at,
+          result: { needsUser: ['删临时文件', '在 Mac 上点确认'] },
+          escalations: [{ index: 1, text: '在 Mac 顶栏点一下确认', at: at + 1 }],
+        },
+      }),
+    });
+    expect(ids(board.needsYou)).toEqual(['need']);
+    expect(board.needsYou[0]).toMatchObject({ needsUser: ['在 Mac 顶栏点一下确认'] });
+    expect(board.needsYou[0]).not.toHaveProperty('triage');
+    expect(board.done).toEqual([]);
+
+    const answered = boardOf({
+      need: need({
+        goalResult: {
+          at,
+          result: { needsUser: ['删临时文件', '在 Mac 上点确认'] },
+          escalations: [{ index: 1, text: '在 Mac 顶栏点一下确认', at: at + 1 }],
+          answers: [{ index: 1, answer: '点了', at: at + 2 }],
+        },
+      }),
+    });
+    expect(answered.needsYou).toEqual([]);
+    expect(answered.done[0]).toMatchObject({ conversationId: 'need', triage: true });
+  });
+
+  it('超过 30 分钟秘书没处理：照旧全部进「需要你」', () => {
+    const board = boardOf({ need: need() }, { s1: sec }, at + 30 * MINUTE);
+    expect(ids(board.needsYou)).toEqual(['need']);
+    expect(board.needsYou[0]).toMatchObject({ needsUser: ['删临时文件', '在 Mac 上点确认'] });
+    expect(board.done).toEqual([]);
+  });
+
+  it('秘书会话已删或已归档：直接进「需要你」', () => {
+    expect(ids(boardOf({ need: need() }, {}).needsYou)).toEqual(['need']);
+    expect(ids(boardOf({ need: need() }, { s1: { ...sec, archived: true } }).needsYou)).toEqual([
+      'need',
+    ]);
+  });
+
+  it('秘书功能关着：不等 30 分钟，立即进「需要你」', () => {
+    const board = buildBoard(emptyFile({ dispatched: { need: need() } }), {
+      rows: { need: { title: '需用户确认', sessionFile: '/s/need.jsonl' }, s1: sec },
+      statuses: { need: idle },
+      projects: [],
+      todos: [],
+      now: NOW,
+      secretaryEnabled: false,
+    });
+    expect(ids(board.needsYou)).toEqual(['need']);
+    expect(board.needsYou[0]).toMatchObject({ needsUser: ['删临时文件', '在 Mac 上点确认'] });
+    expect(board.needsYou[0]).not.toHaveProperty('triage');
+  });
+
+  it('goal-blocked 的 needsUser、实时审批与提问不经筛选，照旧直接进「需要你」', () => {
+    const blocked = boardOf({
+      need: need({ lastResult: { kind: 'goal-blocked', turn: 1, at } }),
+    });
+    expect(ids(blocked.needsYou)).toEqual(['need']);
+    const asking = buildBoard(emptyFile({ dispatched: { need: need() } }), {
+      rows: { need: { title: '提问中', sessionFile: '/s/need.jsonl' }, s1: sec },
+      statuses: { need: waiting },
+      projects: [],
+      todos: [],
+      now: NOW,
+    });
+    expect(ids(asking.needsYou)).toEqual(['need']);
   });
 });
