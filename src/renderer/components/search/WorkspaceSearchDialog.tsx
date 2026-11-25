@@ -6,7 +6,6 @@ import {
   searchBrowserTabs,
   searchSettingsEntries,
 } from '@shared/searchAnything';
-import type { SettingsCategory } from '@shared/settingsDeepLink';
 import type { WorkspaceSearchHit, WorkspaceSearchScope } from '@shared/workspaceSearch';
 import {
   cycleWorkspaceSearchScope,
@@ -31,6 +30,7 @@ import {
   useState,
 } from 'react';
 import { requestOpenChatFind } from '@/components/chat/ChatFindBar';
+import { settingsEntryPath } from '@/components/settings/settingsCategories';
 import { Badge } from '@/components/ui/badge';
 import {
   Command,
@@ -58,6 +58,7 @@ import {
   isDraftEmptyConversation,
   recentConversations,
 } from '@/lib/workspaceSearchDocs';
+import { openSettings } from '@/stores/appView';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 
@@ -67,32 +68,6 @@ const SCOPE_LABELS: Record<WorkspaceSearchScope, string> = {
   project: 'This project',
   all: 'All projects',
   'all-including-archived': 'Include archived',
-};
-
-const SETTINGS_CATEGORY_LABELS: Record<SettingsCategory, string> = {
-  general: 'General',
-  shortcuts: 'Shortcuts',
-  appearance: 'Appearance',
-  providers: 'Model Providers',
-  skills: 'Skills',
-  plugins: 'Enso plugins',
-  mcp: 'MCP Servers',
-  instructions: 'Instruction Files',
-  presets: 'Presets',
-  agents: 'Agent types',
-  workflows: 'Workflows',
-  tools: 'Built-in tools',
-  memory: 'Memory',
-  privacy: 'Privacy',
-  phone: 'Devices',
-  ssh: 'SSH',
-  usage: 'Usage',
-  resources: 'Resources',
-  logs: 'Logs',
-  experimental: 'Experimental',
-  bots: 'Bot mode',
-  botTemplates: 'Bot templates',
-  secretary: 'Secretary',
 };
 
 function Highlighted({ text, query }: { text: string; query: string }) {
@@ -328,7 +303,7 @@ export function WorkspaceSearchDialog({
   };
 
   const openSetting = (entry: SettingsSearchEntry) => {
-    void window.electronAPI.window.openSettings({
+    openSettings({
       category: entry.category as import('@shared/settingsDeepLink').SettingsCategory,
       rowId: entry.id,
     });
@@ -547,7 +522,7 @@ export function WorkspaceSearchDialog({
                       value="open-settings"
                       className="gap-2.5"
                       onClick={() => {
-                        void window.electronAPI.window.openSettings();
+                        openSettings();
                         onOpenChange(false);
                       }}
                     >
@@ -596,10 +571,7 @@ export function WorkspaceSearchDialog({
                             <Highlighted text={t(entry.description)} query={query} />
                           )
                         }
-                        meta={t(
-                          SETTINGS_CATEGORY_LABELS[entry.category as SettingsCategory] ??
-                            entry.category
-                        )}
+                        meta={settingsEntryPath(entry, t)}
                       />
                     </CommandItem>
                   ))}

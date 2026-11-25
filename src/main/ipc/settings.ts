@@ -156,6 +156,8 @@ export const SETTINGS_STATE_FIELDS = [
   'defaultModelFollowLast',
   'titleSummaryEnabled',
   'titleSummaryModel',
+  'gitCommitModel',
+  'gitCommitPromptCustomized',
   'imageGenerationModel',
   'memoryDistillModel',
   'memoryChatModel',
@@ -186,6 +188,7 @@ export const SETTINGS_STATE_FIELDS = [
   'memoryEmbeddingRemoteProviderId',
   'memoryDistillEnabled',
   'memoryDistillWindowMinutes',
+  'memoryDispatchRecallEnabled',
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',
@@ -216,6 +219,8 @@ export type SettingsStateField = (typeof SETTINGS_STATE_FIELDS)[number];
 /** 仅限本机的字段：config-sync 绝不计入指纹，也绝不回写。 */
 const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'hashlineEditEnabled',
+  // 自定义提示词正文是本机 userData 下的独立文件，标记跨机同步会悬空
+  'gitCommitPromptCustomized',
   'pinnedModels',
   'recentModels',
   'approvalAutoManage',
@@ -265,6 +270,8 @@ const CONFIG_SYNC_EXCLUDED_STATE_FIELDS = new Set<SettingsStateField>([
   'memoryDecayIntervalDays',
   // 聚合待办排在本机库的队列里，窗口只影响本机的提炼时机
   'memoryDistillWindowMinutes',
+  // 派发注入读的是本机记忆库，跨机同步到另一台机器没有意义
+  'memoryDispatchRecallEnabled',
   'botModeEnabled',
   'scratchSessionsEnabled',
   'dropShelfEnabled',

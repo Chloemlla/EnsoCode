@@ -14,11 +14,9 @@ import {
 } from '../windows/createAppWindow';
 import { shouldRefreshDragRegions } from '../windows/dragRegionRefresh';
 import { focusMainWindow } from '../windows/MainWindow';
-import { getSettingsWindow, openSettingsWindow } from '../windows/SettingsWindow';
-import { parseOpenSettingsRequest } from './searchAnything';
+import { openSettingsInMainWindow, takeSettingsOpenRequest } from '../windows/mainSettings';
 import { readLocale } from './settings';
 
-let pendingDeepLink: ReturnType<typeof parseOpenSettingsRequest> = null;
 const pendingOpenFolders: string[] = [];
 
 export function noteOpenFolder(folder: string): void {
@@ -31,14 +29,6 @@ export function noteOpenFolderArgv(argv: readonly string[]): void {
 
 export function notifyOpenFolderRequested(): void {
   sendToWindow(focusMainWindow(), IPC_CHANNELS.WINDOW_OPEN_FOLDER_REQUESTED);
-}
-
-function openSettingsDeepLink(link: ReturnType<typeof parseOpenSettingsRequest>): void {
-  const existing = getSettingsWindow();
-  const win = openSettingsWindow();
-  // 已挂载的设置页只收推送；新窗口挂载时再拉取，推送此时会丢
-  if (win !== existing) pendingDeepLink = link;
-  else if (link) sendToWindow(win, IPC_CHANNELS.SETTINGS_DEEP_LINK, link);
 }
 
 /**
@@ -59,7 +49,7 @@ export function openSecretaryConversationFromProtocol(target: {
 
 /** 系统用 enso://install-plugin 唤起后，打开插件设置并开始暂存 */
 export function openPluginInstallFromProtocol(httpsUrl: string): void {
-  openSettingsDeepLink(pluginInstallSettingsLink(httpsUrl));
+  openSettingsInMainWindow(pluginInstallSettingsLink(httpsUrl));
 }
 
 /** 窗口控制：所有 handler 作用于发起 IPC 的窗口，天然支持多窗口 */
@@ -163,15 +153,7 @@ export function registerWindowHandlers(): void {
     win.invalidateShadow();
   });
 
-  ipcMain.handle(IPC_CHANNELS.WINDOW_OPEN_SETTINGS, (_event, raw: unknown) => {
-    openSettingsDeepLink(parseOpenSettingsRequest(raw));
-  });
-
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME, () => {
-    const link = pendingDeepLink;
-    pendingDeepLink = null;
-    return link;
-  });
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME, () => takeSettingsOpenRequest());
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_TAKE_OPEN_FOLDERS, (): string[] =>
     pendingOpenFolders.splice(0)

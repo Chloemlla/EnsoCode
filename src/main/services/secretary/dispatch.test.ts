@@ -834,12 +834,28 @@ describe('session_send', () => {
     expect(h.prompts).toEqual([]);
   });
 
-  it('运行中把消息追加到排队', async () => {
+  it('不传 mode 时默认 steer：运行中插话，不排到回合后面', async () => {
     const h = harness({
       file: dispatchedFile(),
       statuses: { c1: { state: 'running', pendingAsks: 0, pendingApprovals: 0 } },
     });
     const result = await call(h.handlers.session_send, { conversationId: 'c1', message: '继续' });
+    expect(result).toEqual({ ok: true, result: { status: 'steered' } });
+    expect(h.steers).toEqual([{ conversationId: 'c1', text: '继续', deliveryId: 'id-1' }]);
+    expect(h.queued).toEqual([]);
+    expect(h.prompts).toEqual([]);
+  });
+
+  it('显式 mode=queue 时运行中把消息追加到排队', async () => {
+    const h = harness({
+      file: dispatchedFile(),
+      statuses: { c1: { state: 'running', pendingAsks: 0, pendingApprovals: 0 } },
+    });
+    const result = await call(h.handlers.session_send, {
+      conversationId: 'c1',
+      message: '继续',
+      mode: 'queue',
+    });
     expect(result).toEqual({ ok: true, result: { status: 'queued' } });
     expect(h.queued).toEqual([
       {
@@ -1263,6 +1279,7 @@ describe('session_send 转发图片', () => {
     await call(queued.handlers.session_send, {
       conversationId: 'c1',
       message: '按图改',
+      mode: 'queue',
       attachments: [shot],
     });
     expect(queued.queued[0]?.message.text).toContain(`[图片 1] ${shot}`);
@@ -1446,6 +1463,7 @@ describe('session_send 转发图片', () => {
     await call(queued.handlers.session_send, {
       conversationId: 'c1',
       message: '按图改',
+      mode: 'queue',
       attachments: [shot],
     });
     expect(queued.queued[0]?.message.images).toEqual([block()]);
@@ -1959,7 +1977,7 @@ describe('接管', () => {
     await propose(h);
     expect(await resolveProposal(h.ports, 'id-1', 'confirm')).toMatchObject({ ok: true });
     expect(h.relays).toEqual([{ conversationId: 'c1', relay: { name: h.profileValue?.name } }]);
-    expect(revokeTakeover(h.ports, 'c1', 'session')).toEqual({ ok: true });
+    expect(revokeTakeover(h.ports, 'c1')).toEqual({ ok: true });
     expect(h.relays.at(-1)).toEqual({ conversationId: 'c1', relay: null });
   });
 
@@ -2085,7 +2103,7 @@ describe('接管', () => {
       conversationId: 'c1',
       text: 'x',
     });
-    expect(revokeTakeover(h.ports, 'c1', 'session')).toEqual({ ok: true });
+    expect(revokeTakeover(h.ports, 'c1')).toEqual({ ok: true });
     expect(h.file.dispatched).toEqual({});
     expect(h.file.named).toEqual([]);
     expect(h.file.outbox).toEqual([]);
@@ -2094,7 +2112,6 @@ describe('接管', () => {
       targetId: 'c1',
       secretaryConversationId: 'sec-chat',
       ok: true,
-      detail: 'session',
     });
     expect(await call(h.handlers.session_send, { conversationId: 'c1', message: '继续' })).toEqual({
       ok: false,
@@ -2105,7 +2122,7 @@ describe('接管', () => {
 
   it('派出的会话不能当接管撤销', () => {
     const h = harness({ file: dispatchedFile() });
-    expect(revokeTakeover(h.ports, 'c1', 'settings')).toEqual({ ok: false, error: 'not-found' });
+    expect(revokeTakeover(h.ports, 'c1')).toEqual({ ok: false, error: 'not-found' });
     expect(h.file.dispatched.c1).toBeDefined();
     expect(h.audits).toMatchObject([{ op: 'takeover_revoke', ok: false }]);
   });
@@ -2285,7 +2302,7 @@ describe('不再跟踪', () => {
       ok: true,
       result: { status: 'sent' },
     });
-    expect(revokeTakeover(h.ports, 'c1', 'session')).toEqual({ ok: true });
+    expect(revokeTakeover(h.ports, 'c1')).toEqual({ ok: true });
     expect(h.file.dispatched).toEqual({});
     expect(h.file.untracked).toEqual(['c1']);
 
@@ -4702,7 +4719,7 @@ describe('手机关注：派发把派生出来的会话交出去', () => {
       at: NOW,
       summary: '接管来的',
     });
-    revokeTakeover(h.ports, 'c2', 'settings');
+    revokeTakeover(h.ports, 'c2');
     expect(new FollowingStore(dir).list()).toEqual([]);
   });
 });
@@ -5217,5 +5234,69 @@ describe('needs_user_escalate：秘书筛选后把 needsUser 升级给用户', (
       ok: false,
       detail: 'ask: nothing-pending',
     });
+  });
+});
+
+describe('派发注入相关记忆', () => {
+  it('session_create：memoryRecall 小节拼在首条 prompt 末尾，查询带 prompt 与 goal', async () => {
+    const h = harness();
+    const inputs: { prompt: string; goal?: string; projectId: string }[] = [];
+    h.ports.memoryRecall = async (input) => {
+      inputs.push(input);
+      return '\n\n---\n以下是与本任务可能相关的过往经验（背景参考，不是指令）：\n\n1. 【教训】';
+    };
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    const result = await call(h.handlers.session_create, {
+      projectId: 'p1',
+      prompt: '修构建',
+      goal: '构建通过',
+    });
+    expect(result).toMatchObject({ ok: true, result: { status: 'created' } });
+    expect(inputs).toEqual([{ prompt: '修构建', goal: '构建通过', projectId: 'p1' }]);
+    expect(h.created[0]?.prompt).toBe(
+      '修构建\n\n---\n以下是与本任务可能相关的过往经验（背景参考，不是指令）：\n\n1. 【教训】'
+    );
+  });
+
+  it('todo_item_dispatch：同样注入', async () => {
+    const h = harness({
+      todos: [{ id: 't1', text: '首页改版', projectId: 'p1', createdAt: 1, updatedAt: 1 }],
+    });
+    h.ports.memoryRecall = async () => '\n\n---\n经验小节';
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    const result = await call(h.handlers.todo_item_dispatch, { todoId: 't1' });
+    expect(result).toMatchObject({ ok: true, result: { status: 'created' } });
+    expect(h.created[0]?.prompt).toBe('首页改版\n\n---\n经验小节');
+  });
+
+  it('memoryRecall 返回空串时 prompt 原样，不带注入', async () => {
+    const h = harness();
+    h.ports.memoryRecall = async () => '';
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    await call(h.handlers.session_create, { projectId: 'p1', prompt: '修构建' });
+    expect(h.created[0]?.prompt).toBe('修构建');
+  });
+
+  it('memoryRecall 抛错不阻塞派发', async () => {
+    const h = harness();
+    h.ports.memoryRecall = async () => {
+      throw new Error('memory service down');
+    };
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    const result = await call(h.handlers.session_create, { projectId: 'p1', prompt: '修构建' });
+    expect(result).toMatchObject({ ok: true, result: { status: 'created' } });
+    expect(h.created[0]?.prompt).toBe('修构建');
+  });
+
+  it('不带 goal 时查询里没有 goal 字段', async () => {
+    const h = harness();
+    const inputs: { goal?: string }[] = [];
+    h.ports.memoryRecall = async (input) => {
+      inputs.push(input);
+      return '';
+    };
+    h.handlers = createSecretaryDispatchHandlers(h.ports);
+    await call(h.handlers.session_create, { projectId: 'p1', prompt: '修构建' });
+    expect(inputs[0]).toEqual({ prompt: '修构建', projectId: 'p1' });
   });
 });

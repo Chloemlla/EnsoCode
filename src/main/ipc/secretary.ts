@@ -15,8 +15,9 @@ import { getEventClaimStore } from '../services/eventClaims';
 import { interruptedTurnReason } from '../services/interruptedTurns';
 import { setSecretaryAvatarResolver } from '../services/localImageProtocol';
 import { readStoredOauthCredentialKeys } from '../services/oauthProviders';
+import { setRemoteSecretaryIdProvider } from '../services/remoteRenderer';
 import { onConversationsMerged } from '../services/remoteRenderer/conversationSync';
-import { broadcastToRenderers, isMainRenderer, isSettingsRenderer } from '../services/renderers';
+import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import { appendAudit } from '../services/secretary/audit';
 import { managerOfSync } from '../services/secretary/crossSecretary';
 import { secretaryToolFor } from '../services/secretary/customTools';
@@ -102,6 +103,7 @@ import {
   secretaryContext,
   secretaryContexts,
   secretaryIdOfConversation,
+  secretaryIds,
   secretaryRegistry,
   secretaryRoot,
 } from '../services/secretary/secretaries';
@@ -383,9 +385,9 @@ export function onViewedConversationChanged(sessionId: string | null): void {
   for (const instance of hosts.values()) instance.sweepAutoArchive();
 }
 
-/** 档案与定时在设置窗口里编辑，聊天侧的操作仍只认主界面 */
+/** 档案与定时在主界面的设置页里编辑 */
 function isProfileEditor(webContentsId: number): boolean {
-  return isMainRenderer(webContentsId) || isSettingsRenderer(webContentsId);
+  return isMainRenderer(webContentsId);
 }
 
 /** 一个秘书的回传宿主端口：读写全部同步，读改写之间不留 await */
@@ -711,6 +713,8 @@ const NO_SECRETARY = { ok: false as const, error: 'secretary-required' };
 
 export function registerSecretaryHandlers(): void {
   setSecretaryStateListener(broadcastState);
+  // 远端主界面接入/续连时补发秘书重读通知，丢失过推送的远端自愈
+  setRemoteSecretaryIdProvider(() => secretaryIds());
   getEventClaimStore().onChanged(broadcastState);
   getDemandThreadStore().onChanged(broadcastState);
   // worker 报完启动时的任务表：启动时没敢判的、以前自动归档仍有任务在跑的会话在这里补判收回
@@ -841,8 +845,7 @@ export function registerSecretaryHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.SECRETARY_TRANSFER, async (event, request: unknown) => {
-    if (!isMainRenderer(event.sender.id) && !isSettingsRenderer(event.sender.id))
-      return { ok: false, error: 'invalid sender' };
+    if (!isMainRenderer(event.sender.id)) return { ok: false, error: 'invalid sender' };
     if (!secretaryEnabled()) return { ok: false, error: 'disabled' };
     const parsed =
       request && typeof request === 'object' && !Array.isArray(request)
@@ -1069,11 +1072,7 @@ export function registerSecretaryHandlers(): void {
       if (!parsed) return { ok: false, error: 'invalid request' };
       const ctx = secretaryOfRecord(parsed.conversationId, secretaryId);
       if (!ctx) return NO_SECRETARY;
-      return revokeTakeover(
-        dispatchPortsFor(ctx),
-        parsed.conversationId,
-        isSettingsRenderer(event.sender.id) ? 'settings' : 'session'
-      );
+      return revokeTakeover(dispatchPortsFor(ctx), parsed.conversationId);
     }
   );
 

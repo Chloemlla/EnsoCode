@@ -42,11 +42,14 @@ import { providerDisplayName } from '@/components/settings/chatgptPool';
 import {
   applyFetchedModels,
   fetchAllProviderModels,
+  refreshProviders,
   summarizeFetchOutcomes,
+  useProviderFetchState,
 } from '@/components/settings/providerFetch';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from '@/components/ui/menu';
+import { SelectChevron, selectTriggerClassName } from '@/components/ui/select-trigger';
 import { Switch } from '@/components/ui/switch';
 import { addToast } from '@/components/ui/toast';
 import { prefetchAccountUsage, useCachedAccountUsage } from '@/hooks/useAccountUsage';
@@ -61,8 +64,10 @@ import { type SessionUsageAccount, usageAccountKeyForProvider } from './sessionU
 export const OPEN_CHAT_MODEL_PICKER_EVENT = 'enso:open-chat-model-picker';
 
 /** 表单/设置里的整行下拉触发器 */
-export const MODEL_PICKER_FORM_TRIGGER_CLASS =
-  'h-8 w-full max-w-none border border-input bg-background px-2.5 text-sm text-foreground hover:bg-accent';
+/** 设置行里的模型选择：与 SettingsSelect（ui 下拉 sm）同一外观 */
+export const MODEL_PICKER_FORM_TRIGGER_CLASS = selectTriggerClassName('sm');
+/** 对话框表单里的模型选择：与对话框里的 ui 下拉（默认尺寸）同一外观 */
+export const MODEL_PICKER_DIALOG_TRIGGER_CLASS = selectTriggerClassName();
 
 export function requestOpenChatModelPicker() {
   window.dispatchEvent(new Event(OPEN_CHAT_MODEL_PICKER_EVENT));
@@ -550,6 +555,49 @@ function RecentRemoveButton({ refKey, onRemove }: { refKey: string; onRemove: ()
     >
       <X className="h-3 w-3" />
     </span>
+  );
+}
+
+/**
+ * 左栏厂商行尾的刷新。和行按钮并列，避免 button 嵌套；拦住冒泡，以免切导航或关掉弹层。
+ */
+function VendorNavRefresh({
+  vendorId,
+  providers,
+  emphasized,
+  updateProvider,
+}: {
+  vendorId: string;
+  providers: readonly ModelProvider[];
+  emphasized: boolean;
+  updateProvider: (id: string, patch: { models: ModelEntry[] }) => void;
+}) {
+  const { t } = useI18n();
+  const { refreshing, error } = useProviderFetchState(providers.map((provider) => provider.id));
+  const label = error ? `${t('Refresh failed')}: ${error}` : t('Refresh provider models');
+  return (
+    <button
+      type="button"
+      data-model-picker-nav-refresh={vendorId}
+      aria-label={label}
+      title={label}
+      onMouseDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        void refreshProviders(providers, updateProvider);
+      }}
+      className={cn(
+        'flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/40 hover:bg-accent hover:text-foreground focus-visible:text-foreground group-hover:text-foreground',
+        emphasized && 'text-foreground',
+        error && 'text-destructive'
+      )}
+    >
+      {refreshing ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <RefreshCw className={cn('h-3.5 w-3.5', error && 'text-destructive')} />
+      )}
+    </button>
   );
 }
 
@@ -1329,14 +1377,17 @@ export function ModelPicker({
       <Menu open={open} onOpenChange={handleRootOpenChange}>
         <MenuTrigger
           data-model-picker="trigger"
-          className={cn(
-            'flex shrink items-center rounded-lg text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
-            compact ? 'h-[32px] w-full gap-0.5 px-1.5' : 'h-7 min-w-14 max-w-64 gap-1 px-2',
-            triggerClassName
-          )}
+          className={
+            formTrigger
+              ? triggerClassName
+              : cn(
+                  'flex shrink items-center rounded-lg text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+                  compact ? 'h-[32px] w-full gap-0.5 px-1.5' : 'h-7 min-w-14 max-w-64 gap-1 px-2'
+                )
+          }
           title={triggerLabel}
         >
-          <span className="flex min-w-0 items-center gap-1">
+          <span className={cn('flex min-w-0 items-center gap-1', formTrigger && 'flex-1')}>
             <span className="min-w-0 truncate" data-model-picker-label>
               {visibleTriggerLabel}
             </span>
@@ -1356,12 +1407,12 @@ export function ModelPicker({
                 className="flex shrink-0 items-center gap-0.5 text-primary"
                 data-trigger-thinking={displayedThinkingLevel}
               >
-                <Brain className="h-3 w-3" />
+                <Brain className="size-3" />
                 {t(LEVEL_LABEL_KEYS[displayedThinkingLevel])}
               </span>
             ) : null}
           </span>
-          <ChevronDown className={cn('h-3 w-3 shrink-0', formTrigger && 'ms-auto opacity-80')} />
+          {formTrigger ? <SelectChevron /> : <ChevronDown className="h-3 w-3 shrink-0" />}
         </MenuTrigger>
         <MenuPopup
           data-model-picker="root"
@@ -1507,45 +1558,55 @@ export function ModelPicker({
                       view.activeNav.kind === 'vendor' &&
                       view.activeNav.vendorId === group.vendorId;
                     return (
-                      <button
+                      <div
                         key={group.vendorId}
-                        type="button"
                         data-model-picker-nav={`vendor:${group.vendorId}`}
                         data-model-picker-vendor={group.vendorId}
                         data-model-picker-nav-selected={selectedHere ? '' : undefined}
                         onMouseEnter={() =>
                           setActiveNav({ kind: 'vendor', vendorId: group.vendorId })
                         }
-                        onClick={() => setActiveNav({ kind: 'vendor', vendorId: group.vendorId })}
                         className={cn(
-                          'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs hover:bg-accent',
+                          'group flex w-full items-center rounded-md text-left text-xs hover:bg-accent',
                           navActive && 'bg-accent'
                         )}
                       >
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate">{vendorLabel}</span>
-                          <span className="block truncate text-[10px] text-muted-foreground/70">
-                            {sole
-                              ? soleSubtitle
-                              : t('{{count}} accounts', { count: group.providers.length })}
+                        <button
+                          type="button"
+                          onClick={() => setActiveNav({ kind: 'vendor', vendorId: group.vendorId })}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-left"
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{vendorLabel}</span>
+                            <span className="block truncate text-[10px] text-muted-foreground/70">
+                              {sole
+                                ? soleSubtitle
+                                : t('{{count}} accounts', { count: group.providers.length })}
+                            </span>
                           </span>
-                        </span>
-                        {sole && soleInfo?.plan && (
-                          <Badge
-                            variant="outline"
-                            size="sm"
-                            className="max-w-16 shrink-0 truncate text-[9px] uppercase"
-                          >
-                            {soleInfo.plan}
-                          </Badge>
-                        )}
-                        {!sole && (
-                          <Badge variant="outline" size="sm" className="shrink-0 text-[9px]">
-                            {group.providers.length}
-                          </Badge>
-                        )}
-                        {selectedHere && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
-                      </button>
+                          {sole && soleInfo?.plan && (
+                            <Badge
+                              variant="outline"
+                              size="sm"
+                              className="max-w-16 shrink-0 truncate text-[9px] uppercase"
+                            >
+                              {soleInfo.plan}
+                            </Badge>
+                          )}
+                          {!sole && (
+                            <Badge variant="outline" size="sm" className="shrink-0 text-[9px]">
+                              {group.providers.length}
+                            </Badge>
+                          )}
+                          {selectedHere && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                        </button>
+                        <VendorNavRefresh
+                          vendorId={group.vendorId}
+                          providers={group.providers}
+                          emphasized={navActive}
+                          updateProvider={updateProvider}
+                        />
+                      </div>
                     );
                   })}
                 </div>

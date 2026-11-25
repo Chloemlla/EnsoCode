@@ -7,8 +7,10 @@ import { createServer, type Socket } from 'node:net';
 import path from 'node:path';
 import { app } from '@platform';
 import { setAppLoggingEnabled } from '@shared/appLogFile';
+import { IPC_CHANNELS } from '@shared/types/ipc';
+import type { UpdateStatus } from '@shared/types/updater';
 import { registerIpcHandlers } from '../main/ipc';
-import { readSettings, startProviderModelRefresh } from '../main/ipc/settings';
+import { patchSettingsState, readSettings, startProviderModelRefresh } from '../main/ipc/settings';
 import {
   agentWorkerAlive,
   startAgentWorker,
@@ -42,6 +44,7 @@ import {
 } from '../main/services/pairHost';
 import { getProxyConfig } from '../main/services/proxyConfig';
 import { refreshRemoteLeadership, setupRemoteRenderer } from '../main/services/remoteRenderer';
+import { broadcastToRenderers } from '../main/services/renderers';
 import { readySecureStores } from '../main/services/secureStores';
 import {
   disposeAllTerminals,
@@ -53,14 +56,56 @@ import { applyConfigEnv, readServerConfig } from './config';
 import { type PluginControlCommand, parseControlCommand, serveControlConnection } from './control';
 import { runCli } from './run/cli';
 import { registerServerUpdater } from './update/ipc';
+import { globalNpmInstaller } from './update/npm';
+import { HEALTHY_AFTER_MS, markUpdateReady, resolveUpdateBoot } from './update/pendingUpdate';
+import { detectRestartMethod, spawnReexec } from './update/reexec';
 import type { ServerUpdater } from './update/serverUpdater';
 import { startWeb } from './web';
 import { parseWebConfig, type WebConfig } from './web/config';
 
+/**
+ * 启动时的更新健康检查：pending-update.json 在，说明上次启动是为更新而来。
+ * 连续崩溃到上限（守护/launcher 反复拉起却没活到 markUpdateReady）就回滚到旧版本；
+ * 起来满 HEALTHY_AFTER_MS 算健康，清除标记。回滚安装完成后退出，由守护/reexec 脚本拉起旧版本。
+ */
+async function resolveStartupUpdate(): Promise<void> {
+  const dataDir = app.getPath('userData');
+  const decision = resolveUpdateBoot(dataDir, app.getVersion());
+  if (decision.kind === 'none' || decision.kind === 'stale') return;
+  if (decision.kind === 'rollback') {
+    console.warn(`[server] ${decision.to} 连续 ${3} 次没能起来，回滚到 ${decision.from}`);
+    const npm = globalNpmInstaller(app.getAppPath());
+    if (!npm) {
+      console.error('[server] 无法自动回滚（非全局 npm 安装），请手动执行 npm i -g 重装旧版本');
+      return;
+    }
+    try {
+      await npm.install(`@ensocode/server@${decision.from}`);
+      console.log(`[server] 已回滚到 ${decision.from}，重启后生效`);
+    } catch (error) {
+      console.error(
+        `[server] 回滚失败: ${error instanceof Error ? error.message : String(error)}，请手动重装旧版本`
+      );
+      return;
+    }
+    // 无守护时没人拉起旧版本：再放一个 reexec 脚本（崩溃循环下 launcher 早已退出）
+    if (detectRestartMethod(process.env, process.pid) === 'reexec') spawnReexec(dataDir);
+    process.exit(0);
+  }
+  // booting：起来满一分钟算健康
+  const timer = setTimeout(() => markUpdateReady(dataDir, app.getVersion()), HEALTHY_AFTER_MS);
+  timer.unref();
+}
+
 const socketPath = (): string => path.join(app.getPath('userData'), 'server.sock');
 
 /** 检查 → 下载 → 应用（应用会让宿主退出，由 systemd 拉起新版本） */
-async function update(updater: ServerUpdater): Promise<unknown> {
+async function update(updater: ServerUpdater, channel?: 'stable' | 'beta'): Promise<unknown> {
+  if (channel) {
+    updater.setChannel(channel);
+    // 命令行切的渠道同样落盘，重启后仍在所选渠道（与设置页一致）
+    patchSettingsState('updateChannel', channel);
+  }
   await updater.checkForUpdates();
   if (updater.state().status?.status === 'available') await updater.downloadUpdate();
   const status = updater.state().status;
@@ -130,7 +175,23 @@ async function handle(
   if (command.cmd === 'plugin') return handlePlugin(command);
   if (command.cmd === 'pair') return startPairing();
   if (command.cmd === 'devices') return { ok: true, status: getPairStatus() };
-  if (command.cmd === 'update') return update(updater);
+  if (command.cmd === 'update') return update(updater, command.channel);
+  // 仅调试：ENSO_SERVER_DEBUG=1 时可伪造 applying 状态广播，截图/联调 UI 用
+  if (command.cmd === 'debug-applying') {
+    if (process.env.ENSO_SERVER_DEBUG !== '1') return { ok: false, error: 'debug disabled' };
+    const status: UpdateStatus = {
+      status: 'applying',
+      info: { version: command.version ?? '0.4.0-beta.1' },
+      applying: {
+        stage: command.stage,
+        ...(command.stage === 'waiting-tasks'
+          ? { busyCount: command.busyCount ?? 2, deadlineMs: Date.now() + 5 * 60 * 1000 }
+          : {}),
+      },
+    };
+    broadcastToRenderers(IPC_CHANNELS.UPDATER_STATUS, status);
+    return { ok: true };
+  }
   if (command.cmd === 'status') {
     return {
       ok: true,
@@ -161,6 +222,7 @@ function listenControl(updater: ServerUpdater, web: WebConfig | null): void {
 }
 
 async function serve(web: WebConfig | null): Promise<void> {
+  await resolveStartupUpdate();
   // 先占端口：端口被占时直接失败，不留半启动的宿主
   const relay = web ? await startWeb(web) : null;
   await readySecureStores();

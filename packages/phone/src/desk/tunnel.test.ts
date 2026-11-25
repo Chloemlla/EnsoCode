@@ -98,6 +98,25 @@ describe('DeskTunnel', () => {
     expect(received).toEqual(['["a"]', '["b"]', '["c"]']);
   });
 
+  it('重连后等 ready 期间补发帧在按序应用：不重新 hello', () => {
+    const listen = { addEventListener: () => {} };
+    vi.stubGlobal('document', { ...listen, visibilityState: 'visible' });
+    vi.stubGlobal('window', listen);
+    const { tunnel, cid } = createOnlineTunnel();
+    tunnel.start();
+    mockState.events?.onState('offline');
+    mockState.events?.onState('online');
+    mockState.sent = [];
+    for (let seq = 1; seq <= 6; seq++) {
+      mockState.events?.onRemoteFrame?.({ type: 'rpc-event', cid, ch: 'evt', args: [seq], seq });
+      vi.advanceTimersByTime(2_000);
+    }
+    expect(hellos()).toHaveLength(0);
+    vi.advanceTimersByTime(6_000);
+    expect(hellos()).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
   it('切链后 1.5s 快速补发每缺口仅触发一次，随后退回 8s 常规窗口', () => {
     const { cid } = createOnlineTunnel();
     mockState.events?.onTransport?.('relay');
@@ -181,27 +200,41 @@ describe('DeskTunnel', () => {
 
   it('离线期间关闭 slot，重连上线后补发 rpc-bye 清理宿主幽灵 slot', () => {
     const { tunnel } = createOnlineTunnel();
-    const settings = tunnel.attach('settings', () => {});
-    const settingsCid = hellos()[0]?.cid as string;
-    expect(settingsCid).toBeTruthy();
+    const second = tunnel.attach('main', () => {});
+    const secondCid = hellos()[0]?.cid as string;
+    expect(secondCid).toBeTruthy();
 
     mockState.events?.onState('offline');
     mockState.sent = [];
 
-    // 离线期间关闭设置页（iOS WebKit 移除 iframe 或用户关闭弹窗）
-    settings.close();
-    settings.close();
+    // 离线期间关闭第二个 slot（iframe 移除或页面关闭）
+    second.close();
+    second.close();
     expect(byes()).toHaveLength(0);
 
-    // 网络恢复上线：应为离线关闭的 settings slot 补发一次 rpc-bye，且不再为它发 rpc-hello
+    // 网络恢复上线：为离线关闭的 slot 补发一次 rpc-bye，且不再为它发 rpc-hello
     mockState.events?.onState('online');
-    expect(byes()).toEqual([{ type: 'rpc-bye', cid: settingsCid }]);
-    expect(hellos().some((h) => h.cid === settingsCid)).toBe(false);
+    expect(byes()).toEqual([{ type: 'rpc-bye', cid: secondCid }]);
+    expect(hellos().some((h) => h.cid === secondCid)).toBe(false);
 
     // 再次重连不应重复发送已清理的 rpc-bye
     mockState.sent = [];
     mockState.events?.onState('offline');
     mockState.events?.onState('online');
     expect(byes()).toHaveLength(0);
+  });
+
+  it('等 ready 时桌面重进中继（再次 host-online）：立即重新 hello，不等 5s 重试', () => {
+    const tunnel = new DeskTunnel(
+      DEVICE,
+      () => {},
+      () => {}
+    );
+    tunnel.attach('main', () => {});
+    mockState.events?.onState('online');
+    expect(hellos()).toHaveLength(1);
+    mockState.sent = [];
+    mockState.events?.onState('online');
+    expect(hellos()).toHaveLength(1);
   });
 });

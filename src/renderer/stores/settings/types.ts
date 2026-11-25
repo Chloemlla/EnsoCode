@@ -195,6 +195,8 @@ export interface SettingsState {
   memoryDecayMaxImportance: number;
   /** 巡检间隔（天）；缺省 7 */
   memoryDecayIntervalDays: number;
+  /** 秘书派发时按任务内容检索并注入相关记忆；缺省开 */
+  memoryDispatchRecallEnabled: boolean;
   /** 实验功能：Bot 模式；缺省关，关闭时 Main 不启动 Bot 后台逻辑 */
   botModeEnabled: boolean;
   /** 实验功能：临时会话；缺省关，关闭只藏入口，不删已有会话 */
@@ -315,8 +317,8 @@ export interface SettingsState {
   backgroundCodeOpacity: number;
   backgroundSizeMode: BackgroundSizeMode;
   /**
-   * 手动刷新计数器。设置窗口点「立即刷新」时 +1，借设置持久化的多窗口同步
-   * 广播传到主窗口，驱动 BackgroundLayer 重新随机选图 / 绕开远程缓存。
+   * 手动刷新计数器。设置页点「立即刷新」时 +1，
+   * 驱动 BackgroundLayer 重新随机选图 / 绕开远程缓存。
    */
   backgroundRefreshNonce: number;
 
@@ -330,6 +332,10 @@ export interface SettingsState {
   titleSummaryEnabled: boolean;
   /** 标题总结独立模型；null = 跟随全局默认模型 */
   titleSummaryModel: DefaultModelRef | null;
+  /** Git 提交面板「AI 生成」用的模型；null = 未配置 */
+  gitCommitModel: DefaultModelRef | null;
+  /** 是否使用自定义提示词；正文存 userData/git-commit-prompt.txt，不进 settings */
+  gitCommitPromptCustomized: boolean;
   imageGenerationModel: DefaultModelRef | null;
   /** 记忆提炼模型；null = 跟随标题模型 → 全局默认的既有回退链 */
   memoryDistillModel: DefaultModelRef | null;
@@ -435,6 +441,7 @@ export interface SettingsState {
   setMemoryDecayStaleDays: (value: number) => void;
   setMemoryDecayMaxImportance: (value: number) => void;
   setMemoryDecayIntervalDays: (value: number) => void;
+  setMemoryDispatchRecallEnabled: (value: boolean) => void;
   setBotModeEnabled: (value: boolean) => void;
   setScratchSessionsEnabled: (value: boolean) => void;
   setDropShelfEnabled: (value: boolean) => void;
@@ -526,6 +533,8 @@ export interface SettingsState {
   setTitleSummaryEnabled: (value: boolean) => void;
   /** 设置标题总结独立模型；null = 回到跟随全局默认 */
   setTitleSummaryModel: (model: DefaultModelRef | null) => void;
+  setGitCommitModel: (model: DefaultModelRef | null) => void;
+  setGitCommitPromptCustomized: (value: boolean) => void;
   setImageGenerationModel: (model: DefaultModelRef | null) => void;
   /** 记忆提炼独立模型；null = 回落到标题模型 → 全局默认 */
   setMemoryDistillModel: (model: DefaultModelRef | null) => void;

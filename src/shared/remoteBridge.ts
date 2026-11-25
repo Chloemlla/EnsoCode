@@ -3,7 +3,7 @@
  * 壳持有加密隧道；renderer 的 web-preload 经 `window.parent.__ensoRemote` 调用（顶层文档时 parent 即自身）。
  */
 
-export type RemoteFrameKind = 'main' | 'settings';
+export type RemoteFrameKind = 'main';
 
 /** 桌面远程节点层里改由所在电脑 main 处理的通道前缀：本机窗口、节点切换、系统通知 */
 export const REMOTE_LOCAL_PREFIXES = ['nodes:', 'window:', 'notification:'] as const;
@@ -25,10 +25,6 @@ export interface RemoteBridge {
   platform: string;
   attach(kind: RemoteFrameKind): RemoteBridgeFrame;
   leader(): boolean;
-  openSettings(link?: unknown): void;
-  closeSettings(): void;
-  /** 设置页打开时带来的 deep link，读后即清 */
-  consumeSettingsLink(): unknown;
   /** 离开桌面模式回手机版；只有手机壳提供 */
   exitDesk?(): void;
   /** 打开壳里的「电脑与通知」抽屉（推送、已配对电脑）；只有新版手机壳提供 */
@@ -41,7 +37,7 @@ export interface RemoteBridge {
   /** 与 local 同时提供：所在电脑的平台（窗口外观随它） */
   localPlatform?: string;
   /**
-   * 手机壳专属：手机到桌面的链路与浏览器推送。节点设置窗口同样实现本接口，
+   * 手机壳专属：手机到桌面的链路与浏览器推送。桌面远程节点层同样实现本接口，
    * 但那侧没有这条链路，因此这组方法与 RemoteApi 一致按可选处理。
    */
   linkStatus?(): RemoteLinkStatus;

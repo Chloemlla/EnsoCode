@@ -7,6 +7,7 @@ import {
   resolveActiveCategory,
   SETTINGS_GROUPS,
   searchCategories,
+  settingsEntryPath,
   visibleCategories,
 } from './settingsCategories';
 
@@ -88,6 +89,9 @@ const EVERY_SETTINGS_CATEGORY = {
   tools: true,
   memory: true,
   privacy: true,
+  conversation: true,
+  terminal: true,
+  runtime: true,
   phone: true,
   ssh: true,
   usage: true,
@@ -97,6 +101,7 @@ const EVERY_SETTINGS_CATEGORY = {
   bots: true,
   botTemplates: true,
   secretary: true,
+  contacts: true,
 } satisfies Record<SettingsCategory, true>;
 
 describe('SETTINGS_GROUPS', () => {
@@ -145,12 +150,24 @@ describe('groupCategories', () => {
   });
 });
 
-describe('appearance search rows', () => {
-  it('会话排版登记在外观页', () => {
+describe('settingsEntryPath', () => {
+  it('拼出组、分类和标题，侧栏可以不带标题', () => {
+    const entry = { category: 'providers', title: 'Conversation title summary' };
+    const translate = (text: string) =>
+      text === 'Conversation title summary' ? '会话标题总结' : text;
+    expect(settingsEntryPath(entry, translate)).toBe(
+      'Models & agents › Model Providers › 会话标题总结'
+    );
+    expect(settingsEntryPath(entry, translate, false)).toBe('Models & agents › Model Providers');
+  });
+});
+
+describe('conversation search rows', () => {
+  it('会话排版登记在对话显示页', () => {
     expect(
       buildSettingsCatalog().find((entry) => entry.id === 'appearance.chatTypography')
     ).toMatchObject({
-      category: 'appearance',
+      category: 'conversation',
       title: 'Conversation typography',
     });
   });
@@ -200,6 +217,31 @@ describe('Secretary page', () => {
   it('falls back to Experimental, where the switch lives', () => {
     expect(resolveActiveCategory('secretary', [], false, false)).toBe('experimental');
     expect(resolveActiveCategory('secretary', [], false, true)).toBe('secretary');
+    expect(resolveActiveCategory('contacts', [], false, false)).toBe('experimental');
+    expect(resolveActiveCategory('contacts', [], false, true)).toBe('contacts');
+  });
+
+  it('秘书和联系方式与主人自成一组，不再挂在系统组的实验功能下面', () => {
+    const groupOf = (id: SettingsCategory) =>
+      SETTINGS_GROUPS.find((g) => g.categories.includes(id));
+    expect(groupOf('secretary')?.categories).toEqual(['secretary', 'contacts']);
+    expect(groupOf('secretary')?.label).toBe('Secretary & contacts');
+    expect(groupOf('experimental')?.categories).not.toContain('secretary');
+    const ids = (on: boolean) =>
+      groupCategories(
+        visibleCategories(
+          [
+            { id: 'usage' as SettingsCategory },
+            { id: 'secretary' as SettingsCategory },
+            { id: 'contacts' as SettingsCategory },
+          ],
+          [],
+          false,
+          on
+        )
+      ).map((g) => g.id);
+    expect(ids(false)).toEqual(['system']);
+    expect(ids(true)).toEqual(['secretary', 'system']);
   });
 });
 

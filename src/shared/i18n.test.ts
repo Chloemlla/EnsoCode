@@ -113,6 +113,27 @@ const MODEL_CENTER_ENSO_I18N_KEYS = [
   'Authorization failed',
   'Authorizing {{provider}}',
   'Enter this code in your browser',
+  'Enter the code in your browser',
+  'Waiting for browser authentication...',
+  'Verifying...',
+  'The link does not match this authorization. Copy the latest address again.',
+  'That is not an authorization callback address.',
+  'Paste a Qoder Personal Access Token (pt-...), or leave empty for browser login',
+  'Paste a Qoder CN Personal Access Token, or leave empty to cancel',
+  'Paste your Qoder Personal Access Token (pt-...)',
+  'Paste your Qoder CN Personal Access Token',
+  'Please complete login in your browser...',
+  'Click to sign in with your Qoder account in the browser.',
+  'Exchanging access token...',
+  'Fetching user profile...',
+  'Login successful!',
+  'Login cancelled',
+  'No Personal Access Token provided',
+  'Qoder device login network error',
+  'Authorization timed out',
+  'Device token poll returned invalid response',
+  'Device token poll returned empty access token',
+  'OAuth login ended unexpectedly',
   'Open authorization page again',
   'Cancel authorization',
   'Subscription authorization',
@@ -356,7 +377,7 @@ describe('秘书初次设置与设置页文案', () => {
       'Cleanup asks first',
       'Up to {{n}} at a time',
       'Concurrent dispatch limit',
-      'The most dispatched sessions the secretary may run at the same time. Once the limit is reached, new dispatches are refused.',
+      'The most dispatched sessions the secretary may run at the same time. Dispatches beyond the limit wait in line and start on their own when a slot frees up.',
       'Confirm',
       'Edit here',
       'Profile saved',
@@ -396,5 +417,21 @@ describe('秘书初次设置与设置页文案', () => {
       expect(getTranslation('en', key)).toBe(key);
       expect(getTranslation('zh', key), key).not.toBe(key);
     }
+  });
+});
+
+describe('模型服务商的中文叫法统一为「服务商」', () => {
+  it('中文文案里不再出现「提供商」「供应商」', () => {
+    const mixed = Object.entries(zhTranslations).filter(([, zh]) => /提供商|供应商/.test(zh));
+    expect(mixed).toEqual([]);
+  });
+
+  it('模型中心的按钮、标签、占位与空状态都说「服务商」', () => {
+    expect(getTranslation('zh', 'Add model or provider')).toBe('添加模型或服务商');
+    expect(getTranslation('zh', 'Provider')).toBe('服务商');
+    expect(getTranslation('zh', 'Select provider')).toBe('选择服务商');
+    expect(getTranslation('zh', 'Add Provider')).toBe('添加服务商');
+    expect(getTranslation('zh', 'No providers yet')).toBe('暂无服务商');
+    expect(getTranslation('zh', 'Provider (optional)')).toBe('服务商（可选）');
   });
 });

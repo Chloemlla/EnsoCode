@@ -66,6 +66,8 @@ import {
 } from '@/lib/sidePanelDock';
 import { releaseTerminal } from '@/lib/terminalInstances';
 import { cn } from '@/lib/utils';
+import { useSettingsOpen } from '@/stores/appView';
+import { setLayoutAnimating } from '@/stores/layoutAnimation';
 import { useSecretaryStore } from '@/stores/secretary';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
@@ -99,6 +101,7 @@ import { type PanelActivitySource, PanelVisibilityProvider } from './panelVisibi
 import { isPluginPanelId, pinnableTabForId, planPinnedPanels } from './pinnedTabs';
 import { addSecretaryPanel, createSecretaryConsoleReveal } from './secretaryConsole';
 import { secretaryPluginPanelsToClose, secretaryPluginViews } from './secretaryPluginViews';
+import { liftsIntoTitleRow } from './sidePanelTitleRow';
 import { shouldSkipSidePanelWidthAnim, sidePanelWidthTransition } from './sidePanelWidthAnim';
 import { ShowEverywhereItem, SideTabTitle } from './sideTabScope';
 import { TerminalView } from './TerminalView';
@@ -1181,6 +1184,7 @@ export function SidePanel({
   const open = useSidePanelShown(activeIdForUi);
   // 窄屏没有并排空间：打开即全屏盖住聊天区
   const isMobile = useIsMobile();
+  const settingsOpen = useSettingsOpen();
   const storeFullscreen = useSidePanelStore((s) => s.fullscreen);
   const fullscreen = storeFullscreen || (isMobile && open);
   useEffect(() => bindLiveGlobalTabs(), []);
@@ -1258,6 +1262,8 @@ export function SidePanel({
     ro.observe(parent);
     return () => ro.disconnect();
   }, []);
+  // 动画中途卸载收不到 complete，不复位会让聊天区永远不跟随
+  useEffect(() => () => setLayoutAnimating(false), []);
   useEffect(() => {
     if (widthAnim.from === widthAnim.id) return;
     setWidthAnim((s) => (s.from === s.id ? s : { ...s, from: s.id }));
@@ -1301,7 +1307,9 @@ export function SidePanel({
               }
         }
         transition={sidePanelWidthTransition({ skip: skipWidthAnim, cover, targetW })}
+        onAnimationStart={() => setLayoutAnimating(true)}
         onAnimationComplete={() => {
+          setLayoutAnimating(false);
           if (!fullscreen) setCover(false);
         }}
         className={cn(
@@ -1319,7 +1327,11 @@ export function SidePanel({
                 ? 'inset-y-0 right-0'
                 : 'top-0 right-[8px] bottom-[8px]',
           inTitleRow
-            ? cn('no-drag -mt-[44px]', cover ? 'rounded-b-[10px]' : 'rounded-br-[10px]')
+            ? cn(
+                'no-drag',
+                liftsIntoTitleRow({ titleRow, isMobile, settingsOpen }) && '-mt-[44px]',
+                cover ? 'rounded-b-[10px]' : 'rounded-br-[10px]'
+              )
             : card
               ? cn('rounded-[10px]', open && 'shadow-surface')
               : open && 'border-l'

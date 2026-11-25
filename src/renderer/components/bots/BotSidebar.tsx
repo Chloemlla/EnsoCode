@@ -49,6 +49,7 @@ import { addToast } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import { formatRelativeTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
+import { openSettings } from '@/stores/appView';
 import { useBotPendingCount, useBotsStore } from '@/stores/bots';
 import { isActiveDelegation, pendingOwners } from '@/stores/bots/delegations';
 import {
@@ -67,7 +68,7 @@ import { chatErrorText, chatTitle } from './botText';
 import { CloneGroupDialog } from './CloneGroupDialog';
 
 const ICON_BUTTON_CLASS =
-  'relative flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground';
+  'relative flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color,scale,transform] duration-150 hover:bg-muted hover:text-foreground active:scale-[0.95] motion-reduce:transition-none motion-reduce:active:scale-100';
 
 interface BotSidebarProps {
   width: number;
@@ -487,7 +488,7 @@ export function BotSidebar({
           <button
             type="button"
             className={ICON_BUTTON_CLASS}
-            onClick={() => void window.electronAPI.window.openSettings()}
+            onClick={() => openSettings()}
             title={t('Settings')}
           >
             <Settings className="h-4 w-4" />

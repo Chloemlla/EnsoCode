@@ -69,6 +69,9 @@ export const SETTINGS_DATA_COVERAGE = {
   memoryDecayIntervalDays: excluded('Memory forgetting preference; not an Enso capability.'),
   memoryKgEnabled: excluded('Memory entity-graph extraction preference; not an Enso capability.'),
   memoryReconcileEnabled: excluded('Memory conflict review preference; not an Enso capability.'),
+  memoryDispatchRecallEnabled: excluded(
+    'Secretary dispatch memory recall preference; not an Enso capability.'
+  ),
   protectedActionsInCode: excluded(
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
@@ -166,6 +169,10 @@ export const SETTINGS_DATA_COVERAGE = {
   defaultThinkingLevel: surfaces('providers.default-model'),
   titleSummaryEnabled: excluded('Conversation title summary preference; not an Enso capability.'),
   titleSummaryModel: excluded('Conversation title summary preference; not an Enso capability.'),
+  gitCommitModel: excluded('Changes panel AI commit message model; not an Enso capability.'),
+  gitCommitPromptCustomized: excluded(
+    'Changes panel AI commit message prompt flag; not an Enso capability.'
+  ),
   imageGenerationModel: excluded(
     'Independent image generation model preference; not an Enso capability.'
   ),
@@ -271,6 +278,9 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Memory entity-graph extraction preference; not an Enso capability.'
   ),
   setMemoryReconcileEnabled: excluded('Memory conflict review preference; not an Enso capability.'),
+  setMemoryDispatchRecallEnabled: excluded(
+    'Secretary dispatch memory recall preference; not an Enso capability.'
+  ),
   setBotModeEnabled: excluded(
     'Experimental Bot mode toggle; device-local, not an Enso capability.'
   ),
@@ -389,6 +399,10 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Conversation title summary preference; not an Enso capability.'
   ),
   setTitleSummaryModel: excluded('Conversation title summary preference; not an Enso capability.'),
+  setGitCommitModel: excluded('Changes panel AI commit message model; not an Enso capability.'),
+  setGitCommitPromptCustomized: excluded(
+    'Changes panel AI commit message prompt flag; not an Enso capability.'
+  ),
   setImageGenerationModel: excluded('Default image generation model; desktop settings only.'),
   setMemoryDistillModel: excluded('Memory distillation model preference; not an Enso capability.'),
   setMemoryLanguage: excluded('Memory output language preference; not an Enso capability.'),
@@ -600,15 +614,16 @@ export const IPC_PRODUCT_COVERAGE = {
   WINDOW_REFRESH_DRAG_REGIONS: excluded(
     'macOS window-shape refresh after a layout change; not a user product action.'
   ),
-  WINDOW_OPEN_SETTINGS: surfaces('window.open-settings'),
   WINDOW_OPEN_DEV_TOOLS: excluded(
     'Host-only troubleshooting action that opens Chromium DevTools for the local main window.'
   ),
   WINDOW_TOGGLE_SIDEBAR: excluded(
     'Main-to-renderer transport for the macOS View menu; the toggle itself stays in the renderer.'
   ),
-  SETTINGS_DEEP_LINK: excluded('Settings window deep-link transport.'),
-  SETTINGS_DEEP_LINK_CONSUME: excluded('Settings window deep-link handshake.'),
+  SETTINGS_DEEP_LINK: excluded(
+    'Main-to-renderer push for tray, app menu and enso:// settings requests.'
+  ),
+  SETTINGS_DEEP_LINK_CONSUME: excluded('Main-window handshake for pending settings requests.'),
   WINDOW_POPUP_MENU: excluded('Native application menu popup; renderer chrome only.'),
   WINDOW_TAKE_OPEN_FOLDERS: excluded(
     'Startup handoff that opens a folder chosen in the Windows shell.'
@@ -831,6 +846,7 @@ export const IPC_PRODUCT_COVERAGE = {
   PROJECTS_GET_RECENT: surfaces('projects.recent'),
   PROJECTS_LIST_HOST_DIRS: surfaces('projects.add'),
   PROJECTS_CREATE_HOST_DIR: surfaces('projects.add'),
+  PROJECTS_SEARCH_HOST_DIRS: surfaces('projects.add'),
   PROJECTS_REVEAL: surfaces('projects.list'),
   PROJECTS_OPEN_IN_APPS: surfaces('projects.list'),
   PROJECTS_CODE_SOURCES: excluded(
@@ -853,6 +869,15 @@ export const IPC_PRODUCT_COVERAGE = {
   GIT_FETCH: excluded('Desktop Changes panel remote fetch; no Enso capability.'),
   GIT_PULL: excluded('Desktop Changes panel fast-forward-only pull; no Enso capability.'),
   GIT_PUSH: excluded('Desktop Changes panel non-forced upstream push; no Enso capability.'),
+  GIT_GENERATE_COMMIT_MESSAGE: excluded(
+    'Desktop Changes panel AI commit message draft; the user still commits manually.'
+  ),
+  GIT_GENERATE_COMMIT_MESSAGE_ABORT: excluded(
+    'Desktop Changes panel AI commit message draft cancel; no Enso capability.'
+  ),
+  GIT_COMMIT_PROMPT_READ: excluded('Model center Git commit prompt editor; no Enso capability.'),
+  GIT_COMMIT_PROMPT_WRITE: excluded('Model center Git commit prompt editor; no Enso capability.'),
+  GIT_COMMIT_PROMPT_RESET: excluded('Model center Git commit prompt editor; no Enso capability.'),
   CHANGES_SNAPSHOTS_READ: excluded(
     'Internal per-conversation snapshot store for the Changes panel.'
   ),
@@ -941,7 +966,6 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   NODES_REMOVE: excluded('Remote node (desktop guest) pairing transport; not an Enso capability.'),
   NODES_RENAME: excluded('Remote node (desktop guest) pairing transport; not an Enso capability.'),
-  NODES_OPEN_SETTINGS: excluded('Remote node settings window transport; not an Enso capability.'),
   NODES_SWITCH: excluded('Remote node (desktop guest) view switching; not an Enso capability.'),
   NODES_ACTIVE: excluded('Remote node (desktop guest) view switching; not an Enso capability.'),
   NODES_ACTIVE_CHANGED: excluded(

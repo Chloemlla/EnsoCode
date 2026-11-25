@@ -27,6 +27,7 @@
     "pack:server": "node scripts/pack-server.mjs",
     "harbor:eval": "node scripts/harbor-eval.mjs",
     "generate:themes": "npx tsx scripts/generate-themes.ts",
+    "settings:catalog": "npx tsx scripts/settings-catalog/extract.ts",
     "rtk:prepare": "node scripts/prepare-rtk.mjs",
     "knowledge:check": "npx tsx scripts/knowledge.ts check",
     "knowledge:clean": "npx tsx scripts/knowledge.ts clean",
@@ -45,11 +46,11 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.0",
-    "@earendil-works/pi-agent-core": "1.5.1",
-    "@earendil-works/pi-ai": "1.5.1",
-    "@earendil-works/pi-coding-agent": "1.5.1",
-    "@earendil-works/pi-mcp": "1.5.1",
-    "@earendil-works/pi-tui": "1.5.1",
+    "@earendil-works/pi-agent-core": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-mcp": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
     "@electron-toolkit/utils": "^4.0.0",
     "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -112,6 +113,7 @@
     "electron-vite": "^5.0.0",
     "framer-motion": "^13.1.1",
     "hast-util-sanitize": "^5.0.2",
+    "jsdom": "^31.0.1",
     "lucide-react": "^1.33.0",
     "mermaid": "^11.17.2",
     "prettier": "^3.9.9",
@@ -157,9 +159,9 @@
       "better-sqlite3"
     ],
     "patchedDependencies": {
-      "@earendil-works/pi-ai@1.5.1": "patches/@earendil-works__pi-ai@1.5.1.patch",
+      "@earendil-works/pi-ai@1.6.0": "patches/@earendil-works__pi-ai@1.6.0.patch",
       "@rahularya01/pi-cursor@1.4.39": "patches/@rahularya01__pi-cursor@1.4.39.patch",
-      "@earendil-works/pi-coding-agent@1.5.1": "patches/@earendil-works__pi-coding-agent@1.5.1.patch",
+      "@earendil-works/pi-coding-agent@1.6.0": "patches/@earendil-works__pi-coding-agent@1.6.0.patch",
       "electron-vite@5.0.0": "patches/electron-vite@5.0.0.patch"
     }
   },

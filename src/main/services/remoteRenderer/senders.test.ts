@@ -4,6 +4,7 @@ import { OVERVIEW_TAIL_MESSAGES, SNAPSHOT_TAIL_MESSAGES } from '@shared/snapshot
 import { describe, expect, it, vi } from 'vitest';
 import {
   addRemoteSender,
+  primeSecretaryRereads,
   RemoteSender,
   remoteLeaderId,
   remoteSenders,
@@ -38,6 +39,29 @@ describe('RemoteSender seq replay', () => {
     // 浏览器只收到了 seq 1，其余落进了已死的链路
     expect(sender.resume((frame) => next.push(frame), 1)).toBe(true);
     expect(seqs(next)).toEqual([2, 3]);
+  });
+
+  it('续上时先让调用方回 ready 再补发：慢链路上 ready 不排在几 MB 重放后面', () => {
+    const { sender } = setup();
+    sender.send('a');
+    sender.send('b');
+    const order: string[] = [];
+    const resumed = sender.resume(
+      (frame) => order.push(`seq${(frame as { seq?: number }).seq}`),
+      0,
+      () => order.push('ready')
+    );
+    expect(resumed).toBe(true);
+    expect(order).toEqual(['ready', 'seq1', 'seq2']);
+    const rejected: string[] = [];
+    expect(
+      sender.resume(
+        () => {},
+        9,
+        () => rejected.push('ready')
+      )
+    ).toBe(false);
+    expect(rejected).toEqual([]);
   });
 
   it('keeps buffering while suspended and replays after the browser position', () => {
@@ -383,6 +407,49 @@ describe('RemoteSender secretary state', () => {
     const sender = new RemoteSender('pair', 'cid', 'settings', (frame) => first.push(frame));
     sender.send('secretary:state-changed', state('s1', 1));
     expect(decoded(first)).toEqual([['secretary:state-changed', [state('s1', 1)]]]);
+  });
+
+  it('远端主界面接入/续连时补发各秘书的重读通知，丢掉过的推送借此自愈', () => {
+    vi.useFakeTimers();
+    try {
+      const { sender, first } = setup();
+      primeSecretaryRereads(sender, ['default', 's-2']);
+      expect(first).toHaveLength(0);
+      vi.advanceTimersByTime(SECRETARY_COALESCE_MS);
+      expect(decoded(first)).toEqual([
+        ['secretary:state-changed', [{ __ensoReread: 'default' }]],
+        ['secretary:state-changed', [{ __ensoReread: 's-2' }]],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('合并窗口内真实的状态推送与 prime 去重：同一秘书只发一次', () => {
+    vi.useFakeTimers();
+    try {
+      const { sender, first } = setup();
+      primeSecretaryRereads(sender, ['default']);
+      sender.send('secretary:state-changed', state('default', 2));
+      vi.advanceTimersByTime(SECRETARY_COALESCE_MS);
+      expect(decoded(first)).toEqual([['secretary:state-changed', [{ __ensoReread: 'default' }]]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settings 窗口的 prime 不生效（它不是主界面）', () => {
+    vi.useFakeTimers();
+    try {
+      const first: HostToRemote[] = [];
+      const sender = new RemoteSender('pair', 'cid', 'settings', (frame) => first.push(frame));
+      primeSecretaryRereads(sender, ['default']);
+      vi.advanceTimersByTime(SECRETARY_COALESCE_MS);
+      // settings kind 会把半成品 { secretaryId } 当整份状态原样推出去——prime 必须跳过它
+      expect(first).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

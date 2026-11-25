@@ -41,6 +41,9 @@ export const zhTranslations: Record<string, string> = {
   'Owner identity': '主人身份',
   'GitHub accounts that count as you. Events from anyone else are left to the agent unless you require confirmation.':
     '这些 GitHub 账号算你本人。其他人的事件默认交给 agent 判断，除非你要求必须确认。',
+  'GitHub accounts that count as you.': '这些 GitHub 账号算你本人。',
+  'Events from anyone else are left to the agent unless you require confirmation.':
+    '其他人的事件默认交给 agent 判断，除非你要求必须确认。',
   'GitHub accounts': 'GitHub 账号',
   'Comma or space separated': '用逗号或空格分隔',
   'Detected the gh login {{login}} on this machine': '检测到本机 gh 登录账号 {{login}}',
@@ -334,7 +337,25 @@ export const zhTranslations: Record<string, string> = {
   'Server updates install the new version with npm and restart.':
     '服务端（npm 全局安装）：用 npm 安装新版本后重启。',
   'This server must be updated on the machine itself.':
-    '这台服务端无法远程更新，请在服务器上执行 npm i -g @ensocode/server。',
+    '这台服务端无法远程更新，请在服务器上手动执行：',
+  'Not available for this install: it cannot update itself. Update manually instead.':
+    '此安装方式无法自我更新，该开关不生效。请手动更新。',
+  'Server updates install the new version with npm and restart gracefully: running tasks finish first (up to a limit), then the server restarts and tasks resume.':
+    '服务端（npm 全局安装）：自动更新会先等正在跑的任务收完（有上限），再安装并重启，任务重启后续跑。',
+  'Waiting for {{count}} running tasks to finish before installing…':
+    '正在等 {{count}} 个任务收完后安装…',
+  'Installing {{version}}…': '正在安装 {{version}}…',
+  'Restarting server…': '正在重启服务端…',
+  'Updating…': '正在更新…',
+  'New version {{version}} is downloaded. Applying it installs and then stops the server — you will need to restart it externally (container or process manager).':
+    '新版本 {{version}} 已下载。应用更新会安装后停止服务端——它需要你在容器或进程管理器里外部重启。',
+  'Waits for running tasks to finish before restarting; this page reconnects after the server is back. Force restart does not wait.':
+    '重启前先等正在跑的任务收完；服务端起来后本页自动重连。「立即重启」不等待。',
+  'Restart now': '立即重启',
+  'Running tasks finish first, then the server restarts; this page reconnects when it is back.':
+    '正在跑的任务先收完，然后服务端重启；起来后本页自动重连。',
+  'Download and install updates automatically: running tasks finish first, then the server restarts and they resume.':
+    '自动下载并安装更新：正在跑的任务先收完，然后服务端重启，任务重启后续跑。',
   'Automatic updates': '自动更新',
   'Download and install updates automatically': '自动下载并安装更新',
   'Restart automatically to apply updates': '自动重启以应用更新',
@@ -431,7 +452,11 @@ export const zhTranslations: Record<string, string> = {
   'Remove from favorites': '取消收藏',
   'Search themes...': '搜索主题...',
   Settings: '设置',
+  'Settings…': '设置…',
   'Search settings': '搜索设置',
+  'Back to workspace': '返回工作区',
+  '{{n}} sessions running': '{{n}} 个会话运行中',
+  '{{n}} waiting for you': '{{n}} 个待确认',
   Application: '应用',
   'Models & agents': '模型与智能体',
   'Tools & extensions': '工具与扩展',
@@ -441,6 +466,22 @@ export const zhTranslations: Record<string, string> = {
   System: '系统',
   Terminal: '终端',
   'Conversation display': '对话显示',
+  'Also used by command output in conversations': '同时用于对话中的命令输出',
+  'Interface font size': '界面字号',
+  'Interface mono font': '界面等宽字体',
+  'Monospace font for the side panel terminal, code blocks and command output in conversations.':
+    '用于侧边栏终端、代码块与对话中的命令输出的等宽字体。',
+  'Scales all interface text and command output in conversations; also the side panel terminal size. Conversation body text is set separately in Conversation display.':
+    '缩放整个界面文字与对话中的命令输出，也是侧边栏终端的字号；对话正文在「对话显示」里单独设置。',
+  'Runtime & sessions': '运行与会话',
+  'Contacts & owner': '联系方式与主人',
+  'Secretary & contacts': '秘书与联系',
+  'Contact channels': '联系渠道',
+  'Danger zone': '危险操作',
+  'Where the secretary can be reached and where it pushes updates.':
+    '秘书能在哪里被联系到、往哪里推送。',
+  Network: '网络',
+  Shell: '命令行',
   'Conversation typography': '会话排版',
   'Headings, tables and inline code scale with the body text': '标题、表格与行内代码按正文比例缩放',
   Body: '正文',
@@ -850,6 +891,8 @@ export const zhTranslations: Record<string, string> = {
   'Not a git repository.': '不是 git 仓库。',
   'Git diff is not available for this workspace.': '当前工作区不支持 Git diff。',
   'Terminal appearance': '终端外观',
+  'Color scheme, font, size and weight of side panel terminals':
+    '侧边栏终端的配色、终端字体、字号与字重',
   'Theme mode': '主题模式',
   // 背景图
   'Background image': '背景图',
@@ -888,7 +931,7 @@ export const zhTranslations: Record<string, string> = {
   // 首次运行引导
   'Welcome to EnsoCode': '欢迎使用 EnsoCode',
   'Import your providers and assets from local AI apps to get started. You can skip any step.':
-    '从本地 AI 应用导入模型服务与资源即可开始，每一步都可跳过。',
+    '从本地 AI 应用导入服务商与资源即可开始，每一步都可跳过。',
   'Sign in with a provider subscription, or import API providers from local AI apps':
     '使用订阅账号登录，或从本地 AI 应用导入 API 服务',
   'Import skills from Claude Code, Codex or Cursor': '从 Claude Code、Codex 或 Cursor 导入技能',
@@ -904,9 +947,9 @@ export const zhTranslations: Record<string, string> = {
   Minimize: '最小化',
   Maximize: '最大化',
   Restore: '还原',
-  'No new providers imported': '没有新导入的模型服务',
+  'No new providers imported': '没有新导入的服务商',
   'Fetch models for each provider, then enable the ones you want.':
-    '为每个模型服务拉取模型，再启用你需要的。',
+    '为每个服务商拉取模型，再启用你需要的。',
   'Fetch failed': '拉取失败',
   'No models yet': '暂无模型，点击拉取',
   'Bundle skills, MCP servers and an instruction file into a preset (optional)':
@@ -915,10 +958,12 @@ export const zhTranslations: Record<string, string> = {
     '为子代理配置专属模型、技能与 MCP 服务（可选）',
   '{{count}} presets': '已有 {{count}} 个预设',
   'Model Providers': '模型中心',
+  'Models used by features': '各功能使用的模型',
+  Providers: '模型服务',
   'Automatically fetch models': '自动拉取模型',
   'Model fetch interval': '拉取间隔',
   'This interval applies when automatic fetching is enabled for this provider.':
-    '开启此供应商的自动拉取后，按此间隔拉取模型。',
+    '开启此服务商的自动拉取后，按此间隔拉取模型。',
   'Enter a whole number from {{min}} to {{max}} hours.': '请输入 {{min}}–{{max}} 小时之间的整数。',
   hours: '小时',
   'Last fetched {{time}}': '上次拉取成功：{{time}}',
@@ -926,38 +971,69 @@ export const zhTranslations: Record<string, string> = {
   'Manage model API providers for this app': '管理应用的模型 API 服务',
   'Import from local apps': '从本地应用导入',
   'Scan providers configured in local AI apps and import them.':
-    '扫描本机 AI 应用中已配置的模型服务并导入。',
+    '扫描本机 AI 应用中已配置的服务商并导入。',
   'Scanning local apps...': '正在扫描本地应用...',
   'Scan failed': '扫描失败',
   Rescan: '重新扫描',
   'No local apps detected': '未检测到本地应用',
   'Supported: Claude Code, Codex, CC Switch, Alma, Cherry Studio, Hermes, OpenClaw, Grok CLI, Cursor':
     '支持:Claude Code、Codex、CC Switch、Alma、Cherry Studio、Hermes、OpenClaw、Grok CLI、Cursor',
-  'No importable providers found': '未发现可导入的模型服务',
+  'No importable providers found': '未发现可导入的服务商',
   'Already exists': '已存在',
   '{{count}} models': '{{count}} 个模型',
   '{{count}} selected': '已选 {{count}} 项',
   'Import selected': '导入所选',
   Done: '完成',
-  'No providers yet': '暂无模型服务',
+  'No providers yet': '暂无服务商',
   'Import providers from local apps or add one manually to get started':
-    '从本地应用导入或手动添加模型服务以开始使用',
+    '从本地应用导入或手动添加服务商以开始使用',
   'Add provider': '添加服务',
-  'Add Provider': '添加模型服务',
+  'Add Provider': '添加服务商',
   'Subscription login': '订阅登录',
   'Sign in with provider subscriptions (SuperGrok, Claude Pro, ChatGPT, etc.)':
     '使用订阅账号登录（SuperGrok、Claude Pro、ChatGPT 等）',
   'Add account': '添加账号',
   '{{count}} accounts': '{{count}} 个账号',
+  '{{count}} providers': '{{count}} 个服务商',
   'Log out': '退出登录',
   'Starting login...': '正在启动登录…',
   'Complete authorization in your browser': '请在浏览器中完成授权',
+  'Sign in to Devin in your browser.': '请在浏览器中登录 Devin。',
+  'Waiting for browser authentication...': '正在等待浏览器完成授权…',
+  'Exchanging authorization code for tokens...': '正在用授权码换取令牌…',
+  'After you authorize, the browser opens a localhost page that will not load. Paste the full address from the address bar here.':
+    '授权完成后，浏览器会跳到打不开的 localhost 页面。把地址栏里的完整链接粘贴到这里。',
+  'The link does not match this authorization. Copy the latest address again.':
+    '链接与本次授权不匹配，请重新复制最新的地址',
+  'That input has no authorization code. Paste the full localhost address from the address bar.':
+    '这里没有授权码。请粘贴地址栏里的完整 localhost 链接。',
+  'That is not an authorization callback address.': '这不是授权回调地址',
+  'Paste a Qoder Personal Access Token (pt-...), or leave empty for browser login':
+    '粘贴 Qoder 个人访问令牌（pt-...），或留空走浏览器登录',
+  'Paste a Qoder CN Personal Access Token, or leave empty to cancel':
+    '粘贴 Qoder CN 个人访问令牌，或留空取消',
+  'Paste your Qoder Personal Access Token (pt-...)': '请粘贴 Qoder 个人访问令牌（pt-...）',
+  'Paste your Qoder CN Personal Access Token': '请粘贴 Qoder CN 个人访问令牌',
+  'Please complete login in your browser...': '请在浏览器中完成登录…',
+  'Click to sign in with your Qoder account in the browser.': '点此在浏览器中使用 Qoder 账号登录。',
+  'Exchanging access token...': '正在交换访问令牌…',
+  'Fetching user profile...': '正在获取用户资料…',
+  'Login successful!': '登录成功',
+  'Login cancelled': '登录已取消',
+  'No Personal Access Token provided': '未提供个人访问令牌',
+  'Qoder device login network error': 'Qoder 设备登录网络出错',
+  'Authorization timed out': '授权超时',
+  'Device token poll returned invalid response': '设备登录返回了无效响应',
+  'Device token poll returned empty access token': '设备登录没有返回访问令牌',
+  'OAuth login ended unexpectedly': '登录意外结束',
+  'Verify OAuth': '验证用 OAuth',
+  'Verify Device': '验证用设备码',
   'Open authorization page': '打开授权页面',
   'Enter code': '输入代码',
   'Verifying...': '正在验证…',
   'resets {{time}}': '{{time}} 重置',
   Submit: '提交',
-  'Edit Provider': '编辑模型服务',
+  'Edit Provider': '编辑服务商',
   Name: '名称',
   'API Type': 'API 类型',
   'Base URL': 'Base URL',
@@ -980,14 +1056,16 @@ export const zhTranslations: Record<string, string> = {
   'Fetch all models': '拉取全部模型',
   'Refresh model info': '刷新模型信息',
   'Refresh all models and info': '拉取全部模型与模型信息',
+  'Refresh provider models': '刷新此服务商的模型',
+  'Refresh failed': '刷新失败',
   'Model info updated': '模型信息已更新',
   'Model info refresh failed, using cache': '模型信息刷新失败，仍使用缓存',
   'Model info refresh failed': '模型信息刷新失败',
-  'Fetched {{count}} providers': '已拉取 {{count}} 个模型服务',
+  'Fetched {{count}} providers': '已拉取 {{count}} 个服务商',
   '{{ok}} succeeded, {{failed}} failed': '{{ok}} 个成功，{{failed}} 个失败',
   'Sync failed ({{failed}})': '同步失败（{{failed}} 个）',
-  'Skipped {{count}} disabled providers': '已跳过 {{count}} 个未启用的模型服务',
-  'No enabled providers to sync': '没有已启用的模型服务可同步',
+  'Skipped {{count}} disabled providers': '已跳过 {{count}} 个未启用的服务商',
+  'No enabled providers to sync': '没有已启用的服务商可同步',
   'Test connection': '测试连接',
   Authorize: '授权',
   Authorizing: '授权中...',
@@ -1028,15 +1106,15 @@ export const zhTranslations: Record<string, string> = {
   Exit: '退出',
   // 统一的供应商设置、默认模型与 Enso
   'Add a provider subscription or API Key, or import providers from local AI apps':
-    '添加提供商订阅或 API Key，也可从本地 AI 应用导入模型服务',
-  'Add model or provider': '添加模型 / 提供商',
+    '添加服务商订阅或 API Key，也可从本地 AI 应用导入服务商',
+  'Add model or provider': '添加模型或服务商',
   'Import providers from local apps or use the unified setup to get started':
-    '从本地应用导入模型服务，或使用统一向导开始配置',
+    '从本地应用导入服务商，或使用统一向导开始配置',
   'Choose a provider first. You will select subscription or API Key next.':
-    '请先选择提供商，下一步再选择订阅或 API Key。',
+    '请先选择服务商，下一步再选择订阅或 API Key。',
   'Choose how to connect': '选择连接方式',
   Subscription: '订阅',
-  'Provider subscription': '提供商订阅',
+  'Provider subscription': '服务商订阅',
   'ChatGPT (PI login)': 'ChatGPT（PI 登录）',
   'Sign in in your browser and use your subscription account.': '在浏览器中登录并使用订阅账号。',
   'Configure an endpoint and key, then fetch or test its models.':
@@ -1049,7 +1127,7 @@ export const zhTranslations: Record<string, string> = {
   'Cancel authorization': '取消授权',
   'Subscription authorization': '订阅授权',
   'No subscription account connected': '尚未连接订阅账号',
-  'Authorize this provider to add its available models.': '授权此提供商，以添加其可用模型。',
+  'Authorize this provider to add its available models.': '授权此服务商，以添加其可用模型。',
   'Connect subscription': '连接订阅',
   'Add another account': '添加其他账号',
   'Import from Codex': '从 Codex 导入',
@@ -1074,6 +1152,25 @@ export const zhTranslations: Record<string, string> = {
     '关闭后可为本项目单独配置内置工具，优先级高于全局，下次会话生效。',
   'Session choice overrides the project default.': '会话里手动选的模型优先于项目默认。',
   'Conversation title summary': '会话标题总结',
+  'Git commit generation': 'Git Commit 生成',
+  'Model and prompt used by the AI button in the Git commit panel.':
+    'Git 提交面板「AI 生成」按钮使用的模型与提示词。',
+  'Select provider': '选择服务商',
+  'The selected model is unavailable. Choose another one.': '所选模型不可用，请重新选择。',
+  'Could not save the prompt': '提示词保存失败',
+  'Git commit generation is not configured': '尚未配置 Git Commit 生成',
+  'Choose a provider and model for Git commit generation in Model Providers.':
+    '请先在模型中心为「Git Commit 生成」选择服务商和模型。',
+  'The selected model is unavailable. Choose another one in Model Providers.':
+    '所选模型不可用，请在模型中心重新选择。',
+  'Could not generate a commit message': '提交信息生成失败',
+  'No changes to commit.': '没有可提交的改动。',
+  'Cancel generation': '取消生成',
+  'Generate commit message with AI': 'AI 生成提交信息',
+  'Replace the current commit message?': '覆盖当前提交信息？',
+  'The AI-generated message will overwrite what you have typed.':
+    'AI 生成的内容会覆盖你已输入的提交信息。',
+  'Model returned an empty commit message.': '模型返回了空的提交信息。',
   'Generate a short AI title from the first message of a new conversation.':
     '新会话发出首条消息后，用 AI 自动生成简短标题。',
   'Follows the default model': '跟随默认模型',
@@ -1094,7 +1191,7 @@ export const zhTranslations: Record<string, string> = {
     '使用默认生图模型生成图片，并保存到会话专属目录。',
   'No image generation models available': '没有可用的图像生成模型',
   'Enable a model and configure valid provider credentials first.':
-    '请先启用模型并配置有效的提供商凭证。',
+    '请先启用模型并配置有效的服务商凭证。',
   'Default model changed: {{previous}} → {{next}}': '默认模型已更改：{{previous}} → {{next}}',
   'Subscription credentials are loading. API-key models remain available.':
     '正在加载订阅凭证，API Key 模型仍可使用。',
@@ -1108,7 +1205,7 @@ export const zhTranslations: Record<string, string> = {
   'Choose a model for this conversation or set a project, group, or global default before sending.':
     '发送前请为此对话选择模型，或设置项目、分组或全局默认模型。',
   'No usable model is available. Configure provider credentials and enable a model first.':
-    '没有可用模型。请先配置提供商凭证并启用模型。',
+    '没有可用模型。请先配置服务商凭证并启用模型。',
   Agent: 'Agent',
   Agents: 'Agent',
   File: '文件',
@@ -1215,10 +1312,10 @@ export const zhTranslations: Record<string, string> = {
   'Failed to prompt child Agent.': '无法向子 Agent 发送任务。',
   'Failed to record dispatch.': '无法记录派发结果。',
   Target: '目标',
-  Provider: '提供商',
+  Provider: '服务商',
   Account: '账号',
   Coworker: '队员',
-  'Could not load subscription providers': '无法加载订阅提供商',
+  'Could not load subscription providers': '无法加载订阅服务商',
   Save: '保存',
   // 技能与 MCP
   Skills: '技能',
@@ -1355,10 +1452,30 @@ export const zhTranslations: Record<string, string> = {
   'A digest based on git log': '基于 git log 生成变更摘要',
   'Summarize the recent changes in this repository based on git log.':
     '根据 git log 总结这个仓库最近的改动。',
+  'Tell the secretary what to take care of…': '要秘书处理什么，直接说…',
+  "Check today's progress": '看看今天的进展',
+  'Progress report and items waiting on you': '进展汇报，以及需要你拍板的事',
+  "Summarize today's progress and list anything waiting on me.":
+    '汇报一下今天的进展，把需要我处理的事列出来。',
+  'Assign a task': '派一个任务',
+  'A one-off job for the secretary to run': '一次性的事，说完秘书就去办',
+  'Take care of a one-off task: ': '帮我处理一件一次性的事：',
+  'Organize the to-do list': '整理待办',
+  'Sort the board into clear next steps': '把看板上的事整理成清晰的下一步',
+  'Go through the board and organize it into clear next steps.':
+    '过一遍看板上的事，整理成清晰的下一步。',
+  'Clean up merged branches': '清理已完成的分支',
+  'Remove branches that are already merged': '删掉已经合并、不再需要的分支',
+  'Clean up merged branches and worktrees you no longer need.':
+    '清理一下已经合并的分支和不再需要的 worktree。',
   'Loading Mermaid diagram...': '加载 Mermaid 图表...',
   'Mermaid render error': 'Mermaid 渲染错误',
   'Mermaid render failed': 'Mermaid 渲染失败',
   'Mermaid preview': 'Mermaid 预览',
+  'Visualization preview': '可视化预览',
+  'Visualization failed to render, showing source': '可视化渲染失败，已显示源码',
+  'Show source': '查看源码',
+  'Show preview': '查看预览',
   'Zoom in': '放大',
   'Zoom out': '缩小',
   'Reset zoom': '重置缩放',
@@ -1410,6 +1527,10 @@ export const zhTranslations: Record<string, string> = {
     '不挂项目的会话。工具跟随全局设置。',
   'Add a local directory as the conversation working folder.': '把本地目录加为对话的工作目录。',
   'Type a path or select from recent projects...': '输入路径或从最近项目中选择...',
+  'Search for directory': '搜索目录',
+  'Find a directory on {{host}}': '在 {{host}} 上查找目录',
+  'No matching directories': '没有匹配的目录',
+  'Searching...': '搜索中...',
   'Local directory': '本地目录',
   'Remote (SSH)': '远程(SSH)',
   'SSH host': 'SSH 主机',
@@ -2332,7 +2453,7 @@ export const zhTranslations: Record<string, string> = {
   'Fast read-only recon, returns compressed findings': '快速只读调研,返回压缩结论',
   'System prompt': '系统提示',
   'You are a fast recon agent. Explore, never modify…': '你是快速调研代理,只探索不修改…',
-  'Provider (optional)': '模型服务(可选)',
+  'Provider (optional)': '服务商（可选）',
   'Follow conversation': '跟随会话',
   'Enable subagent model': '启用子代理模型',
   'Make this model available to subagents': '允许子代理选择此模型',
@@ -2847,6 +2968,9 @@ export const zhTranslations: Record<string, string> = {
   'Turn off notifications': '关闭推送通知',
   'Push notifications': '推送通知',
   'Computers and notifications': '电脑与通知',
+  'Things that need your attention are pushed to this phone.': '有需要你处理的事时推送到这台手机。',
+  'Things that need your attention are pushed to this device.':
+    '有需要你处理的事时推送到这台设备。',
   'Turning on notifications…': '正在开启推送…',
   'Notifications need a newer desktop app.': '需先升级桌面端才能开启推送。',
   'Add this app to the Home Screen before notifications can be turned on.':
@@ -2898,7 +3022,7 @@ export const zhTranslations: Record<string, string> = {
   'Encrypt the entire package with a password. OAuth login sessions are still excluded.':
     '使用密码加密整个配置包。OAuth 登录态仍不会包含在内。',
   'API keys, provider account links, MCP arguments and environment values, plus credentials and private URL parts in MCP endpoints, will be omitted. Configurations containing skill or instruction files require encryption.':
-    'API Key、模型服务账号关联、MCP 参数和环境变量，以及 MCP 地址中的凭据和私密 URL 部分都会被省略。包含技能或指令文件的配置需要加密导出。',
+    'API Key、服务商账号关联、MCP 参数和环境变量，以及 MCP 地址中的凭据和私密 URL 部分都会被省略。包含技能或指令文件的配置需要加密导出。',
   'Encryption password': '加密密码',
   'Confirm password': '确认密码',
   'Use at least 8 characters. This password cannot be recovered.':
@@ -2946,7 +3070,7 @@ export const zhTranslations: Record<string, string> = {
   'Do you want to continue with this import?': '要继续导入吗？',
   'Confirm import': '确认导入',
   'Sensitive provider or MCP values were omitted; existing local values were preserved when available.':
-    '敏感的模型服务或 MCP 配置值已省略；如本机已有对应值，则会保留。',
+    '敏感的服务商或 MCP 配置值已省略；如本机已有对应值，则会保留。',
   'OAuth login state is not included; sign in again after import.':
     '配置包不包含 OAuth 登录态；导入后请重新登录。',
   'Imported MCP servers may require external commands, packages, or paths.':
@@ -3941,6 +4065,7 @@ export const zhTranslations: Record<string, string> = {
   'The session was deleted': '会话已删除',
   '{{n}} waiting': '{{n}} 件等你',
   '{{n}} running': '{{n}} 件在跑',
+  '{{n}} unread': '{{n}} 条未读',
   '{{n}} queued': '{{n}} 件排队',
   '{{n}} dispatched tasks running': '派出的 {{n}} 件活在跑',
   'Unknown source': '未知来源',
@@ -4069,8 +4194,8 @@ export const zhTranslations: Record<string, string> = {
   'Name, avatar, visible projects and patrol.': '名字、头像、可见项目与巡检。',
   'Up to {{n}} at a time': '最多同时 {{n}} 个',
   'Concurrent dispatch limit': '同时运行的派发会话上限',
-  'The most dispatched sessions the secretary may run at the same time. Once the limit is reached, new dispatches are refused.':
-    '秘书最多同时运行几个派发会话，超过上限时新派发会被拒绝。',
+  'The most dispatched sessions the secretary may run at the same time. Dispatches beyond the limit wait in line and start on their own when a slot frees up.':
+    '秘书最多同时运行几个派发会话，超出的派发会排队，有空位时自动开始。',
   Confirm: '确认',
   'Edit here': '就地修改',
   'Profile saved': '配置已保存',
@@ -4256,6 +4381,13 @@ export const zhTranslations: Record<string, string> = {
   'Unknown task': '未知任务',
   'Clean tree': '工作区干净',
   'No local branch': '没有本机分支',
+  'Repository diff {{project}}': '分支差异 {{project}}',
+  Ref: '目标',
+  '{{count}} files (+{{added}} −{{deleted}})': '{{count}} 个文件（+{{added}} −{{deleted}}）',
+  'from {{path}}': '来自 {{path}}',
+  Truncated: '已截断',
+  '{{count}} files total, only the first ones are listed': '共 {{count}} 个文件，只列出前一部分',
+  '+{{added}} −{{deleted}}': '+{{added}} −{{deleted}}',
   'Search memory {{query}} · {{count}}': '搜索记忆 {{query}} · {{count}} 条',
   'Delete memory {{title}}': '删除记忆 {{title}}',
   'Save memory {{title}}': '记住 {{title}}',
@@ -4393,6 +4525,55 @@ export const zhTranslations: Record<string, string> = {
   'Report screenshots': '报告截图',
   'Copies of screenshots in finished reports, kept for 7 days after completion. Cleaning removes all of them; report text is kept.':
     '已完成报告里截图的副本，完成后保留 7 天。清理会删掉全部截图，报告文字保留。',
+  'Not vectorized': '未向量化',
+  'Completion backend': '推理后端',
+  'Local GGUF runs on this machine. Remote uses the model below.':
+    '本地 GGUF 在本机运行；远程则使用下方的模型。',
+  'Local model selected but the weights are not on disk. Distillation and interpretation will wait until you click Download.':
+    '已选择本地模型，但权重文件不在磁盘上。提炼和解读会等你点击下载后再进行。',
+  'Download in progress. Distillation waits until the model is ready.':
+    '正在下载，模型就绪后才开始提炼。',
+  'Automatic distillation is on, but the local model is not ready. Sessions will queue until you download it.':
+    '已开启自动提炼，但本地模型尚未就绪。会话会排队，直到你下载模型。',
+  '{{version}} asks for more and is waiting for approval': '{{version}} 需要更多权限，等待你批准',
+  'No tools yet': '还没有工具',
+  'Asks every call': '每次调用都询问',
+  'Show the code': '查看代码',
+  Plugins: '插件',
+  'Python or Node tools the secretary builds for itself. It proposes them in the chat; you confirm before anything is written. Read-only tools run directly, anything else asks for your approval on every call.':
+    '秘书为自己编写的 Python 或 Node 工具。它会在对话里提出，你确认后才会写入。只读工具直接运行，其他工具每次调用都要你批准。',
+  'Delete agent type?': '删除智能体类型？',
+  'This permanently deletes the "{{name}}" agent type.': '将永久删除智能体类型「{{name}}」。',
+  'Enable custom background image': '启用自定义背景图',
+  'Theme mode is set to Sync terminal theme, so interface colors follow your terminal theme instead of this gallery.':
+    '当前主题模式为「跟随终端主题」，界面配色将跟随终端主题，而非下方主题库。',
+  'Switch to System mode': '切换为跟随系统',
+  'Restore default template?': '恢复默认模板？',
+  'Delete template?': '删除模板？',
+  'This discards customizations to "{{name}}".': '将放弃对「{{name}}」的自定义修改。',
+  'This permanently deletes "{{name}}".': '将永久删除「{{name}}」。',
+  'Remove member?': '移除成员？',
+  'Remove "{{name}}" from this team template?': '要从团队模板中移除「{{name}}」吗？',
+  'Clear cookies?': '清除 Cookie？',
+  'Clear cache?': '清除缓存？',
+  'Clear all browsing data?': '清除所有浏览数据？',
+  'Clear rule exemptions?': '清除规则豁免？',
+  'All exempted dcg rules will require confirmation again.':
+    '所有已豁免的 dcg 规则将重新需要确认。',
+  'From environment': '来自环境变量',
+  'Delete instruction file?': '删除指令文件？',
+  'This removes "{{name}}" from your instruction files.': '将从指令文件列表中移除「{{name}}」。',
+  'Plugin commands': '插件命令',
+  'Clear filter': '清空筛选',
+  'Delete MCP server?': '删除 MCP 服务器？',
+  'This permanently deletes the "{{name}}" MCP server configuration.':
+    '将永久删除 MCP 服务器配置「{{name}}」。',
+  'Clear search': '清空搜索',
+  'Delete skill?': '删除技能？',
+  'This removes "{{name}}" from your skills list.': '将从技能列表中移除「{{name}}」。',
+  'Delete SSH connection?': '删除 SSH 连接？',
+  Metric: '指标',
+  'Add project ({{shortcut}})': '添加项目（{{shortcut}}）',
 };
 
 export function normalizeLocale(input?: string): Locale {

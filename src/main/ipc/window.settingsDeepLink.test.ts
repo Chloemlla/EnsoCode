@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
-  settingsWindow: null as { isDestroyed: () => boolean } | null,
-  sent: [] as Array<{ channel: string; args: unknown[] }>,
+  request: null as unknown,
+  openSettingsInMainWindow: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -16,17 +16,13 @@ vi.mock('electron', () => ({
       mocks.handlers.set(channel, fn),
   },
 }));
-vi.mock('../windows/SettingsWindow', () => ({
-  getSettingsWindow: () => mocks.settingsWindow,
-  openSettingsWindow: () => {
-    mocks.settingsWindow ??= { isDestroyed: () => false };
-    return mocks.settingsWindow;
-  },
+vi.mock('../windows/mainSettings', () => ({
+  openSettingsInMainWindow: mocks.openSettingsInMainWindow,
+  takeSettingsOpenRequest: () => mocks.request,
 }));
 vi.mock('../windows/createAppWindow', () => ({
   getWindowWebContents: vi.fn(),
-  sendToWindow: (_win: unknown, channel: string, ...args: unknown[]) =>
-    mocks.sent.push({ channel, args }),
+  sendToWindow: vi.fn(),
   TRAFFIC_LIGHT_POSITION: { x: 0, y: 0 },
 }));
 vi.mock('../windows/MainWindow', () => ({ focusMainWindow: vi.fn() }));
@@ -39,46 +35,31 @@ vi.mock('../services/appMenu', () => ({ installAppMenu: vi.fn() }));
 vi.mock('../services/nodeRemote', () => ({ sendToNodeViews: vi.fn() }));
 vi.mock('./settings', () => ({ readLocale: () => 'zh' }));
 
-const { registerWindowHandlers } = await import('./window');
+const { openPluginInstallFromProtocol, registerWindowHandlers } = await import('./window');
 registerWindowHandlers();
 
-const openSettings = (link?: unknown) =>
-  mocks.handlers.get(IPC_CHANNELS.WINDOW_OPEN_SETTINGS)?.({}, link);
-/** 设置页挂载时拉取的深链 */
-const consumeOnMount = () => mocks.handlers.get(IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME)?.();
-/** 已挂载的设置页收到的深链 */
-const liveLinks = () =>
-  mocks.sent.filter((m) => m.channel === IPC_CHANNELS.SETTINGS_DEEP_LINK).map((m) => m.args[0]);
-const closeSettingsWindow = () => {
-  mocks.settingsWindow = null;
-};
+beforeEach(() => mocks.openSettingsInMainWindow.mockClear());
 
-beforeEach(() => {
-  closeSettingsWindow();
-  consumeOnMount();
-  mocks.sent.length = 0;
-});
-
-describe('设置窗口深链', () => {
-  it('窗口未打开：新窗口挂载时拿到日志页深链', () => {
-    openSettings({ category: 'logs' });
-    expect(consumeOnMount()).toMatchObject({ category: 'logs' });
-    expect(consumeOnMount()).toBeNull();
+describe('设置只在主窗口里打开', () => {
+  it('enso://install-plugin 在主窗口打开插件页并带上安装地址', () => {
+    openPluginInstallFromProtocol('https://example.com/p.zip');
+    expect(mocks.openSettingsInMainWindow).toHaveBeenCalledWith({
+      category: 'plugins',
+      rowId: 'plugins.installUrl',
+      pluginInstallUrl: 'https://example.com/p.zip',
+    });
   });
 
-  it('窗口已打开（停在通用页）：深链直接推给已挂载的页面', () => {
-    openSettings();
-    consumeOnMount();
-    openSettings({ category: 'logs' });
-    expect(liveLinks()).toEqual([expect.objectContaining({ category: 'logs' })]);
+  it('主窗口渲染层挂载或收到推送时拉取同一份打开请求', () => {
+    mocks.request = { link: { category: 'logs', rowId: 'logs.root' } };
+    expect(mocks.handlers.get(IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME)?.()).toEqual(mocks.request);
   });
 
-  it('已打开时推送过的深链不留到下一次新开窗口', () => {
-    openSettings();
-    consumeOnMount();
-    openSettings({ category: 'logs', rowId: 'logs.root' });
-    closeSettingsWindow();
-    openSettings();
-    expect(consumeOnMount()).toBeNull();
+  it('没有任何开独立设置窗口的通道', () => {
+    expect(Object.values(IPC_CHANNELS)).not.toContain('window:open-settings');
+    expect(Object.values(IPC_CHANNELS)).not.toContain('nodes:open-settings');
+    expect([...mocks.handlers.keys()].filter((channel) => /open-settings/.test(channel))).toEqual(
+      []
+    );
   });
 });

@@ -30,6 +30,7 @@ import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
 import { type PluginPresetOption, useEnabledPluginPresets } from '@/plugins/usePluginPresets';
 import { useSettingsStore } from '@/stores/settings';
+import { SettingsButton, SettingsPage, SettingsSection } from './kit';
 import { ListFilterBar, matchesFilter } from './ListFilterBar';
 import { NewSessionBadge } from './NewSessionBadge';
 
@@ -67,59 +68,56 @@ export function PresetsSettings() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4" data-settings-row="presets.root">
-        <div>
-          <h3 className="font-medium text-lg">
-            {t('Presets')}
-            <NewSessionBadge />
-          </h3>
-          <p className="text-muted-foreground text-sm">
-            {t(
-              'Role descriptions, skills, MCP servers and instruction files, chosen per conversation'
-            )}
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setEditing('new')}>
-            <Plus className="mr-1.5 h-4 w-4" />
+    <SettingsPage
+      rowId="presets.root"
+      title={
+        <>
+          {t('Presets')}
+          <NewSessionBadge />
+        </>
+      }
+      description={t(
+        'Role descriptions, skills, MCP servers and instruction files, chosen per conversation'
+      )}
+      actions={
+        <>
+          <Input
+            size="sm"
+            className="w-56 min-w-0 max-w-full"
+            value={importUrl}
+            disabled={importing}
+            placeholder={t('https://example.com/preset.json')}
+            onChange={(event) => setImportUrl(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void importFromUrl();
+            }}
+          />
+          <SettingsButton
+            disabled={importing || !importUrl.trim()}
+            onClick={() => void importFromUrl()}
+          >
+            {importing && <Loader2 className="h-4 w-4 animate-spin" />}
+            {t('Import URL')}
+          </SettingsButton>
+          <SettingsButton onClick={() => setEditing('new')}>
+            <Plus className="h-4 w-4" />
             {t('New preset')}
-          </Button>
-          <div className="flex items-center gap-2">
-            <Input
-              className="h-8 w-56"
-              value={importUrl}
-              disabled={importing}
-              placeholder={t('https://example.com/preset.json')}
-              onChange={(event) => setImportUrl(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void importFromUrl();
-              }}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={importing || !importUrl.trim()}
-              onClick={() => void importFromUrl()}
-            >
-              {importing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-              {t('Import URL')}
-            </Button>
-          </div>
-          {importError && (
-            <p role="alert" className="text-xs text-destructive">
-              {importError}
-            </p>
-          )}
-        </div>
-      </div>
+          </SettingsButton>
+        </>
+      }
+    >
+      {importError && (
+        <p role="alert" className="mt-1 text-right text-xs text-destructive">
+          {importError}
+        </p>
+      )}
 
-      <div className="space-y-2">
+      <SettingsSection>
         {/* 内置全局预设：只读，跟随各条目的 enabled 开关 */}
-        <div className="flex items-center gap-3 rounded-md border px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3 max-sm:px-3">
           <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">
-            <p className="flex items-center gap-2 text-sm font-medium">
+            <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
               {t('Global')}
               <Badge variant="outline">{t('Read-only')}</Badge>
               {defaultPresetId === 'default' && <Badge variant="secondary">{t('Default')}</Badge>}
@@ -135,7 +133,7 @@ export function PresetsSettings() {
           )}
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             aria-label={t('View default role description')}
             onClick={() => setPreviewDefault(true)}
           >
@@ -146,11 +144,14 @@ export function PresetsSettings() {
         {presets
           .filter((preset) => preset.id !== 'default')
           .map((preset) => (
-            <div key={preset.id} className="flex items-center gap-3 rounded-md border px-3 py-2.5">
+            <div
+              key={preset.id}
+              className="flex flex-wrap items-center gap-2 px-4 py-3 max-sm:px-3"
+            >
               <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-2 truncate text-sm font-medium">
-                  {preset.name}
+                <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
+                  <span className="max-w-full truncate">{preset.name}</span>
                   {preset.pluginPresetId && (
                     <Badge variant="outline">
                       {`+ ${
@@ -180,21 +181,21 @@ export function PresetsSettings() {
                   {t('Set as default')}
                 </Button>
               )}
-              <Button variant="ghost" size="icon" onClick={() => setEditing(preset)}>
+              <Button variant="ghost" size="icon-sm" onClick={() => setEditing(preset)}>
                 <Pencil className="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="icon" onClick={() => removePreset(preset.id)}>
+              <Button variant="ghost" size="icon-sm" onClick={() => removePreset(preset.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
           ))}
 
         {pluginPresets.map((preset) => (
-          <div key={preset.id} className="flex items-center gap-3 rounded-md border px-3 py-2.5">
+          <div key={preset.id} className="flex flex-wrap items-center gap-2 px-4 py-3 max-sm:px-3">
             <Layers className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
-              <p className="flex items-center gap-2 truncate text-sm font-medium">
-                {preset.name}
+              <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
+                <span className="max-w-full truncate">{preset.name}</span>
                 <Badge variant="outline">{t('Read-only')}</Badge>
                 {defaultPresetId === preset.id && <Badge variant="secondary">{t('Default')}</Badge>}
               </p>
@@ -215,7 +216,7 @@ export function PresetsSettings() {
             )}
           </div>
         ))}
-      </div>
+      </SettingsSection>
 
       {editing !== null && (
         <PresetEditDialog
@@ -228,7 +229,7 @@ export function PresetsSettings() {
         />
       )}
       {previewDefault && <DefaultSystemPromptDialog onClose={() => setPreviewDefault(false)} />}
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -462,9 +463,9 @@ export function PresetEditDialog({
           <Collapsible
             open={advancedOpen}
             onOpenChange={setAdvancedOpen}
-            className="rounded-md border"
+            className="border-border border-t"
           >
-            <CollapsibleTrigger className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left">
+            <CollapsibleTrigger className="flex w-full items-center justify-between gap-3 border-border border-b py-2.5 text-left">
               <div className="min-w-0">
                 <p className="flex items-center gap-2 text-sm font-medium">
                   {t('Advanced')}
@@ -486,7 +487,7 @@ export function PresetEditDialog({
               />
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <div className="space-y-4 border-t px-3 py-3">
+              <div className="space-y-4 py-3">
                 <PluginPresetOverlayField
                   value={pluginPresetId}
                   disabled={saving}
@@ -922,9 +923,9 @@ export function PickList<T extends { id: string }>({
       <p className="mb-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
         {title}
       </p>
-      <div className="rounded-md border">
+      <div>
         {items.length > 0 && (
-          <div className="border-b p-1.5">
+          <div className="border-b border-border/60 py-1">
             <ListFilterBar
               query={query}
               onQueryChange={setQuery}

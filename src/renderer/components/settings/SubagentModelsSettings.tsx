@@ -4,7 +4,7 @@ import { MODEL_THINKING_LEVEL_OVERRIDES } from '@shared/types/llm';
 import { isVirtualRef, selectableVirtualModels, VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import { Plus, Trash2 } from 'lucide-react';
 import { useMemo } from 'react';
-import { ModelPicker } from '@/components/chat/ModelPicker';
+import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +13,7 @@ import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useSettingsStore } from '@/stores/settings';
+import { SettingsButton, SettingsRow, SettingsSection, SettingsSwitch } from './kit';
 
 const isModelEnabled = (provider: ModelProvider, modelId: string): boolean =>
   provider.models.some((model) => model.id === modelId && model.enabled !== false);
@@ -68,31 +69,31 @@ export function SubagentModelsSettings() {
   }, [candidates, defaultModel, virtualModels]);
 
   return (
-    <section data-slot="subagent-models" className="space-y-2 rounded-lg border bg-card p-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <h4 className="font-medium text-sm">{t('Let the agent pick subagent models')}</h4>
-          <p className="mt-0.5 text-muted-foreground text-xs">
+    <SettingsSection>
+      <SettingsRow
+        rowId="providers.let-the-agent-pick-subagent-models"
+        label={t('Let the agent pick subagent models')}
+        description={
+          <>
             {t(
               'The main agent can pick one of these models when dispatching subagents or coworkers. The description tells it when to use each model.'
             )}
-          </p>
-          <p className="mt-1 text-muted-foreground text-xs">
-            {t('Applies to newly started conversations.')}
-          </p>
-        </div>
-        <Switch className="shrink-0" checked={enabled} onCheckedChange={setEnabled} />
-      </div>
+            <span className="mt-1 block">{t('Applies to newly started conversations.')}</span>
+          </>
+        }
+      >
+        <SettingsSwitch checked={enabled} onCheckedChange={setEnabled} />
+      </SettingsRow>
 
       {enabled && (
-        <div className="space-y-1.5">
+        <>
           {entries.map((entry) => (
             <div
               key={entry.id}
               data-slot="subagent-model-row"
               className={cn(
-                'flex items-center gap-2 rounded-md border px-2 py-1.5',
-                entry.enabled === false && 'bg-muted/50 text-muted-foreground'
+                'flex flex-wrap items-center gap-2 px-4 py-2.5 pl-10 max-sm:pr-3 max-sm:pl-7',
+                entry.enabled === false && 'text-muted-foreground'
               )}
             >
               <Switch
@@ -107,13 +108,15 @@ export function SubagentModelsSettings() {
                   {t('Disabled')}
                 </Badge>
               )}
-              <div className="shrink-0 rounded-md border bg-background">
+              <div className="w-[220px] max-w-full shrink-0">
                 <ModelPicker
                   providers={candidates}
                   virtualModels={virtualModels}
                   providerId={entry.providerId}
                   modelId={entry.modelId}
                   modelCapabilityOverrides={pickModelCapabilityOverrides(entry)}
+                  side="bottom"
+                  triggerClassName={MODEL_PICKER_FORM_TRIGGER_CLASS}
                   reasoningMode={isReasoningOverride(entry.reasoning) ? entry.reasoning : 'follow'}
                   reasoningEnabled={entry.reasoning === 'on'}
                   thinkingLevel={
@@ -151,14 +154,16 @@ export function SubagentModelsSettings() {
               <Input
                 value={entry.description}
                 placeholder={t('When to use it, e.g. cheap and fast for simple subtasks')}
-                className="h-7 flex-1 text-xs"
+                className="min-w-[min(100%,12rem)] flex-1"
+                size="sm"
                 onChange={(event) => updateEntry(entry.id, { description: event.target.value })}
               />
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+                aria-label={t('Delete')}
+                className={cn('shrink-0 text-muted-foreground hover:text-destructive')}
                 onClick={() => removeEntry(entry.id)}
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -166,26 +171,24 @@ export function SubagentModelsSettings() {
             </div>
           ))}
 
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            disabled={!seedSelection}
-            onClick={() => {
-              if (seedSelection) addEntry({ ...seedSelection, description: '' });
-            }}
-          >
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            {t('Add model')}
-          </Button>
-          {!seedSelection && (
-            <p className="text-muted-foreground text-xs">
-              {t('Enable a model and configure valid provider credentials first.')}
-            </p>
-          )}
-        </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 pl-10 max-sm:pr-3 max-sm:pl-7">
+            <SettingsButton
+              disabled={!seedSelection}
+              onClick={() => {
+                if (seedSelection) addEntry({ ...seedSelection, description: '' });
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {t('Add model')}
+            </SettingsButton>
+            {!seedSelection && (
+              <span className="text-muted-foreground text-xs">
+                {t('Enable a model and configure valid provider credentials first.')}
+              </span>
+            )}
+          </div>
+        </>
       )}
-    </section>
+    </SettingsSection>
   );
 }

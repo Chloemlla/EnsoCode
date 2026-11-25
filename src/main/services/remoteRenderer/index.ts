@@ -28,6 +28,7 @@ import {
   addRemoteSender,
   getRemoteSender,
   hasRemoteMain,
+  primeSecretaryRereads,
   RemoteSender,
   remoteLeaderId,
   remoteSenderById,
@@ -36,6 +37,13 @@ import {
 } from './senders';
 
 let hostControl = false;
+
+/** 秘书清单由 IPC 注册处注入（避免与 secretary/ipc 模块成环）；未注入时 prime 是空操作 */
+let secretaryIdProvider: () => readonly string[] = () => [];
+
+export function setRemoteSecretaryIdProvider(provider: () => readonly string[]): void {
+  secretaryIdProvider = provider;
+}
 
 /** 无界面服务端把自身的更新/重启开放给已配对的浏览器 */
 export function allowRemoteHostControl(): void {
@@ -179,37 +187,40 @@ async function hello(link: RemoteLink, command: Extract<RemoteToHost, { type: 'r
     link.send({ type: 'rpc-ready', cid: command.cid, ok: false, error: 'renderer-missing' });
     return;
   }
-  let sender = getRemoteSender(link.pairId, command.cid);
-  let resumed = false;
-  if (sender && sender.kind === command.kind) {
-    cancelGrace(sender);
-    resumed = sender.resume(deliverer(link), command.seq);
-    if (!resumed) {
-      dispose(sender);
-      sender = undefined;
+  const ready = (sender: RemoteSender, resumed: boolean): void => {
+    const leader = sender.kind === 'main' && isLeader(sender);
+    if (sender.kind === 'main') leaderSent.set(sender.id, leader);
+    link.send({
+      type: 'rpc-ready',
+      cid: command.cid,
+      ok: true,
+      resumed,
+      version,
+      platform: process.platform,
+      leader,
+      replay: true,
+    });
+    // 接入/续连后补发秘书重读通知：丢失过推送的远端借此自愈，提案卡不再停在占位行
+    primeSecretaryRereads(sender, secretaryIdProvider());
+  };
+  const existing = getRemoteSender(link.pairId, command.cid);
+  if (existing && existing.kind === command.kind) {
+    cancelGrace(existing);
+    existing.page = command.page;
+    for (const stale of staleRemoteSenders(link.pairId, command.page)) dispose(stale);
+    // 先回 ready 再补发：保留窗口可达几 MB，ready 排在后面时慢链路上浏览器久等不到，
+    // 反复 hello 让宿主一遍遍重放，最终塞满中继的单连接队列被拆链
+    if (existing.resume(deliverer(link), command.seq, () => ready(existing, true))) {
+      refreshRemoteLeadership();
+      return;
     }
-  } else if (sender) {
-    dispose(sender);
-    sender = undefined;
   }
-  if (!sender) {
-    sender = new RemoteSender(link.pairId, command.cid, command.kind, deliverer(link));
-    addRemoteSender(sender);
-  }
+  if (existing) dispose(existing);
+  const sender = new RemoteSender(link.pairId, command.cid, command.kind, deliverer(link));
+  addRemoteSender(sender);
   sender.page = command.page;
   for (const stale of staleRemoteSenders(link.pairId, command.page)) dispose(stale);
-  const leader = sender.kind === 'main' && isLeader(sender);
-  if (sender.kind === 'main') leaderSent.set(sender.id, leader);
-  link.send({
-    type: 'rpc-ready',
-    cid: command.cid,
-    ok: true,
-    resumed,
-    version,
-    platform: process.platform,
-    leader,
-    replay: true,
-  });
+  ready(sender, false);
   refreshRemoteLeadership();
 }
 

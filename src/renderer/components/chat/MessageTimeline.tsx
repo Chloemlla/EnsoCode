@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { useI18n } from '@/i18n';
 import { overlayGuardActive } from '@/lib/overlayGuard';
 import { cn } from '@/lib/utils';
+import { isLayoutAnimating, useLayoutAnimationStore } from '@/stores/layoutAnimation';
 import {
   type HistoryPageChrome,
   historyPageChrome,
@@ -77,7 +78,9 @@ const AT_BOTTOM_THRESHOLD = 40;
 // 稳定引用。库每次渲染都重发 props；按引用去重的输入不能每次都是新对象。
 const INITIAL_TOP_MOST_ITEM_INDEX = { index: 'LAST', align: 'end' } as const;
 const VIEWPORT_OVERSCAN = { top: 600, bottom: 600 };
-const followChatOutput = (isAtBottom: boolean) => (isAtBottom ? 'auto' : false);
+/** 面板宽度动画期间不跟随：逐帧重排时 Virtuoso 的滚动纠正会与测高互相拉扯 */
+const followChatOutput = (isAtBottom: boolean) =>
+  isAtBottom && !isLayoutAnimating() ? 'auto' : false;
 
 interface TurnSpans {
   /** 行 key → 所属轮次 key */
@@ -159,6 +162,8 @@ interface MessageTimelineProps {
   emptyDescription?: string;
   /** 空会话建议卡片的点击回调；不传则不显示建议 */
   onSuggestion?: (prompt: string) => void;
+  /** 空态语境：秘书会话用秘书的副标题和建议卡片 */
+  emptyVariant?: 'project' | 'secretary';
   /** 空时间线且 resume 失败时：再走一遍 jsonl 回放 */
   onRetryResume?: () => void;
   /** 准备超时降级：空态说明「暂无可显示的历史」并给重试入口，不冒充已同步 */
@@ -190,6 +195,8 @@ interface MessageTimelineProps {
   secretarySession?: boolean;
   /** 这条时间线所属秘书的脸；不传就用当前聚焦的秘书 */
   secretaryFace?: SecretaryFaceModel;
+  /** 这条时间线正在渲染的会话，用来取所属秘书的脸 */
+  conversationId?: string;
   /** 选中文字可引用到主输入框（只有带主 Composer 的会话视图开） */
   quotable?: boolean;
 }
@@ -210,6 +217,7 @@ export function MessageTimeline({
   emptyTitle,
   emptyDescription,
   onSuggestion,
+  emptyVariant,
   onRetryResume,
   onRetrySync,
   virtualize = true,
@@ -221,11 +229,12 @@ export function MessageTimeline({
   activeHit = null,
   secretarySession = false,
   secretaryFace,
+  conversationId,
   quotable = false,
 }: MessageTimelineProps) {
   const { t } = useI18n();
   const host = useChatHost();
-  const face = useSecretaryFace();
+  const face = useSecretaryFace(conversationId);
   const secretarySpeaker = secretarySession ? (secretaryFace ?? face) : null;
   const secretaryMark = !host && secretarySpeaker ? secretarySpeaker : null;
   const secretaryChat = secretarySession;
@@ -244,6 +253,8 @@ export function MessageTimeline({
   /** 用户正在/刚触摸过滚动容器：只有这时才允许解除跟随 */
   const userScrollingRef = useRef(false);
   const userScrollTimerRef = useRef(0);
+  /** 面板宽度动画期间被压下的「非用户离底」：动画结束后补一次单次贴底 */
+  const layoutDriftRef = useRef(false);
   const [activeNavKey, setActiveNavKey] = useState<string | null>(null);
 
   /*
@@ -432,6 +443,28 @@ export function MessageTimeline({
       window.clearTimeout(userScrollTimerRef.current);
     },
     []
+  );
+
+  /*
+   * 右侧面板开合时聊天区逐帧变宽/变窄，Virtuoso 每帧重测行高；此时再起贴底循环就是闪烁源。
+   * 动画开始停掉进行中的纠正；结束后若期间被挤离底且仍贴底，按流式跟随的单次贴底归位，
+   * 否则 Virtuoso 内部已判离底，后续输出不再跟随，也不会出现「回到底部」。
+   */
+  useEffect(
+    () =>
+      useLayoutAnimationStore.subscribe(({ active }, prev) => {
+        if (active === prev.active) return;
+        if (active) {
+          cancelAnimationFrame(settleRef.current);
+          cancelAnimationFrame(followSettleRef.current);
+          pinningRef.current = false;
+          return;
+        }
+        const drifted = layoutDriftRef.current;
+        layoutDriftRef.current = false;
+        if (drifted && atBottomRef.current && !userScrollingRef.current) pinToBottom();
+      }),
+    [pinToBottom]
   );
 
   /** 用户滚动意图（滚轮/触摸/键盘/拖滚动条）：只有这期间的离底才算用户上滚，两条渲染路径共用 */
@@ -700,6 +733,7 @@ export function MessageTimeline({
             privacyMask={replyHead.replyPrivacyMask}
             secretarySession={secretaryChat}
             face={secretarySpeaker}
+            conversationId={conversationId}
           />
         )}
         <RowErrorBoundary itemKey={item.key}>
@@ -829,12 +863,15 @@ export function MessageTimeline({
                     </>
                   ) : emptyDescription !== '' ? (
                     <p className="t-stagger-line t-stagger-line--2 text-sm text-muted-foreground">
-                      {emptyDescription ?? t('Ask the agent…')}
+                      {emptyDescription ??
+                        (emptyVariant === 'secretary'
+                          ? t('Tell the secretary what to take care of…')
+                          : t('Ask the agent…'))}
                     </p>
                   ) : null}
                   {onSuggestion && (
                     <div className="t-stagger-line t-stagger-line--3 mt-5 w-full">
-                      <WelcomeSuggestions onPick={onSuggestion} />
+                      <WelcomeSuggestions onPick={onSuggestion} variant={emptyVariant} />
                     </div>
                   )}
                 </>
@@ -925,6 +962,10 @@ export function MessageTimeline({
                  * 此前贴底就重新贴回去，不解除跟随。
                  */
                 if (!value && atBottomRef.current && !userScrollingRef.current) {
+                  if (isLayoutAnimating()) {
+                    layoutDriftRef.current = true;
+                    return;
+                  }
                   scrollToBottom();
                   return;
                 }

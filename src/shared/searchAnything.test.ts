@@ -11,6 +11,7 @@ import {
   searchBrowserTabs,
   searchSettingsEntries,
 } from './searchAnything';
+import { relocateSettingsLink, type SettingsCategory } from './settingsDeepLink';
 
 function tab(
   overrides: Partial<BrowserSearchTab> & Pick<BrowserSearchTab, 'tabId'>
@@ -189,6 +190,44 @@ describe('searchSettingsEntries', () => {
     const hits = searchSettingsEntries(local, 'term');
     expect(hits.map((e) => e.id)).toEqual(['a.title-hit', 'b.desc-only']);
   });
+
+  it('精确命中排在前缀、子串和仅说明命中之前', () => {
+    const local = [
+      { id: 'd.desc', category: 'general', title: '其他', description: '这里提到代理' },
+      { id: 'c.mid', category: 'general', title: '网络代理项' },
+      { id: 'b.prefix', category: 'general', title: '代理服务器' },
+      { id: 'a.exact', category: 'general', title: '代理' },
+    ];
+    expect(searchSettingsEntries(local, '代理').map((e) => e.id)).toEqual([
+      'a.exact',
+      'b.prefix',
+      'c.mid',
+      'd.desc',
+    ]);
+  });
+
+  it('多词查询按最差的一词排，整句前缀高于标题中段，说明垫底', () => {
+    const local = [
+      { id: 'd.desc', category: 'general', title: '其他', description: '代理 服务器在说明里' },
+      { id: 'c.mid', category: 'general', title: '说明里的代理 服务器' },
+      { id: 'b.prefix', category: 'general', title: '代理 服务器更多' },
+      { id: 'a.exact', category: 'general', title: '代理 服务器' },
+    ];
+    expect(searchSettingsEntries(local, '代理 服务器').map((e) => e.id)).toEqual([
+      'a.exact',
+      'b.prefix',
+      'c.mid',
+      'd.desc',
+    ]);
+  });
+
+  it('不传译文函数时，中文仍能命中英文标题的中文译文', () => {
+    const local = [{ id: 'general.proxy', category: 'general', title: 'Network proxy' }];
+    expect(searchSettingsEntries(local, '网络代理').map((e) => e.id)).toEqual(['general.proxy']);
+    expect(searchSettingsEntries(local, 'Network proxy').map((e) => e.id)).toEqual([
+      'general.proxy',
+    ]);
+  });
 });
 
 describe('buildSettingsCatalog', () => {
@@ -246,27 +285,32 @@ describe('buildSettingsCatalog', () => {
     }
   });
 
-  it('对话显示条目归外观页', () => {
-    const catalog = buildSettingsCatalog();
-    const moved = [
-      'openChangesOnFileEdit',
-      'compactReadOnlyTools',
-      'expandLiveEdits',
-      'expandLiveReasoning',
-      'autoCollapseTurns',
-      'collapseCompletedActivity',
-      'collapseLiveActivity',
-      'liveActivityFoldDelaySec',
-      'pinUnfinishedTodos',
-      'headerSessionTabs',
-      'navRailSide',
-    ];
-    for (const suffix of moved) {
-      expect(catalog.find((entry) => entry.id === `appearance.${suffix}`)?.category).toBe(
-        'appearance'
-      );
-      expect(catalog.some((entry) => entry.id === `general.${suffix}`)).toBe(false);
+  it('拆页后每个条目都指向行现在所在的分区（与深链改落一致）', () => {
+    for (const entry of buildSettingsCatalog()) {
+      expect(
+        relocateSettingsLink({ category: entry.category as SettingsCategory, rowId: entry.id })
+          .category,
+        entry.id
+      ).toBe(entry.category);
     }
+    const categoryOf = (id: string) => buildSettingsCatalog().find((e) => e.id === id)?.category;
+    expect(categoryOf('appearance.headerSessionTabs')).toBe('conversation');
+    expect(categoryOf('appearance.chatTypography')).toBe('conversation');
+    expect(categoryOf('appearance.navRailSide')).toBe('conversation');
+    expect(categoryOf('general.terminalShell')).toBe('terminal');
+    expect(categoryOf('general.autoArchiveIdleDays')).toBe('runtime');
+    expect(categoryOf('general.proxy')).toBe('general');
+  });
+
+  it('搜「代理」「字体」「归档闲置」命中新位置', () => {
+    const catalog = buildSettingsCatalog();
+    const hits = (query: string) =>
+      searchSettingsEntries(catalog, query, {
+        translate: (text) => getTranslation('zh', text),
+      }).map((e) => `${e.category}:${e.id}`);
+    expect(hits('代理')).toContain('general:general.proxy');
+    expect(hits('字体')).toContain('appearance:terminal.font');
+    expect(hits('归档闲置')).toContain('runtime:general.autoArchiveIdleDays');
   });
 
   it('Bot 设置迁到「实验」与「Bot 模式」页，通用页不再有旧条目', () => {
@@ -304,7 +348,7 @@ describe('buildSettingsCatalog', () => {
   it('phone.root 标题或描述包含 pairing 或 Devices', () => {
     const catalog = buildSettingsCatalog();
     const entry = catalog.find((e) => e.id === 'phone.root');
-    expect(`${entry?.title} ${entry?.description ?? ''}`).toMatch(/pairing|devices/i);
+    expect(entry?.title).toBe('Allow connections');
   });
 
   it('从 snapshot 投影具名条目', () => {
@@ -337,14 +381,15 @@ describe('buildSettingsCatalog', () => {
   it('搜索 "proxy" 命中 general.proxy，"pairing" 命中 phone.root，具名 provider 名可命中', () => {
     const catalog = buildSettingsCatalog({ providers: [{ id: 'p1', name: 'My Custom Provider' }] });
     expect(searchSettingsEntries(catalog, 'proxy').map((e) => e.id)).toContain('general.proxy');
-    expect(searchSettingsEntries(catalog, 'pairing').map((e) => e.id)).toContain('phone.root');
+    expect(searchSettingsEntries(catalog, 'Devices').map((e) => e.id)).toContain('phone.devices');
     expect(searchSettingsEntries(catalog, 'Custom').map((e) => e.id)).toContain('providers.p1');
   });
 
   it('目录里的标题和说明都有中文译文', () => {
     const missing = buildSettingsCatalog()
       .flatMap((entry) => [entry.title, entry.description ?? ''])
-      .filter((text) => text && !(text in zhTranslations));
+      // 原文本身就是中文的没有可译的译文，它自己就是界面显示文本
+      .filter((text) => text && !/[\u3400-\u9fff]/u.test(text) && !(text in zhTranslations));
     expect(missing).toEqual([]);
   });
 

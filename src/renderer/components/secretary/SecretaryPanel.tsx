@@ -1,6 +1,7 @@
 import type { SecretaryScheduleView } from '@shared/types/secretary';
 import { Settings } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { SettingsSection } from '@/components/settings/kit';
 import { useI18n } from '@/i18n';
 import { openSecretarySettings } from '@/lib/secretarySettingsLink';
 import { cn } from '@/lib/utils';
@@ -146,7 +147,27 @@ export function SecretaryPanel({ projectId }: { projectId?: string } = {}) {
         {tab === 'workbench' && <SecretaryWorkbench name={view.name} secretaryId={secretaryId} />}
         {tab === 'daily' && <SecretaryDailyBoard secretaryId={secretaryId} />}
         {tab === 'memory' && <SecretaryMemoryPanel secretaryId={secretaryId} />}
-        {tab === 'contact' && <SecretaryContactPanel secretaryId={secretaryId} />}
+        {tab === 'contact' && (
+          // 手机上打不开桌面设置页，联系方式与主人身份必须在面板里直接管理；
+          // 与设置页同一实现，分组卡片排版走同一套 frames
+          <div className="px-3 pb-4">
+            <SecretaryContactPanel
+              secretaryId={secretaryId}
+              frames={{
+                owner: (node) => (
+                  <SettingsSection title={t('Owner identity')} rowId="contacts.owner">
+                    {node}
+                  </SettingsSection>
+                ),
+                channels: (node) => (
+                  <SettingsSection title={t('Contact channels')} rowId="contacts.channels">
+                    {node}
+                  </SettingsSection>
+                ),
+              }}
+            />
+          </div>
+        )}
         {tab === 'skills' && <SecretarySkillsPanel secretaryId={secretaryId} />}
         {tab === 'schedules' && (
           <SecretarySchedulePanel

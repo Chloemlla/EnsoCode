@@ -232,11 +232,13 @@ export class RemoteSender extends EventEmitter {
    * 续上新连接，从浏览器已应用的 seq 之后补发。
    * 所需帧已移出窗口，或浏览器声称收到过宿主没发过的帧，返回 false（调用方应销毁并让浏览器重载）。
    */
-  resume(deliver: Deliver, appliedSeq?: number): boolean {
+  /** beforeReplay 在确认能续上、补发之前调用：调用方借此先回 rpc-ready */
+  resume(deliver: Deliver, appliedSeq?: number, beforeReplay?: () => void): boolean {
     this.deliver = deliver;
     const from = appliedSeq ?? (this.suspended ? this.suspendedAfter : this.seq);
     this.suspended = false;
     if (from < this.evictedThrough || from > this.seq) return false;
+    beforeReplay?.();
     for (const { seq, frame } of this.retained) if (seq > from) deliver(frame);
     return true;
   }
@@ -434,9 +436,22 @@ export function staleRemoteSenders(pairId: string, page: string | undefined): Re
 }
 
 export const isRemoteMainSender = (id: number): boolean => byId.get(id)?.kind === 'main';
-export const isRemoteSettingsSender = (id: number): boolean => byId.get(id)?.kind === 'settings';
 export const hasRemoteMain = (): boolean =>
   [...byId.values()].some((sender) => sender.kind === 'main');
+
+/**
+ * 远端主界面接入/续连后补发各秘书的重读通知。
+ * 重读标记是一次性事件：帧被丢（断链重连途中 sender 重建、合并窗口被覆盖等）后，
+ * 远端要等下一次状态变化才会重拉，期间提案卡一直停在占位行、没有确认按钮。
+ * 接入时无条件补一遍，远端按缓存增量重读，未变时几乎零成本。
+ * settings 窗口不能收半成品状态（它会把 { secretaryId } 当整份原样推出去），只 prime 主界面。
+ */
+export function primeSecretaryRereads(sender: RemoteSender, secretaryIds: readonly string[]): void {
+  if (sender.kind !== 'main') return;
+  for (const id of secretaryIds) {
+    sender.send(SECRETARY_STATE_CHANNEL, { secretaryId: id });
+  }
+}
 
 /** 广播给所有远端 renderer（exceptId 用于排除发起方，语义同桌面多窗口广播） */
 export function sendToRemoteRenderers(

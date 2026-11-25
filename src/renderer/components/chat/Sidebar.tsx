@@ -122,7 +122,8 @@ import {
   SecretaryDispatchBadge,
 } from '@/components/secretary/SecretaryRunningOrigins';
 import {
-  SecretaryCollapsedButton,
+  type CollapsedSecretaryEntry,
+  SecretaryCollapsedRail,
   SecretaryGroupHeader,
   SecretarySidebarSection,
   sidebarProjects,
@@ -165,14 +166,26 @@ import {
   readCollapsedProjects,
   subscribeCollapsedProjects,
 } from '@/lib/importLocalProject';
-import { effectiveKeybindings, formatBinding, IS_MAC } from '@/lib/keybindings';
-import { heightVariants, springStandard } from '@/lib/motion';
+import {
+  ADD_PROJECT_SHORTCUT,
+  effectiveKeybindings,
+  formatBinding,
+  IS_MAC,
+  isAddProjectShortcut,
+} from '@/lib/keybindings';
+import {
+  heightVariants,
+  sidebarWidthTransition,
+  springStandard,
+  usePrefersReducedMotion,
+} from '@/lib/motion';
 import { openSecretary } from '@/lib/openSecretary';
-import { secretaryConversationIds } from '@/lib/secretaryEntry';
+import { secretaryConversationIds, secretaryUnreadCount } from '@/lib/secretaryEntry';
 import { openSecretarySettings } from '@/lib/secretarySettingsLink';
 import { formatRelativeTime } from '@/lib/time';
 import { cn } from '@/lib/utils';
 import { Z_INDEX } from '@/lib/z-index';
+import { openSettings } from '@/stores/appView';
 import { closeBackgroundTasks } from '@/stores/backgroundTasksView';
 import { useSecretaryStore } from '@/stores/secretary';
 import { usePendingReminder, useSessionRemindersStore } from '@/stores/sessionReminders';
@@ -238,13 +251,18 @@ const SECRETARY_FOLDS_KEY = 'enso-collapsed-secretaries';
 const SECRETARY_VISIBLE_LIMIT = 3;
 
 const ICON_BUTTON_CLASS =
-  'flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground';
+  'flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-[background-color,color,scale,transform] duration-150 hover:bg-foreground/5 hover:text-foreground active:scale-[0.95] motion-reduce:transition-none motion-reduce:active:scale-100';
 /** 分区标题右侧的悬停按钮；无悬停的触屏常显 */
 const SECTION_ACTION_CLASS =
   '-my-0.5 flex size-5 shrink-0 items-center justify-center rounded-[5px] text-subtle-foreground opacity-0 transition-opacity hover:bg-foreground/5 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100';
+/** 添加项目需要被发现，不依赖悬停才显现 */
+const SECTION_ACTION_PERSISTENT_CLASS =
+  '-my-0.5 flex size-5 shrink-0 items-center justify-center rounded-[5px] text-subtle-foreground hover:bg-foreground/5 hover:text-foreground';
 
 interface SidebarProps {
   width?: number;
+  /** 拖拽调宽进行中：宽度瞬时跟手，弹簧不追手抖 */
+  resizing?: boolean;
   collapsed: boolean;
   onToggleCollapse: () => void;
   onOpenSearch?: () => void;
@@ -254,12 +272,14 @@ interface SidebarProps {
 
 export function Sidebar({
   width,
+  resizing,
   collapsed,
   onToggleCollapse,
   onOpenSearch,
   onNavigate,
 }: SidebarProps) {
   const { t, locale } = useI18n();
+  const reduceMotion = usePrefersReducedMotion();
   const projects = useSettingsStore((state) => state.projects);
   const chromeKind = useWindowChromeKind();
   const mobile = chromeKind === 'mobile';
@@ -371,6 +391,38 @@ export function Sidebar({
       return view ? [{ id: entry.id, projectId: entry.projectId, view }] : [];
     });
   }, [multiSecretary, secretaryList, secretaryStates, t]);
+  // 折叠图标栏：与展开态同一份秘书清单与顺序，每个秘书各自的角标
+  const collapsedSecretaries = useMemo<CollapsedSecretaryEntry[]>(() => {
+    if (!collapsed) return [];
+    const base = multiSecretary
+      ? secretaryEntries
+      : secretaryView
+        ? [
+            {
+              id: secretaryList[0]?.id ?? 'default',
+              projectId: secretaryState.projectId,
+              view: secretaryView,
+            },
+          ]
+        : [];
+    const activeProjectId = activeId ? conversations[activeId]?.projectId : undefined;
+    return base.map((entry) => ({
+      id: entry.id,
+      view: entry.view,
+      unread: secretaryUnreadCount(entry.projectId, order, conversations),
+      active: activeProjectId !== undefined && activeProjectId === entry.projectId,
+    }));
+  }, [
+    collapsed,
+    multiSecretary,
+    secretaryEntries,
+    secretaryView,
+    secretaryList,
+    secretaryState.projectId,
+    activeId,
+    order,
+    conversations,
+  ]);
   // 每个秘书只按自己的看板分组，计数和悬停列表都不跨分区
   const secretaryRunning = useMemo(() => {
     const known = (id: string) => conversations[id] !== undefined;
@@ -947,6 +999,11 @@ export function Sidebar({
       const mod = IS_MAC ? e.metaKey : e.ctrlKey;
       const switchMode = mod && !e.shiftKey && !e.altKey;
       setModHeld(switchMode);
+      if (isAddProjectShortcut(e)) {
+        e.preventDefault();
+        setAddOpen(true);
+        return;
+      }
       if (!switchMode || e.repeat) return;
       const n = Number(e.key);
       if (n < 1 || n > 9) return;
@@ -974,6 +1031,10 @@ export function Sidebar({
       document.removeEventListener('visibilitychange', onVis);
     };
   }, [selectConversation, setModHeld]);
+
+  const addProjectTitle = t('Add project ({{shortcut}})', {
+    shortcut: formatBinding(ADD_PROJECT_SHORTCUT),
+  });
 
   // worktree 徽标状态：挂载 + 窗口聚焦 + 30s 轻量轮询（只查隔离会话，不每帧跑 git）
   useEffect(() => {
@@ -1069,35 +1130,22 @@ export function Sidebar({
     <motion.aside
       initial={false}
       animate={{ width: collapsed ? 48 : width }}
-      transition={springStandard}
+      transition={sidebarWidthTransition({ resizing, reducedMotion: reduceMotion })}
       data-enso="sidebar"
       className="flex shrink-0 flex-col overflow-hidden"
     >
       {collapsed && (
-        <div className="flex w-full flex-1 flex-col items-center gap-1 py-2">
+        <div className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 py-2">
           {/* 展开/折叠与搜索常驻窗口顶栏（App），折叠栏只留其余入口 */}
-          {(multiSecretary ? secretaryEntries.length > 0 : secretaryView) && (
-            <SecretaryCollapsedButton
-              view={
-                multiSecretary && secretaryEntries[0]
-                  ? {
-                      ...secretaryEntries[0].view,
-                      needsYou: secretaryEntries.reduce(
-                        (sum, entry) => sum + entry.view.needsYou,
-                        0
-                      ),
-                      running: secretaryEntries.reduce((sum, entry) => sum + entry.view.running, 0),
-                    }
-                  : (secretaryView as NonNullable<typeof secretaryView>)
-              }
-              onClick={() => openSecretary()}
-            />
+          {collapsedSecretaries.length > 0 && (
+            <SecretaryCollapsedRail entries={collapsedSecretaries} onOpen={openSecretary} />
           )}
           <button
             type="button"
             onClick={() => setAddOpen(true)}
             className={ICON_BUTTON_CLASS}
-            title={t('Add project')}
+            title={addProjectTitle}
+            aria-label={addProjectTitle}
           >
             <FolderPlus className="h-4 w-4" />
           </button>
@@ -1123,7 +1171,7 @@ export function Sidebar({
           <button
             type="button"
             data-enso="settings-button"
-            onClick={() => window.electronAPI.window.openSettings()}
+            onClick={() => openSettings()}
             className={ICON_BUTTON_CLASS}
             title={t('Settings')}
           >
@@ -1244,12 +1292,13 @@ export function Sidebar({
                   void useSecretaryStore.getState().newSecretaryConversation();
                 }}
                 onOpenSettings={() =>
-                  void window.electronAPI.window.openSettings({
+                  openSettings({
                     category: 'secretary',
                     rowId: 'secretary.root',
                   })
                 }
                 onReset={() => setSecretaryResetId('default')}
+                secretaryId={secretaryList[0]?.id ?? 'default'}
                 runningOrigins={runningLink(secretaryRunning.single)}
               >
                 {shownSecretaryIds.map((id) => (
@@ -1297,7 +1346,8 @@ export function Sidebar({
               onClick={() => setAddOpen(true)}
               className="mt-2 w-full rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground transition-colors hover:border-brand/50 hover:text-foreground"
             >
-              {t('Add a project to start')}
+              <span className="block">{t('Add a project to start')}</span>
+              <span className="mt-1 block text-xs">{formatBinding(ADD_PROJECT_SHORTCUT)}</span>
             </button>
           )}
           {orderedProjects.length === 0 && scratchSessionsEnabled && scratchProject && (
@@ -1544,11 +1594,11 @@ export function Sidebar({
                   <button
                     type="button"
                     onClick={() => setAddOpen(true)}
-                    className={SECTION_ACTION_CLASS}
-                    title={t('Add project')}
-                    aria-label={t('Add project')}
+                    className={SECTION_ACTION_PERSISTENT_CLASS}
+                    title={addProjectTitle}
+                    aria-label={addProjectTitle}
                   >
-                    <Plus className="size-3.25" />
+                    <FolderPlus className="size-3.25" />
                   </button>
                 </>
               }
@@ -2023,6 +2073,16 @@ export function Sidebar({
           ) : (
             <NodeSwitcher />
           )}
+          <button
+            type="button"
+            data-enso="add-project-footer"
+            onClick={() => setAddOpen(true)}
+            className={ICON_BUTTON_CLASS}
+            title={addProjectTitle}
+            aria-label={addProjectTitle}
+          >
+            <FolderPlus className="h-4 w-4" />
+          </button>
           <BackgroundTasksButton className={ICON_BUTTON_CLASS} />
           <ArchiveEntryButton
             count={archivedCount}
@@ -2042,7 +2102,7 @@ export function Sidebar({
           <button
             type="button"
             data-enso="settings-button"
-            onClick={() => window.electronAPI.window.openSettings()}
+            onClick={() => openSettings()}
             className={ICON_BUTTON_CLASS}
             title={t('Settings')}
             aria-label={t('Settings')}

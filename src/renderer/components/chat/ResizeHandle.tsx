@@ -11,6 +11,11 @@ interface ResizeHandleProps {
   gap?: boolean;
   /** 零宽、不画线，命中区只落在右侧卡片边缘：左侧贴边的是侧栏滚动条，不能被手柄盖住 */
   edge?: boolean;
+  /**
+   * 面板收起时隐藏且不可交互。1px 线仍占位：条件挂载会让开合首帧聊天区先跳宽；
+   * 8px 缝不占位：否则收起态右边距叠成 16px，与底边 8px 不对称
+   */
+  inactive?: boolean;
 }
 
 /** 侧边栏缘的拖拽手柄:视觉 1px。edge 命中区只向右扩进卡片，避免盖住侧栏滚动条。 */
@@ -20,8 +25,12 @@ export function ResizeHandle({
   onReset,
   gap = false,
   edge = false,
+  inactive = false,
 }: ResizeHandleProps) {
   const [resizing, setResizing] = useState(false);
+  // 只在实际拖动后才铺 iframe 遮罩：mousedown 立即铺设会把手柄盖住，
+  // 快速点击(无拖动)的 mouseup 落在遮罩上,click/dblclick 序列断裂,双击复位间歇失效
+  const [dragging, setDragging] = useState(false);
   const lastX = useRef(0);
 
   const handleMouseDown = useCallback(
@@ -31,11 +40,13 @@ export function ResizeHandle({
       onResizingChange?.(true);
       lastX.current = e.clientX;
       const handleMove = (ev: MouseEvent) => {
+        setDragging(true);
         onResize(ev.clientX - lastX.current);
         lastX.current = ev.clientX;
       };
       const handleUp = () => {
         setResizing(false);
+        setDragging(false);
         onResizingChange?.(false);
         document.removeEventListener('mousemove', handleMove);
         document.removeEventListener('mouseup', handleUp);
@@ -48,10 +59,12 @@ export function ResizeHandle({
 
   return (
     <div
+      aria-hidden={inactive || undefined}
       className={cn(
         // z-20：命中区伸进相邻卡片，否则后绘制的卡片会把指针吃掉
         'relative z-20 shrink-0',
-        edge ? 'w-0' : gap ? 'w-[8px]' : 'w-px bg-border'
+        edge || (gap && inactive) ? 'w-0' : gap ? 'w-[8px]' : 'w-px bg-border',
+        inactive && 'pointer-events-none invisible'
       )}
     >
       <div
@@ -69,7 +82,7 @@ export function ResizeHandle({
         )}
       />
       {/* 拖拽期间遮住 iframe（插件页等），否则鼠标进入 iframe 后父文档收不到 mousemove/mouseup */}
-      {resizing && <div className="fixed inset-0 z-50 cursor-col-resize" />}
+      {dragging && <div className="fixed inset-0 z-50 cursor-col-resize" />}
     </div>
   );
 }

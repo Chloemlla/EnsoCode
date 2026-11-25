@@ -13,6 +13,11 @@ import type { DropShelfDelivery } from '@shared/dropShelf';
 import type { ElevationRequestView } from '@shared/elevation';
 import type { InterruptedTurn } from '@shared/exitInterrupt';
 import type {
+  GenerateCommitMessageRequest,
+  GenerateCommitMessageResult,
+  GitCommitPromptResult,
+} from '@shared/gitCommitMessage';
+import type {
   ChatModelDto,
   DistillableSessionDto,
   EmbeddingDownloadProgressDto,
@@ -74,7 +79,7 @@ import type {
 } from '@shared/resources';
 import type { BrowserSearchTab } from '@shared/searchAnything';
 import type { FeedEvent } from '@shared/secretary/feed';
-import type { SettingsDeepLink } from '@shared/settingsDeepLink';
+import type { SettingsOpenRequest } from '@shared/settingsDeepLink';
 import type { ShellIntegration } from '@shared/shellIntegration';
 import type {
   AssetOccupancyRow,
@@ -118,6 +123,7 @@ import type {
   GitRequest,
   GitStatusResult,
   HostDirListing,
+  HostDirSearchResult,
   ListModelsResult,
   LocalAssetScanResult,
   LocalProviderScanResult,
@@ -1092,6 +1098,9 @@ const electronAPI = {
     /** 在宿主机 parent 目录下新建子文件夹，成功时返回新目录的列表 */
     createHostDir: (parent: string, name: string): Promise<HostDirListing> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_CREATE_HOST_DIR, parent, name),
+    /** 在本机家目录下按关键词搜索目录；空查询返回空列表，host 是机器名 */
+    searchHostDirs: (query: string): Promise<HostDirSearchResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_SEARCH_HOST_DIRS, query),
     /** 在系统文件管理器（或 appId 指定的应用）里打开项目或会话的实际工作目录；ssh 项目返回 unsupported */
     reveal: (request: {
       projectId: string;
@@ -1132,6 +1141,21 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.GIT_PULL, request),
     push: (request: GitRequest): Promise<GitOperationResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.GIT_PUSH, request),
+    generateCommitMessage: (
+      request: GenerateCommitMessageRequest
+    ): Promise<GenerateCommitMessageResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_GENERATE_COMMIT_MESSAGE, request),
+    abortCommitMessage: (request: {
+      requestId: string;
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_GENERATE_COMMIT_MESSAGE_ABORT, request),
+    /** 自定义提示词存 userData 下独立文件；renderer 只传文本，不传路径 */
+    readCommitPrompt: (): Promise<GitCommitPromptResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_COMMIT_PROMPT_READ),
+    writeCommitPrompt: (request: { text: string }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_COMMIT_PROMPT_WRITE, request),
+    resetCommitPrompt: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_COMMIT_PROMPT_RESET),
   },
 
   changes: {
@@ -1746,7 +1770,9 @@ const electronAPI = {
     setChannel: (channel: UpdateChannel): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_SET_CHANNEL, channel),
     getState: (): Promise<UpdaterState> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_GET_STATE),
-    restart: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_RESTART),
+    /** force=true 立即重启（不等任务收完）；默认优雅：先等运行中的回合结束 */
+    restart: (force?: boolean): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.UPDATER_RESTART, force === true),
     onStatus: (callback: (status: UpdateStatus) => void): (() => void) => {
       const listener = (_: unknown, status: UpdateStatus) => callback(status);
       ipcRenderer.on(IPC_CHANNELS.UPDATER_STATUS, listener);
@@ -1821,9 +1847,6 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.NODES_REMOVE, nodeId),
     rename: (nodeId: string, label: string): Promise<NodeActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.NODES_RENAME, nodeId, label),
-    /** 在本机新窗口打开该节点的设置（宿主设置页经隧道运行） */
-    openSettings: (nodeId: string): Promise<NodeActionResult> =>
-      ipcRenderer.invoke(IPC_CHANNELS.NODES_OPEN_SETTINGS, nodeId),
     /** 主窗口可见层切到本机（'local'）或某节点的完整界面 */
     switch: (target: string): Promise<NodeActionResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.NODES_SWITCH, target),
@@ -1854,8 +1877,6 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE, visible),
     refreshDragRegions: (): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_REFRESH_DRAG_REGIONS),
-    openSettings: (link?: SettingsDeepLink): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_SETTINGS, link),
     openDevTools: (): Promise<OpenDevToolsResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.WINDOW_OPEN_DEV_TOOLS),
     onToggleSidebar: (callback: () => void): (() => void) => {
@@ -1863,12 +1884,12 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.WINDOW_TOGGLE_SIDEBAR, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_TOGGLE_SIDEBAR, listener);
     },
-    onSettingsDeepLink: (callback: (link: SettingsDeepLink) => void): (() => void) => {
-      const listener = (_: unknown, link: SettingsDeepLink) => callback(link);
+    onSettingsDeepLink: (callback: () => void): (() => void) => {
+      const listener = () => callback();
       ipcRenderer.on(IPC_CHANNELS.SETTINGS_DEEP_LINK, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.SETTINGS_DEEP_LINK, listener);
     },
-    consumeSettingsDeepLink: (): Promise<SettingsDeepLink | null> =>
+    consumeSettingsDeepLink: (): Promise<SettingsOpenRequest | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_DEEP_LINK_CONSUME),
     popupMenu: (
       items: { id: string; label: string }[],

@@ -1,12 +1,12 @@
 import type { DefaultModelRef } from '@shared/defaultModel';
 import type { ModelProvider } from '@shared/types';
-import { CircleAlert, Server } from 'lucide-react';
+import { CircleAlert } from 'lucide-react';
 import { MODEL_PICKER_FORM_TRIGGER_CLASS, ModelPicker } from '@/components/chat/ModelPicker';
-import { Button } from '@/components/ui/button';
 import { useI18n } from '@/i18n';
 import { useMaterializedProviders, useUsableProviders } from '@/stores/modelDirectory/useProviders';
 import { useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useDefaultModelRevalidationStore, useSettingsStore } from '@/stores/settings';
+import { SettingsRow, SettingsSwitch } from './kit';
 
 function selectionLabel(selection: DefaultModelRef, providers: readonly ModelProvider[]): string {
   const provider = providers.find((entry) => entry.id === selection.providerId);
@@ -53,78 +53,66 @@ export function DefaultModelPicker() {
       })
     : null;
 
+  const notes = [
+    candidates.length === 0 &&
+      `${t('No usable models')} · ${t('Enable a model and configure valid provider credentials first.')}`,
+    credentialsError
+      ? t('Subscription credentials could not be loaded: {{error}}', { error: credentialsError })
+      : credentialsPending &&
+        t('Subscription credentials are loading. API-key models remain available.'),
+    noticeText,
+  ].filter((note): note is string => Boolean(note));
+
   return (
-    <section className="space-y-2 rounded-lg border bg-card p-3">
-      <div className="min-w-0">
-        <h4 className="font-medium text-sm">{t('Default model')}</h4>
-        <p className="mt-0.5 text-muted-foreground text-xs">
-          {t(
-            defaultModelFollowLast
-              ? 'New conversations use the last model you picked.'
-              : 'Used for new conversations.'
-          )}
-        </p>
-      </div>
+    <>
+      <SettingsRow
+        rowId="providers.default-model"
+        label={t('Default model')}
+        description={
+          <>
+            {t('Used for new conversations.')}
+            {notes.map((note) => (
+              <span key={note} className="mt-1 flex items-start gap-1">
+                <CircleAlert className="mt-0.5 size-3 shrink-0" />
+                {note}
+              </span>
+            ))}
+          </>
+        }
+      >
+        {candidates.length > 0 && (
+          <div className="w-[280px] max-w-full">
+            <ModelPicker
+              providers={candidates}
+              virtualModels={virtualModels}
+              providerId={selectedProvider?.id ?? defaultModel?.providerId ?? ''}
+              modelId={selectedModel?.id ?? defaultModel?.modelId ?? ''}
+              reasoningEnabled={defaultReasoningEnabled}
+              thinkingLevel={defaultThinkingLevel}
+              emptyLabel={t('Select model')}
+              triggerLabel={defaultModelFollowLast ? t('Follow last selection') : undefined}
+              side="bottom"
+              triggerClassName={MODEL_PICKER_FORM_TRIGGER_CLASS}
+              onSelect={(providerId, modelId) => setDefaultModel({ providerId, modelId })}
+              onReasoningChange={setDefaultReasoningEnabled}
+              onThinkingChange={setDefaultThinkingLevel}
+              showReasoningControls={!defaultModelFollowLast}
+            />
+          </div>
+        )}
+      </SettingsRow>
       {candidates.length > 0 && (
-        <div className="w-full min-w-0">
-          <ModelPicker
-            providers={candidates}
-            virtualModels={virtualModels}
-            providerId={selectedProvider?.id ?? defaultModel?.providerId ?? ''}
-            modelId={selectedModel?.id ?? defaultModel?.modelId ?? ''}
-            reasoningEnabled={defaultReasoningEnabled}
-            thinkingLevel={defaultThinkingLevel}
-            emptyLabel={t('Select model')}
-            triggerLabel={defaultModelFollowLast ? t('Follow last selection') : undefined}
-            side="bottom"
-            triggerClassName={MODEL_PICKER_FORM_TRIGGER_CLASS}
-            onSelect={(providerId, modelId) => setDefaultModel({ providerId, modelId })}
-            onReasoningChange={setDefaultReasoningEnabled}
-            onThinkingChange={setDefaultThinkingLevel}
-            showReasoningControls={!defaultModelFollowLast}
-          />
-        </div>
-      )}
-      {!defaultModelFollowLast && candidates.length > 0 && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="self-start"
-          onClick={() => setDefaultModelFollowLast(true)}
+        <SettingsRow
+          rowId="providers.follow-last-selection"
+          label={t('Follow last selection')}
+          description={t('New conversations use the last model you picked.')}
         >
-          {t('Follow last selection')}
-        </Button>
+          <SettingsSwitch
+            checked={defaultModelFollowLast}
+            onCheckedChange={setDefaultModelFollowLast}
+          />
+        </SettingsRow>
       )}
-
-      {candidates.length === 0 && (
-        <div className="rounded-md border border-dashed px-3 py-5 text-center">
-          <Server className="mx-auto h-5 w-5 text-muted-foreground" />
-          <p className="mt-2 font-medium text-sm">{t('No usable models')}</p>
-          <p className="mt-1 text-muted-foreground text-xs">
-            {t('Enable a model and configure valid provider credentials first.')}
-          </p>
-        </div>
-      )}
-
-      {(credentialsPending || credentialsError) && (
-        <div className="flex items-start gap-2 rounded-md bg-muted px-2.5 py-2 text-xs">
-          <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <span className="text-muted-foreground">
-            {credentialsError
-              ? t('Subscription credentials could not be loaded: {{error}}', {
-                  error: credentialsError,
-                })
-              : t('Subscription credentials are loading. API-key models remain available.')}
-          </span>
-        </div>
-      )}
-
-      {noticeText && (
-        <p className="rounded-md bg-muted px-2.5 py-2 text-muted-foreground text-xs">
-          {noticeText}
-        </p>
-      )}
-    </section>
+    </>
   );
 }
