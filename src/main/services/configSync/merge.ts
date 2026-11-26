@@ -55,6 +55,8 @@ const SCALAR_SETTING_KEYS = [
   'expandLiveReasoning',
   'autoCollapseTurns',
   'quoteSelectionButton',
+  'learnButtonEnabled',
+  'composerToolbar',
   'collapseCompletedActivity',
   'collapseLiveActivity',
   'liveActivityFoldDelaySec',

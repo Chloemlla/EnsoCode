@@ -738,6 +738,14 @@ export interface AgentRunProgress {
   activity?: AgentRunActivity;
   /** 最近一条回复的末尾（仅界面预览；给模型的回执不带） */
   text?: string;
+  /** 因上游瞬态/配额故障正在等待自动恢复：Run 没收口，恢复后会自动续跑 */
+  upstreamWaiting?: {
+    provider: string;
+    errorKind: 'transient' | 'quota';
+    /** 下一次自动探测的时间（epoch ms） */
+    nextAt: number;
+    lastError: string;
+  };
 }
 
 export type AgentRunActivity =
@@ -1445,6 +1453,9 @@ export type AgentCommand =
       remote?: AgentRemoteConfig;
       /** 旁路会话：首条 prompt 前缀注入，消费一次 */
       rolePrompt?: string;
+      /** 复盘旁路：从该父会话分叉消息序列（注入其最近一次请求的消息快照，命中同一份提示缓存）。
+       *  源会话不存在、已换模型或还没有任何请求时静默降级为普通旁路。 */
+      forkFrom?: string;
       /** 仅普通 parent：替换 pi 默认提示词开头的角色段落，其余运行时内容保留 */
       systemPrompt?: string;
       /** skills/cwd 之后的真尾段 */
@@ -2043,6 +2054,8 @@ export interface AgentSpawnRequest {
   /** 秘书派出/跟踪的会话：ask_user 先转给秘书；恢复时一起带上，避免悄悄变回直接问用户 */
   askRelay?: { name: string };
   planMode?: boolean;
+  /** 追加到系统提示词尾部的文本；headless run 等宿主注入场景提示用，不改动预设本身 */
+  systemPromptAppend?: string;
 }
 
 export interface AgentActionResult {
@@ -4127,6 +4140,7 @@ const agentCommandParsers = {
         'protectedActions',
         'planMode',
         'instanceId',
+        'forkFrom',
       ]) ||
       !parseSessionIdentity(value.identity) ||
       typeof value.cwd !== 'string' ||
@@ -4210,7 +4224,8 @@ const agentCommandParsers = {
           !Array.isArray(value.botWriteLock.ancestors) ||
           !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
       (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean') ||
-      (value.instanceId !== undefined && !isUuid(value.instanceId))
+      (value.instanceId !== undefined && !isUuid(value.instanceId)) ||
+      (value.forkFrom !== undefined && !isNonEmptyString(value.forkFrom))
     ) {
       return null;
     }

@@ -466,6 +466,8 @@ interface ForkBase {
   messages: Message[];
   options?: SimpleStreamOptions;
   stream: StreamFn;
+  /** 请求发出时会话的选择模型（虚拟模型为虚拟 id）；换过模型则前缀不同，fork 静默降级 */
+  selection: { provider: string; id: string };
   /** 这次请求的回复；正常收尾（无工具调用）时接在前缀后面 */
   reply?: AssistantMessage;
 }
@@ -2140,6 +2142,7 @@ export class SessionSupervisor {
           command.askRelay,
           command.dcgExemptRules
         );
+        if (command.forkFrom) this.injectForkTranscript(command.identity, command.forkFrom);
         return;
       case 'spawn-child':
         await this.spawnTypedChild(
@@ -4147,6 +4150,11 @@ export class SessionSupervisor {
               messages: [...context.messages],
               options,
               stream: (m, c, o) => stream.call(session.agent, m, c, o),
+              // 选择模型：虚拟模型（Auto）路由后 model 是物理成员，
+              // 「换没换模型」只能按选择判定，否则虚拟选择永远对不上物理快照
+              selection: session.model
+                ? { provider: session.model.provider, id: session.model.id }
+                : { provider: model.provider, id: model.id },
             };
           return runWithRequestBodyObserver(
             (usage) => {
@@ -5671,6 +5679,45 @@ export class SessionSupervisor {
   /** 渲染层口径的完整记录：compaction 之前的历史 + pi 当前上下文 */
   private transcript(managed: ManagedSession): unknown[] {
     return buildSessionDisplayMessages(managed.session, managed.session.messages as unknown[]);
+  }
+
+  /**
+   * 复盘旁路分叉注入：把源会话最近一次请求的消息快照写进新会话的 transcript 与 agent state，
+   * 之后复盘会话的首条 prompt 就是源会话请求前缀的续写，命中同一份提示缓存。
+   * 源会话不在、还没有任何请求留底、或换过模型时静默降级（调用方退回文本快照）。
+   */
+  private injectForkTranscript(identity: SessionIdentity, forkFrom: string): void {
+    const managed = this.sessions.get(identity.sessionId);
+    if (!managed || !isSameGeneration(managed.identity, identity)) return;
+    const source = this.sessions.get(forkFrom);
+    const base = source ? forkBaseOf(source) : undefined;
+    if (!source || !base) return;
+    // 模型必须与被分叉会话一致，否则请求前缀不同，注入了也吃不到缓存，反而污染上下文
+    const model = managed.session.model;
+    if (!model || model.id !== base.selection.id || model.provider !== base.selection.provider)
+      return;
+    const reply = base.reply;
+    const settled =
+      reply?.stopReason === 'stop' && !reply.content.some((part) => part.type === 'toolCall');
+    const messages = settled ? [...base.messages, reply] : [...base.messages];
+    if (messages.length === 0) return;
+    try {
+      for (const message of messages) {
+        managed.session.sessionManager.appendMessage(message);
+      }
+      managed.session.agent.state.messages = [...messages];
+      managed.forkBase = {
+        model: base.model,
+        messages: [...messages],
+        ...(base.options ? { options: base.options } : {}),
+        stream: base.stream,
+        selection: base.selection,
+      };
+      this.reconcileMessages(managed, this.transcript(managed));
+      managed.turnStartIndex = managed.messages.length;
+    } catch {
+      // 注入失败不阻断旁路：会话仍是空起步的普通旁路
+    }
   }
 
   private reconcileMessages(managed: ManagedSession, rawMessages: unknown[]): void {
@@ -7349,7 +7396,8 @@ function stillQueued<T extends { text: string }>(
 function forkBaseOf(parent: ManagedSession): ForkBase | undefined {
   const base = parent.forkBase;
   const model = parent.session.model;
-  if (!base || model?.id !== base.model.id || model.provider !== base.model.provider) return;
+  if (!base || model?.id !== base.selection.id || model.provider !== base.selection.provider)
+    return;
   return base;
 }
 

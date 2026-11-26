@@ -169,6 +169,8 @@ export const IPC_CHANNELS = {
   /** 主窗口 → main：等待弹层上点「强制退出」 */
   APP_RESTART_FORCE: 'app:restart-force',
   APP_SET_BADGE_COUNT: 'app:set-badge-count',
+  /** main → 全部渲染器：系统从睡眠唤醒（桌面 powerMonitor resume；服务器无此事件） */
+  SYSTEM_RESUMED: 'system:resumed',
 
   // 拖放浮窗（实验，macOS）：浮窗 ⇄ Main ⇄ 主窗口
   DROP_SHELF_STATE: 'drop-shelf:state',
@@ -425,11 +427,17 @@ export const IPC_CHANNELS = {
   PROJECTS_CREATE_HOST_DIR: 'projects:create-host-dir',
   /** 在本机家目录下按关键词搜索目录（添加项目） */
   PROJECTS_SEARCH_HOST_DIRS: 'projects:search-host-dirs',
+  /** 把远程 git 仓库克隆到本机目录（添加项目的 Clone；url 可为完整地址或 owner/repo） */
+  PROJECTS_GIT_CLONE: 'projects:git-clone',
+  /** 用 gh 搜索当前账号的 GitHub 仓库（添加项目的 Clone） */
+  PROJECTS_SEARCH_GITHUB_REPOS: 'projects:search-github-repos',
   /** 在系统文件管理器或指定 appId 的应用里打开项目根目录或会话 worktree（仅本地项目） */
   PROJECTS_REVEAL: 'projects:reveal',
   PROJECTS_CODE_SOURCES: 'projects:code-sources',
   /** 列出本机已安装、可打开项目目录的编辑器 / 终端 */
   PROJECTS_OPEN_IN_APPS: 'projects:open-in-apps',
+  PROJECTS_GET_ICON: 'projects:get-icon',
+  PROJECTS_SET_ICON: 'projects:set-icon',
 
   // SSH 连接配置（设置页 + 添加项目选择器）
   SSH_CONNECTIONS_LIST: 'ssh-connections:list',

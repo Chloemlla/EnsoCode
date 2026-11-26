@@ -8,6 +8,7 @@ import { parseAccentColor } from '@shared/accentColor';
 import { isReservedAgentTypeName } from '@shared/builtinAgents';
 import { isStoredChatTypography } from '@shared/chatTypography';
 import { parseCompactStrategy } from '@shared/compactStrategy';
+import { isStoredComposerToolbar } from '@shared/composerToolbar';
 import { isPluginPresetId } from '@shared/extensionPlugins/preset';
 import { parseOauthAccountPool } from '@shared/oauthAccountPool';
 import { parseProviderHeaders } from '@shared/providers/providerHeaders';
@@ -109,6 +110,8 @@ const STATE_KEYS = [
   'expandLiveReasoning',
   'autoCollapseTurns',
   'quoteSelectionButton',
+  'learnButtonEnabled',
+  'composerToolbar',
   'collapseCompletedActivity',
   'collapseLiveActivity',
   'liveActivityFoldDelaySec',
@@ -185,6 +188,7 @@ const PRESET_KEYS = [
   'refusalRetry',
   'refusalRetryPromptId',
   'pluginPresetId',
+  'pluginPresetIds',
 ];
 const AGENT_TYPE_KEYS = [
   'id',
@@ -665,6 +669,14 @@ function validatePreset(raw: unknown): RecordValue {
   ) {
     throw new Error('Invalid preset pluginPresetId');
   }
+  if (entry.pluginPresetIds !== undefined) {
+    if (!Array.isArray(entry.pluginPresetIds)) throw new Error('Invalid preset pluginPresetIds');
+    for (const id of entry.pluginPresetIds) {
+      if (typeof id !== 'string' || !isPluginPresetId(id)) {
+        throw new Error('Invalid preset pluginPresetIds');
+      }
+    }
+  }
   if (entry.refusalRetry !== undefined && typeof entry.refusalRetry !== 'boolean') {
     throw new Error('Invalid preset refusalRetry');
   }
@@ -1052,6 +1064,7 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
     'expandLiveReasoning',
     'autoCollapseTurns',
     'quoteSelectionButton',
+    'learnButtonEnabled',
     'collapseCompletedActivity',
     'collapseLiveActivity',
     'pinUnfinishedTodos',
@@ -1070,6 +1083,9 @@ export function validateBundle(value: unknown): ConfigSyncBundle {
   }
   if (state.chatTypography !== undefined && !isStoredChatTypography(state.chatTypography)) {
     throw new Error('Invalid state.chatTypography');
+  }
+  if (state.composerToolbar !== undefined && !isStoredComposerToolbar(state.composerToolbar)) {
+    throw new Error('Invalid state.composerToolbar');
   }
   numberField(state, 'maxActiveCoworkers', 'state', 1, 20, true);
   numberField(state, 'autoRetryLimit', 'state', -1, 100, true);

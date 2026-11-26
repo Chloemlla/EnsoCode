@@ -9,6 +9,7 @@ import type { InterruptedTurn } from '@shared/exitInterrupt';
 import type { PluginSessionStatus, SessionStatusPayload } from '@shared/extensionPlugins/events';
 import { normalizeLocale } from '@shared/i18n';
 import { type PersistedPairConversation, planPairResume } from '@shared/pair/headlessResume';
+import { providerKeyFor } from '@shared/providers/providerKey';
 import { projectSafeJournal } from '@shared/safeJournalProjection';
 import { appendInboundImageLines } from '@shared/secretary/inboundImages';
 import { resolveSshTarget } from '@shared/ssh';
@@ -91,6 +92,7 @@ import {
   keepBackgroundTask,
   promptChildSession,
   promptSession,
+  providersFromSettings,
   readSettingsState,
   registerPluginSessionBridge,
   releaseParentSession,
@@ -200,6 +202,7 @@ import { forwardAgentEvent, setPairAgentBridge } from '../services/pairHost';
 import {
   configurePairSessionHost,
   handlePairHeadlessAgentEvent,
+  resetStallBeatsForSystemResume,
 } from '../services/pairSessionHost';
 import { planReminderWake, reminderResumeFromAuthority } from '../services/reminderWake';
 import { remoteCandidates } from '../services/remoteModels';
@@ -208,7 +211,7 @@ import { broadcastToRenderers, isMainRenderer } from '../services/renderers';
 import type { RestartManifestEntry } from '../services/restartManifest';
 import { ContactStore, hasContactRoutes } from '../services/secretary/contact/store';
 import { secretaryToolDescriptors, secretaryToolsDir } from '../services/secretary/customTools';
-import { notifySecretaryChanged } from '../services/secretary/dispatch';
+import { forgetDispatchSession, notifySecretaryChanged } from '../services/secretary/dispatch';
 import { secretaryEnabled } from '../services/secretary/enabled';
 import { unfollowTargetEverywhere } from '../services/secretary/following';
 import { isSecretaryConversation, isSecretaryProject } from '../services/secretary/identity';
@@ -247,6 +250,10 @@ import {
 } from '../services/sessionActivity';
 import { removeConversationSessionFiles } from '../services/sessionFileCleanup';
 import { createFileMemo } from '../services/sessionHistoryCache';
+import {
+  projectSessionHistoryStats,
+  type SessionHistoryStats,
+} from '../services/sessionHistoryStats';
 import {
   displayMessages,
   findHistoryMessage,
@@ -331,7 +338,7 @@ let dispatchService: AgentDispatchService | null = null;
 let agentService: AgentService | null = null;
 let upstreamRecovery: UpstreamRecoveryService | null = null;
 let upstreamSessionWakeHandler:
-  | ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean)
+  | ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean | 'retry')
   | null = null;
 const pendingAgentControl = new Map<string, AbortController>();
 const pendingComputer = new Map<string, AbortController>();
@@ -368,8 +375,44 @@ export function getUpstreamRecoveryService(): UpstreamRecoveryService | null {
   return upstreamRecovery;
 }
 
+/** 会话被删除/归档时撤掉它的上游等待：避免 waiter 永远指向不会再跑的会话 */
+export function cancelUpstreamWaitForSession(sessionId: string): void {
+  upstreamRecovery?.cancel(sessionId);
+}
+
+/**
+ * 闸门里的 provider 是运行时身份（enso-<hostHash>-<keyFp> 或订阅账号 key），用户看不懂。
+ * 反查设置里的供应商条目，换成可读的名字；条目已删/换 key 时退回原 id。
+ */
+function providerDisplayName(runtimeKey: string): string | undefined {
+  try {
+    for (const provider of providersFromSettings()) {
+      if (provider.oauthAccountKey === runtimeKey) return provider.name;
+      if (!provider.oauthAccountKey) {
+        try {
+          if (providerKeyFor(provider) === runtimeKey) return provider.name;
+        } catch {
+          // 条目字段不全（apiKey 非字符串等）：跳过这条继续找
+        }
+      }
+    }
+  } catch {
+    // settings 还没就绪：退回原 id
+  }
+  return undefined;
+}
+
+function withProviderNames(snapshots: ProviderHealthSnapshot[]): ProviderHealthSnapshot[] {
+  return snapshots.map((snapshot) => {
+    const name = providerDisplayName(snapshot.provider);
+    return name && name !== snapshot.provider ? { ...snapshot, providerName: name } : snapshot;
+  });
+}
+
 export function setUpstreamSessionWakeHandler(
-  handler: ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean) | null
+  handler:
+    | ((conversationId: string, reason: 'probe' | 'recovered' | 'manual') => boolean | 'retry')
+    | null
 ): void {
   upstreamSessionWakeHandler = handler;
 }
@@ -410,6 +453,13 @@ export function observedSubagentsRunning(sessionId: string): boolean {
 /** 主会话名下正在运行的子代理进度快照（秘书查询、看板、侧栏同源） */
 export function observedSubagentProgress(sessionId: string): AgentRunProgress[] {
   return agentService?.progress(sessionId) ?? [];
+}
+
+/** 会话最近一次 session-meta 的运行时读数（上下文占用、窗口、用量）；worker 退出或没观察到为 undefined */
+export function observedSessionMeta(
+  sessionId: string
+): ReturnType<typeof agentSessionIndex.sessionMeta> {
+  return agentSessionIndex.sessionMeta(sessionId);
 }
 
 /** 冷启动时该父会话是否有停在安全点、正在按 #418 自动续跑的子代理 Run */
@@ -1122,6 +1172,7 @@ function spawnRequestKeys(): readonly (keyof AgentSpawnRequest)[] {
     'autoRejectApprovals',
     'askRelay',
     'planMode',
+    'systemPromptAppend',
   ] as const;
   // 少登记字段时这里编译失败，而不是等到真机上整条请求被拒
   const missing: Exclude<keyof AgentSpawnRequest, (typeof keys)[number]> extends never
@@ -1159,7 +1210,8 @@ function parseSpawnRequest(value: unknown): AgentSpawnRequest | null {
       typeof request.autoRejectApprovals !== 'boolean') ||
     (request.askRelay !== undefined &&
       (!asRecord(request.askRelay) || !isNonEmptyString(asRecord(request.askRelay)?.name))) ||
-    (request.planMode !== undefined && typeof request.planMode !== 'boolean')
+    (request.planMode !== undefined && typeof request.planMode !== 'boolean') ||
+    (request.systemPromptAppend !== undefined && typeof request.systemPromptAppend !== 'string')
   ) {
     return null;
   }
@@ -1554,6 +1606,14 @@ export async function readSessionActivity(
     Math.max(1, Math.floor(Number.isFinite(limit) ? limit : ACTIVITY_LIMIT_DEFAULT))
   );
   return projectSessionActivity(await readFullSessionHistory(sessionFile), bounded);
+}
+
+/** 秘书 session_stats：对全量投影跑一次性统计（与 activity 共用同一份备忘解析结果） */
+export async function readSessionHistoryStats(
+  sessionFile: string | undefined
+): Promise<SessionHistoryStats | null> {
+  const messages = await readFullSessionHistory(sessionFile);
+  return messages.length === 0 ? null : projectSessionHistoryStats(messages);
 }
 
 /**
@@ -2103,10 +2163,12 @@ export function registerAgentHandlers(): void {
     onWake(event) {
       if (event.waiter.kind === 'subagent') {
         void agentService?.wakeUpstream(event.waiter.id);
-        return;
+        return true;
       }
-      const handledByMain = upstreamSessionWakeHandler?.(event.waiter.id, event.reason) === true;
-      if (!handledByMain) {
+      const handled = upstreamSessionWakeHandler?.(event.waiter.id, event.reason);
+      // 驱动者明说「会话还在 waiting 但此刻接不住」：重排倒计时，稍后真正重试
+      if (handled === 'retry') return false;
+      if (handled !== true) {
         try {
           broadcastToRenderers(IPC_CHANNELS.AGENT_UPSTREAM_WAKE_EVENT, {
             conversationId: event.waiter.id,
@@ -2116,10 +2178,14 @@ export function registerAgentHandlers(): void {
           // renderer 已销毁
         }
       }
+      return true;
     },
     onHealthChange(snapshots: ProviderHealthSnapshot[]) {
       try {
-        broadcastToRenderers(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_EVENT, snapshots);
+        broadcastToRenderers(
+          IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_EVENT,
+          withProviderNames(snapshots)
+        );
       } catch {
         // renderer 已销毁
       }
@@ -2222,7 +2288,13 @@ export function registerAgentHandlers(): void {
     },
   });
   setInterval(() => humanTimeouts.check(), 1000).unref();
-  powerMonitor.on('resume', () => humanTimeouts.check());
+  powerMonitor.on('resume', () => {
+    humanTimeouts.check();
+    // 睡眠期间墙钟照走但定时器停跑：watchdog 拿跨睡眠时长判静默必误报，
+    // headless 与渲染器两侧看门狗各自重置心跳重新计时
+    resetStallBeatsForSystemResume();
+    broadcastToRenderers(IPC_CHANNELS.SYSTEM_RESUMED);
+  });
 
   setAgentEventListener((incomingEvent) => {
     // 换代（Main 不退）：会话不算失败、不进会话广播；只有子代理服务按断点把被打断的 Run 接着跑
@@ -2876,6 +2948,10 @@ export function registerAgentHandlers(): void {
     if (result.accepted) {
       sourceBindings!.invalidateConversation(parsed.conversationId);
       removeConversationFiles(result.value);
+      // 会话删了就不会再有重试：撤掉上游等待 waiter 与驱动者续跑，
+      // 否则闸门内存里的 waiter 永远指向死会话，状态条倒计时空转
+      upstreamRecovery?.cancel(parsed.conversationId);
+      forgetDispatchSession(parsed.conversationId);
       // 会话删了就不会再有人等它定的提醒
       clearSessionReminders(parsed.conversationId);
       // 会话删了就不会再有结果：手机关注里的这一条一并移除
@@ -3312,9 +3388,8 @@ export function registerAgentHandlers(): void {
     }
   );
 
-  ipcMain.handle(
-    IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_LIST,
-    (): ProviderHealthSnapshot[] => upstreamRecovery?.snapshots() ?? []
+  ipcMain.handle(IPC_CHANNELS.AGENT_UPSTREAM_HEALTH_LIST, (): ProviderHealthSnapshot[] =>
+    withProviderNames(upstreamRecovery?.snapshots() ?? [])
   );
 
   ipcMain.handle(

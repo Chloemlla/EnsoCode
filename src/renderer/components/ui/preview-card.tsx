@@ -5,6 +5,7 @@ import { PreviewCard as PreviewCardPrimitive } from '@base-ui/react/preview-card
 import { cn } from '@/lib/utils';
 
 const PreviewCard = PreviewCardPrimitive.Root;
+const createPreviewCardHandle = PreviewCardPrimitive.createHandle;
 
 function PreviewCardTrigger({ ...props }: PreviewCardPrimitive.Trigger.Props) {
   return <PreviewCardPrimitive.Trigger data-slot="preview-card-trigger" {...props} />;
@@ -15,9 +16,11 @@ function PreviewCardPopup({
   children,
   align = 'center',
   sideOffset = 4,
+  side,
   ...props
 }: PreviewCardPrimitive.Popup.Props & {
   align?: PreviewCardPrimitive.Positioner.Props['align'];
+  side?: PreviewCardPrimitive.Positioner.Props['side'];
   sideOffset?: PreviewCardPrimitive.Positioner.Props['sideOffset'];
 }) {
   return (
@@ -26,6 +29,7 @@ function PreviewCardPopup({
         align={align}
         className="z-50"
         data-slot="preview-card-positioner"
+        side={side}
         sideOffset={sideOffset}
       >
         <PreviewCardPrimitive.Popup
@@ -44,6 +48,7 @@ function PreviewCardPopup({
 }
 
 export {
+  createPreviewCardHandle,
   PreviewCard,
   PreviewCard as HoverCard,
   PreviewCardPopup,

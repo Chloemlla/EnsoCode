@@ -130,6 +130,10 @@ export const SETTINGS_DATA_COVERAGE = {
   quoteSelectionButton: excluded(
     'Renderer floating quote button preference; not an Enso capability.'
   ),
+  learnButtonEnabled: excluded('Renderer composer button preference; not an Enso capability.'),
+  composerToolbar: excluded(
+    'Renderer composer toolbar pin/order preference; not an Enso capability.'
+  ),
   collapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
   ),
@@ -341,6 +345,10 @@ export const SETTINGS_ACTION_COVERAGE = {
   setAutoCollapseTurns: excluded('Renderer timeline collapse preference; not an Enso capability.'),
   setQuoteSelectionButton: excluded(
     'Renderer floating quote button preference; not an Enso capability.'
+  ),
+  setLearnButtonEnabled: excluded('Renderer composer button preference; not an Enso capability.'),
+  setComposerToolbar: excluded(
+    'Renderer composer toolbar pin/order preference; not an Enso capability.'
   ),
   setCollapseCompletedActivity: excluded(
     'Renderer timeline collapse preference; not an Enso capability.'
@@ -651,6 +659,9 @@ export const IPC_PRODUCT_COVERAGE = {
   ),
   APP_RESTART_FORCE: excluded('Renderer-to-main force quit from the restart wait overlay.'),
   APP_SET_BADGE_COUNT: excluded('Renderer-to-main Dock badge count for waiting conversations.'),
+  SYSTEM_RESUMED: excluded(
+    'Main-to-renderer system wake broadcast; renderers reset stall heartbeats on it.'
+  ),
   DROP_SHELF_STATE: excluded('Main-to-shelf window visual state for the macOS drop shelf.'),
   DROP_SHELF_DROP: excluded('Drop shelf window hands dropped Finder paths to main.'),
   DROP_SHELF_PENDING: excluded('Main-to-renderer ping that drop shelf paths are waiting.'),
@@ -847,8 +858,12 @@ export const IPC_PRODUCT_COVERAGE = {
   PROJECTS_LIST_HOST_DIRS: surfaces('projects.add'),
   PROJECTS_CREATE_HOST_DIR: surfaces('projects.add'),
   PROJECTS_SEARCH_HOST_DIRS: surfaces('projects.add'),
+  PROJECTS_GIT_CLONE: surfaces('projects.add'),
+  PROJECTS_SEARCH_GITHUB_REPOS: surfaces('projects.add'),
   PROJECTS_REVEAL: surfaces('projects.list'),
   PROJECTS_OPEN_IN_APPS: surfaces('projects.list'),
+  PROJECTS_GET_ICON: surfaces('projects.list'),
+  PROJECTS_SET_ICON: surfaces('projects.list'),
   PROJECTS_CODE_SOURCES: excluded(
     'Desktop-only review of project pi extensions before trusting them.'
   ),

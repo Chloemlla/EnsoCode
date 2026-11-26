@@ -361,6 +361,8 @@ export interface Conversation extends SessionProjection {
   btwParentId?: string;
   /** 旁路隔离提示，spawn 时注入 pendingRole */
   btwRolePrompt?: string;
+  /** 复盘旁路：spawn 时从该会话分叉消息序列（只允许等于 btwParentId） */
+  btwForkFrom?: string;
   coworkerName?: string;
   agentType?: string;
   /** typed mention child 的 Main 权威 metadata；普通 coworker 无此字段。 */
@@ -506,6 +508,7 @@ interface SessionsState {
     projectId: string;
     btwParentId: string;
     rolePrompt: string;
+    forkFrom?: string;
     lastProviderId?: string;
     lastModelId?: string;
     reasoningEnabled?: boolean;
@@ -1495,10 +1498,16 @@ export const useSessionsStore = create<SessionsState>()(
             for (const session of event.sessions) {
               const id = session.identity.sessionId;
               // 补快照可能意味着 turn-completed 已错过（renderer 重载 / 正文脱节），排队消息与
-              // goal 一并泵；用户中断的轮次由 turn-completed 收口，这里不抢跑
+              // goal 一并泵；用户中断的轮次由 turn-completed 收口，这里不抢跑。
+              // 推迟到宏任务：同一轮就泵会让优雅重启恢复后队列在渲染一帧前就被消费，
+              // UI 上表现为「队列消息丢了」。延迟期间状态可能已变（用户中断、会话离开），
+              // 届时重读最新行重新判定，abortRequested / 非 leader 都不再泵。
               if (!isLeaderRenderer() || get().conversations[id]?.abortRequested) continue;
-              flushQueue(id);
-              continueGoal(id);
+              setTimeout(() => {
+                if (!isLeaderRenderer() || get().conversations[id]?.abortRequested) return;
+                flushQueue(id);
+                continueGoal(id);
+              }, 0);
             }
             if (event.sessionId) {
               const state = get();
@@ -3422,6 +3431,7 @@ export const useSessionsStore = create<SessionsState>()(
             createdAt: Date.now(),
             btwParentId: input.btwParentId,
             btwRolePrompt: input.rolePrompt,
+            ...(input.forkFrom ? { btwForkFrom: input.forkFrom } : {}),
             lastProviderId: input.lastProviderId,
             lastModelId: input.lastModelId,
             reasoningEnabled: input.reasoningEnabled,
@@ -3627,6 +3637,7 @@ export const useSessionsStore = create<SessionsState>()(
                   providerId: target.providerId,
                   modelId: target.modelId,
                   rolePrompt: conversation.btwRolePrompt ?? '',
+                  ...(conversation.btwForkFrom ? { forkFrom: conversation.btwForkFrom } : {}),
                   reasoningEnabled: conversation.reasoningEnabled,
                   thinkingLevel: conversation.thinkingLevel,
                   approvalMode:

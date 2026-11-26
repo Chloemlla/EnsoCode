@@ -11,6 +11,7 @@ import {
   DEFAULT_CHAT_TYPOGRAPHY,
   normalizeChatTypography,
 } from '@shared/chatTypography';
+import { normalizeComposerToolbar } from '@shared/composerToolbar';
 import {
   type DefaultModelRef,
   oauthCredentialBlock,
@@ -255,6 +256,8 @@ const initialState = {
   expandLiveReasoning: true,
   autoCollapseTurns: false,
   quoteSelectionButton: true,
+  learnButtonEnabled: true,
+  composerToolbar: normalizeComposerToolbar(undefined),
   collapseCompletedActivity: true,
   collapseLiveActivity: false,
   liveActivityFoldDelaySec: 5,
@@ -491,6 +494,8 @@ export const useSettingsStore = create<SettingsState>()(
       setExpandLiveReasoning: (expandLiveReasoning) => set({ expandLiveReasoning }),
       setAutoCollapseTurns: (autoCollapseTurns) => set({ autoCollapseTurns }),
       setQuoteSelectionButton: (quoteSelectionButton) => set({ quoteSelectionButton }),
+      setLearnButtonEnabled: (learnButtonEnabled) => set({ learnButtonEnabled }),
+      setComposerToolbar: (value) => set({ composerToolbar: normalizeComposerToolbar(value) }),
       setCollapseCompletedActivity: (collapseCompletedActivity) =>
         set({ collapseCompletedActivity }),
       setCollapseLiveActivity: (collapseLiveActivity) => set({ collapseLiveActivity }),

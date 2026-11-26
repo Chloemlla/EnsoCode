@@ -66,6 +66,7 @@ import type { PastedTextFileResult } from '@shared/pastedText';
 import type { PlanRespondAction } from '@shared/planMode';
 import type { PresetImportDraft } from '@shared/presetImport';
 import type { PrivacyMaskRecord } from '@shared/privacyMask/report';
+import type { ProjectIconInfo } from '@shared/projectIcon';
 import type { SessionReminderSummary } from '@shared/reminders';
 import type { RemoteApi } from '@shared/remoteBridge';
 import type {
@@ -108,6 +109,8 @@ import type {
   FilesWatchEvent,
   FilesWatchResult,
   FilesWriteResult,
+  GitCloneRequest,
+  GitCloneResult,
   GitCommitDiffRequest,
   GitCommitFilesResult,
   GitCommitRequest,
@@ -118,6 +121,7 @@ import type {
   GitFileDiffResult,
   GitHistoryRequest,
   GitHistoryResult,
+  GithubRepoSearchResult,
   GitOperationResult,
   GitPathsRequest,
   GitRequest,
@@ -405,6 +409,11 @@ const electronAPI = {
     },
     setBadgeCount: (count: number): void => {
       ipcRenderer.send(IPC_CHANNELS.APP_SET_BADGE_COUNT, count);
+    },
+    onSystemResumed: (callback: () => void): (() => void) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.SYSTEM_RESUMED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.SYSTEM_RESUMED, listener);
     },
   },
 
@@ -1101,6 +1110,12 @@ const electronAPI = {
     /** 在本机家目录下按关键词搜索目录；空查询返回空列表，host 是机器名 */
     searchHostDirs: (query: string): Promise<HostDirSearchResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_SEARCH_HOST_DIRS, query),
+    /** 把远程仓库克隆到 parentDir 下；url 为完整 git 地址或 owner/repo */
+    gitClone: (request: GitCloneRequest): Promise<GitCloneResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GIT_CLONE, request),
+    /** 用 gh 搜索当前账号的仓库。空 query 列出自己的仓库，url 为 https 克隆地址 */
+    searchGithubRepos: (query: string, limit?: number): Promise<GithubRepoSearchResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_SEARCH_GITHUB_REPOS, query, limit),
     /** 在系统文件管理器（或 appId 指定的应用）里打开项目或会话的实际工作目录；ssh 项目返回 unsupported */
     reveal: (request: {
       projectId: string;
@@ -1112,6 +1127,14 @@ const electronAPI = {
     /** 项目（或会话 worktree）里会被当作代码加载的 pi 扩展/包来源 */
     codeSources: (request: { projectId: string; conversationId?: string }): Promise<string[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_CODE_SOURCES, request),
+    getIcon: (projectId: string): Promise<ProjectIconInfo> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GET_ICON, { projectId }),
+    /** 上传自定义图标，或传 null 移除。scratch / 秘书 / bot-home 会被拒绝 */
+    setIcon: (
+      projectId: string,
+      image: Uint8Array | null
+    ): Promise<{ ok: boolean; error?: string; info?: ProjectIconInfo }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_SET_ICON, { projectId, image }),
   },
 
   git: {

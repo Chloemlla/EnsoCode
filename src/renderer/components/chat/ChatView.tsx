@@ -38,11 +38,13 @@ import { AskBar } from './AskBar';
 import { ChatSessionTimeline } from './ChatSessionTimeline';
 import { ChildRunsButton } from './ChildRunsButton';
 import { Composer } from './Composer';
+import { ComposerToolbarItems } from './ComposerToolbarItems';
 import { ConversationStatusIndicator } from './ConversationStatusIndicator';
 import { CoworkerTabs } from './CoworkerTabs';
 import { insertComposerText, requestFocusComposer } from './composerMentionBridge';
 import { routeComposerPayload } from './composerRouting';
 import { GoalBar } from './GoalBar';
+import { LearnButton } from './LearnButton';
 import { MarkdownLinkContext } from './Markdown';
 import { MessageQueue } from './MessageQueue';
 import { CHAT_COL, type MessageTimelineHandle } from './MessageTimeline';
@@ -88,6 +90,7 @@ export function ChatView() {
   const virtualModels = useSettingsStore((state) => state.virtualModels);
   const customAgentTypes = useSettingsStore((state) => state.agentTypes);
   const defaultModel = useSettingsStore((state) => state.defaultModel);
+  const learnButtonEnabled = useSettingsStore((state) => state.learnButtonEnabled);
   const projects = useSettingsStore((state) => state.projects);
   const projectGroups = useSettingsStore((state) => state.projectGroups);
   const presets = useSettingsStore((state) => state.presets);
@@ -100,8 +103,9 @@ export function ChatView() {
     (state) => state.conversations[chrome?.parentId ?? '']?.coworkerIds
   );
   const pluginPresetId =
-    presetOverlay(chrome?.presetId, (id) => presets.find((preset) => preset.id === id))
-      .pluginPresetId ?? null;
+    presetOverlay(chrome?.presetId, (id) =>
+      presets.find((preset) => preset.id === id)
+    ).pluginPresetIds?.at(-1) ?? null;
   const memberName = useMemberName(chrome?.displayedParentId ? chrome.agentType : undefined);
   const oauthSnapshot = useOauthCredentialStore((state) => state.snapshot);
   const enabledProviders = useUsableProviders();
@@ -198,6 +202,9 @@ export function ChatView() {
     isVirtualRef(modelResolution) && chrome?.id
       ? lastReplyModel(state.conversations[chrome.id]?.messages)
       : undefined
+  );
+  const hasMessages = useSessionsStore((state) =>
+    chrome?.id ? (state.conversations[chrome.id]?.messages.length ?? 0) > 0 : false
   );
   const activeAccount = useSessionsStore(
     useShallow((state) =>
@@ -517,65 +524,80 @@ export function ChatView() {
             toolbar={
               <>
                 {!chrome.displayedParentId && (
-                  <>
-                    <PresetPicker
-                      presetId={chrome.presetId ?? 'default'}
-                      disabled={chrome.started}
-                      onSelect={(presetId) =>
-                        useSessionsStore.getState().setPreset(chrome.id, presetId)
-                      }
-                      onModel={(model) =>
-                        useSessionsStore
-                          .getState()
-                          .setModel(chrome.id, model.providerId, model.modelId)
-                      }
-                    />
-                    <WorktreePicker
-                      conversationId={chrome.id}
-                      onBranchChange={handleBranchChange}
-                    />
-                    {(planAvailable || chrome.planState?.active) && (
-                      <PlanModeToggle
-                        active={chrome.planState?.active ?? false}
-                        onToggle={(active) =>
-                          useSessionsStore.getState().setPlanMode(chrome.id, active)
-                        }
-                      />
-                    )}
-                    <ApprovalModePicker
-                      mode={chrome.approvalMode ?? 'full'}
-                      autoReject={chrome.autoRejectApprovals === true}
-                      onSelect={(mode) =>
-                        useSessionsStore.getState().setApprovalMode(chrome.id, mode)
-                      }
-                      onToggleAutoReject={(value) =>
-                        useSessionsStore.getState().setAutoRejectApprovals(chrome.id, value)
-                      }
-                    />
-                    <ModelPicker
-                      listenHotkey
-                      refreshAllModels
-                      recordRecent
-                      compact={isMobile}
-                      providers={enabledProviders}
-                      virtualModels={virtualModels}
-                      routedModelLabel={routedModelLabel}
-                      activeAccount={activeAccount}
-                      providerId={selectedProviderId}
-                      modelId={effectiveModelId}
-                      reasoningEnabled={chrome.reasoningEnabled ?? false}
-                      thinkingLevel={chrome.thinkingLevel ?? 'medium'}
-                      onSelect={(pid, mid) =>
-                        useSessionsStore.getState().setModel(chrome.id, pid, mid)
-                      }
-                      onReasoningChange={(enabled) =>
-                        useSessionsStore.getState().setReasoning(chrome.id, enabled)
-                      }
-                      onThinkingChange={(level) =>
-                        useSessionsStore.getState().setThinking(chrome.id, level)
-                      }
-                    />
-                  </>
+                  <ComposerToolbarItems
+                    items={{
+                      preset: (
+                        <PresetPicker
+                          presetId={chrome.presetId ?? 'default'}
+                          disabled={chrome.started}
+                          onSelect={(presetId) =>
+                            useSessionsStore.getState().setPreset(chrome.id, presetId)
+                          }
+                          onModel={(model) =>
+                            useSessionsStore
+                              .getState()
+                              .setModel(chrome.id, model.providerId, model.modelId)
+                          }
+                        />
+                      ),
+                      worktree: (
+                        <WorktreePicker
+                          conversationId={chrome.id}
+                          onBranchChange={handleBranchChange}
+                        />
+                      ),
+                      'plan-mode':
+                        planAvailable || chrome.planState?.active ? (
+                          <PlanModeToggle
+                            active={chrome.planState?.active ?? false}
+                            onToggle={(active) =>
+                              useSessionsStore.getState().setPlanMode(chrome.id, active)
+                            }
+                          />
+                        ) : null,
+                      'approval-mode': (
+                        <ApprovalModePicker
+                          mode={chrome.approvalMode ?? 'full'}
+                          autoReject={chrome.autoRejectApprovals === true}
+                          onSelect={(mode) =>
+                            useSessionsStore.getState().setApprovalMode(chrome.id, mode)
+                          }
+                          onToggleAutoReject={(value) =>
+                            useSessionsStore.getState().setAutoRejectApprovals(chrome.id, value)
+                          }
+                        />
+                      ),
+                      model: (
+                        <ModelPicker
+                          listenHotkey
+                          refreshAllModels
+                          recordRecent
+                          compact={isMobile}
+                          providers={enabledProviders}
+                          virtualModels={virtualModels}
+                          routedModelLabel={routedModelLabel}
+                          activeAccount={activeAccount}
+                          providerId={selectedProviderId}
+                          modelId={effectiveModelId}
+                          reasoningEnabled={chrome.reasoningEnabled ?? false}
+                          thinkingLevel={chrome.thinkingLevel ?? 'medium'}
+                          onSelect={(pid, mid) =>
+                            useSessionsStore.getState().setModel(chrome.id, pid, mid)
+                          }
+                          onReasoningChange={(enabled) =>
+                            useSessionsStore.getState().setReasoning(chrome.id, enabled)
+                          }
+                          onThinkingChange={(level) =>
+                            useSessionsStore.getState().setThinking(chrome.id, level)
+                          }
+                        />
+                      ),
+                      learn:
+                        hasMessages && learnButtonEnabled ? (
+                          <LearnButton conversationId={chrome.id} />
+                        ) : null,
+                    }}
+                  />
                 )}
                 {chrome.displayedParentId && (
                   <span className="text-[11px] text-muted-foreground">

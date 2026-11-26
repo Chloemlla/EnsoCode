@@ -254,10 +254,12 @@ function addBtwPanel(
   });
 }
 
-function BtwPanel(props: IDockviewPanelProps<{ conversationId?: string; projectId?: string }>) {
-  const { conversationId } = props.params;
+function BtwPanel(
+  props: IDockviewPanelProps<{ conversationId?: string; projectId?: string; learn?: boolean }>
+) {
+  const { conversationId, learn } = props.params;
   if (!conversationId) return null;
-  return <BtwView conversationId={conversationId} panelApi={props.api} />;
+  return <BtwView conversationId={conversationId} panelApi={props.api} learn={learn === true} />;
 }
 
 function addBrowserPanel(
@@ -593,6 +595,7 @@ function NewTabMenu({
   onNewPluginView,
   secretaryPluginIds,
   compact,
+  promptAt,
 }: {
   /** 缺省 = 该会话不提供这个入口（秘书会话没有终端、文件、改动） */
   onNewTerminal?: () => void;
@@ -607,6 +610,8 @@ function NewTabMenu({
   /** 秘书会话传入：只列勾选了的插件页面 */
   secretaryPluginIds?: readonly string[] | null;
   compact?: boolean;
+  /** 无 tab 展开的一次性信号时间戳；与 store 里一致时菜单初次即弹出 */
+  promptAt?: number | null;
 }) {
   const { t } = useI18n();
   const allPluginViews = usePluginViews();
@@ -614,8 +619,16 @@ function NewTabMenu({
     secretaryPluginIds === undefined
       ? allPluginViews
       : secretaryPluginViews(allPluginViews, secretaryPluginIds ?? undefined);
+  // 一次性弹出：信号在就受控撑开；用户点类型/点别处/Esc 关闭时清掉信号，此后回到用户点 + 的非受控用法
+  const prompted = promptAt != null;
   return (
-    <Menu>
+    <Menu
+      key={prompted ? `prompt-${promptAt}` : 'idle'}
+      defaultOpen={prompted}
+      onOpenChange={(next) => {
+        if (!next) useSidePanelStore.getState().clearNewTabMenuPrompt();
+      }}
+    >
       <MenuTrigger
         className={cn(
           'flex items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground',
@@ -823,6 +836,18 @@ function Watermark(props: IWatermarkPanelProps) {
   const secretary = useSecretaryConversation(projectId);
   const secretaryPluginIds = useSecretaryPluginIds();
   const secretaryName = useSecretaryName();
+  const newTabMenuPromptAt = useSidePanelStore((s) =>
+    conversationId && s.newTabMenuPrompt?.conversationId === conversationId
+      ? s.newTabMenuPrompt.at
+      : null
+  );
+  // dock 隐藏（切会话/收起面板）时整个水印不渲染：
+  // 菜单弹层走 Portal 挂在 body 上，display:none 的容器关不住它——
+  // 锚点 rect 归零后弹层漂到视口左上角、高度也不再受裁剪限制，
+  // 再开第二个菜单就是用户看到的「一大一小双 popover」。卸载即关。
+  const isActiveConversation = useSessionsStore((s) => s.activeId === conversationId);
+  const panelShown = useSidePanelShown(conversationId);
+  if (!isActiveConversation || !panelShown) return null;
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="enso-side-dock-header flex shrink-0 items-center justify-end border-b bg-background px-2 py-1">
@@ -833,6 +858,7 @@ function Watermark(props: IWatermarkPanelProps) {
           {t('No tabs yet. Create one to get started.')}
         </p>
         <NewTabMenu
+          promptAt={newTabMenuPromptAt}
           onNewTerminal={
             secretary
               ? undefined

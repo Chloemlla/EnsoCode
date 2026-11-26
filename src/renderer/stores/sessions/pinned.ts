@@ -64,18 +64,20 @@ export function lastActiveAt(conversation: SidebarConversation): number {
   );
 }
 
-/** 「最近」只收这个窗口内有过未归档会话的项目，不是全部项目的另一种排序 */
+/** 「最近」只收这个窗口内有过会话（含已归档）的项目，不是全部项目的另一种排序 */
 export const RECENT_PROJECT_WINDOW_DAYS = 7;
 export const RECENT_PROJECT_WINDOW_MS = RECENT_PROJECT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 function latestActivityByProject(
   order: readonly string[],
-  conversations: Conversations
+  conversations: Conversations,
+  options?: { includeArchived?: boolean }
 ): Map<string, number> {
+  const includeArchived = options?.includeArchived === true;
   const activity = new Map<string, number>();
   for (const id of order) {
     const conversation = sidebarRoot(id, conversations);
-    if (!conversation || conversation.archived === true) continue;
+    if (!conversation || (conversation.archived === true && !includeArchived)) continue;
     activity.set(
       conversation.projectId,
       Math.max(activity.get(conversation.projectId) ?? 0, lastActiveAt(conversation))
@@ -100,14 +102,14 @@ export function sortProjectsByActivity<T extends { id: string }>(
   return byLatestActivity(projects, latestActivityByProject(order, conversations));
 }
 
-/** 最近视图：未归档、且最新会话落在窗口内；没有会话或更早的项目不显示 */
+/** 最近视图：最新会话（含已归档）落在窗口内；没有会话或更早的项目不显示 */
 export function recentProjects<T extends { id: string }>(
   projects: readonly T[],
   order: readonly string[],
   conversations: Conversations,
   now: number
 ): T[] {
-  const activity = latestActivityByProject(order, conversations);
+  const activity = latestActivityByProject(order, conversations, { includeArchived: true });
   const cutoff = now - RECENT_PROJECT_WINDOW_MS;
   return byLatestActivity(
     projects.filter((project) => {
@@ -152,6 +154,22 @@ export function projectConversationIds(
   );
 }
 
+/** 该项目有侧栏会话且全部已归档。从无会话、或仍有未归档会话，都是 false。 */
+export function projectHasOnlyArchivedConversations(
+  order: readonly string[],
+  conversations: Conversations,
+  projectId: string
+): boolean {
+  let hasArchived = false;
+  for (const id of order) {
+    const conversation = sidebarRoot(id, conversations);
+    if (conversation?.projectId !== projectId) continue;
+    if (conversation.archived !== true) return false;
+    hasArchived = true;
+  }
+  return hasArchived;
+}
+
 function sidebarTone(
   conversation: SidebarConversation,
   conversations: Conversations,
@@ -180,7 +198,10 @@ function isParked(tone: ConversationDotTone): boolean {
 }
 
 /** 不受留存窗口影响、始终留在「活跃中」:运行、待确认、未读、未读失败、续跑中、挂起等待 */
-function staysActive(tone: ConversationDotTone, conversation: SidebarConversation): boolean {
+export function staysActive(
+  tone: ConversationDotTone,
+  conversation: Pick<SidebarConversation, 'unread' | 'queueFailed' | 'goal'>
+): boolean {
   if (tone === 'failed')
     return conversation.unread === true || conversation.queueFailed !== undefined;
   if (isParked(tone) || conversation.goal?.status === 'active') return true;
@@ -188,7 +209,9 @@ function staysActive(tone: ConversationDotTone, conversation: SidebarConversatio
 }
 
 /** 留存窗口起点:最后一条消息与续期时刻中较晚者;都没有则不参与留存 */
-function retentionAnchor(conversation: SidebarConversation): number | undefined {
+export function retentionAnchor(
+  conversation: Pick<SidebarConversation, 'messages' | 'lastActiveAt' | 'activeRenewedAt'>
+): number | undefined {
   const messageAt = conversation.messages.at(-1)?.timestamp ?? conversation.lastActiveAt;
   return conversation.activeRenewedAt === undefined
     ? messageAt

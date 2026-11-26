@@ -64,6 +64,13 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
       'Show read/grep/find/ls as one-line rows and fold consecutive tool calls while the agent is still running',
   },
   {
+    id: 'appearance.composerToolbar',
+    category: 'appearance',
+    title: 'Composer toolbar buttons',
+    description:
+      'Pin buttons with the pin icon in the composer More menu; drag the handles there to reorder. Unpinned buttons fold into the More menu',
+  },
+  {
     id: 'appearance.enable-custom-background',
     category: 'appearance',
     title: 'Enable custom background image',
@@ -94,6 +101,13 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
     title: 'Show active sessions in the title bar',
     description:
       'Show active conversations as tabs above the conversation. Hold ⌘/Ctrl to see number shortcuts. Hidden while Bot mode is enabled.',
+  },
+  {
+    id: 'appearance.learnButtonEnabled',
+    category: 'appearance',
+    title: 'Learn button in composer',
+    description:
+      'Show a Learn button in the composer toolbar once the conversation has messages; it opens a side-by-side session that reviews this conversation and distills lessons',
   },
   {
     id: 'appearance.liveActivityFoldDelaySec',

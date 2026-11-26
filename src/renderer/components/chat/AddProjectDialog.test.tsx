@@ -1,9 +1,9 @@
-import type { HostDirSearchResult } from '@shared/types';
+import type { GithubRepoSearchResult, HostDirSearchResult } from '@shared/types';
 import { parseHTML } from 'linkedom';
 import { act, type ComponentProps, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AddProjectDialog } from './AddProjectDialog';
+import { AddProjectDialog, cloneFolderName, validateNewFolderName } from './AddProjectDialog';
 
 // t 必须稳定：DirBrowser 的 load 依赖 t，每次新建会让加载 effect 无限重跑
 const i18n = vi.hoisted(() => ({
@@ -174,6 +174,7 @@ beforeEach(() => {
         listHostDirs: vi.fn(async () => ({ ok: true, path: '/home', dirs: [] })),
         createHostDir,
         searchHostDirs: vi.fn(async () => ({ ok: true, host: 'test-host', results: [] })),
+        searchGithubRepos: vi.fn(async () => ({ ok: true, repos: [] })),
       },
       dialog: { selectDirectory: vi.fn() },
     },
@@ -350,5 +351,294 @@ describe('AddProjectDialog 本机目录搜索', () => {
     expect(searchInput()).toHaveProperty('value', '');
     await click('Remote (SSH)');
     expect(searchInput()).toBeNull();
+  });
+});
+
+describe('AddProjectDialog 新建与克隆', () => {
+  const button = (text: string) =>
+    [...container.querySelectorAll('button')].find((el) => el.textContent === text);
+  const input = (placeholder: string) =>
+    container.querySelector(`input[placeholder="${placeholder}"]`);
+
+  it('非法文件夹名显示红字并禁用创建', async () => {
+    await render(true);
+    await click('New folder');
+    const create = () => button('Create and add');
+    expect(create()?.hasAttribute('disabled')).toBe(true);
+
+    await type(input('Folder name'), 'bad/name');
+    expect(container.textContent).toContain(
+      'Folder name cannot contain slashes or control characters.'
+    );
+    expect(create()?.hasAttribute('disabled')).toBe(true);
+
+    await type(input('Folder name'), 'bad\\name');
+    expect(create()?.hasAttribute('disabled')).toBe(true);
+    await type(input('Folder name'), '..');
+    expect(container.textContent).toContain('Enter a folder name');
+    expect(create()?.hasAttribute('disabled')).toBe(true);
+    await type(input('Folder name'), 'a\u0001b');
+    expect(container.textContent).toContain(
+      'Folder name cannot contain slashes or control characters.'
+    );
+
+    await type(input('Search parent directory'), '/Users/me');
+    await submit();
+    expect(createHostDir).not.toHaveBeenCalled();
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it('创建成功后只添加新目录一次', async () => {
+    let resolveCreate: (result: {
+      ok: boolean;
+      path?: string;
+      parent?: string | null;
+      dirs?: string[];
+      error?: string;
+    }) => void = () => {};
+    createHostDir.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      })
+    );
+    await render(true);
+    await click('New folder');
+    await type(input('Folder name'), '  demo  ');
+    await type(input('Search parent directory'), '/Users/me/src/');
+    expect(container.textContent).toContain('/Users/me/src/demo');
+    expect(button('Create and add')?.hasAttribute('disabled')).toBe(false);
+    await submit();
+    await submit();
+    expect(createHostDir).toHaveBeenCalledTimes(1);
+    expect(createHostDir).toHaveBeenCalledWith('/Users/me/src', 'demo');
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(button('Create and add')?.hasAttribute('disabled')).toBe(true);
+    await act(async () => {
+      resolveCreate({ ok: true, path: '/Users/me/src/demo', parent: '/Users/me/src', dirs: [] });
+    });
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd).toHaveBeenCalledWith({ path: '/Users/me/src/demo' });
+  });
+
+  it('创建失败时显示错误且不添加项目', async () => {
+    createHostDir.mockResolvedValue({ ok: false, error: 'Permission denied' });
+    await render(true);
+    await click('New folder');
+    await type(input('Folder name'), 'demo');
+    await type(input('Search parent directory'), '/Users/me');
+    await submit();
+    expect(container.textContent).toContain('Permission denied');
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(button('Create and add')?.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('从仓库地址推导目录名，克隆成功后添加返回路径', async () => {
+    expect(cloneFolderName('https://github.com/acme/widget.git')).toBe('widget');
+    expect(cloneFolderName('git@github.com:acme/widget.git')).toBe('widget');
+    expect(cloneFolderName('acme/widget')).toBe('widget');
+    expect(cloneFolderName('https://github.com/acme/widget.git/')).toBe('widget');
+    expect(validateNewFolderName('ok')).toBeNull();
+
+    let resolveClone: (result: { ok: true; path: string } | { ok: false; error: string }) => void =
+      () => {};
+    const gitClone = vi.fn(
+      () =>
+        new Promise<{ ok: true; path: string } | { ok: false; error: string }>((resolve) => {
+          resolveClone = resolve;
+        })
+    );
+    window.electronAPI.projects.gitClone = gitClone;
+    await render(true);
+    await click('Clone');
+    expect(container.textContent).not.toContain('Search for directory');
+    await type(input('owner/repo or a git URL'), 'https://github.com/acme/widget.git');
+    await type(input('Search parent directory'), '/Users/me/src');
+    expect(container.textContent).toContain('/Users/me/src/widget');
+    await submit();
+    await submit();
+    expect(gitClone).toHaveBeenCalledTimes(1);
+    expect(gitClone).toHaveBeenCalledWith({
+      url: 'https://github.com/acme/widget.git',
+      parentDir: '/Users/me/src',
+    });
+    expect(createHostDir).not.toHaveBeenCalled();
+    expect(onAdd).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveClone({ ok: false, error: 'Clone failed.' });
+    });
+    expect(container.textContent).toContain('Clone failed.');
+    expect(onAdd).not.toHaveBeenCalled();
+
+    await submit();
+    expect(gitClone).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolveClone({ ok: true, path: '/Users/me/src/widget' });
+    });
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd).toHaveBeenCalledWith({ path: '/Users/me/src/widget' });
+  });
+});
+
+describe('AddProjectDialog 仓库与位置搜索', () => {
+  const input = (placeholder: string) =>
+    container.querySelector(`input[placeholder="${placeholder}"]`);
+  const buttonIncluding = (text: string) =>
+    [...container.querySelectorAll('button')].find((el) => el.textContent?.includes(text));
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('输入仓库关键词后选中结果，回填克隆地址并更新目标目录', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const search = vi.fn(
+      async (): Promise<GithubRepoSearchResult> => ({
+        ok: true,
+        repos: [
+          {
+            name: 'widget',
+            nameWithOwner: 'acme/widget',
+            description: 'A demo repository for widgets',
+            isPrivate: true,
+            url: 'https://github.com/acme/widget',
+          },
+        ],
+      })
+    );
+    window.electronAPI.projects.searchGithubRepos = search;
+    await render(true);
+    await click('Clone');
+    await type(input('owner/repo or a git URL'), 'acme/widget');
+    expect(container.textContent).toContain('acme/widget');
+    expect(container.textContent).toContain('Searching...');
+    expect(search).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(249);
+    });
+    expect(search).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search).toHaveBeenCalledWith('acme/widget', 10);
+    expect(container.textContent).toContain('Search your repositories');
+    expect(container.textContent).toContain('A demo repository for widgets');
+    const repo = buttonIncluding('acme/widget');
+    if (!repo) throw new Error('Missing repo result');
+    await act(async () => repo.click());
+    expect(input('owner/repo or a git URL')).toHaveProperty(
+      'value',
+      'https://github.com/acme/widget'
+    );
+    expect(container.textContent).not.toContain('A demo repository for widgets');
+    await type(input('Search parent directory'), '/Users/me/src');
+    expect(container.textContent).toContain('/Users/me/src/widget');
+  });
+
+  it('新的仓库关键词作废尚未返回的旧搜索', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let resolveOld: (value: GithubRepoSearchResult) => void = () => {};
+    const search = vi.fn((query: string): Promise<GithubRepoSearchResult> => {
+      if (query === 'old') {
+        return new Promise((resolve) => {
+          resolveOld = resolve;
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        repos: [
+          {
+            name: 'new',
+            nameWithOwner: 'acme/new',
+            description: null,
+            isPrivate: false,
+            url: 'https://github.com/acme/new',
+          },
+        ],
+      });
+    });
+    window.electronAPI.projects.searchGithubRepos = search;
+    await render(true);
+    await click('Clone');
+    await type(input('owner/repo or a git URL'), 'old');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    await type(input('owner/repo or a git URL'), 'new');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(container.textContent).toContain('acme/new');
+    await act(async () => {
+      resolveOld({
+        ok: true,
+        repos: [
+          {
+            name: 'old',
+            nameWithOwner: 'acme/old',
+            description: null,
+            isPrivate: false,
+            url: 'https://github.com/acme/old',
+          },
+        ],
+      });
+    });
+    expect(container.textContent).not.toContain('acme/old');
+    expect(container.textContent).toContain('acme/new');
+  });
+
+  it('gh 未登录时提示登录，而不是空结果', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    window.electronAPI.projects.searchGithubRepos = vi.fn(
+      async (): Promise<GithubRepoSearchResult> => ({
+        ok: false,
+        error: 'Sign in to GitHub with gh CLI.',
+      })
+    );
+    await render(true);
+    await click('Clone');
+    await type(input('owner/repo or a git URL'), 'enso');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(container.textContent).toContain('Sign in to GitHub with gh CLI.');
+    expect(container.textContent).not.toContain('No repositories found');
+  });
+
+  it('克隆和新建文件夹都能搜索位置并回填父目录', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const search = vi.fn(
+      async (): Promise<HostDirSearchResult> => ({
+        ok: true,
+        host: 'mbp',
+        results: [{ path: '/Users/me/src', displayPath: '~/src' }],
+      })
+    );
+    window.electronAPI.projects.searchHostDirs = search;
+    await render(true);
+    await click('Clone');
+    const parent = () => container.querySelector('input[placeholder="Search parent directory"]');
+    await type(parent(), 'src');
+    expect(search).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(search).toHaveBeenCalledWith('src');
+    expect(container.textContent).toContain('~/src');
+    await click('~/src');
+    expect(parent()).toHaveProperty('value', '/Users/me/src');
+    expect(container.textContent).not.toContain('~/src');
+
+    await click('New folder');
+    await type(input('Folder name'), 'demo');
+    expect(container.textContent).toContain('/Users/me/src/demo');
+    await type(parent(), 'lib');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(search).toHaveBeenLastCalledWith('lib');
+    await click('~/src');
+    expect(parent()).toHaveProperty('value', '/Users/me/src');
+    expect(container.textContent).toContain('/Users/me/src/demo');
   });
 });
