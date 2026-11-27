@@ -143,6 +143,8 @@ export interface SettingsState {
   rtkEnabled: boolean;
   /** 会话请求对 Anthropic Messages 模型用 1h prompt cache；缺省关，下一次请求生效。 */
   longCacheRetention: boolean;
+  /** 本机 agy CLI。binaryPath 空则从 PATH 查找。skipPermissions 默认关。 */
+  agy: AgySettings;
   /** 后台操作电脑时显示被操作窗口的画中画（macOS） */
   computerPreview: boolean;
   /** computer 操作任何 app 都不再询问（macOS），缺省关 */
@@ -155,6 +157,9 @@ export interface SettingsState {
 
   /** dcg 命令守卫：命中危险命令强制真人确认；需先安装二进制，新建或冷恢复会话生效。 */
   dcgEnabled: boolean;
+
+  /** dcg system.processes pack：拦截 pkill/killall/kill -1 等批量杀进程命令；需 dcg 0.17.2+，新建或冷恢复会话生效。 */
+  dcgProcessGuard: boolean;
 
   /** 文件编辑工具模式；缺省 apply_patch，新建或冷恢复会话生效。 */
   editMode: EditMode;
@@ -427,11 +432,13 @@ export interface SettingsState {
   setExploreFoldEnabled: (value: boolean) => void;
   setRtkEnabled: (value: boolean) => void;
   setLongCacheRetention: (value: boolean) => void;
+  setAgy: (value: AgySettings) => void;
   setComputerPreview: (value: boolean) => void;
   setComputerAllowAllApps: (value: boolean) => void;
   setOpenLinksInBuiltinBrowser: (value: boolean) => void;
   setProtectedActionsInCode: (value: boolean) => void;
   setDcgEnabled: (value: boolean) => void;
+  setDcgProcessGuard: (value: boolean) => void;
   setMemoryEmbeddingModel: (value: string) => void;
   setMemoryEmbeddingAutoDownload: (value: boolean) => void;
   setMemoryModelIdleMinutes: (value: number) => void;
@@ -654,3 +661,5 @@ export interface SettingsState {
   setUsageModelPricing: (modelId: string, pricing: ModelPricing) => boolean;
   removeUsageModelPricing: (modelId: string) => void;
 }
+
+import type { AgySettings } from '@shared/agy/types';

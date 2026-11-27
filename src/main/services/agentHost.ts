@@ -3,6 +3,8 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { agentWorkerPath, app, resourcesPath, utilityProcess, type WorkerProcess } from '@platform';
 import { describeAgentWorkerExit } from '@shared/agentWorkerExit';
+import { AGY_PROVIDER_ID } from '@shared/agy/constants';
+import { agySettingsProvider, parseAgySettings } from '@shared/agy/settings';
 import { APP_LOGGING_ENV, isAppLoggingEnabled } from '@shared/appLogFile';
 import {
   type ApprovalAllowThreshold,
@@ -150,11 +152,12 @@ import {
   isAgentWorkerGone,
   takeAgentWorkerCrash,
 } from './agentWorkerExit';
+import { cachedAgyModels } from './agyProbe';
 import { backgroundTaskStates } from './backgroundTaskTracker';
 import { type MemberAgentType, memberSpawnDescription } from './bots/botAgentType';
 import { BuiltinToolScopes, sessionDisabledTools, withoutKeepEnabled } from './builtinToolScopes';
 import { isComputerPlatformSupported } from './computer/support';
-import { DCG_VERSION, dcgRoot, installedDcgPath } from './dcgBinary';
+import { compareDcgVersions, DCG_VERSION, dcgRoot, resolveInstalledDcg } from './dcgBinary';
 import { activeDcgExemptRules } from './dcgRuleMemory';
 import { ensureElevationServer } from './elevation';
 import {
@@ -444,6 +447,7 @@ export function startAgentWorker(options: { restartCheckpointFile?: string } = {
     pushMaxActiveCoworkers();
     pushAutoRetryLimit();
     pushLongCacheRetention();
+    pushAgyConfig();
     pushPrivacyMasking();
     pushDisabledWorkflowPresets();
     pushModelDirectory();
@@ -1845,8 +1849,17 @@ export function spawnSession(
   const pluginEvents = extensionPlugins?.eventPlanForSpawn(secretaryPluginIds) ?? null;
   // worker 崩溃/退出后不自动拉起的话，所有会话都只能靠重启 app 恢复；在 spawn 入口按需重建
   if (!worker && workerExited) startAgentWorker();
-  const dcgPath = state?.dcgEnabled === true ? installedDcgPath(dcgRoot()) : null;
-  const dcgExemptRules = dcgPath ? activeDcgExemptRules(dcgRoot(), DCG_VERSION) : [];
+  const installedDcg = state?.dcgEnabled === true ? resolveInstalledDcg(dcgRoot()) : null;
+  const dcgPath = installedDcg?.path ?? null;
+  const dcgActiveVersion = installedDcg?.version ?? DCG_VERSION;
+  const dcgExemptRules = dcgPath ? activeDcgExemptRules(dcgRoot(), dcgActiveVersion) : [];
+  // system.processes pack 是 0.17.2 新增：旧版二进制不认识（直接放行一切），绝不能透传
+  const dcgExtraPacks =
+    dcgPath &&
+    state?.dcgProcessGuard === true &&
+    (compareDcgVersions(dcgActiveVersion, '0.17.2') ?? -1) >= 0
+      ? (['system.processes'] as const)
+      : null;
   const sent = sendAgentCommand({
     type: 'spawn-parent',
     identity,
@@ -1862,6 +1875,7 @@ export function spawnSession(
     rtkEnabled: state?.rtkEnabled !== false,
     ...(dcgPath ? { dcgPath } : {}),
     ...(dcgExemptRules.length > 0 ? { dcgExemptRules } : {}),
+    ...(dcgExtraPacks ? { dcgExtraPacks: [...dcgExtraPacks] } : {}),
     ...(exploreFoldEnabled ? { exploreFoldEnabled: true } : {}),
     editMode,
     ...(compactStrategy !== 'standard' ? { compactStrategy } : {}),
@@ -3419,6 +3433,17 @@ export function pushLongCacheRetention(): void {
   } satisfies AgentCommand);
 }
 
+export function pushAgyConfig(): void {
+  if (!worker || !workerReady) return;
+  const agy = parseAgySettings(readSettingsState()?.agy);
+  worker.postMessage({
+    type: 'set-agy-config',
+    binaryPath: agy.binaryPath,
+    skipPermissions: agy.skipPermissions,
+    models: cachedAgyModels(),
+  } satisfies AgentCommand);
+}
+
 /** worker 跟随 Main 当前的应用日志开关 */
 export function pushAppLogging(): void {
   if (!worker || !workerReady) return;
@@ -3534,6 +3559,8 @@ export function customProvidersForWorker(): WorkerCustomProvider[] {
     const provider = item as Partial<ModelProvider>;
     if (provider.oauthAccountKey) continue;
     if (typeof provider.id !== 'string' || provider.id.length === 0) continue;
+    // agy cli 是 worker 内置 provider，设置里的条目只给选择器用，不能当自定义 API 供应商注册
+    if (provider.id === AGY_PROVIDER_ID) continue;
     if (typeof provider.name !== 'string') continue;
     if (
       typeof provider.api !== 'string' ||
@@ -3592,7 +3619,8 @@ export function providersFromSettings(): ModelProvider[] {
     : [];
   // OAuth 条目的 models 只是稀疏覆盖；存在性、enabled 与凭证校验都看目录物化后的清单。
   const materialized = materializeProviders(raw, getModelDirectorySnapshot());
-  return materialized;
+  if (materialized.some((provider) => provider.id === AGY_PROVIDER_ID)) return materialized;
+  return [...materialized, agySettingsProvider(cachedAgyModels())];
 }
 
 export function modelRefForSpawnConfig(config: SpawnModelConfig): ModelRef {

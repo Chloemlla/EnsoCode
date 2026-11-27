@@ -68,7 +68,7 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
     category: 'appearance',
     title: 'Composer toolbar buttons',
     description:
-      'Pin buttons with the pin icon in the composer More menu; drag the handles there to reorder. Unpinned buttons fold into the More menu',
+      'Pin buttons in the composer More menu, drag to reorder, and use Edit mode to insert flexible spaces. Unpinned buttons fold into the More menu',
   },
   {
     id: 'appearance.enable-custom-background',
@@ -751,6 +751,26 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
   },
   { id: 'providers.advanced', category: 'providers', title: 'Advanced' },
   {
+    id: 'providers.agy-binary-path',
+    category: 'providers',
+    title: 'Binary path',
+    description: 'Leave empty to find agy on PATH or in ~/.local/bin.',
+  },
+  {
+    id: 'providers.agy-cli',
+    category: 'providers',
+    title: 'agy cli (experimental)',
+    description:
+      'Runs sessions through the local agy acp command. EnsoCode does not sign in for you.',
+  },
+  {
+    id: 'providers.agy-skip-permissions',
+    category: 'providers',
+    title: 'Skip permissions',
+    description:
+      'Passes --dangerously-skip-permissions. agy will not ask before commands or edits.',
+  },
+  {
     id: 'providers.assistant-approval-model',
     category: 'providers',
     title: 'Assistant approval model',
@@ -874,6 +894,25 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
   },
   { id: 'runtime.root', category: 'runtime', title: 'Runtime & sessions' },
   { id: 'runtime.sessions-worktrees', category: 'runtime', title: 'Sessions & worktrees' },
+  { id: 'secretary.actions', category: 'secretary', title: 'Actions' },
+  {
+    id: 'secretary.bearer-token',
+    category: 'secretary',
+    title: 'Bearer token',
+    description: 'Pass via Authorization: Bearer <token> or X-Enso-Token header.',
+  },
+  {
+    id: 'secretary.coalesce-window-seconds',
+    category: 'secretary',
+    title: 'Coalesce window (seconds)',
+    description: 'Combine consecutive events within this window into one wake-up (0 = immediate).',
+  },
+  {
+    id: 'secretary.coalesce-window-seconds-2',
+    category: 'secretary',
+    title: 'Coalesce window (seconds)',
+    description: 'Combine consecutive events within this window into one wake-up (0 = immediate).',
+  },
   { id: 'secretary.communication-style', category: 'secretary', title: 'Communication style' },
   { id: 'secretary.danger-zone', category: 'secretary', title: 'Danger zone' },
   {
@@ -890,6 +929,8 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
     description:
       'The most dispatched sessions the secretary may run at the same time. Dispatches beyond the limit wait in line and start on their own when a slot frees up.',
   },
+  { id: 'secretary.http-post-url', category: 'secretary', title: 'HTTP POST URL' },
+  { id: 'secretary.name', category: 'secretary', title: 'Name' },
   {
     id: 'secretary.plugins',
     category: 'secretary',
@@ -953,6 +994,28 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
     description:
       'Python or Node tools the secretary builds for itself. It proposes them in the chat; you confirm before anything is written. Read-only tools run directly, anything else asks for your approval on every call.',
   },
+  {
+    id: 'secretary.trigger-instruction',
+    category: 'secretary',
+    title: 'Trigger instruction',
+    description:
+      'Trusted rule shown outside untrusted event payload so the secretary knows how to react.',
+  },
+  {
+    id: 'secretary.trigger-instruction-2',
+    category: 'secretary',
+    title: 'Trigger instruction',
+    description: 'Optional rule telling the secretary how to handle incoming events.',
+  },
+  {
+    id: 'secretary.triggers',
+    category: 'secretary',
+    title: 'Local triggers',
+    description:
+      'Loopback-only (127.0.0.1) HTTP POST & WebSocket endpoints for local scripts and watchers to wake this secretary. Starts automatically only when at least one trigger is enabled.',
+  },
+  { id: 'secretary.triggers.server', category: 'secretary', title: 'Local listener port' },
+  { id: 'secretary.websocket-url', category: 'secretary', title: 'WebSocket URL' },
   { id: 'shortcuts.pluginCommands', category: 'shortcuts', title: 'Plugin commands' },
   {
     id: 'shortcuts.root',
@@ -1037,6 +1100,13 @@ export const GENERATED_SETTINGS_CATALOG: readonly SettingsSearchEntry[] = [
     title: 'Destructive command guard (dcg)',
     description:
       'Check bash and PowerShell commands with dcg before running. Matches such as git reset --hard or recursive deletes always require your confirmation, even in full-access mode. Takes effect on new conversations.',
+  },
+  {
+    id: 'tools.dcgProcessGuard',
+    category: 'tools',
+    title: 'Block mass process kills (system.processes)',
+    description:
+      'Also check commands like pkill, killall and kill -1 that signal processes by pattern. New conversations only. Requires dcg v0.17.2 or later.',
   },
   {
     id: 'tools.editMode',

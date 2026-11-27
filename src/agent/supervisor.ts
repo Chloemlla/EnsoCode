@@ -34,6 +34,7 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { AGENT_COMPACTION_LOG } from '@shared/agentWorkerExit';
+import { AGY_PROVIDER_ID } from '@shared/agy/constants';
 import { setAppLoggingEnabled } from '@shared/appLogFile';
 import type { ApprovalAllowThreshold } from '@shared/approvalReviewRecord';
 import { autoRetryOverrides, DEFAULT_AUTO_RETRY_LIMIT } from '@shared/autoRetry';
@@ -136,7 +137,13 @@ import { classifyUpstreamError } from '@shared/upstreamRecovery';
 import { VIRTUAL_PROVIDER_ID } from '@shared/virtualModels';
 import type { WebSearchChainEntry } from '@shared/webSearchChain';
 import type { WindowsLocalShell } from '@shared/windowsLocalShell';
+import { version as appVersion } from '../../package.json';
 import { AgentControlInvoker } from './agentControl';
+import { agyCompactGuardExtension, withAgyCompactGuard } from './agy/compactGuard';
+import { isAgyModel, registerAgyProvider } from './agy/provider';
+import { closeAgySession, closeAllAgySessions } from './agy/registry';
+import { attachAgyBridgeToSession } from './agy/sessionBridge';
+import { setAgyWorkerConfig } from './agy/workerConfig';
 import {
   createApplyPatchTool,
   createRemoteApplyPatchIo,
@@ -294,7 +301,7 @@ import {
   runWithPrivacySink,
 } from './privacyMask/runtime';
 import { createProjectSettingsManager } from './projectCode';
-import { projectMessage } from './projection';
+import { projectMessage, projectTodos } from './projection';
 import { promptCatalogExtension } from './promptCatalog';
 import { applyWorkerProxyEnv, runWithProviderProxy } from './proxyEnv';
 import { withReadTruncationMeta } from './readTruncation';
@@ -799,29 +806,34 @@ function createSessionResourceLoader(options: {
             } satisfies InlineExtension,
           ]
         : []),
+      // 每种策略都包上 agy 兜底：Enso 处理器对 agy 会话给不出结果时不能落到 pi 原生摘要
       ...(!options.noExtensions && options.compactStrategy === 'continuous-memory'
         ? [
-            continuousMemoryInlineExtension({
-              model: options.smartCompactSummaryModel,
-              mode: options.smartCompactMode,
-              compact: options.compactRoute,
-            }),
+            withAgyCompactGuard(
+              continuousMemoryInlineExtension({
+                model: options.smartCompactSummaryModel,
+                mode: options.smartCompactMode,
+                compact: options.compactRoute,
+              })
+            ),
           ]
         : !options.noExtensions &&
             (options.compactStrategy === 'smart' || options.compactStrategy === 'codex-native')
           ? [
-              smartCompactInlineExtension(
-                options.compactRoute
-                  ? null
-                  : {
-                      summaryModel: options.smartCompactSummaryModel,
-                      mode: options.smartCompactMode,
-                    },
-                options.compactStrategy === 'codex-native',
-                options.compactRoute
+              withAgyCompactGuard(
+                smartCompactInlineExtension(
+                  options.compactRoute
+                    ? null
+                    : {
+                        summaryModel: options.smartCompactSummaryModel,
+                        mode: options.smartCompactMode,
+                      },
+                  options.compactStrategy === 'codex-native',
+                  options.compactRoute
+                )
               ),
             ]
-          : []),
+          : [agyCompactGuardExtension]),
       ...(options.pluginEvents ? [createPluginEventsExtension(options.pluginEvents.invoker)] : []),
       skillChainExtension(() => loader.getSkills().skills),
       options.silentTurnRecovery,
@@ -918,6 +930,22 @@ function acceptsImageInput(model: AgentSession['model']): boolean {
   return model?.input?.includes('image') === true;
 }
 
+/** 工具结果 / 增量快照里的文字段拼接；没有 content 数组时为空串 */
+function toolResultText(result: unknown): string {
+  const parts = (result as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .filter(
+      (part): part is { type: 'text'; text: string } =>
+        typeof part === 'object' &&
+        part !== null &&
+        (part as { type?: string }).type === 'text' &&
+        typeof (part as { text?: unknown }).text === 'string'
+    )
+    .map((part) => part.text)
+    .join('');
+}
+
 function settingsModelRef(model: SpawnModelConfig): ModelRef {
   if (
     'settingsProviderId' in model &&
@@ -959,6 +987,7 @@ export async function initializeWorkerRuntime(runtime: ModelRuntime): Promise<Mo
   runtime.registerProvider(QODER_PROVIDER_ID, qoderProviderConfig('global'));
   runtime.registerProvider(QODER_CN_PROVIDER_ID, qoderProviderConfig('cn'));
   await loadCursorProvider(runtime);
+  registerAgyProvider(runtime);
   // 已关联 Codex 的账号也可能在 worker 里触发刷新，必须同样接管；须在按需注册克隆之前
   installCodexLinkedRefresh(runtime);
   // registerProvider 只触发 allowNetwork:false 的 refresh，拿到的是兜底清单；Main 侧界面
@@ -1834,6 +1863,17 @@ export class SessionSupervisor {
       this.longCacheRetention = command.enabled;
       return;
     }
+    if (command.type === 'set-agy-config') {
+      setAgyWorkerConfig({
+        binaryPath: command.binaryPath,
+        skipPermissions: command.skipPermissions,
+        models: command.models,
+      });
+      void this.getRuntime()
+        .then((runtime) => registerAgyProvider(runtime, command.models))
+        .catch(() => {});
+      return;
+    }
     if (command.type === 'set-app-logging') {
       setAppLoggingEnabled(command.enabled);
       return;
@@ -2140,7 +2180,8 @@ export class SessionSupervisor {
           command.workflowPresetFiles,
           command.secretaryTools,
           command.askRelay,
-          command.dcgExemptRules
+          command.dcgExemptRules,
+          command.dcgExtraPacks
         );
         if (command.forkFrom) this.injectForkTranscript(command.identity, command.forkFrom);
         return;
@@ -2372,7 +2413,12 @@ export class SessionSupervisor {
           managed.session.model ? Boolean(managed.session.model.reasoning) : false,
           command.model.modelId
         );
+        // 切走前记下：setModel 之后 session.model 已经是新模型
+        const leavingAgy = isAgyModel(managed.session.model ?? {}) && !isAgyModel(next);
         await managed.session.setModel(next);
+        if (leavingAgy) {
+          void closeAgySession(managed.identity.sessionId);
+        }
         ensureAssistantUsage(managed.session.messages as unknown[]);
         managed.modelId = command.model.modelId;
         const usage = managed.session.getContextUsage();
@@ -2846,7 +2892,8 @@ export class SessionSupervisor {
     workflowPresetFiles: readonly string[] = [],
     secretaryToolDescriptors: readonly SecretaryToolDescriptor[] = [],
     askRelay?: { name: string },
-    dcgExemptRules: readonly string[] = []
+    dcgExemptRules: readonly string[] = [],
+    dcgExtraPacks: readonly string[] = []
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -3014,7 +3061,9 @@ export class SessionSupervisor {
         autoReject: autoRejectApprovals,
         ...(botMode ? { exemptFull: true, humanTimeoutMs: HUMAN_REQUEST_TIMEOUT_MS } : {}),
         commandGuard: withTempRootGuard(
-          dcgPath ? withDcgExemptions(createDcgGuard(dcgPath), dcgExemptRules) : undefined
+          dcgPath
+            ? withDcgExemptions(createDcgGuard(dcgPath, undefined, dcgExtraPacks), dcgExemptRules)
+            : undefined
         ),
         sessionTempDir: remote ? null : sessionTempDir(sessionId, { cwd }),
       }
@@ -3474,6 +3523,20 @@ export class SessionSupervisor {
               cwd
             )
           : undefined;
+        // 每个子会话一个 agy 会话：匿名子会话用 pi 自己的会话 id，dispose 时关掉。
+        // 不看起始模型：桥对其他模型是空操作，会话中途切到 agy 也接得上
+        const agyChildId = childIdentity?.sessionId ?? childSessionId ?? session.sessionId;
+        const agyChildTemp = sessionTempDir(agyChildId, { cwd });
+        attachAgyBridgeToSession(session, {
+          ensoSessionId: agyChildId,
+          resumable: !ephemeral,
+          cwd,
+          sessionDir: this.options.sessionDir,
+          clientVersion: appVersion,
+          gate: childGate,
+          planActive: () => false,
+          readRoots: () => [cwd, ...(agyChildTemp ? [agyChildTemp] : [])],
+        });
         if (childIdentity) {
           const childServers = typed
             ? selectedMcp
@@ -3926,6 +3989,17 @@ export class SessionSupervisor {
       },
       () => this.emitPlanState(managed)
     );
+    // 不看起始模型：桥对其他模型是空操作，会话中途切到 agy 也接得上
+    const agyTemp = sessionTempDir(sessionId, { cwd });
+    attachAgyBridgeToSession(session, {
+      ensoSessionId: sessionId,
+      cwd,
+      sessionDir: this.options.sessionDir,
+      clientVersion: appVersion,
+      gate,
+      planActive: () => plan.state().active,
+      readRoots: () => [cwd, ...(agyTemp ? [agyTemp] : [])],
+    });
     // 关掉 plan 时先退出 plan 模式，再撤掉控制器：工具门不再限制，set-plan-mode 不再生效
     const setPlanEnabled = (enabled: boolean) => {
       if (enabled === (managed.plan !== undefined)) return;
@@ -5180,17 +5254,8 @@ export class SessionSupervisor {
       case 'tool_execution_update': {
         if (event.parentToolCallId) return;
         // pi 已按 BASH_UPDATE_THROTTLE_MS 节流下发全量快照，这里只做投影，不再二次节流
-        const parts: unknown = event.partialResult?.content;
-        if (!Array.isArray(parts)) return;
-        const output = parts
-          .filter(
-            (part): part is { type: 'text'; text: string } =>
-              typeof part === 'object' &&
-              part !== null &&
-              (part as { type?: string }).type === 'text'
-          )
-          .map((part) => part.text)
-          .join('');
+        if (!Array.isArray(event.partialResult?.content)) return;
+        const output = toolResultText(event.partialResult);
         if (!output) return;
         this.options.emit({
           type: 'tool-output',
@@ -5210,6 +5275,18 @@ export class SessionSupervisor {
         if (start !== undefined) {
           managed.toolDurations.set(event.toolCallId, Date.now() - start);
         }
+        // toolResult 消息可能晚到（agy / Cursor 整段回复结束才落盘、pi 并行工具按源序补发）：先告诉界面它已收口
+        // todo 的清单同 toolResult 投影一样取自 result.details，清单行与固定待办条不必等落盘
+        const todos = event.toolName === 'todo' ? projectTodos(event.result?.details) : null;
+        this.options.emit({
+          type: 'tool-output',
+          identity: managed.identity,
+          seq: ++managed.seq,
+          toolCallId: event.toolCallId,
+          output: toolResultText(event.result),
+          ended: event.isError === true || event.result?.isError === true ? 'error' : 'ok',
+          ...(todos ? { todos } : {}),
+        });
         return;
       }
       case 'compaction_start':
@@ -5379,6 +5456,13 @@ export class SessionSupervisor {
     // 子代理 Run 真正收口：它的提醒没人再等；退出收尾打断的 Run 重启后接着跑，提醒留着
     if (!awaitingTasks && !quiet && sessionId.includes('::')) this.reminders.cancelAll(sessionId);
     const awaitingReminder = !sessionId.includes('::') && this.reminders.list(sessionId).length > 0;
+    // 根会话（无 Run 概念）也有未完的后台工作要交付：headless run 靠它保持进程等唤醒。
+    // 只给事实不给行为：GUI 常驻本来就等得到，是否据此不退出是 headless 消费者的事
+    const awaitingBackground =
+      !sessionId.includes('::') &&
+      !aborted &&
+      !budget &&
+      (this.bgTasks.undeclared(sessionId).length > 0 || managed.pendingTaskReminders.length > 0);
     managed.currentTurnId = undefined;
     managed.abortedTurnId = undefined;
     managed.turnAborted = false;
@@ -5413,6 +5497,7 @@ export class SessionSupervisor {
         ...(continues ? { continues } : {}),
         ...(awaitingTasks ? { awaitingTasks: true as const } : {}),
         ...(awaitingReminder ? { awaitingReminder: true as const } : {}),
+        ...(awaitingBackground ? { awaitingBackground: true as const } : {}),
         ...(managed.session.model?.provider ? { provider: managed.session.model.provider } : {}),
       });
     if (awaitingTasks) {
@@ -6675,6 +6760,7 @@ export class SessionSupervisor {
 
   async shutdown(): Promise<void> {
     clearInterval(this.evictionTimer);
+    void closeAllAgySessions();
     this.reminders.dispose();
     this.workspaceSwitch.clear();
     this.recordInterruptedTasks();
@@ -7636,6 +7722,12 @@ export function resolveBaseModel(runtime: ModelRuntime, model: SpawnModelConfig)
     if (!provider) throw new Error(`oauth provider not found: ${registered.provider}`);
     runtime.registerNativeProvider(withRequestBodyBudget(provider));
     return registered;
+  }
+  if (model.settingsProviderId === AGY_PROVIDER_ID) {
+    registerAgyProvider(runtime, undefined, model.modelId);
+    const agyModel = runtime.getModel(AGY_PROVIDER_ID, model.modelId);
+    if (!agyModel) throw new Error(`agy model not found: ${model.modelId}`);
+    return agyModel;
   }
   const providerId = providerKeyFor(model);
   const entry: ModelEntry = { id: model.modelId };

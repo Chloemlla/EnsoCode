@@ -206,11 +206,13 @@ const initialState = {
   exploreFoldEnabled: false,
   rtkEnabled: true,
   longCacheRetention: false,
+  agy: EMPTY_AGY_SETTINGS,
   computerPreview: true,
   computerAllowAllApps: false,
   openLinksInBuiltinBrowser: true,
   protectedActionsInCode: false,
   dcgEnabled: false,
+  dcgProcessGuard: false,
   editMode: 'apply_patch' as import('@shared/types').EditMode,
   compactStrategy: 'standard' as import('@shared/compactStrategy').CompactStrategy,
   smartCompactEnabled: false,
@@ -429,12 +431,14 @@ export const useSettingsStore = create<SettingsState>()(
       setExploreFoldEnabled: (exploreFoldEnabled) => set({ exploreFoldEnabled }),
       setRtkEnabled: (rtkEnabled) => set({ rtkEnabled }),
       setLongCacheRetention: (longCacheRetention) => set({ longCacheRetention }),
+      setAgy: (agy) => set({ agy }),
       setComputerPreview: (computerPreview) => set({ computerPreview }),
       setComputerAllowAllApps: (computerAllowAllApps) => set({ computerAllowAllApps }),
       setOpenLinksInBuiltinBrowser: (openLinksInBuiltinBrowser) =>
         set({ openLinksInBuiltinBrowser }),
       setProtectedActionsInCode: (protectedActionsInCode) => set({ protectedActionsInCode }),
       setDcgEnabled: (dcgEnabled) => set({ dcgEnabled }),
+      setDcgProcessGuard: (dcgProcessGuard) => set({ dcgProcessGuard }),
       setMemoryEmbeddingModel: (memoryEmbeddingModel) => set({ memoryEmbeddingModel }),
       setMemoryEmbeddingAutoDownload: (memoryEmbeddingAutoDownload) =>
         set({ memoryEmbeddingAutoDownload }),
@@ -1493,3 +1497,5 @@ useModelDirectoryStore.subscribe((state, prev) => {
   if (state.snapshot === prev.snapshot) return;
   useSettingsStore.getState().revalidateDefaultModel(useOauthCredentialStore.getState().snapshot);
 });
+
+import { EMPTY_AGY_SETTINGS } from '@shared/agy/types';

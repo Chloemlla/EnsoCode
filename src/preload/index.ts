@@ -1,3 +1,4 @@
+import type { AgyAuthStatus, AgyModelOption } from '@shared/agy/types';
 import type { AppLogEntry, LogExportResult, LogSummaryLevel } from '@shared/appLog';
 import type { BotTemplateLibrary } from '@shared/bots/templateLibrary';
 import type {
@@ -284,6 +285,11 @@ import type {
   SecretaryTakeoverView,
   SecretaryTodoMutate,
   SecretaryToolDraft,
+  SecretaryTriggerCreateDraft,
+  SecretaryTriggerListResult,
+  SecretaryTriggerServerState,
+  SecretaryTriggerUpdatePatch,
+  SecretaryTriggerView,
   SecretaryUntrackedView,
 } from '@shared/types/secretary';
 import type {
@@ -297,7 +303,12 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
 } from '@shared/types/sidePanel';
-import type { RestartToUpdateResult, UpdaterState, UpdateStatus } from '@shared/types/updater';
+import type {
+  RestartToUpdateResult,
+  UpdateCheckResult,
+  UpdaterState,
+  UpdateStatus,
+} from '@shared/types/updater';
 import type {
   WorkflowPresetDraft,
   WorkflowPresetSaveResult,
@@ -767,6 +778,64 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.SECRETARY_OPEN_CONVERSATION, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.SECRETARY_OPEN_CONVERSATION, listener);
     },
+    /** 本机触发器列表与监听服务状态 */
+    listTriggers: (
+      secretaryId?: string
+    ): Promise<SecretaryTriggerListResult | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGERS_LIST, secretaryId),
+    onTriggersChanged: (
+      callback: (payload: { server: SecretaryTriggerServerState }) => void
+    ): (() => void) => {
+      const listener = (_event: unknown, payload: { server: SecretaryTriggerServerState }) =>
+        callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.SECRETARY_TRIGGERS_CHANGED, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.SECRETARY_TRIGGERS_CHANGED, listener);
+    },
+    createTrigger: (
+      draft: Partial<SecretaryTriggerCreateDraft> & { name: string },
+      secretaryId?: string
+    ): Promise<
+      | {
+          ok: true;
+          trigger: SecretaryTriggerView;
+          token: string;
+          server: SecretaryTriggerServerState;
+        }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_CREATE, draft, secretaryId),
+    updateTrigger: (
+      id: string,
+      patch: SecretaryTriggerUpdatePatch,
+      secretaryId?: string
+    ): Promise<
+      | { ok: true; trigger: SecretaryTriggerView; server: SecretaryTriggerServerState }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_UPDATE, { id, patch }, secretaryId),
+    removeTrigger: (
+      id: string,
+      secretaryId?: string
+    ): Promise<{ ok: true; server: SecretaryTriggerServerState } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_REMOVE, { id }, secretaryId),
+    rotateTriggerToken: (
+      id: string,
+      secretaryId?: string
+    ): Promise<{ ok: true; token: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_ROTATE_TOKEN, { id }, secretaryId),
+    revealTriggerToken: (
+      id: string,
+      secretaryId?: string
+    ): Promise<{ ok: true; token: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_REVEAL_TOKEN, { id }, secretaryId),
+    setTriggerServerPort: (
+      port: number
+    ): Promise<{ ok: true; server: SecretaryTriggerServerState } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_SET_PORT, { port }),
+    testTrigger: (
+      id: string,
+      text?: string,
+      secretaryId?: string
+    ): Promise<{ ok: true; deliveryKey: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_TRIGGER_TEST, { id, text }, secretaryId),
   },
 
   modelDirectory: {
@@ -1013,6 +1082,15 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.OAUTH_CREDENTIALS_CHANGED, listener);
     },
+  },
+
+  agy: {
+    /** refresh=true 才重新探测。设置页打开用缓存，重新检测传 true。不要在窗口聚焦时调用。 */
+    authStatus: (refresh = false): Promise<AgyAuthStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGY_AUTH_STATUS, refresh),
+    /** 只读 Main 缓存的模型清单，不启动 agy。启动时用它填 picker。 */
+    cachedModels: (): Promise<AgyModelOption[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGY_CACHED_MODELS),
   },
 
   assets: {
@@ -1778,7 +1856,8 @@ const electronAPI = {
   },
 
   updater: {
-    checkForUpdates: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
+    checkForUpdates: (): Promise<UpdateCheckResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.UPDATER_CHECK),
     downloadUpdate: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.UPDATER_DOWNLOAD_UPDATE),
     /** 走优雅重启的安全点：当前工具结束后重启安装，后台命令交给新实例 */
     quitAndInstall: (): Promise<RestartToUpdateResult | undefined> =>

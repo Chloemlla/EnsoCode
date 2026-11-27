@@ -46,6 +46,7 @@ export const SETTINGS_DATA_COVERAGE = {
   ),
   rtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   longCacheRetention: excluded('Prompt cache TTL is a device-local request cost preference.'),
+  agy: excluded('Device-local Antigravity CLI path and permission skip.'),
   computerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   computerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   openLinksInBuiltinBrowser: excluded(
@@ -76,6 +77,7 @@ export const SETTINGS_DATA_COVERAGE = {
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
   dcgEnabled: excluded('dcg command guard depends on a device-local binary.'),
+  dcgProcessGuard: excluded('dcg command guard depends on a device-local binary.'),
   botModeEnabled: excluded('Experimental Bot mode toggle; device-local, not an Enso capability.'),
   scratchSessionsEnabled: excluded(
     'Experimental temporary chats toggle; device-local, not an Enso capability.'
@@ -251,6 +253,7 @@ export const SETTINGS_ACTION_COVERAGE = {
   ),
   setRtkEnabled: excluded('RTK command compression is a desktop session preference.'),
   setLongCacheRetention: excluded('Prompt cache TTL is a device-local request cost preference.'),
+  setAgy: excluded('Device-local Antigravity CLI path and permission skip.'),
   setComputerPreview: excluded('Computer picture-in-picture is a desktop display preference.'),
   setComputerAllowAllApps: excluded('Computer app trust is a device-local security preference.'),
   setOpenLinksInBuiltinBrowser: excluded(
@@ -260,6 +263,7 @@ export const SETTINGS_ACTION_COVERAGE = {
     'Protected-action confirmation floor for Code sessions; desktop safety preference.'
   ),
   setDcgEnabled: excluded('dcg command guard depends on a device-local binary.'),
+  setDcgProcessGuard: excluded('dcg command guard depends on a device-local binary.'),
   setMemoryEmbeddingModel: excluded('Memory embedding model choice is a desktop preference.'),
   setMemoryEmbeddingAutoDownload: excluded('Memory model download policy is a device preference.'),
   setMemoryModelIdleMinutes: excluded('Memory model idle unloading policy is a device preference.'),
@@ -601,6 +605,15 @@ export const IPC_PRODUCT_COVERAGE = {
   SECRETARY_TRANSFER: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_OVERVIEW: excluded('Experimental secretary agent; not an Enso capability.'),
   SECRETARY_OPEN_CONVERSATION: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGERS_LIST: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGERS_CHANGED: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_CREATE: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_UPDATE: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_REMOVE: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_ROTATE_TOKEN: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_REVEAL_TOKEN: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_SET_PORT: excluded('Experimental secretary agent; not an Enso capability.'),
+  SECRETARY_TRIGGER_TEST: excluded('Experimental secretary agent; not an Enso capability.'),
   REMOTE_LEADER_CHANGED: excluded('Remote desktop renderer coordination transport.'),
   REMOTE_UPLOAD: excluded('Remote desktop browser upload transport.'),
   CONFIG_SYNC_EXPORT: excluded('Settings-only portable configuration export flow.'),
@@ -1268,6 +1281,8 @@ export const IPC_PRODUCT_COVERAGE = {
   EXTENSION_PLUGINS_VIEW_STATE_GET: excluded('Enso 插件侧栏页面状态读取，替代 localStorage。'),
   EXTENSION_PLUGINS_VIEW_STATE_SET: excluded('Enso 插件侧栏页面状态写入，按插件 id 存在 Main。'),
   EXTENSION_PLUGINS_PICK_PATH: excluded('桌面专用：插件配置项选择文件或目录。'),
+  AGY_AUTH_STATUS: excluded('本机 agy 登录探测，只在设置页打开或重新检测时调用。'),
+  AGY_CACHED_MODELS: excluded('本机 agy 模型清单的只读缓存，启动时填 picker，不探测。'),
 } satisfies Record<keyof typeof IPC_CHANNELS, CoverageDisposition>;
 
 export const AUTHORITATIVE_COVERAGE_SOURCES = {

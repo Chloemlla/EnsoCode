@@ -396,6 +396,40 @@ describe('tool-output 事件跨进程边界', () => {
     expect(parseAgentWorkerEvent({ ...event, output: 42 })).toBeNull();
     expect(parseAgentWorkerEvent({ ...event, identity: undefined })).toBeNull();
   });
+
+  it('可选 ended 只接受 ok / error', () => {
+    expect(parseAgentWorkerEvent({ ...event, ended: 'ok' })).toEqual({ ...event, ended: 'ok' });
+    expect(parseAgentWorkerEvent({ ...event, ended: 'error' })).toEqual({
+      ...event,
+      ended: 'error',
+    });
+    expect(parseAgentWorkerEvent({ ...event, ended: true })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...event, ended: 'OK' })).toBeNull();
+  });
+
+  it('可选 todos 只随收口事件、按 todo 清单形状通过', () => {
+    const todos = [
+      { content: 'a', status: 'in_progress' },
+      { content: 'b', status: 'pending' },
+    ];
+    const ended = { ...event, ended: 'ok', todos };
+    expect(parseAgentWorkerEvent(ended)).toEqual(ended);
+    expect(parseAgentWorkerEvent({ ...event, ended: 'ok', todos: [] })).toEqual({
+      ...event,
+      ended: 'ok',
+      todos: [],
+    });
+    // 没收口的增量不带清单
+    expect(parseAgentWorkerEvent({ ...event, todos })).toBeNull();
+    expect(parseAgentWorkerEvent({ ...ended, todos: 'x' })).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...ended, todos: [{ content: 'a', status: 'done' }] })
+    ).toBeNull();
+    expect(
+      parseAgentWorkerEvent({ ...ended, todos: [{ content: 1, status: 'pending' }] })
+    ).toBeNull();
+    expect(parseAgentWorkerEvent({ ...ended, todos: [null] })).toBeNull();
+  });
 });
 
 describe('MCP 旁路事件收窄', () => {

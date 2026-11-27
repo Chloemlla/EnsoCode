@@ -20,6 +20,7 @@ import type {
   ConfigSyncMode,
   ConfigSyncOpenResult,
   ConfigSyncPreviewResult,
+  ConfigSyncSkippedModelReference,
   ConfigSyncSummary,
 } from '@shared/types';
 import { persistedSettingsState } from '@shared/types/builtinTools';
@@ -78,6 +79,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
     mode: 'excluded',
     reason: 'device-local prompt cache cost policy',
   },
+  agy: { mode: 'excluded', reason: 'device-local Antigravity CLI path and permission skip' },
   computerPreview: { mode: 'excluded', reason: 'macOS-only desktop display preference' },
   computerAllowAllApps: { mode: 'excluded', reason: 'device-local computer control trust' },
   openLinksInBuiltinBrowser: { mode: 'excluded', reason: 'desktop link-opening preference' },
@@ -126,6 +128,7 @@ export const CONFIG_SYNC_FIELD_POLICY = {
   botAssistantModel: { mode: 'excluded', reason: 'bot members and chats live on this device' },
   protectedActionsInCode: { mode: 'excluded', reason: 'device-local safety preference' },
   dcgEnabled: { mode: 'excluded', reason: 'dcg binary is installed on this device' },
+  dcgProcessGuard: { mode: 'excluded', reason: 'dcg binary is installed on this device' },
   autoUpdate: { mode: 'excluded', reason: 'device update policy' },
   autoRestartForUpdate: { mode: 'excluded', reason: 'device update policy' },
   updateChannel: { mode: 'excluded', reason: 'device update policy' },
@@ -515,6 +518,12 @@ export async function exportConfigToPath(
       );
     }
     if (!options.includeSecrets) bundle = redactBundle(bundle);
+    const skippedModelReferences: ConfigSyncSkippedModelReference[] = [];
+    bundle = validateBundle(bundle, {
+      onDanglingRef(ref) {
+        skippedModelReferences.push(ref);
+      },
+    });
     const bytes = await encodeBundle(bundle, options.includeSecrets ? options.password : undefined);
     if (bytes.byteLength > MAX_PACKAGE_BYTES)
       return resultError('Configuration package is too large.');
@@ -541,9 +550,14 @@ export async function exportConfigToPath(
       if (fd !== null) closeSync(fd);
       rmSync(tempPath, { force: true });
     }
-    return collected.skippedInstructions.length
-      ? { ok: true, filePath, skippedInstructions: collected.skippedInstructions }
-      : { ok: true, filePath };
+    return {
+      ok: true,
+      filePath,
+      ...(collected.skippedInstructions.length
+        ? { skippedInstructions: collected.skippedInstructions }
+        : {}),
+      ...(skippedModelReferences.length ? { skippedModelReferences } : {}),
+    };
   } catch (error) {
     console.error('[configSync] export failed', error);
     if (error instanceof ExportError) return resultError(error.message);

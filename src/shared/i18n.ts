@@ -67,8 +67,11 @@ export const zhTranslations: Record<string, string> = {
   Unbind: '解绑',
   'Change bot': '更换 bot',
   'Allow confirming cards from Telegram': '允许从 Telegram 确认卡片',
-  'On by default. A tap on your phone can confirm settings, skill, tool, takeover and cleanup cards. Those cards change which projects the secretary sees, what it may take over, which skills and tools it installs and what it cleans up. Approvals are never handled from Telegram.':
-    '默认打开：手机上的一个按钮就能确认设置、技能、工具、接管与清理卡片——这些卡片能改秘书的可见项目、接管范围，装 skill 和工具，也能清理分支与会话。审批无论如何都不能从 Telegram 处理。',
+  'On by default. A tap on your phone can confirm settings, skill, tool, takeover and cleanup cards. Those cards change which projects the secretary sees, what it may take over, which skills and tools it installs and what it cleans up. Approvals have their own switch below.':
+    '默认打开：手机上的一个按钮就能确认设置、技能、工具、接管与清理卡片——这些卡片能改秘书的可见项目、接管范围，装 skill 和工具，也能清理分支与会话。审批由下面单独的开关管。',
+  'Approve from Telegram': '允许从 Telegram 审批',
+  'Off by default. Approval cards from every conversation go to your private chat only. When on, file edits and ordinary commands get Approve and Deny buttons; high-risk actions (git push, deletes, publishing, secrets, MCP tools) still need the computer.':
+    '默认关闭。所有会话的审批卡只发到你的私聊。打开后，改文件和普通命令带「批准」「拒绝」按钮；高危操作（git push、删除、发布、密钥、MCP 工具）仍然只能在电脑上审批。',
   'No system keychain available: the bot token is stored unencrypted on this machine.':
     '系统钥匙串不可用：bot token 会以明文存在这台机器上。',
   'Bot verified': 'bot 已校验',
@@ -270,12 +273,18 @@ export const zhTranslations: Record<string, string> = {
   'Current version': '当前版本',
   'Check for updates': '检查更新',
   'Checking for updates…': '正在检查更新…',
+  'Checking…': '检查中…',
   'New version {{version}} found': '发现新版本 {{version}}',
+  'A new version is available': '发现新版本',
   'You are on the latest version': '已是最新版本',
+  'You are up to date': '已是最新',
   'Downloading update… {{percent}}%': '正在下载更新… {{percent}}%',
   'New version {{version}} is downloaded. Restarting waits for the current tool to finish; background commands keep running.':
     '新版本 {{version}} 已下载。重启会在当前工具结束后进行，转到后台的命令会接着跑。',
+  'Update downloaded. Restart to install.': '更新已下载可重启安装',
+  'Automatic updates are not supported on this platform': '当前平台不支持自动更新',
   'Update check failed': '检查更新失败',
+  'Update check failed: {{error}}': '检查失败：{{error}}',
   'Restart to update': '重启更新',
   'Restart to update is already in progress. Please wait.': '正在重启更新，请稍候',
   'No downloaded update to install. Check for updates again.':
@@ -635,6 +644,14 @@ export const zhTranslations: Record<string, string> = {
     '执行 bash 和 PowerShell 命令前先用 dcg 检查。命中 git reset --hard、递归删除等危险命令时，即使在完全放行模式下也必须由你确认。新会话生效。',
   'Not available on this platform': '当前平台不可用',
   'Installed v{{version}}': '已安装 v{{version}}',
+  'Installed v{{installed}} (v{{version}} available)':
+    '已安装 v{{installed}}（可升级到 v{{version}}）',
+  'Upgrade to v{{version}}': '升级到 v{{version}}',
+  'Upgrading…': '正在升级…',
+  'Block mass process kills (system.processes)': '拦截批量杀进程（system.processes）',
+  'Also check commands like pkill, killall and kill -1 that signal processes by pattern. New conversations only. Requires dcg v0.17.2 or later.':
+    '同时检查 pkill、killall、kill -1 等按模式批量向进程发信号的命令。仅新会话生效。需要 dcg v0.17.2 或更高版本。',
+  'Upgrade dcg to v0.17.2 or later to enable this.': '将 dcg 升级到 v0.17.2 或更高版本后可开启。',
   'Not installed': '未安装',
   Install: '安装',
   Uninstall: '卸载',
@@ -1060,6 +1077,22 @@ export const zhTranslations: Record<string, string> = {
   'Refresh model info': '刷新模型信息',
   'Refresh all models and info': '拉取全部模型与模型信息',
   'Refresh provider models': '刷新此服务商的模型',
+  'agy cli (experimental)': 'agy cli（实验）',
+  'Uses the agy already signed in on this machine': '使用本机已登录的 agy',
+  'Runs sessions through the local agy acp command. EnsoCode does not sign in for you.':
+    '会话通过本机 agy acp 运行。EnsoCode 不会替你登录。',
+  'Binary path': '二进制路径',
+  'Leave empty to find agy on PATH or in ~/.local/bin.': '留空则在 PATH 或 ~/.local/bin 里找 agy。',
+  'Skip permissions': '跳过权限确认',
+  'Passes --dangerously-skip-permissions. agy will not ask before commands or edits.':
+    '会传 --dangerously-skip-permissions。agy 在执行命令和改文件前不再询问。',
+  'Detect again': '重新检测',
+  'Signed in': '已登录',
+  'Not signed in': '未登录',
+  'agy is not installed': '未安装 agy',
+  'agy is older than 1.5.1': 'agy 低于 1.5.1',
+  'Status unknown': '状态未知',
+  'Run agy in a terminal to sign in, then detect again.': '在终端运行 agy 完成登录，然后重新检测。',
   'Refresh failed': '刷新失败',
   'Model info updated': '模型信息已更新',
   'Model info refresh failed, using cache': '模型信息刷新失败，仍使用缓存',
@@ -2930,9 +2963,16 @@ export const zhTranslations: Record<string, string> = {
   'Pin buttons to the toolbar, drag to reorder': '点图钉把按钮固定到工具行，拖动把手排序',
   'Pin to toolbar': '固定到工具行',
   'Unpin from toolbar': '从工具行收起',
+  'Add image': '添加图片',
+  'Edit toolbar layout': '编辑工具行布局',
+  'Done editing': '完成',
+  'Edit mode: drag to reorder, insert or remove spacers': '编辑模式：拖动排序，插入或移除空白',
+  'Insert flexible space': '插入弹性空白',
+  'Remove flexible space': '移除弹性空白',
+  'Flexible space': '弹性空白',
   'Composer toolbar buttons': '输入框工具行按钮',
-  'Pin buttons with the pin icon in the composer More menu; drag the handles there to reorder. Unpinned buttons fold into the More menu':
-    '在输入框「更多」菜单里点图钉固定按钮、拖把手排序；未固定的按钮折叠进「更多」菜单',
+  'Pin buttons in the composer More menu, drag to reorder, and use Edit mode to insert flexible spaces. Unpinned buttons fold into the More menu':
+    '在「更多」菜单里用图钉固定按钮、拖动排序，编辑模式可插入弹性空白。未固定的按钮折叠进「更多」菜单',
   // 状态栏段名（设置弹层行标签 + 状态栏 hover title 前缀）
   Turns: '轮次',
   Duration: '耗时',
@@ -3129,6 +3169,19 @@ export const zhTranslations: Record<string, string> = {
     '所选文件是符号链接，请换一个位置保存。',
   'These instructions were skipped because their source files are missing or unreadable:':
     '以下指令的源文件已丢失或无法读取，未包含在配置包中：',
+  'These model references were skipped because their provider or model is not in this export:':
+    '以下模型引用指向的服务商或模型不在本次导出中，未写入配置包：',
+  'Subagent model': '子代理模型',
+  'Agent type model': '子代理类型的模型',
+  'Title summary model': '标题总结模型',
+  'Git commit model': 'Git Commit 模型',
+  'Image generation model': '生图模型',
+  'Memory distill model': '记忆蒸馏模型',
+  'Smart compact model': '智能压缩模型',
+  'Approval reviewer': '审批复核模型',
+  '{{label}} ({{providerId}} / {{modelId}})': '{{label}}（{{providerId}} / {{modelId}}）',
+  '{{label}} {{id}} ({{providerId}} / {{modelId}})':
+    '{{label}} {{id}}（{{providerId}} / {{modelId}}）',
   'Skill, instruction, and system prompt contents require an encrypted export.':
     '技能、指令和系统提示词正文需要使用加密导出。',
   'Invalid import request.': '导入请求无效。',
@@ -3536,8 +3589,8 @@ export const zhTranslations: Record<string, string> = {
   'Off by default. /memory lists titles only, never the memory text.':
     '默认关闭。/memory 只列标题，不显示记忆正文。',
   'Mirroring every conversation to Telegram': '正在把所有对话同步到 Telegram',
-  'Every reply in the secretary conversation is sent to your phone, not just milestones. Silent turns arrive as a one-line summary. Telegram messages are not end-to-end encrypted and stay on Telegram servers. Send /sync off in Telegram to stop.':
-    '秘书会话里每一轮回复都会发到手机，不再只发里程碑；静默回合只发一行摘要。Telegram 消息不是端到端加密的，会存在 Telegram 的服务器上。在 Telegram 发 /sync off 可以关掉。',
+  'Every reply in the secretary conversation is sent to your phone, not just milestones. Silent turns stay quiet. Telegram messages are not end-to-end encrypted and stay on Telegram servers. Send /sync off in Telegram to stop.':
+    '秘书会话里每一轮回复都会发到手机，不再只发里程碑；静默回合不打扰。Telegram 消息不是端到端加密的，会存在 Telegram 的服务器上。在 Telegram 发 /sync off 可以关掉。',
   'Only milestones go to Telegram. Send /sync in Telegram to mirror every reply; /last replays the latest round.':
     '目前只把里程碑发到 Telegram。在 Telegram 发 /sync 可以把每一轮回复都同步过去；/last 回看最近一轮。',
   'Followed from the phone: {{count}}': '手机关注的 {{count}} 个任务',
@@ -4624,6 +4677,47 @@ export const zhTranslations: Record<string, string> = {
   'Delete SSH connection?': '删除 SSH 连接？',
   Metric: '指标',
   'Add project ({{shortcut}})': '添加项目（{{shortcut}}）',
+  'Local triggers': '本机触发器',
+  'Local triggers ({{n}})': '本机触发器（{{n}}）',
+  'Loopback-only (127.0.0.1) HTTP POST & WebSocket endpoints for local scripts and watchers to wake this secretary. Starts automatically only when at least one trigger is enabled.':
+    '仅限本机（127.0.0.1）的 HTTP POST 与 WebSocket 入口，供本地脚本和监听程序实时唤醒当前秘书。仅在有启用中的触发器时自动监听。',
+  'New trigger': '新建触发器',
+  'Create trigger': '创建触发器',
+  'Local listener port': '本机监听端口',
+  'Listening on 127.0.0.1:{{port}} ({{n}} active)':
+    '正在监听 127.0.0.1:{{port}}（已启用 {{n}} 条）',
+  'Starts automatically on 127.0.0.1 when any trigger is enabled.':
+    '启用任意一条触发器时自动在 127.0.0.1 上启动监听。',
+  'Listen failed': '监听失败',
+  'Port must be 0 (random) or between 1024 and 65535.': '端口必须为 0（随机）或 1024–65535。',
+  'Trigger name is required.': '请填写触发器名称。',
+  'Coalesce window must be between 0 and 60 seconds.': '合并窗口需在 0 到 60 秒之间。',
+  'e.g. WeChat after-sales watcher': '例如：微信售后群监听',
+  'Coalesce {{s}}s': '合并 {{s}} 秒',
+  'Immediate delivery': '立即投递',
+  'Fired {{n}} times · Last {{time}}': '已触发 {{n}} 次 · 最近 {{time}}',
+  'Never fired': '尚未触发',
+  'No local triggers yet.': '还没有本机触发器。',
+  'HTTP POST URL': 'HTTP POST 地址',
+  'WebSocket URL': 'WebSocket 地址',
+  'Bearer token': '认证 Token',
+  'Pass via Authorization: Bearer <token> or X-Enso-Token header.':
+    '通过 Authorization: Bearer <token> 或 X-Enso-Token 请求头携带。',
+  'Copy token': '复制 Token',
+  Rotate: '重置',
+  'Coalesce window (seconds)': '合并窗口（秒）',
+  'Combine consecutive events within this window into one wake-up (0 = immediate).':
+    '将窗口内连续到达的事件合并为一次唤醒（填 0 表示立即投递）。',
+  'Trigger instruction': '预设处理说明',
+  'Trusted rule shown outside untrusted event payload so the secretary knows how to react.':
+    '位于不可信事件正文之外的用户规则，告诉秘书收到事件后应该怎么处理。',
+  'Optional rule telling the secretary how to handle incoming events.':
+    '可选：告诉秘书收到该触发器事件后如何处理。',
+  'Optional handling rule for this trigger': '可选：填写收到事件后的处理说明',
+  'Send test event': '发送测试事件',
+  'Test event queued': '测试事件已入队',
+  'Trigger: {{summary}}': '触发：{{summary}}',
+  Trigger: '触发',
 };
 
 export function normalizeLocale(input?: string): Locale {

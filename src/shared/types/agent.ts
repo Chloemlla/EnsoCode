@@ -1449,6 +1449,8 @@ export type AgentCommand =
       dcgPath?: string;
       /** 用户按规则记忆豁免的 dcg rule_id（仅当前 dcg 版本有效） */
       dcgExemptRules?: string[];
+      /** 额外启用的 dcg pack（如 system.processes）；仅 0.17.2+ 二进制可识别，由 Main 按版本门控下发 */
+      dcgExtraPacks?: string[];
       /** ssh 项目：工具执行切到远端。Main 从项目权威派生，不信任 renderer。 */
       remote?: AgentRemoteConfig;
       /** 旁路会话：首条 prompt 前缀注入，消费一次 */
@@ -1626,6 +1628,13 @@ export type AgentCommand =
   | { type: 'set-auto-retry-limit'; limit: number }
   /** 长缓存：会话请求对 Anthropic Messages 模型用 1h prompt cache，下一次请求生效 */
   | { type: 'set-long-cache-retention'; enabled: boolean }
+  /** agy CLI：二进制路径、跳过权限、探测缓存的模型。空路径表示从 PATH 查找。 */
+  | {
+      type: 'set-agy-config';
+      binaryPath: string;
+      skipPermissions: boolean;
+      models: { id: string; name: string }[];
+    }
   /** 「记录应用日志」热切换：worker 的 agent.log / compaction.log 是否落盘 */
   | { type: 'set-app-logging'; enabled: boolean }
   /** 设置里禁用的内置预设：worker 执行与工具说明都按它过滤 */
@@ -1913,6 +1922,19 @@ export interface RestartReplyProgress {
 export interface TodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+}
+
+/** 跨进程边界收窄 todo 清单：每项都得是 TodoItem，否则整份拒绝 */
+function isTodoList(value: unknown): value is TodoItem[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.content === 'string' &&
+        (item.status === 'pending' || item.status === 'in_progress' || item.status === 'completed')
+    )
+  );
 }
 
 /** 渲染层可见的消息投影：pi AgentMessage 的白名单克隆 */
@@ -2274,6 +2296,8 @@ export type AgentWorkerEvent =
       awaitingTasks?: true;
       /** 根会话还挂着自定提醒：在等自己定的时间点，goal 先不续跑 */
       awaitingReminder?: true;
+      /** 根会话还有没表态的在跑后台任务或没交付的完成通知：headless run 据此保持进程等唤醒 */
+      awaitingBackground?: true;
       /** 本轮实际使用的 provider id，供上游健康闸门判断恢复 */
       provider?: string;
     }
@@ -2327,6 +2351,13 @@ export type AgentWorkerEvent =
       startedAt?: number;
       /** 前台命令的超时截止 wall clock：无输出巡检在此之前不把静默当卡死 */
       deadlineAt?: number;
+      /**
+       * pi tool_execution_end 时带上：工具已收口（output 为结果正文）。toolResult 消息可能晚到
+       * （agy / Cursor 在整段回复结束才落盘、pi 并行工具按源序补发），卡片先据此转完成 / 失败。
+       */
+      ended?: 'ok' | 'error';
+      /** 随 ended 带上：todo 工具 result.details 投影的清单，toolResult 落地前清单行 / 固定待办条据此显示 */
+      todos?: TodoItem[];
     }
   | { type: 'messages-truncated'; identity: SessionIdentity; seq: number; length: number }
   | {
@@ -2779,7 +2810,8 @@ const isPluginObserveData = (event: string, data: unknown): boolean => {
   if (event === 'agent_start') return hasExactKeys(data, []);
   if (event === 'agent_end')
     return (
-      hasOnlyKeys(data, ['text']) &&
+      hasOnlyKeys(data, ['text', 'silent']) &&
+      (data.silent === undefined || data.silent === true) &&
       (data.text === undefined ||
         (typeof data.text === 'string' && data.text.length <= AGENT_END_TEXT_MAX))
     );
@@ -4124,6 +4156,7 @@ const agentCommandParsers = {
         'rtkEnabled',
         'dcgPath',
         'dcgExemptRules',
+        'dcgExtraPacks',
         'remote',
         'rolePrompt',
         'systemPrompt',
@@ -4174,6 +4207,14 @@ const agentCommandParsers = {
           Array.isArray(value.dcgExemptRules) &&
           value.dcgExemptRules.length <= 500 &&
           value.dcgExemptRules.every(isDcgRuleId)
+        )) ||
+      (value.dcgExtraPacks !== undefined &&
+        !(
+          Array.isArray(value.dcgExtraPacks) &&
+          value.dcgExtraPacks.length <= 32 &&
+          value.dcgExtraPacks.every(
+            (entry) => typeof entry === 'string' && /^[a-z][a-z0-9]*(\.[a-z0-9]+)*$/.test(entry)
+          )
         )) ||
       (value.planMode !== undefined && typeof value.planMode !== 'boolean') ||
       (value.windowsLocalShell !== undefined &&
@@ -4497,6 +4538,27 @@ const agentCommandParsers = {
     return hasExactKeys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'
       ? (value as unknown as AgentCommand)
       : null;
+  },
+  'set-agy-config': (value: Record<string, unknown>): AgentCommand | null => {
+    if (
+      !hasExactKeys(value, ['type', 'binaryPath', 'skipPermissions', 'models']) ||
+      typeof value.binaryPath !== 'string' ||
+      typeof value.skipPermissions !== 'boolean' ||
+      !Array.isArray(value.models)
+    ) {
+      return null;
+    }
+    const models = [];
+    for (const item of value.models) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const row = item as { id?: unknown; name?: unknown };
+      if (typeof row.id !== 'string' || !row.id || typeof row.name !== 'string' || !row.name) {
+        return null;
+      }
+      models.push({ id: row.id, name: row.name });
+    }
+    value.models = models;
+    return value as unknown as AgentCommand;
   },
   'set-app-logging': (value: Record<string, unknown>): AgentCommand | null => {
     return hasExactKeys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'
@@ -5433,6 +5495,7 @@ const agentWorkerEventParsers = {
         (value.continues === undefined || isNonEmptyString(value.continues)) &&
         (value.awaitingTasks === undefined || value.awaitingTasks === true) &&
         (value.awaitingReminder === undefined || value.awaitingReminder === true) &&
+        (value.awaitingBackground === undefined || value.awaitingBackground === true) &&
         (value.provider === undefined || isNonEmptyString(value.provider))
         ? (value as unknown as AgentWorkerEvent)
         : null;
@@ -5651,7 +5714,9 @@ const agentWorkerEventParsers = {
       return isNonEmptyString(value.toolCallId) &&
         typeof value.output === 'string' &&
         (value.startedAt === undefined || typeof value.startedAt === 'number') &&
-        (value.deadlineAt === undefined || Number.isFinite(value.deadlineAt))
+        (value.deadlineAt === undefined || Number.isFinite(value.deadlineAt)) &&
+        (value.ended === undefined || value.ended === 'ok' || value.ended === 'error') &&
+        (value.todos === undefined || (value.ended !== undefined && isTodoList(value.todos)))
         ? (value as unknown as AgentWorkerEvent)
         : null;
     }

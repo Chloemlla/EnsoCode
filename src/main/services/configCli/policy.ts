@@ -30,6 +30,7 @@ const READ_DENIED = new Set(['projects', 'projectGroups']);
 /** 写入即改文件路径或可执行入口；或与 Main 管理的本机文件配对、只能经设置页专用 IPC 改的标记 */
 const WRITE_DENIED = new Set([
   'worktreeRoot',
+  'agy',
   'backgroundImagePath',
   'backgroundFolderPath',
   'terminalShell',
@@ -292,7 +293,7 @@ function validateField(field: string, value: unknown): string | null {
   if (field === 'learnButtonEnabled' && typeof value !== 'boolean')
     return 'learnButtonEnabled must be a boolean';
   if (field === 'composerToolbar' && !isStoredComposerToolbar(value))
-    return 'composerToolbar must be { order, pinned } arrays of known toolbar item ids';
+    return 'composerToolbar must be { order, pinned } arrays of known toolbar item ids; order may also contain up to 5 unique spacer keys';
   if (field === 'pluginLoggingEnabled' && typeof value !== 'boolean')
     return 'pluginLoggingEnabled must be a boolean';
   if (field === 'appLoggingEnabled' && typeof value !== 'boolean')

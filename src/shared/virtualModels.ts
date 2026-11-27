@@ -1,3 +1,4 @@
+import { isSessionOnlyProvider } from './agy/settings';
 import type { DefaultModelRef } from './defaultModel';
 import { DEFAULT_BASE_URLS, isClassifierOnlyProvider } from './providerCatalog';
 import type { ModelProvider } from './types/llm';
@@ -63,6 +64,22 @@ function parseMemberRef(value: unknown): DefaultModelRef | null {
 
 export const sameModelRef = (a: DefaultModelRef, b: DefaultModelRef): boolean =>
   a.providerId === b.providerId && a.modelId === b.modelId;
+
+/** 备用模型列表里上移(-1)/下移(1)一项；越界或空列表原样返回同一引用 */
+export function moveFallback(
+  fallbacks: DefaultModelRef[],
+  index: number,
+  delta: -1 | 1
+): DefaultModelRef[] {
+  const target = index + delta;
+  if (index < 0 || index >= fallbacks.length || target < 0 || target >= fallbacks.length) {
+    return fallbacks;
+  }
+  const next = [...fallbacks];
+  next[index] = fallbacks[target] as DefaultModelRef;
+  next[target] = fallbacks[index] as DefaultModelRef;
+  return next;
+}
 
 export function parseVirtualClassifier(value: unknown): VirtualClassifierConfig | undefined {
   if (!isRecord(value)) return undefined;
@@ -154,12 +171,13 @@ export function directMemberRef(entry: VirtualModelEntry): DefaultModelRef {
   return entry.fast ?? entry.primary;
 }
 
-/** Cursor 走 sessionBridge 直调工具，不经 pi 请求管线，不能做成员。 */
+/** Cursor 与 agy cli 走 sessionBridge，不经 pi 请求管线，不能做成员。 */
 export function canBeVirtualMember(
-  provider: Partial<Pick<ModelProvider, 'oauthAccountKey' | 'api' | 'baseUrl' | 'catalogId'>>
+  provider: Partial<Pick<ModelProvider, 'id' | 'oauthAccountKey' | 'api' | 'baseUrl' | 'catalogId'>>
 ): boolean {
   return (
     !isClassifierOnlyProvider(provider) &&
+    !isSessionOnlyProvider(provider) &&
     (!provider.oauthAccountKey || providerIdOfAccountKey(provider.oauthAccountKey) !== 'cursor')
   );
 }

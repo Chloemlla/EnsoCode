@@ -146,6 +146,8 @@ export function LiveSessionTimeline({
         ? buildTimeline(projection.messages, running, projection.customEntries, undefined, {
             historyBaseIndex: projection.historyBaseIndex,
             toolOutputs: projection.toolOutputs,
+            toolEnded: projection.toolEnded,
+            toolTodos: projection.toolTodos,
             pendingApprovals: projection.pendingApprovals,
             toolStartedAt: projection.toolStartedAt,
             runDividers,

@@ -940,7 +940,9 @@ function buildMessageTimeline(
   batchLabels?: ReadonlyMap<string, string>,
   secretarySession = false,
   /** 被判定为「退出导致」的模型错误原文：这是应用退出，不是模型出错，不渲染成红行 */
-  suppressedError?: string
+  suppressedError?: string,
+  toolEnded?: Record<string, 'ok' | 'error'>,
+  toolTodos?: Record<string, TodoItem[]>
 ): TimelineItem[] {
   const reviewingIds = reviewingToolCallIds(pendingApprovals);
   const results = new Map<
@@ -1255,6 +1257,8 @@ function buildMessageTimeline(
           return;
         case 'toolCall': {
           const result = results.get(part.id);
+          // 已收口但 toolResult 还没落地（agy / Cursor 轮末才落盘）：按收口结果显示，不再转圈
+          const ended = result ? undefined : toolEnded?.[part.id];
           // 未完成时退而用执行中的输出快照（空串不算，否则行会变“可展开但空”）
           const partial = toolOutputs?.[part.id];
           const sandboxTool = isSandboxTool(part.name);
@@ -1294,7 +1298,7 @@ function buildMessageTimeline(
               : result?.fileChanges?.length
                 ? result.fileChanges.map((change) => change.path)
                 : patchPathsFromArgs(part.arguments);
-          const live = !result && running && messageIndex === lastTurnIndex;
+          const live = !result && !ended && running && messageIndex === lastTurnIndex;
           const liveCommand = live && (part.name === 'bash' || part.name === 'powershell');
           const waiting = live ? blockingWaitKind(part.name, part.arguments) : null;
           const imagePath =
@@ -1331,21 +1335,27 @@ function buildMessageTimeline(
               ? result.isError || sandboxView?.status === 'failed'
                 ? 'error'
                 : 'ok'
-              : running && messageIndex === lastTurnIndex
-                ? reviewingIds.has(part.id)
-                  ? 'reviewing'
-                  : 'running'
-                : running
-                  ? 'ok'
-                  : 'error',
+              : ended
+                ? ended === 'error' || sandboxView?.status === 'failed'
+                  ? 'error'
+                  : 'ok'
+                : running && messageIndex === lastTurnIndex
+                  ? reviewingIds.has(part.id)
+                    ? 'reviewing'
+                    : 'running'
+                  : running
+                    ? 'ok'
+                    : 'error',
             // 执行失败 = 文件没改，参数里的意图 diff 不能显示成已应用
-            edits: result?.isError
-              ? null
-              : (extractEdits(part.name, part.arguments) ??
-                extractHashlineDiff(part.name, result?.editDiff)),
+            edits:
+              result?.isError || ended === 'error'
+                ? null
+                : (extractEdits(part.name, part.arguments) ??
+                  extractHashlineDiff(part.name, result?.editDiff)),
             writeContent: extractWriteContent(part.name, part.arguments),
             fileChanges: result?.fileChanges ?? null,
-            todos: result?.todos ?? null,
+            // toolResult 未落地时用收口事件带来的清单（agy 轮末才落盘）
+            todos: result ? result.todos : (toolTodos?.[part.id] ?? null),
             durationMs: result?.durationMs ?? null,
             agentMeta: result?.agentMeta ?? null,
             ...(result?.rtk ? { rtk: result.rtk } : {}),
@@ -1667,6 +1677,10 @@ export function buildTimeline(
     historyBaseIndex?: number;
     /** 运行中工具的输出快照（toolCallId → 文本）；真实 toolResult 到位后优先用后者 */
     toolOutputs?: Record<string, string>;
+    /** 已收口但 toolResult 未落地的工具结果（toolCallId → ok / error） */
+    toolEnded?: Record<string, 'ok' | 'error'>;
+    /** 已收口但 toolResult 未落地的 todo 清单（toolCallId → 清单） */
+    toolTodos?: Record<string, TodoItem[]>;
     pendingApprovals?: readonly ApprovalRequestInfo[];
     toolStartedAt?: Record<string, number>;
     /** 按时间插入的分隔线，at 升序 */
@@ -1703,7 +1717,9 @@ export function buildTimeline(
     historyBaseIndex,
     batchLabels,
     options?.secretarySession === true,
-    options?.interrupted?.suppressedError
+    options?.interrupted?.suppressedError,
+    options?.toolEnded,
+    options?.toolTodos
   );
   const hostWrapUps = hostTaskWrapUpIndexes(messages, rowEntries, historyBaseIndex);
   const messageItems =
