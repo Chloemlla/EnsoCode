@@ -610,6 +610,14 @@ export interface AgentControlContext {
   owner: AgentOwnerIdentity;
 }
 
+/** 子代理 spawn 首轮上下文种子策略；默认 none 保持空白起步 */
+export const SUBAGENT_SEED_CONTEXTS = ['none', 'prior_reads', 'fork_compact', 'fork'] as const;
+export type SubagentSeedContext = (typeof SUBAGENT_SEED_CONTEXTS)[number];
+
+export function isSubagentSeedContext(value: unknown): value is SubagentSeedContext {
+  return typeof value === 'string' && SUBAGENT_SEED_CONTEXTS.includes(value as SubagentSeedContext);
+}
+
 /** Main 授权的验收命令 id。模型不能提交 argv；未知 id 在 Main 拒绝，不会执行。 */
 export type AgentRunGate = { commandRef: string };
 
@@ -623,6 +631,7 @@ export interface AgentControlSpawnRequest {
   agentType?: string;
   model?: string;
   thinking?: AgentControlThinkingLevel;
+  seedContext?: SubagentSeedContext;
   schema?: unknown;
   gate?: AgentRunGate;
 }
@@ -792,6 +801,7 @@ export type AgentControlToolRequest =
       agentType?: string;
       model?: string;
       thinking?: AgentControlThinkingLevel;
+      seedContext?: SubagentSeedContext;
       wait: boolean;
       schema?: unknown;
       gate?: AgentRunGate;
@@ -887,6 +897,7 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         'agentType',
         'model',
         'thinking',
+        'seedContext',
         'wait',
         'schema',
         'gate',
@@ -900,6 +911,7 @@ export function parseAgentControlToolRequest(value: unknown): AgentControlToolRe
         (value.thinking === undefined ||
           value.thinking === 'off' ||
           THINKING_LEVELS.includes(value.thinking as ThinkingLevel)) &&
+        (value.seedContext === undefined || isSubagentSeedContext(value.seedContext)) &&
         typeof value.wait === 'boolean' &&
         schemaValid &&
         optionalGate
@@ -1492,6 +1504,11 @@ export type AgentCommand =
       botWriteLock?: { label: string; ancestors: string[] };
       /** 受保护动作底线（Bot 会话恒开；Code 会话由设置项决定） */
       protectedActions?: boolean;
+      /**
+       * 仅秘书会话：秘书资料里 owner 标记信任的插件 id。完全放行档且本轮由 owner 亲手触发时，
+       * 这些插件的非只读工具不再逐次确认，受保护动作底线照常生效。
+       */
+      secretaryTrustedPluginIds?: string[];
       /** 期望的 Plan 模式；与会话 jsonl 折叠结果不同时由 worker 追加切换条目 */
       planMode?: boolean;
     }
@@ -1501,6 +1518,7 @@ export type AgentCommand =
       cwd: string;
       config: ResolvedAgentTypeSpawnConfig;
       resumeFile?: string;
+      seedContext?: SubagentSeedContext;
     }
   | {
       type: 'prompt-child';
@@ -1546,6 +1564,11 @@ export type AgentCommand =
       images?: AttachedImage[];
       /** Bot 插话仅允许进入活轮；不再忙时交回 Main 重新准入。 */
       activeOnly?: true;
+      /**
+       * Main 认定这条是 owner 亲手输入（应用输入框、配对手机、秘书联系方式里绑定的本人），必须带 deliveryId。
+       * 秘书会话据此判断「本轮由 owner 触发」：Main 自己的投递（会话回传、同事消息、触发器、定时）不带。
+       */
+      ownerInput?: true;
       /**
        * 仅 prompt：带新消息的断点续跑（委派续跑附说明 / 验收原因 / 群背景新增）。worker 在空闲会话上开新轮前
        * 先按 retry 的语义把未完成（error / aborted / 停在工具调用）的最后一条 assistant 移出模型上下文；
@@ -2847,6 +2870,14 @@ const isModelSelectPayload = (data: Record<string, unknown>): boolean => {
 const isTokenRecord = (value: unknown, keys: readonly string[]): boolean =>
   isRecord(value) && hasExactKeys(value, keys) && keys.every((key) => isTokenCount(value[key]));
 
+const isContextUsageReport = (value: unknown): boolean =>
+  isRecord(value) &&
+  hasOnlyKeys(value, ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoningTokens']) &&
+  (['input', 'output', 'cacheRead', 'cacheWrite'] as const).every((key) =>
+    isTokenCount(value[key])
+  ) &&
+  (value.reasoningTokens === undefined || isTokenCount(value.reasoningTokens));
+
 const isContextUsagePayload = (data: Record<string, unknown>): boolean =>
   hasOnlyKeys(data, [
     'used',
@@ -2863,8 +2894,7 @@ const isContextUsagePayload = (data: Record<string, unknown>): boolean =>
   (data.contextWindow === undefined || isTokenCount(data.contextWindow)) &&
   (data.percent === undefined || isTokenCount(data.percent)) &&
   isTokenRecord(data.buckets, CONTEXT_USAGE_BUCKETS) &&
-  (data.usage === undefined ||
-    isTokenRecord(data.usage, ['input', 'output', 'cacheRead', 'cacheWrite'])) &&
+  (data.usage === undefined || isContextUsageReport(data.usage)) &&
   (data.turns === undefined || isSequence(data.turns)) &&
   (data.parts === undefined ||
     (Array.isArray(data.parts) &&
@@ -2906,11 +2936,14 @@ const isPluginInterceptPayload = (event: string, payload: unknown): boolean => {
       payload.reason.length <= 64
     );
   }
+  const isOptionalParentToolCallId = (value: unknown): boolean =>
+    value === undefined || (isNonEmptyString(value) && value.length <= 512);
   if (event === 'tool_call') {
     return (
-      hasExactKeys(payload, ['toolCallId', 'toolName', 'input']) &&
+      hasOnlyKeys(payload, ['toolCallId', 'parentToolCallId', 'toolName', 'input']) &&
       isNonEmptyString(payload.toolCallId) &&
       payload.toolCallId.length <= 512 &&
+      isOptionalParentToolCallId(payload.parentToolCallId) &&
       isNonEmptyString(payload.toolName) &&
       payload.toolName.length <= 256 &&
       isRecord(payload.input)
@@ -2918,9 +2951,17 @@ const isPluginInterceptPayload = (event: string, payload: unknown): boolean => {
   }
   if (event === 'tool_result') {
     return (
-      hasExactKeys(payload, ['toolCallId', 'toolName', 'input', 'content', 'isError']) &&
+      hasOnlyKeys(payload, [
+        'toolCallId',
+        'parentToolCallId',
+        'toolName',
+        'input',
+        'content',
+        'isError',
+      ]) &&
       isNonEmptyString(payload.toolCallId) &&
       payload.toolCallId.length <= 512 &&
+      isOptionalParentToolCallId(payload.parentToolCallId) &&
       isNonEmptyString(payload.toolName) &&
       payload.toolName.length <= 256 &&
       isRecord(payload.input) &&
@@ -4055,6 +4096,7 @@ const parsePromptOrSteer = (value: Record<string, unknown>): AgentCommand | null
     'deliveryId',
     'activeOnly',
     'resume',
+    'ownerInput',
     'instanceId',
   ]) &&
     parseAnySessionIdentity(value.identity) &&
@@ -4064,6 +4106,8 @@ const parsePromptOrSteer = (value: Record<string, unknown>): AgentCommand | null
     (value.activeOnly === undefined ||
       (value.type === 'steer' && value.activeOnly === true && isDeliveryId(value.deliveryId))) &&
     (value.resume === undefined || (value.type === 'prompt' && value.resume === true)) &&
+    (value.ownerInput === undefined ||
+      (value.ownerInput === true && isDeliveryId(value.deliveryId))) &&
     ((value.type === 'steer' && value.deliveryId === undefined) ||
       isDeliveryId(value.deliveryId)) &&
     (value.instanceId === undefined ||
@@ -4171,6 +4215,7 @@ const agentCommandParsers = {
         'botDelegationTask',
         'botWriteLock',
         'protectedActions',
+        'secretaryTrustedPluginIds',
         'planMode',
         'instanceId',
         'forkFrom',
@@ -4265,6 +4310,15 @@ const agentCommandParsers = {
           !Array.isArray(value.botWriteLock.ancestors) ||
           !value.botWriteLock.ancestors.every(isNonEmptyString))) ||
       (value.protectedActions !== undefined && typeof value.protectedActions !== 'boolean') ||
+      (value.secretaryTrustedPluginIds !== undefined &&
+        !(
+          value.secretaryMode === true &&
+          Array.isArray(value.secretaryTrustedPluginIds) &&
+          value.secretaryTrustedPluginIds.length <= 500 &&
+          value.secretaryTrustedPluginIds.every(
+            (entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 256
+          )
+        )) ||
       (value.instanceId !== undefined && !isUuid(value.instanceId)) ||
       (value.forkFrom !== undefined && !isNonEmptyString(value.forkFrom))
     ) {
@@ -4273,11 +4327,12 @@ const agentCommandParsers = {
     return value as unknown as AgentCommand;
   },
   'spawn-child': (value: Record<string, unknown>): AgentCommand | null => {
-    return hasOnlyKeys(value, ['type', 'identity', 'cwd', 'config', 'resumeFile']) &&
+    return hasOnlyKeys(value, ['type', 'identity', 'cwd', 'config', 'resumeFile', 'seedContext']) &&
       parseChildSessionIdentity(value.identity) &&
       typeof value.cwd === 'string' &&
       parseResolvedAgentTypeSpawnConfig(value.config) &&
-      (value.resumeFile === undefined || isNonEmptyString(value.resumeFile))
+      (value.resumeFile === undefined || isNonEmptyString(value.resumeFile)) &&
+      (value.seedContext === undefined || isSubagentSeedContext(value.seedContext))
       ? (value as unknown as AgentCommand)
       : null;
   },

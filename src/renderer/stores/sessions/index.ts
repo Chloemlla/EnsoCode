@@ -91,6 +91,10 @@ import { create } from 'zustand';
 import { persist, type StorageValue } from 'zustand/middleware';
 import { startQueuedSession } from '@/lib/queuedSessionApi';
 import { isLeaderRenderer } from '@/lib/rendererRole';
+import {
+  noteSourceAuthorityProjection,
+  readSharedSourceAuthority,
+} from '@/lib/sourceAuthorityCache';
 import { readMaterializedProviders } from '@/stores/modelDirectory/useProviders';
 import { oauthCredentialContext, useOauthCredentialStore } from '@/stores/oauthCredentials';
 import { useSettingsStore } from '@/stores/settings';
@@ -196,7 +200,11 @@ function hotSessionIds(
   return ids;
 }
 const parentTailInFlight = new Set<string>();
+/** 上一次给远端/主进程触发尾窗读的时刻：避免单次挂起永久占坑，切回或自动恢复都能重发 */
+const parentTailInFlightAt = new Map<string, number>();
 const olderHistoryInFlight = new Set<string>();
+/** 在途超过此时间仍未回包则视为挂起：自动重试一次，不让用户干等 20s 才出重试按钮 */
+const PARENT_TAIL_RETRY_MS = 6_000;
 /** 冷缓存清掉的 child 再被看到时补历史。实现在 store 创建后赋值。 */
 let loadViewedChildHistory: (conversationId: string) => void = () => {};
 /**
@@ -470,8 +478,8 @@ interface SessionsState {
   rebuildWorktree(id: string): Promise<string | null>;
   /** resume 发现 worktree 丢失后：回退主工作树继续 */
   fallbackToMainWorkspace(id: string): Promise<void>;
-  /** 刷新全部隔离会话的 worktree 状态（侧边栏徽标） */
-  refreshWorktreeStatuses(): Promise<void>;
+  /** 刷新全部隔离会话的 worktree 状态（侧边栏徽标）；force 跳过短时冷却 */
+  refreshWorktreeStatuses(options?: { force?: boolean }): Promise<void>;
   selectConversation(id: string): void;
   /** 手机打开会话时清未读，不改桌面选中 */
   markConversationRead(id: string): void;
@@ -570,6 +578,11 @@ interface SessionsState {
   hireCoworker(parentId: string, name: string, agentType?: string): Promise<string | null>;
   /** 指定会话入队（不依赖 activeId）：手机端在轮次进行中发消息走这里 */
   enqueueMessage(conversationId: string, text: string, images?: AttachedImage[]): void;
+  /**
+   * leader 补泵一次排队：别的界面排的消息可能在本轮收束之后才到达，等不到下一次收束。
+   * 会话仍在跑、压缩中或有待决项时不发，照旧等收束。
+   */
+  pumpQueue(conversationId: string): void;
   removeQueuedMessage(conversationId: string, messageId: string): void;
   withdrawMessage(conversationId: string, target: { kind: 'queue' | 'delivery'; id: string }): void;
   /** 拒收的气泡原样重发：收回旧气泡，按「立即发送」以新投递号发出 */
@@ -2593,7 +2606,7 @@ export const useSessionsStore = create<SessionsState>()(
               return { conversations, workspaceRevisionByConversation };
             });
             void get()
-              .refreshWorktreeStatuses()
+              .refreshWorktreeStatuses({ force: true })
               .catch(() => {});
             return result;
           } catch (error) {
@@ -2814,43 +2827,57 @@ export const useSessionsStore = create<SessionsState>()(
           );
         },
 
-        // 启动、侧栏挂载、回焦会同时触发：合并成一次尾随刷新；状态一次批量取（宿主限并发跑 git）
-        refreshWorktreeStatuses: coalesceRuns(async () => {
-          const targets = get().conversations;
-          const [records, statuses] = await Promise.all([
-            window.electronAPI.worktree.list(),
-            window.electronAPI.worktree.statuses(),
-          ]);
-          const entries = records
-            .filter((record) => targets[record.conversationId])
-            .map((record) => ({ record, status: statuses[record.conversationId] }));
-          set((state) => {
-            const conversations = { ...state.conversations };
-            const worktreeStatuses = { ...state.worktreeStatuses };
-            for (const { record, status } of entries) {
-              const conversation = conversations[record.conversationId];
-              if (
-                !conversation ||
-                conversation !== targets[record.conversationId] ||
-                conversation.workspaceMigrating ||
-                conversation.projectId !== record.projectId
-              )
-                continue;
-              conversations[conversation.id] = {
-                ...conversation,
-                worktree: record,
-                worktreeMissing: status
-                  ? !status.exists || undefined
-                  : conversation.worktreeMissing,
-                ...(conversation.sessionFile && conversation.worktree?.path !== record.path
-                  ? { pendingWorkspaceNote: workspaceMigratedNote(record.path) }
-                  : {}),
-              };
-              if (status) worktreeStatuses[conversation.id] = status;
-            }
-            return { conversations, worktreeStatuses };
+        // 启动、侧栏挂载、回焦会同时触发：5s 内有状态时复用并合并尾随刷新；状态一次批量取（宿主限并发跑 git）
+        refreshWorktreeStatuses: (() => {
+          let lastWorktreeStatusAt = 0;
+          const run = coalesceRuns(async () => {
+            const targets = get().conversations;
+            const [records, statuses] = await Promise.all([
+              window.electronAPI.worktree.list(),
+              window.electronAPI.worktree.statuses(),
+            ]);
+            const entries = records
+              .filter((record) => targets[record.conversationId])
+              .map((record) => ({ record, status: statuses[record.conversationId] }));
+            set((state) => {
+              const conversations = { ...state.conversations };
+              const worktreeStatuses = { ...state.worktreeStatuses };
+              for (const { record, status } of entries) {
+                const conversation = conversations[record.conversationId];
+                if (
+                  !conversation ||
+                  conversation !== targets[record.conversationId] ||
+                  conversation.workspaceMigrating ||
+                  conversation.projectId !== record.projectId
+                )
+                  continue;
+                conversations[conversation.id] = {
+                  ...conversation,
+                  worktree: record,
+                  worktreeMissing: status
+                    ? !status.exists || undefined
+                    : conversation.worktreeMissing,
+                  ...(conversation.sessionFile && conversation.worktree?.path !== record.path
+                    ? { pendingWorkspaceNote: workspaceMigratedNote(record.path) }
+                    : {}),
+                };
+                if (status) worktreeStatuses[conversation.id] = status;
+              }
+              return { conversations, worktreeStatuses };
+            });
+            lastWorktreeStatusAt = Date.now();
           });
-        }),
+          return (options?: { force?: boolean }) => {
+            if (
+              !options?.force &&
+              Object.keys(get().worktreeStatuses).length > 0 &&
+              Date.now() - lastWorktreeStatusAt < 5_000
+            ) {
+              return Promise.resolve();
+            }
+            return run();
+          };
+        })(),
 
         async newConversation(projectId, options) {
           const sourceId = options?.worktreeFromConversationId;
@@ -3866,6 +3893,7 @@ export const useSessionsStore = create<SessionsState>()(
           const conversation = get().conversations[id];
           if (!conversation) return;
           parentTailInFlight.delete(id);
+          parentTailInFlightAt.delete(id);
           const stuckSpawn = conversation.spawning && !conversation.started;
           set((state) =>
             patch(state, id, {
@@ -4315,6 +4343,12 @@ export const useSessionsStore = create<SessionsState>()(
               ],
             })
           );
+          // 手机按它看到的运行态入队，那一轮可能已在桌面收束
+          get().pumpQueue(conversationId);
+        },
+
+        pumpQueue(conversationId) {
+          if (isLeaderRenderer()) flushQueue(conversationId);
         },
 
         updateQueuedMessage(conversationId, messageId, text) {
@@ -4711,14 +4745,14 @@ export const useSessionsStore = create<SessionsState>()(
 installRemoteActiveMemory(useSessionsStore);
 
 async function syncConversationProjectIds(): Promise<void> {
-  const authority = await window.electronAPI.sourceAuthority.read();
+  const authority = await readSharedSourceAuthority();
   const conversations = useSessionsStore.getState().conversations;
   const next = remapConversationProjectIds(conversations, authority.conversations);
   if (next !== conversations) useSessionsStore.setState({ conversations: next });
 }
 
-void syncConversationProjectIds();
 window.electronAPI.sourceAuthority.onChanged((projection) => {
+  noteSourceAuthorityProjection(projection);
   const conversations = useSessionsStore.getState().conversations;
   const next = remapConversationProjectIds(conversations, projection.conversations);
   if (next !== conversations) useSessionsStore.setState({ conversations: next });
@@ -4735,12 +4769,20 @@ useSettingsStore.subscribe((state, previous) => {
 let lastReportedViewedId: string | null = null;
 
 async function hydrateParentHistoryTail(conversationId: string): Promise<void> {
-  if (parentTailInFlight.has(conversationId)) return;
+  const startedAt = parentTailInFlightAt.get(conversationId);
+  if (parentTailInFlight.has(conversationId)) {
+    if (startedAt !== undefined && Date.now() - startedAt < PARENT_TAIL_RETRY_MS) return;
+    // 在途超时（如手机切后台丢响应或慢链路卡住）：放行并发再拉一次，避免永久卡在「正在读取历史…」
+    parentTailInFlight.delete(conversationId);
+    parentTailInFlightAt.delete(conversationId);
+  }
   const current = useSessionsStore.getState().conversations[conversationId];
   if (!current || current.parentId || hasAuthoritativeMessages(current.messages)) return;
   const read = window.electronAPI.agent.readParentHistoryTail;
   if (!read) return;
   parentTailInFlight.add(conversationId);
+  const attemptAt = Date.now();
+  parentTailInFlightAt.set(conversationId, attemptAt);
   try {
     const result = await read(conversationId);
     if (!result.ok || result.messages.length === 0) {
@@ -4764,7 +4806,10 @@ async function hydrateParentHistoryTail(conversationId: string): Promise<void> {
     // 尾巴失败不挡 resume；worker 快照仍能补回正文
     markParentHistoryAttempted(conversationId);
   } finally {
-    parentTailInFlight.delete(conversationId);
+    if (parentTailInFlightAt.get(conversationId) === attemptAt) {
+      parentTailInFlight.delete(conversationId);
+      parentTailInFlightAt.delete(conversationId);
+    }
   }
 }
 
@@ -4844,6 +4889,7 @@ function hydrateViewedOnTransition(conversationId: string, conversation: Convers
 
 let preparingStallTimer: ReturnType<typeof setTimeout> | null = null;
 let preparingStallId: string | null = null;
+let preparingAutoRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 只看空正文的非生成态准备：这正是 Preparing 占满时间线的情形 */
 function isPreparingStallCandidate(conversation: Conversation): boolean {
@@ -4860,9 +4906,29 @@ function watchPreparingStall(state: SessionsState, viewed: string | null): void 
   const candidate = conversation && isPreparingStallCandidate(conversation) ? viewed : null;
   if (candidate === preparingStallId) return;
   if (preparingStallTimer) clearTimeout(preparingStallTimer);
+  if (preparingAutoRetryTimer) clearTimeout(preparingAutoRetryTimer);
   preparingStallTimer = null;
+  preparingAutoRetryTimer = null;
   preparingStallId = candidate;
   if (!candidate) return;
+  // 6s 仍在准备且没正文：自动清掉可能挂死的尾窗去重位并静默补拉一次尾窗 + 快照，
+  // 等价于用户手动切走再切回，避免远程链路切后台恢复后一直停在「正在读取历史…」
+  preparingAutoRetryTimer = setTimeout(() => {
+    preparingAutoRetryTimer = null;
+    const current = useSessionsStore.getState();
+    const latest = current.conversations[candidate];
+    if (viewedFromState(current) !== candidate || !latest || !isPreparingStallCandidate(latest)) {
+      return;
+    }
+    if (!latest.parentId && needsHistoryHydration(latest)) {
+      parentTailInFlight.delete(candidate);
+      parentTailInFlightAt.delete(candidate);
+      void hydrateParentHistoryTail(candidate);
+    }
+    if (needsWorkerSnapshot(latest)) {
+      void window.electronAPI.agent.requestSnapshot(candidate);
+    }
+  }, PARENT_TAIL_RETRY_MS);
   preparingStallTimer = setTimeout(() => {
     preparingStallTimer = null;
     preparingStallId = null;
@@ -4873,6 +4939,7 @@ function watchPreparingStall(state: SessionsState, viewed: string | null): void 
     }
     // 挂住的尾窗读（远程隧道断线）不能继续占着去重位，否则重试也被吞掉
     parentTailInFlight.delete(candidate);
+    parentTailInFlightAt.delete(candidate);
     useSessionsStore.setState((s) => patch(s, candidate, { syncStalled: true }));
   }, PREPARING_STALL_MS);
 }
@@ -4976,10 +5043,26 @@ async function forkConversation(
   return targetId;
 }
 
+/**
+ * 别的界面（PWA 完整模式）排的消息经写回到达，可能晚于本轮收束：有新排队项的会话补泵一次。
+ * 只改字/删条不泵，中断后留着的队列照旧等用户处理。
+ */
+function pumpArrivedQueues(before: Record<string, Conversation>, ids: string[]): void {
+  const after = useSessionsStore.getState().conversations;
+  for (const id of ids) {
+    const known = new Set((before[id]?.queuedMessages ?? []).map((item) => item.id));
+    if (after[id]?.queuedMessages?.some((item) => !known.has(item.id))) {
+      useSessionsStore.getState().pumpQueue(id);
+    }
+  }
+}
+
 window.electronAPI.settings?.onConversationsPatch?.((value) => {
   const remotePatch = queueConversationsPatch(value);
   if (!remotePatch) return;
+  const before = useSessionsStore.getState().conversations;
   useSessionsStore.setState((state) => applySequencedConversationsPatch(state, remotePatch));
+  pumpArrivedQueues(before, Object.keys(remotePatch.upserts));
 });
 
 // 写回被 Main 拒收：重读磁盘并把磁盘行补回内存，之后的写回以这份磁盘值为基线
@@ -4988,9 +5071,10 @@ window.electronAPI.settings?.onConversationsResync?.(() => {
     .readConversations()
     .then(({ value, seq }) => {
       resetConversationsAppliedSeq(seq);
-      useSessionsStore.setState((state) =>
-        applyConversationsPatchToState(state, diffConversations(undefined, value))
-      );
+      const disk = diffConversations(undefined, value);
+      const before = useSessionsStore.getState().conversations;
+      useSessionsStore.setState((state) => applyConversationsPatchToState(state, disk));
+      pumpArrivedQueues(before, Object.keys(disk.upserts));
     })
     .catch(() => {});
 });

@@ -486,8 +486,11 @@ const electronAPI = {
 
   secretary: {
     /** 工作台与聊天卡片读同一份 Main 状态；开关关闭时 enabled 为 false */
-    getState: (secretaryId?: string): Promise<SecretaryState> =>
-      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_GET_STATE, secretaryId),
+    getState: (
+      secretaryId?: string,
+      options?: { includeAllProposals?: boolean }
+    ): Promise<SecretaryState> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_GET_STATE, secretaryId, options),
     /** 秘书清单：侧栏、设置页与新建流程用 */
     list: (): Promise<SecretarySummary[]> => ipcRenderer.invoke(IPC_CHANNELS.SECRETARY_LIST),
     onListChanged: (callback: (list: SecretarySummary[]) => void): (() => void) => {
@@ -1207,6 +1210,8 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_CODE_SOURCES, request),
     getIcon: (projectId: string): Promise<ProjectIconInfo> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GET_ICON, { projectId }),
+    getIcons: (projectIds: string[]): Promise<Record<string, ProjectIconInfo>> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECTS_GET_ICONS, { projectIds }),
     /** 上传自定义图标，或传 null 移除。scratch / 秘书 / bot-home 会被拒绝 */
     setIcon: (
       projectId: string,
@@ -2529,7 +2534,12 @@ const electronAPI = {
         ipcRenderer.removeListener(IPC_CHANNELS.EXTENSION_PLUGINS_DRAFT_REQUEST, listener);
     },
     onViewEvent: (
-      callback: (event: { pluginId: string; name: string; data: unknown }) => void
+      callback: (event: {
+        pluginId: string;
+        name: string;
+        data: unknown;
+        sessionId?: string;
+      }) => void
     ): (() => void) => {
       const listener = (_e: unknown, event: Parameters<typeof callback>[0]) => callback(event);
       ipcRenderer.on(IPC_CHANNELS.EXTENSION_PLUGINS_VIEW_EVENT, listener);

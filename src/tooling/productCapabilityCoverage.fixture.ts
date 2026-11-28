@@ -452,6 +452,8 @@ export const SETTINGS_ACTION_COVERAGE = {
   addSubagentModel: surfaces('providers.subagent-models.add'),
   updateSubagentModel: surfaces('providers.subagent-models.update'),
   removeSubagentModel: surfaces('providers.subagent-models.remove'),
+  setSubagentModels: surfaces('providers.subagent-models.add'),
+  moveSubagentModel: surfaces('providers.subagent-models.update'),
   addVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
   updateVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
   removeVirtualModel: excluded('virtual model routing is configured in the settings UI only'),
@@ -876,6 +878,7 @@ export const IPC_PRODUCT_COVERAGE = {
   PROJECTS_REVEAL: surfaces('projects.list'),
   PROJECTS_OPEN_IN_APPS: surfaces('projects.list'),
   PROJECTS_GET_ICON: surfaces('projects.list'),
+  PROJECTS_GET_ICONS: surfaces('projects.list'),
   PROJECTS_SET_ICON: surfaces('projects.list'),
   PROJECTS_CODE_SOURCES: excluded(
     'Desktop-only review of project pi extensions before trusting them.'

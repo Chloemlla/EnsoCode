@@ -20,6 +20,7 @@ import {
 import {
   type AgentSession,
   type AgentSessionEvent,
+  calculateContextTokens,
   createAgentSession,
   createFindToolDefinition,
   createGrepToolDefinition,
@@ -27,6 +28,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   DefaultResourceLoader,
+  estimateTokens,
   type InlineExtension,
   ModelRuntime,
   type PromptOptions,
@@ -125,6 +127,7 @@ import type {
   SlashCommand,
   SpawnModelConfig,
   SubagentModelOption,
+  SubagentSeedContext,
   ThinkingLevel,
   VirtualClassifierCredentials,
 } from '@shared/types/agent';
@@ -182,6 +185,7 @@ import {
 import { enabledHotBuiltins, nextActiveToolNames } from './builtinLoadout';
 import { CheckpointManager, withCheckpoint } from './checkpoint/manager';
 import { createRemoteCheckpointHost } from './checkpoint/remoteHost';
+import { buildChildContextSeed, type ChildContextSeed, type SeedImage } from './childContextSeed';
 import {
   appendSystemPromptExtension,
   SUBAGENT_CONTRACT_PROMPT,
@@ -242,12 +246,14 @@ import {
 import { omitNamedTools } from './disallowedTools';
 import { createNormalizedEditTool } from './editTool';
 import { type CompactCancel, formatCompactCancel, takeCompactCancel } from './ensoCompact/cancel';
+import { textOf } from './ensoCompact/serialize';
 import type { EnsoCompactOptions } from './ensoCompact/types';
 import {
   createExploreFoldState,
   createExploreFoldTools,
   exploreFoldExtension,
 } from './exploreFold';
+import { withForkPrefix } from './forkPrefix';
 import { OperationGate } from './gate';
 import { createGoalTools } from './goal';
 import {
@@ -441,6 +447,8 @@ interface ChildPluginSource {
 /** 会话工厂：父 runtime/resource/tool 配置的唯一 child 创建入口。 */
 interface SessionFactory {
   cwd: string;
+  /** 远程会话标记：构建上下文种子时不做本机磁盘 stat */
+  remote?: boolean;
   /** gate 验收命令执行器(远程会话走 ssh,本地会话走 /bin/sh) */
   runGate: (gate: string) => Promise<string>;
   agentTypes: AgentTypeSpawnConfig[];
@@ -481,6 +489,14 @@ interface ForkBase {
 
 /** fork 代理能真正执行的工具；其余照原样声明（保住缓存前缀）但调用时拒绝 */
 const FORK_TOOLS = new Set(['read', 'grep', 'find', 'ls']);
+
+/** seed_context="fork" 子会话里注入的父前缀条数，resume 时据此把前缀改写接回去 */
+const FORK_PREFIX_ENTRY = 'enso-fork-prefix';
+const FORK_SEED_HINT = 'use seed_context "fork_compact" instead';
+/** 父上下文占窗口超过这个比例就不让 fork：子代理首轮就会自动压缩，继承的前缀和缓存一起丢 */
+const FORK_SEED_MAX_CONTEXT_RATIO = 0.7;
+const FORK_SEED_NOTE =
+  '<fork_context>\nThe conversation above is your parent session, copied verbatim. You are a subagent forked from it: do only the task below and report back; do not continue the parent task.\n</fork_context>';
 
 interface AgentRunHold {
   id: string;
@@ -591,6 +607,12 @@ interface ManagedSession {
   parentId?: string;
   coworkerName?: string;
   pendingRole?: string;
+  /** 子会话首轮一次性上下文种子（仅在首次 prompt 时注入一次后立即清零，不污染后续缓存前缀） */
+  pendingSeed?: ChildContextSeed;
+  /** 本地工作区已读文件账本（供子会话种子鲜度校验只读查询） */
+  readLedger?: ReadLedger;
+  /** seed_context="fork" 注入的父请求前缀；每次请求原样放回开头（见 withForkPrefix） */
+  forkPrefix?: Message[];
   /** 父会话 spawn 时带了系统提示词：秘书档案改了就地换正文 */
   persona?: PersonaHolder;
   /** 最近一次会话请求原样留底：插件 fork 代理据此重放前缀，命中同一份提示缓存 */
@@ -606,6 +628,11 @@ interface ManagedSession {
   /** 已入 pi steer 队列、尚未上屏的投递回执，与 pi 队列同序 */
   /** detach：Bot 插话结算时交回 Main；withdraw：用户在模型取用前撤回 */
   steerDeliveries?: { id: string | null; detach?: () => boolean; withdraw?: () => boolean }[];
+  /**
+   * Main 标记为 owner 亲手输入的投递：deliveryId → 原文。上屏时 id 对得上、正文也含原文，
+   * 才算 owner 触发的这一轮；回执错位时宁可当成不是 owner。
+   */
+  ownerDeliveries?: Map<string, string>;
   pendingBranch?: string;
   pendingBranchRequestId?: string;
   pendingVerifications?: number;
@@ -2181,7 +2208,8 @@ export class SessionSupervisor {
           command.secretaryTools,
           command.askRelay,
           command.dcgExemptRules,
-          command.dcgExtraPacks
+          command.dcgExtraPacks,
+          command.secretaryTrustedPluginIds
         );
         if (command.forkFrom) this.injectForkTranscript(command.identity, command.forkFrom);
         return;
@@ -2190,7 +2218,8 @@ export class SessionSupervisor {
           command.identity,
           command.cwd,
           command.config,
-          command.resumeFile
+          command.resumeFile,
+          command.seedContext
         );
         return;
       case 'dismiss-child': {
@@ -2264,12 +2293,14 @@ export class SessionSupervisor {
         // 只有子代理 Run（Main 带 requestBudget 标记）计数；Bot 成员等不 arm，不计数
         if (command.requestBudget) managed.requestBudget?.arm();
         else managed.requestBudget?.disarm();
-        const images = command.task.images.map((image) => ({ type: 'image' as const, ...image }));
+        const taskImages = command.task.images.map((image) => ({
+          type: 'image' as const,
+          ...image,
+        }));
+        const initial = consumeInitialPrompt(managed, command.task.text, taskImages);
+        const images = initial.images ?? [];
         void managed.session
-          .prompt(
-            consumeRole(managed, command.task.text),
-            images.length > 0 ? { images } : undefined
-          )
+          .prompt(initial.text, images.length > 0 ? { images } : undefined)
           .catch((error) => {
             this.failTurn(managed, toErrorMessage(error));
           });
@@ -2277,6 +2308,7 @@ export class SessionSupervisor {
       }
       case 'prompt': {
         const managed = this.must(command.identity);
+        if (command.ownerInput) this.noteOwnerInput(managed, command.deliveryId, command.text);
         managed.plan?.supersede();
         // 非提醒来源的输入：提醒连续链从头算
         this.reminders.resetChain(managed.identity.sessionId);
@@ -2315,6 +2347,8 @@ export class SessionSupervisor {
       }
       case 'steer': {
         const managed = this.must(command.identity);
+        if (command.ownerInput && command.deliveryId)
+          this.noteOwnerInput(managed, command.deliveryId, command.text);
         if (command.activeOnly && command.deliveryId) {
           await this.steerActive(managed, command.text, command.images, command.deliveryId);
           return;
@@ -2893,7 +2927,8 @@ export class SessionSupervisor {
     secretaryToolDescriptors: readonly SecretaryToolDescriptor[] = [],
     askRelay?: { name: string },
     dcgExemptRules: readonly string[] = [],
-    dcgExtraPacks: readonly string[] = []
+    dcgExtraPacks: readonly string[] = [],
+    secretaryTrustedPluginIds: readonly string[] = []
   ): Promise<void> {
     const sessionId = identity.sessionId;
     const sessionEditMode = resolveEditMode(requestedEditMode, hashlineEditEnabled);
@@ -3321,6 +3356,7 @@ export class SessionSupervisor {
     // coworker 用独立门(否则审批条落错 tab、allowSession 白名单跨会话泄漏)
     const factory: SessionFactory = {
       cwd,
+      remote: Boolean(remoteOps),
       runGate: (gateCommand) => runGateCommand(cwd, gateCommand, sshExecutor),
       agentTypes,
       subagentModels,
@@ -3748,6 +3784,15 @@ export class SessionSupervisor {
             }
           )
         : undefined;
+    // 秘书资料里信任的插件：只认 Main 本次下发的描述符，按工具名定
+    const trustedPluginIds = new Set(secretaryMode ? secretaryTrustedPluginIds : []);
+    const ownerGate = new OwnerGate({ trustedPlugins: trustedPluginIds });
+    const trustedPluginTools = new Set(
+      pluginToolDescriptors
+        .filter((descriptor) => trustedPluginIds.has(descriptor.pluginId))
+        .map((descriptor) => descriptor.name)
+    );
+    const ownerTurn = { ownerTurn: () => ownerGate.isOwnerInputTurn() };
     const sessionTools = [
       ...buildCoreTools(),
       ...(secretary ? createSecretaryTools(secretary) : []),
@@ -3769,7 +3814,10 @@ export class SessionSupervisor {
         'browser',
         createBrowserTools(browser).map((tool) => withNavigateApproval(gate, tool))
       ),
-      ...builtin('memory', createMemoryTools(memory, { language: memoryLanguage })),
+      ...builtin(
+        'memory',
+        createMemoryTools(memory, { language: memoryLanguage, secretary: secretaryMode })
+      ),
       ...(delegation
         ? createDelegationTools(delegation, {
             groupTasks: botGroupTasks,
@@ -3803,9 +3851,15 @@ export class SessionSupervisor {
         ? createPluginTools([...pluginToolDescriptors], pluginTools, {
             untrusted: secretaryMode,
           }).map((tool) =>
-            // 秘书会话里的插件工具可能以用户身份往外发消息：非只读的每次都要人确认
+            // 秘书会话里的插件工具可能以用户身份往外发消息：非只读的每次都要人确认，
+            // 除非 owner 信任了这个插件（仍要 full 档、owner 亲手触发，底线照常）
             secretaryMode
-              ? withMandatoryApproval(gate, 'mcp', tool)
+              ? withMandatoryApproval(
+                  gate,
+                  'mcp',
+                  tool,
+                  trustedPluginTools.has(tool.name) ? ownerTurn : undefined
+                )
               : withApproval(gate, 'mcp', tool)
           )
         : []),
@@ -3872,7 +3926,6 @@ export class SessionSupervisor {
     const readonlyAgentTypes = new Set(
       agentTypes.filter((type) => type.tools === 'readonly').map((type) => type.name)
     );
-    const ownerGate = new OwnerGate();
     const planGated = (tools: Def[]): Def[] =>
       tools.map((tool) =>
         withOwnerGate(
@@ -3979,6 +4032,7 @@ export class SessionSupervisor {
     if (rolePrompt && !resumeFile) managedRef.pendingRole = rolePrompt;
     if (persona) managedRef.persona = persona;
     if (refusalRetryPrompt) managedRef.refusalRetryPrompt = refusalRetryPrompt;
+    managedRef.readLedger = readLedger;
     managedRef.browser = browser;
     managedRef.memory = memory;
     const managed = managedRef;
@@ -3999,6 +4053,7 @@ export class SessionSupervisor {
       gate,
       planActive: () => plan.state().active,
       readRoots: () => [cwd, ...(agyTemp ? [agyTemp] : [])],
+      ...(persona ? { persona: () => persona.current } : {}),
     });
     // 关掉 plan 时先退出 plan 模式，再撤掉控制器：工具门不再限制，set-plan-mode 不再生效
     const setPlanEnabled = (enabled: boolean) => {
@@ -4212,8 +4267,9 @@ export class SessionSupervisor {
         managed.pendingPrivacyMask = mergeMaskReports(managed.pendingPrivacyMask, report);
         session.sessionManager.appendCustomEntry(PRIVACY_MASK_ENTRY, record);
       };
-      session.agent.streamFunction = (model, context, options) =>
+      session.agent.streamFunction = (model, rawContext, options) =>
         runWithPrivacySink(privacySink, () => {
+          const context = withForkPrefix(managed.forkPrefix, rawContext);
           if (
             !session.isCompacting &&
             options?.sessionId === session.sessionId &&
@@ -4285,7 +4341,12 @@ export class SessionSupervisor {
         queueMicrotask(() => {
           if (this.sessions.get(identity.sessionId) !== managed) return;
           const full = { messages: projectMessages(raw), baseIndex: 0 };
+          // 只在还没进入新回合时把 turnStartIndex 对齐到全量长度，避免把历史用户消息错切进本轮
+          const stillAtResumeHead = managed.turnStartIndex === immediate.messages.length;
           managed.messages = full.messages;
+          if (stillAtResumeHead && managed.status === 'idle') {
+            managed.turnStartIndex = full.messages.length;
+          }
           emitResumeSnapshot(full, true);
         });
       }
@@ -4413,7 +4474,8 @@ export class SessionSupervisor {
     identity: ChildSessionIdentity,
     cwd: string,
     config: ResolvedAgentTypeSpawnConfig,
-    resumeFile?: string
+    resumeFile?: string,
+    seedContext?: SubagentSeedContext
   ): Promise<void> {
     const parent = this.must(identity.parent);
     const factory = parent.factory;
@@ -4451,6 +4513,8 @@ export class SessionSupervisor {
     if (!resumeFile && parent.coworkers.size >= this.maxActiveCoworkers) {
       throw new Error(`coworker limit reached (${this.maxActiveCoworkers} active)`);
     }
+    // fork 档在建会话前就要确认有可分叉的父请求、且上下文留得出余量；明确拒绝，不静默降级
+    const forkBase = seedContext === 'fork' && !resumeFile ? forkSeedBase(parent) : undefined;
 
     let managedRef: ManagedSession | undefined;
     const gate = new ApprovalGate(
@@ -4490,6 +4554,29 @@ export class SessionSupervisor {
       ],
       pluginSource: { identity, kind: 'subagent', name: identity.instanceName },
     });
+    const forkPrefix = forkBase ? forkMessages(forkBase) : undefined;
+    if (forkBase && forkPrefix) {
+      try {
+        const mismatch = forkSeedMismatch(forkBase, parent.session, result.session);
+        if (mismatch) throw new Error(mismatch);
+        writeForkMessages(result.session, forkPrefix);
+        const first = forkPrefix[0];
+        const last = forkPrefix[forkPrefix.length - 1];
+        result.session.sessionManager.appendCustomEntry(FORK_PREFIX_ENTRY, {
+          count: forkPrefix.length,
+          firstTimestamp: first?.timestamp,
+          lastTimestamp: last?.timestamp,
+        });
+      } catch (error) {
+        // 还没登记：只释放这个会话，父会话和其他子代理不受影响
+        cancelContinuousMemory(result.session.sessionManager);
+        try {
+          releaseOauthPoolSession(result.session.sessionId);
+          result.session.dispose();
+        } catch {}
+        throw error;
+      }
+    }
     const metadata: ChildConversationMetadata = {
       parentId: identity.parent.sessionId,
       childGeneration: identity.generation,
@@ -4528,7 +4615,48 @@ export class SessionSupervisor {
       ...(result.requestBudget ? { requestBudget: result.requestBudget } : {}),
     });
     this.attachChildPlugins(managedRef, result, Boolean(resumeFile));
-    if (!resumeFile) managedRef.pendingRole = config.systemPrompt;
+    if (forkBase && forkPrefix) {
+      managedRef.pendingRole = config.systemPrompt;
+      managedRef.forkPrefix = forkPrefix;
+      managedRef.pendingSeed = {
+        text: FORK_SEED_NOTE,
+        stats: {
+          mode: 'fork',
+          filesIncluded: 0,
+          staleFilesSkipped: 0,
+          userTurnsIncluded: 0,
+          imagesIncluded: 0,
+          chars: FORK_SEED_NOTE.length,
+        },
+      };
+      this.adoptForkMessages(managedRef, forkBase, forkPrefix);
+    } else if (resumeFile) {
+      managedRef.forkPrefix = restoredForkPrefix(result.session);
+    } else {
+      managedRef.pendingRole = config.systemPrompt;
+      if (seedContext && seedContext !== 'none' && seedContext !== 'fork') {
+        // 种子是可选增强：构建失败只丢种子，不能让已注册的 child 卡在未 ready
+        const seed = await buildChildContextSeed(
+          (parent.session.messages ?? []) as readonly ContextMessage[],
+          parent.readLedger,
+          {
+            mode: seedContext,
+            cwd,
+            acceptsImages: acceptsImageInput(result.session.model),
+            remote: factory.remote,
+          }
+        ).catch((error: unknown) => {
+          console.warn(
+            '[seed-context] build failed, spawning without seed:',
+            toErrorMessage(error)
+          );
+          return undefined;
+        });
+        if (seed && (seed.text || seed.images?.length)) {
+          managedRef.pendingSeed = seed;
+        }
+      }
+    }
     this.options.emit({
       type: 'child-ready',
       identity,
@@ -4875,7 +5003,9 @@ export class SessionSupervisor {
       if (managed.status === 'running') {
         await this.steerTracked(managed, text);
       } else {
-        void this.promptTracked(managed, consumeRole(managed, text), {
+        const initial = consumeInitialPrompt(managed, text);
+        void this.promptTracked(managed, initial.text, {
+          ...(initial.images && initial.images.length > 0 ? { images: initial.images } : {}),
           streamingBehavior: 'followUp',
         })
           .then(() => {
@@ -5134,7 +5264,11 @@ export class SessionSupervisor {
         return;
       }
       case 'message_start': {
-        managed.ownerGate?.observeMessage(event.message);
+        const deliveryId = event.message.role === 'user' ? this.takeDelivery(managed) : null;
+        managed.ownerGate?.observeMessage(
+          event.message,
+          deliveryId !== null && this.takeOwnerInput(managed, deliveryId, event.message)
+        );
         const index = managed.messages.length;
         const message = projectMessage(event.message);
         if (message?.role === 'assistant') {
@@ -5142,7 +5276,6 @@ export class SessionSupervisor {
           managed.timings[index] = { stepStartMs: managed.requestStartMs ?? Date.now() };
           managed.requestStartMs = undefined;
         }
-        const deliveryId = event.message.role === 'user' ? this.takeDelivery(managed) : null;
         this.upsertLocalMessage(managed, message);
         if (deliveryId) {
           this.options.emit({
@@ -5781,28 +5914,27 @@ export class SessionSupervisor {
     const model = managed.session.model;
     if (!model || model.id !== base.selection.id || model.provider !== base.selection.provider)
       return;
-    const reply = base.reply;
-    const settled =
-      reply?.stopReason === 'stop' && !reply.content.some((part) => part.type === 'toolCall');
-    const messages = settled ? [...base.messages, reply] : [...base.messages];
+    const messages = forkMessages(base);
     if (messages.length === 0) return;
     try {
-      for (const message of messages) {
-        managed.session.sessionManager.appendMessage(message);
-      }
-      managed.session.agent.state.messages = [...messages];
-      managed.forkBase = {
-        model: base.model,
-        messages: [...messages],
-        ...(base.options ? { options: base.options } : {}),
-        stream: base.stream,
-        selection: base.selection,
-      };
-      this.reconcileMessages(managed, this.transcript(managed));
-      managed.turnStartIndex = managed.messages.length;
+      writeForkMessages(managed.session, messages);
+      this.adoptForkMessages(managed, base, messages);
     } catch {
       // 注入失败不阻断旁路：会话仍是空起步的普通旁路
     }
+  }
+
+  /** 分叉底稿已写进会话：它本身也可再被分叉，投影给渲染层，本轮从底稿之后算起 */
+  private adoptForkMessages(managed: ManagedSession, base: ForkBase, messages: Message[]): void {
+    managed.forkBase = {
+      model: base.model,
+      messages: [...messages],
+      ...(base.options ? { options: base.options } : {}),
+      stream: base.stream,
+      selection: base.selection,
+    };
+    this.reconcileMessages(managed, this.transcript(managed));
+    managed.turnStartIndex = managed.messages.length;
   }
 
   private reconcileMessages(managed: ManagedSession, rawMessages: unknown[]): void {
@@ -5924,9 +6056,10 @@ export class SessionSupervisor {
     managed.currentTurnId = randomUUID();
     managed.turnAborted = false;
     ensureAssistantUsage(managed.session.messages as unknown[]);
-    const body = consumeRole(managed, text);
+    const initial = consumeInitialPrompt(managed, text, images);
+    const body = initial.text;
     const options = {
-      ...(images ? { images } : {}),
+      ...(initial.images ? { images: initial.images } : {}),
       streamingBehavior: 'followUp' as const,
       preflightResult: (disposition: PromptDisposition) => {
         if (disposition === 'queued') this.noteQueuedPrompt(managed, deliveryId);
@@ -6027,6 +6160,7 @@ export class SessionSupervisor {
     reason?: 'turn-stuck'
   ): void {
     if (!deliveryId) return;
+    managed.ownerDeliveries?.delete(deliveryId);
     this.options.emit({
       type: 'delivery-rejected',
       identity: managed.identity,
@@ -6128,6 +6262,27 @@ export class SessionSupervisor {
     const slot = managed.promptDelivery ?? managed.steerDeliveries?.shift();
     managed.promptDelivery = undefined;
     return slot?.id ?? null;
+  }
+
+  /** Main 标了 owner 亲手输入的投递：记下原文，上屏时核对 */
+  private noteOwnerInput(managed: ManagedSession, deliveryId: string, text: string): void {
+    managed.ownerDeliveries ??= new Map();
+    const pending = managed.ownerDeliveries;
+    pending.set(deliveryId, text);
+    // 被 input hook 吃掉、从没上屏的投递不会被取走：只留最近的若干条
+    while (pending.size > OWNER_DELIVERY_LIMIT) {
+      const oldest = pending.keys().next().value;
+      if (oldest === undefined) break;
+      pending.delete(oldest);
+    }
+  }
+
+  /** 这条上屏的 user 消息是不是 owner 亲手输入：投递号对得上，且正文确实含原文 */
+  private takeOwnerInput(managed: ManagedSession, deliveryId: string, message: unknown): boolean {
+    const text = managed.ownerDeliveries?.get(deliveryId);
+    if (text === undefined) return false;
+    managed.ownerDeliveries?.delete(deliveryId);
+    return userMessageText(message).includes(text);
   }
 
   /** 子代理预算 Run 每完成一次模型请求记一笔：到软预算提示一次，到 1.5 倍中止并强制交出。 */
@@ -6429,10 +6584,11 @@ export class SessionSupervisor {
       occupancy = undefined;
     }
     let parts: ContextPart[] | undefined;
+    let turns: number | undefined;
     if (occupancy) {
       try {
         const inputs = this.occupancyInputs(managed);
-        parts = buildContextParts({
+        const built = buildContextParts({
           buckets: contextUsagePayload(occupancy, managed.messages).buckets,
           agentsFiles: inputs.agentsFiles,
           skills: inputs.skills,
@@ -6440,7 +6596,9 @@ export class SessionSupervisor {
           reminders: inputs.pendingTaskReminders ?? [],
           messages: inputs.contextMessages,
           estimate: (message) => this.estimateSessionMessage(message),
-        }).parts;
+        });
+        parts = built.parts;
+        turns = built.turns;
       } catch {
         // 拆分失败只少了条目，分类合计照发
       }
@@ -6456,9 +6614,22 @@ export class SessionSupervisor {
       usageTotals: toUsageTotals(computeStats(managed.messages)),
     });
     if (occupancy && managed.pluginEvents?.plan.observe.includes('context_usage')) {
+      // 原始 pi 消息保留 usage.reasoning（投影消息会剥离）；无记录时回退 managed.messages
+      const rawMessages = Array.isArray(managed.session.messages)
+        ? (managed.session.messages as Parameters<typeof contextUsagePayload>[1])
+        : [];
+      const usageMessages = rawMessages.some(
+        (message) => message?.role === 'assistant' && Boolean(message.usage)
+      )
+        ? rawMessages
+        : managed.messages;
       managed.pluginEvents.notify(
         'context_usage',
-        contextUsagePayload({ ...occupancy, ...(parts ? { parts } : {}) }, managed.messages)
+        contextUsagePayload(
+          { ...occupancy, ...(parts ? { parts } : {}) },
+          usageMessages,
+          turns !== undefined ? { turns } : undefined
+        )
       );
     }
   }
@@ -7328,6 +7499,14 @@ export class SessionSupervisor {
 
 /** 投影 idle 但 pi 仍 streaming 时，等它真正空闲的上限；超时视为僵尸轮 */
 const ZOMBIE_TURN_WAIT_MS = 5_000;
+/** 等着上屏核对的 owner 输入最多留几条 */
+const OWNER_DELIVERY_LIMIT = 32;
+
+function userMessageText(message: unknown): string {
+  return message && typeof message === 'object'
+    ? textOf((message as { content?: unknown }).content)
+    : '';
+}
 /** 子代理 Run 等自己后台任务的时限，从第一次持有起算 */
 export const AGENT_RUN_HOLD_LIMIT_MS = 10 * 60_000;
 /** 流式增量下发间隔：约 20 帧/秒，肉眼连贯，长回复的 IPC 与 markdown 重算降一个量级 */
@@ -7439,12 +7618,28 @@ function withPendingPlanNote(
   return note ? prependTurnNote(note, text) : text;
 }
 
-/** coworker 首条消息前缀注入角色提示,消费一次 */
-function consumeRole(managed: { pendingRole?: string }, text: string): string {
-  if (!managed.pendingRole) return text;
+/** coworker/子代理首条消息前缀注入角色提示与一次性上下文种子，各自只消费一次 */
+function consumeInitialPrompt(
+  managed: { pendingRole?: string; pendingSeed?: ChildContextSeed },
+  text: string,
+  images?: SeedImage[]
+): { text: string; images?: SeedImage[] } {
   const role = managed.pendingRole;
   managed.pendingRole = undefined;
-  return `<role>\n${role}\n</role>\n\n${text}`;
+  const seed = managed.pendingSeed;
+  managed.pendingSeed = undefined;
+
+  const parts: string[] = [];
+  if (role) parts.push(`<role>\n${role}\n</role>`);
+  if (seed?.text) parts.push(seed.text);
+  parts.push(text);
+  const body = parts.join('\n\n');
+
+  const seedImages = seed?.images;
+  if (!seedImages || seedImages.length === 0) {
+    return { text: body, ...(images !== undefined ? { images } : {}) };
+  }
+  return { text: body, images: [...seedImages, ...(images ?? [])] };
 }
 
 const toErrorMessage = (error: unknown): string =>
@@ -7485,6 +7680,74 @@ function forkBaseOf(parent: ManagedSession): ForkBase | undefined {
   if (!base || model?.id !== base.selection.id || model.provider !== base.selection.provider)
     return;
   return base;
+}
+
+/** 分叉底稿：最近一次请求的消息；回复正常收尾（无工具调用）时接在后面 */
+function forkMessages(base: ForkBase): Message[] {
+  const reply = base.reply;
+  const settled =
+    reply?.stopReason === 'stop' && !reply.content.some((part) => part.type === 'toolCall');
+  return settled ? [...base.messages, reply] : [...base.messages];
+}
+
+/** 底稿原样写进会话记录与 agent state：落 jsonl，resume 时随记录恢复，不靠 worker 内存 */
+function writeForkMessages(session: AgentSession, messages: Message[]): void {
+  for (const message of messages) {
+    session.sessionManager.appendMessage(message);
+  }
+  session.agent.state.messages = [...messages];
+}
+
+/** seed_context="fork" 的父请求底稿；没有或放不下时明确报错 */
+function forkSeedBase(parent: ManagedSession): ForkBase {
+  const base = forkBaseOf(parent);
+  if (!base || base.messages.length === 0) {
+    throw new Error(
+      `seed_context "fork" needs the parent's latest request on its current model, and none is recorded (no request yet, the model changed, or the worker restarted); ${FORK_SEED_HINT}`
+    );
+  }
+  const window = base.model.contextWindow ?? 0;
+  const tokens = base.reply?.usage
+    ? calculateContextTokens(base.reply.usage)
+    : base.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+  if (window > 0 && tokens > window * FORK_SEED_MAX_CONTEXT_RATIO) {
+    throw new Error(
+      `parent context is too large to fork (${tokens}/${window} tokens); compact the parent first or ${FORK_SEED_HINT}`
+    );
+  }
+  return base;
+}
+
+/** 前缀要命中缓存，子会话必须与父会话同一选择模型、同一 thinking 档位；不一致就拒绝，不替它换 */
+function forkSeedMismatch(
+  base: ForkBase,
+  parent: AgentSession,
+  child: AgentSession
+): string | undefined {
+  const model = child.model;
+  if (!model || model.provider !== base.selection.provider || model.id !== base.selection.id) {
+    const got = model ? `${model.provider}/${model.id}` : 'none';
+    return `seed_context "fork" requires the child to run on the parent model ${base.selection.provider}/${base.selection.id}, got ${got}; omit model or ${FORK_SEED_HINT}`;
+  }
+  if (child.thinkingLevel !== parent.thinkingLevel) {
+    return `seed_context "fork" requires the parent thinking level "${parent.thinkingLevel}", got "${child.thinkingLevel}"; omit thinking or ${FORK_SEED_HINT}`;
+  }
+  return undefined;
+}
+
+/** resume 的 fork 子会话：记录开头仍是注入时的底稿（没压缩掉）才接回前缀改写 */
+function restoredForkPrefix(session: AgentSession): Message[] | undefined {
+  const entry = session.sessionManager
+    .getBranch()
+    .findLast((item) => item.type === 'custom' && item.customType === FORK_PREFIX_ENTRY);
+  const data = entry?.type === 'custom' ? (entry.data as Record<string, unknown>) : undefined;
+  const count = typeof data?.count === 'number' ? data.count : 0;
+  const messages = session.messages as Message[];
+  if (count <= 0 || messages.length < count) return undefined;
+  const prefix = messages.slice(0, count);
+  if (prefix[0]?.timestamp !== data?.firstTimestamp) return undefined;
+  if (prefix[count - 1]?.timestamp !== data?.lastTimestamp) return undefined;
+  return prefix;
 }
 
 /**

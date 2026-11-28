@@ -4,13 +4,19 @@
 export {
   type BoxedContentKey,
   boxContentKey,
+  FRAME_V2_GZIP_MIN_BYTES,
+  type FrameCodec,
   generateContentKey,
   generatePairKeypair,
+  isIncompressibleMime,
+  MAX_DECOMPRESSED_BYTES,
   openBoxedContentKey,
   openFrame,
   PairCryptoError,
   type PairKeypair,
+  type SealFrameV2Options,
   sealFrame,
+  sealFrameV2,
 } from './crypto';
 export { createBrowserDirectPeerFactory } from './direct/browserPeer';
 export {
@@ -34,6 +40,9 @@ export {
 export { DirectLink, type DirectLinkDeps, type DirectSignal } from './direct/link';
 export { classifyNatMapping, describeCandidates, type NatMapping } from './direct/nat';
 export {
+  DIRECT_BUFFER_LIMIT,
+  DIRECT_BULK_THRESHOLD_BYTES,
+  type DirectChannelKind,
   type DirectPeer,
   type DirectPeerFactory,
   isAllowedCandidate,
@@ -76,6 +85,7 @@ export {
   type DirectCandidate,
   type DirectCapability,
   type HostAppearance,
+  type HostCapability,
   type HostToPhone,
   type IceServerEntry,
   isPhoneCommand,
@@ -113,6 +123,8 @@ export {
   toWebSocketUrl,
 } from './relay';
 export {
+  batchRemoteFrames,
+  createRemoteBinaryPartAssembler,
   createRemoteOrderedStream,
   createRemotePartAssembler,
   decodeBase64,
@@ -123,19 +135,31 @@ export {
   gzipRemoteJson,
   type HostToRemote,
   isHostRemoteFrame,
+  isRemoteBinaryPart,
   isRemotePart,
+  REMOTE_BATCH_MAX_BYTES,
+  REMOTE_BATCH_MAX_FRAMES,
+  REMOTE_BIN_PART_BYTES,
   REMOTE_GZIP_MIN_CHARS,
   REMOTE_PART_CHARS,
+  type RemoteBatch,
+  type RemoteBinaryPart,
+  type RemoteBinaryPartAssembler,
   type RemoteGzip,
   type RemoteKind,
   type RemotePart,
   type RemotePartAssembler,
+  type RemotePrefetchItem,
+  type RemotePrefetchResult,
+  type RemotePrefetchResultItem,
   type RemoteToHost,
+  splitRemoteBinaryFrame,
   splitRemoteFrame,
 } from './remote';
 export { createFrameReplay, type FrameReplay, isReplayHello } from './replay';
 export {
   createCachedHostLookup,
+  FOREGROUND_STALE_HIDDEN_MS,
   isConnectStuck,
   isForegroundSocketStale,
   isMagicDnsOnly,
@@ -156,3 +180,11 @@ export {
   TAILSCALE_MAGIC_DNS,
 } from './revive';
 export { isPairSyncCursor, parsePairSessionSync } from './sessionSync';
+export {
+  browserWebSocketFactory,
+  type RelayConnectParams,
+  type RelaySocketFactory,
+  type RelaySocketLike,
+  type RelayTransportKind,
+  type RelayTransportLane,
+} from './transport';

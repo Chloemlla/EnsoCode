@@ -2,8 +2,8 @@ import type { ChatTypography } from '@shared/chatTypography';
 import type { CompactStrategy } from '@shared/compactStrategy';
 import type { ComposerToolbarSettings } from '@shared/composerToolbar';
 import type {
-  DefaultModelNotice,
   DefaultModelRef,
+  DeterministicModelUnavailability,
   OauthCredentialBlock,
 } from '@shared/defaultModel';
 import type { ContextMenuOpen, FileOpenRule } from '@shared/fileOpening';
@@ -39,25 +39,23 @@ export type DefaultModelRevalidation =
       status: 'unchanged';
       defaultModel: DefaultModelRef | null;
       writeback: false;
-      notice: null;
     }
   | ({
       status: 'deferred';
       defaultModel: DefaultModelRef | null;
       writeback: false;
-      notice: null;
     } & OauthCredentialBlock)
   | {
       status: 'stale';
       defaultModel: DefaultModelRef | null;
       writeback: false;
-      notice: null;
     }
   | {
-      status: 'sanitized';
-      defaultModel: DefaultModelRef | null;
-      writeback: true;
-      notice: DefaultModelNotice;
+      /** 默认模型确定不可用：原样保留，只标记原因，从不替换或清空 */
+      status: 'unavailable';
+      defaultModel: DefaultModelRef;
+      reason: DeterministicModelUnavailability;
+      writeback: false;
     };
 
 export type Theme = 'light' | 'dark' | 'system' | 'sync-terminal';
@@ -591,6 +589,10 @@ export interface SettingsState {
   addSubagentModel: (entry: Omit<SubagentModelEntry, 'id'>) => SubagentModelEntry;
   updateSubagentModel: (id: string, updates: Partial<Omit<SubagentModelEntry, 'id'>>) => void;
   removeSubagentModel: (id: string) => void;
+  /** 原子替换整张列表（向导确认）；条目 id 由调用方生成 */
+  setSubagentModels: (entries: SubagentModelEntry[]) => void;
+  /** 与同一启用状态的最近邻居交换；到边界或 id 不存在时不变 */
+  moveSubagentModel: (id: string, direction: 'up' | 'down') => void;
   addVirtualModel: (entry: Omit<VirtualModelEntry, 'id'>) => VirtualModelEntry;
   updateVirtualModel: (id: string, updates: Partial<Omit<VirtualModelEntry, 'id'>>) => void;
   removeVirtualModel: (id: string) => void;

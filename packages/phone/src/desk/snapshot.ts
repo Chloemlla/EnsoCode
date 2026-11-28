@@ -12,8 +12,9 @@ const SAVED_HEADER = 'x-desk-saved';
 /** 桌面在线后盖着的上限：在线却迟迟起不来时不能一直挡住（桌面不在线的时间不计） */
 const MAX_SNAPSHOT_MS = 20_000;
 const SETTLED_MS = 2_500;
+const FAST_SETTLED_MS = 1_200;
 /** 启动请求全部回来、没有缺帧持续这么久：数据已到齐，不必再等文字量稳定 */
-const QUIET_MS = 600;
+const QUIET_MS = 250;
 /** 文字太少的快照（存的时候 renderer 正在重载）盖上去只是一片空白 */
 const MIN_SNAPSHOT_CHARS = 200;
 
@@ -24,6 +25,8 @@ export interface SnapshotProgress {
   liveChars: number;
   snapChars: number;
   settingsLoaded: boolean;
+  /** 乐观缓存水合已完成（后台仍在与宿主校对，写入门禁已拦住陈旧写回） */
+  optimisticHydrated?: boolean;
   /** renderer 文字量多久没变了 */
   stableFor: number;
   /** 时间线还在「正在读取历史」：文字量稳定也不算追上 */
@@ -38,6 +41,7 @@ export interface SnapshotSample {
   now: number;
   liveChars: number;
   settingsLoaded: boolean;
+  optimisticHydrated?: boolean;
   liveLoading: boolean;
   hostOnline: boolean;
   /** renderer 没有在途请求、宿主帧没有缺口；不知道时按不空闲 */
@@ -47,10 +51,14 @@ export interface SnapshotSample {
 export function snapshotReady(p: SnapshotProgress): boolean {
   if (!p.hostOnline) return false;
   if (p.elapsed >= MAX_SNAPSHOT_MS) return true;
-  if (!p.settingsLoaded || p.liveLoading) return false;
-  return (
-    p.liveChars >= p.snapChars * 0.8 || p.stableFor >= SETTLED_MS || (p.idleFor ?? 0) >= QUIET_MS
-  );
+  if (p.liveLoading) return false;
+  if (!p.settingsLoaded) {
+    return Boolean(
+      p.optimisticHydrated && p.liveChars >= MIN_SNAPSHOT_CHARS && p.liveChars >= p.snapChars * 0.8
+    );
+  }
+  const settled = p.liveChars >= MIN_SNAPSHOT_CHARS ? FAST_SETTLED_MS : SETTLED_MS;
+  return p.liveChars >= p.snapChars * 0.8 || p.stableFor >= settled || (p.idleFor ?? 0) >= QUIET_MS;
 }
 
 /**
@@ -84,6 +92,7 @@ export function createSnapshotTracker(
       liveChars: sample.liveChars,
       snapChars,
       settingsLoaded: sample.settingsLoaded,
+      optimisticHydrated: sample.optimisticHydrated,
       stableFor: sample.now - changedAt,
       liveLoading: sample.liveLoading,
       hostOnline: sample.hostOnline,
@@ -170,6 +179,7 @@ export async function saveSnapshot(cacheName: string, base: string, doc: Documen
   baseEl.href = `${base}/`;
   head.prepend(baseEl);
   const html = `<!doctype html>${clone.outerHTML}`;
+  if (typeof caches === 'undefined') return;
   const cache = await caches.open(cacheName);
   await cache.put(
     snapshotUrl(base),
@@ -265,7 +275,7 @@ export async function saveReads(
   base: string,
   reads: Map<string, ReadEntry>
 ): Promise<void> {
-  if (reads.size === 0) return;
+  if (reads.size === 0 || typeof caches === 'undefined') return;
   const cache = await caches.open(cacheName);
   await cache.put(
     readsUrl(base),

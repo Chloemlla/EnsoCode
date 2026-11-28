@@ -33,7 +33,10 @@ import {
   type ProviderEntry,
   parsePairSessionSync,
   RELAY_CONNECT_TIMEOUT_MS,
+  type RelaySocketFactory,
+  type RelaySocketLike,
   sealFrame,
+  sealFrameV2,
   shouldReplaceOnNudge,
   toWebSocketUrl,
   VISIBILITY_PROBE_MS,
@@ -55,6 +58,7 @@ import {
   type SyncTracking,
 } from '@shared/pair/syncProjection';
 import { normalizeTimelinePrefs } from '@shared/pair/timelinePrefs';
+import { createNativeOrBrowserRelaySocket } from './nativeBridge';
 import { type PhoneCacheData, type PhoneCacheStore, phoneCache } from './sessionCache';
 import {
   setCompactReadOnlyTools,
@@ -142,11 +146,16 @@ export interface ClientEvents {
 }
 
 export class PairClient {
-  private ws: WebSocket | null = null;
+  private ws: RelaySocketLike | null = null;
   private heartbeat: Heartbeat | null = null;
   private contentKey: Uint8Array;
   /** 直连和中继共用这一份：帧只封一次，再选路 */
-  private replay: FrameReplay = createFrameReplay(sealFrame, openFrame);
+  private hostFrameV2 = false;
+  private replay: FrameReplay = createFrameReplay(
+    (key, payload, nonce) =>
+      this.hostFrameV2 ? sealFrameV2(key, payload, { nonce }) : sealFrame(key, payload, nonce),
+    (key, frame) => openFrame(key, frame)
+  );
   /**
    * 防重放刚因 host-online 重置：此时发的帧不带锁定前缀。经直连会先于中继的 peer-joined
    * 到达 host，被它仍锁定的旧前缀静默丢弃；这几秒改走中继，保证排在 peer-joined 之后。
@@ -194,6 +203,9 @@ export class PairClient {
   private pendingDirectRestart = false;
   private probeNonce = 0;
   private probeSentAt: number | null = null;
+  private relayEpoch: string | null = null;
+  private relaySeq = 0;
+  private lastReplayedFrom: number | null = null;
   private metadata: Omit<PhoneCacheData, 'sessions'> = {
     catalog: [],
     pinnedOrder: [],
@@ -207,7 +219,8 @@ export class PairClient {
     private events: ClientEvents,
     directFactory: DirectPeerFactory | null = createBrowserDirectPeerFactory(),
     private cache: PhoneCacheStore = phoneCache,
-    private desk = false
+    private desk = false,
+    private socketFactory: RelaySocketFactory = createNativeOrBrowserRelaySocket
   ) {
     this.contentKey = fromBase64Url(device.contentKey);
     this.direct = new DirectLink({
@@ -233,8 +246,28 @@ export class PairClient {
     });
   }
 
+  get hostV2(): boolean {
+    return this.hostFrameV2;
+  }
+
   transport(): DirectTransport {
     return this.direct.transport();
+  }
+
+  diagnostics(): {
+    relayKind: string | null;
+    hostV2: boolean;
+    relayEpoch: string | null;
+    relaySeq: number;
+    replayedFrom: number | null;
+  } {
+    return {
+      relayKind: this.ws?.transportKind ?? null,
+      hostV2: this.hostFrameV2,
+      relayEpoch: this.relayEpoch,
+      relaySeq: this.relaySeq,
+      replayedFrom: this.lastReplayedFrom,
+    };
   }
 
   connect(): void {
@@ -279,10 +312,23 @@ export class PairClient {
     // 直连还通（回前台换中继 socket）不算断：报连接中会让上层把请求全部挂起，等新中继进房
     if (this.direct.transport() !== 'direct') this.events.onState('connecting');
     const base = toWebSocketUrl(this.device.relayUrl);
-    const url = `${base}/v1/pair/${encodeURIComponent(this.device.pairId)}?role=guest&token=${encodeURIComponent(this.device.token)}`;
-    let ws: WebSocket;
+    const resume =
+      this.relayEpoch !== null
+        ? `&relayEpoch=${encodeURIComponent(this.relayEpoch)}&sinceRelaySeq=${this.relaySeq}`
+        : '';
+    const url = `${base}/v1/pair/${encodeURIComponent(this.device.pairId)}?role=guest&token=${encodeURIComponent(this.device.token)}${resume}`;
+    let ws: RelaySocketLike;
     try {
-      ws = new WebSocket(url);
+      ws = this.socketFactory({
+        relayUrl: this.device.relayUrl,
+        wsUrl: url,
+        pairId: this.device.pairId,
+        role: 'guest',
+        token: this.device.token,
+        ...(this.relayEpoch !== null
+          ? { relayEpoch: this.relayEpoch, sinceRelaySeq: this.relaySeq }
+          : {}),
+      });
     } catch {
       this.scheduleReconnect();
       return;
@@ -322,7 +368,7 @@ export class PairClient {
       this.scheduleReconnect();
     };
     this.heartbeat = attachHeartbeat(
-      ws,
+      ws as unknown as WebSocket,
       () => {
         try {
           ws.close();
@@ -346,17 +392,43 @@ export class PairClient {
       if (this.closed || this.revoked || this.ws !== ws) return;
       clearTimeout(connectTimer);
       this.attempt = 0;
-      this.primeRoom();
+      if (this.direct.transport() !== 'direct') this.primeRoom();
     };
 
     ws.onmessage = (event) => {
       if (this.closed || this.revoked || this.ws !== ws) return;
       if (typeof event.data === 'string') {
         try {
-          const control = JSON.parse(event.data) as { type?: string };
+          const control = JSON.parse(event.data) as {
+            type?: string;
+            relayEpoch?: unknown;
+            relaySeq?: unknown;
+            replayedFrom?: unknown;
+          };
           if (control.type === 'host-online') {
             if (this.roomStatusSeen) this.roomPrimed = false;
             this.roomStatusSeen = true;
+            if (
+              typeof control.relayEpoch === 'string' &&
+              control.relayEpoch.length > 0 &&
+              typeof control.relaySeq === 'number' &&
+              Number.isSafeInteger(control.relaySeq) &&
+              control.relaySeq >= 0
+            ) {
+              const replayed =
+                typeof control.replayedFrom === 'number' &&
+                Number.isSafeInteger(control.replayedFrom) &&
+                control.replayedFrom >= 0
+                  ? control.replayedFrom
+                  : null;
+              this.relayEpoch = control.relayEpoch;
+              this.lastReplayedFrom = replayed;
+              this.relaySeq = replayed ?? control.relaySeq;
+            } else {
+              this.relayEpoch = null;
+              this.relaySeq = 0;
+              this.lastReplayedFrom = null;
+            }
             // 防重放只在这里重置：host 进房时同样收到 peer-joined 一起重置。中继重连尝试不能重置，
             // 否则直连上的帧退回随机 nonce，被仍锁定旧前缀的 host 静默丢弃
             this.replay.peerReset();
@@ -367,6 +439,9 @@ export class PairClient {
             this.primeRoom();
           } else if (control.type === 'host-offline') {
             this.roomStatusSeen = true;
+            this.relayEpoch = null;
+            this.relaySeq = 0;
+            this.lastReplayedFrom = null;
             this.events.onState('host-offline');
             this.direct.peerOnline(false);
             this.roomPrimed = false;
@@ -377,6 +452,7 @@ export class PairClient {
         } catch {}
         return;
       }
+      if (this.relayEpoch !== null) this.relaySeq += 1;
       this.enqueueFrame(new Uint8Array(event.data as ArrayBuffer), ws);
     };
 
@@ -433,6 +509,8 @@ export class PairClient {
     this.flushCache();
     this.closed = true;
     this.pendingDirectRestart = false;
+    this.relayEpoch = null;
+    this.relaySeq = 0;
     this.stopSyncRetry();
     if (this.timer) clearTimeout(this.timer);
     this.direct.close();
@@ -467,7 +545,7 @@ export class PairClient {
     this.connect();
   }
 
-  private enqueueFrame(frame: Uint8Array, socket?: WebSocket): void {
+  private enqueueFrame(frame: Uint8Array, socket?: RelaySocketLike): void {
     this.receiveQueue = this.receiveQueue
       .then(async () => {
         if (this.closed || this.revoked || (socket && socket !== this.ws)) return;
@@ -476,7 +554,7 @@ export class PairClient {
       .catch(() => {});
   }
 
-  private async handleFrame(frame: Uint8Array, socket?: WebSocket): Promise<void> {
+  private async handleFrame(frame: Uint8Array, socket?: RelaySocketLike): Promise<void> {
     let payload: HostToPhone;
     try {
       const opened = await this.replay.open(this.contentKey, frame);
@@ -549,6 +627,8 @@ export class PairClient {
         this.events.onPushConfig?.(payload.vapidPublicKey);
         break;
       case 'host-info':
+        this.hostFrameV2 =
+          Array.isArray(payload.capabilities) && payload.capabilities.includes('frame-v2');
         this.direct.hostInfo(payload);
         this.events.onReadOnly?.(payload.readOnly === true);
         this.events.onRemoteDesktop?.(payload.remoteDesktop === true);
@@ -821,7 +901,7 @@ export class PairClient {
   send(command: PhoneToHost, opts?: { bulk?: boolean }): void {
     if (!this.canSend()) return;
     if ((opts?.bulk || Date.now() < this.relayOnlyUntil) && this.ws?.readyState === 1) {
-      this.sendViaRelay(command);
+      this.sendViaRelay(command, opts?.bulk ? 'bulk' : 'ctrl');
       return;
     }
     this.sendQueue = this.sendQueue
@@ -831,7 +911,7 @@ export class PairClient {
         if (this.closed || this.revoked || this.overRelayLimit(frame, command)) return;
         // 直连优先；背压/刚好断掉时无缝退回中继
         if (this.direct.send(frame)) return;
-        this.sendFrameViaRelay(frame);
+        this.sendFrameViaRelay(frame, opts?.bulk ? 'bulk' : 'ctrl');
       })
       .catch(() => {});
   }
@@ -844,9 +924,14 @@ export class PairClient {
     return true;
   }
 
-  private sendFrameViaRelay(frame: Uint8Array): void {
+  private sendFrameViaRelay(frame: Uint8Array, lane: 'ctrl' | 'bulk' = 'ctrl'): void {
     if (this.ws?.readyState !== 1) return;
-    this.ws.send(frame.slice().buffer as ArrayBuffer);
+    const buf = frame.slice().buffer as ArrayBuffer;
+    if (this.ws.sendOnLane) {
+      this.ws.sendOnLane(buf, lane);
+      return;
+    }
+    this.ws.send(buf);
   }
 
   private sendRelayProbe(): void {
@@ -855,13 +940,13 @@ export class PairClient {
     this.sendViaRelay({ type: 'probe', nonce: this.probeNonce });
   }
 
-  private sendViaRelay(command: PhoneToHost): void {
+  private sendViaRelay(command: PhoneToHost, lane: 'ctrl' | 'bulk' = 'ctrl'): void {
     this.sendQueue = this.sendQueue
       .then(async () => {
         if (this.closed || this.revoked) return;
         const frame = await this.replay.seal(this.contentKey, command);
         if (this.closed || this.revoked || this.overRelayLimit(frame, command)) return;
-        this.sendFrameViaRelay(frame);
+        this.sendFrameViaRelay(frame, lane);
       })
       .catch(() => {});
   }
@@ -877,7 +962,12 @@ export class PairClient {
     if (this.closed || this.revoked || this.roomPrimed) return;
     if (this.ws?.readyState !== 1) return;
     this.roomPrimed = true;
-    this.send(this.desk ? { type: 'snapshot', desk: true } : { type: 'snapshot' });
+    const canV2 = typeof DecompressionStream === 'function';
+    this.send(
+      this.desk
+        ? { type: 'snapshot', desk: true, ...(canV2 ? { v2: true } : {}) }
+        : { type: 'snapshot', ...(canV2 ? { v2: true } : {}) }
+    );
     if (this.subscribedId) this.subscribe(this.subscribedId);
   }
 
@@ -989,6 +1079,8 @@ export class PairClient {
   private revoke(): void {
     this.revoked = true;
     this.pendingDirectRestart = false;
+    this.relayEpoch = null;
+    this.relaySeq = 0;
     this.stopSyncRetry();
     if (this.timer) clearTimeout(this.timer);
     if (this.cacheTimer) clearTimeout(this.cacheTimer);

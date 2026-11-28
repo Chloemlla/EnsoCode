@@ -1,5 +1,6 @@
 import { normalizeRelayUrl } from '@enso/pair';
 import type { RemoteBridge, RemoteFrameKind } from '@shared/remoteBridge';
+import { collectPrefetchItems } from '@shared/remoteDelta';
 import {
   cachedRemoteImage,
   pruneRemoteImages,
@@ -12,12 +13,47 @@ import type { ConnState } from '../client';
 import { pickActive } from '../deviceList';
 import { installKeyboardInset } from '../keyboard';
 import { parseSessionFromSearch, parseSessionId, takeStashedSessionId } from '../launchSession';
-import { isStandalone, PHONE_PUSH_ENABLED_KEY, pushAvailability, subscribePush } from '../push';
+import {
+  hasNativeDeskProxy,
+  hasNativePip,
+  hasNativePush,
+  type NativePipAspect,
+  type NativePipStatus,
+  pushNativePipState,
+  pushNativeWidgetState,
+  registerNativeDeskFetcher,
+  resolveNativePushGatewayOrigin,
+  setNativePipAspect,
+  setNativePipAuto,
+  startNativePip,
+  stopNativePip,
+  subscribeNativePipState,
+} from '../nativeBridge';
+import {
+  createTrailingThrottle,
+  DeskPipTracker,
+  loadNativePipAspect,
+  loadNativePipAuto,
+  loadNativePipFollow,
+  type NativePipFollowMode,
+  parseInvokeSessionId,
+  saveNativePipAspect,
+  saveNativePipAuto,
+  saveNativePipFollow,
+} from '../pipState';
+import {
+  isStandalone,
+  PHONE_PUSH_ENABLED_KEY,
+  pushAvailability,
+  setNativePushGatewayResolver,
+  subscribePush,
+} from '../push';
 import { acceptPushSubscription, pushDeps, turnPushOff, turnPushOn } from '../pushToggle';
 import { watchShellUpdate } from '../shellUpdate';
 import { loadActiveDeviceId, loadDevices, saveActiveDeviceId } from '../storage';
 import { hadPairing, requestPersistence, storageLossNotice, syncPairedMark } from '../storageGuard';
 import { PHONE_URL, saveUiMode } from '../uiMode';
+import { DeskWidgetTracker } from '../widgetState';
 import { RelayBundle } from './bundle';
 import { watchDeskChrome } from './chrome';
 import { createDeviceDrawer, DESKTOP_DRAWER_QUERY } from './deviceDrawer';
@@ -159,7 +195,8 @@ function showState(state: ConnState): void {
 
 async function main(): Promise<void> {
   (window as { __deskBoot?: boolean }).__deskBoot = true;
-  if (!('serviceWorker' in navigator)) {
+  const nativeDeskProxy = hasNativeDeskProxy();
+  if (!nativeDeskProxy && !('serviceWorker' in navigator)) {
     splash('当前浏览器不支持 Service Worker，无法使用完整版。');
     return;
   }
@@ -212,9 +249,11 @@ async function main(): Promise<void> {
   const launchSessionId =
     urlSession ?? (await withTimeout(takeStashedSessionId(), STORAGE_TIMEOUT_MS, null));
 
-  await ensureDeskWorker(navigator.serviceWorker, (stage) => {
-    bootStage = stage;
-  });
+  if (!nativeDeskProxy) {
+    await ensureDeskWorker(navigator.serviceWorker, (stage) => {
+      bootStage = stage;
+    });
+  }
   bootStage = '启动隧道';
 
   const frames = $('frames');
@@ -227,30 +266,105 @@ async function main(): Promise<void> {
   /** 换构建整页重载中：旧构建的快照和只读缓存不再有用，别在离开时写存储 */
   let leaving = false;
   let settingsLoaded = false;
+  let optimisticHydrated = false;
   let snapshot: HTMLIFrameElement | null = null;
   let snapshotTimer: ReturnType<typeof setInterval> | null = null;
   let snapshotBlobs: string[] = [];
 
   // 壳是旧版本缓存出来的：renderer 还没起来就立即换新（旧壳配新桌面起不来时自愈），否则等回前台
-  watchShellUpdate({
-    container: navigator.serviceWorker,
-    doc: document,
-    storage: sessionStorage,
-    canReloadNow: () => !settingsLoaded && !stopped,
-    reload: () => {
-      leaveGuard?.release();
-      location.reload();
-    },
-  });
+  if (!nativeDeskProxy && 'serviceWorker' in navigator) {
+    watchShellUpdate({
+      container: navigator.serviceWorker,
+      doc: document,
+      storage: sessionStorage,
+      canReloadNow: () => !settingsLoaded && !stopped,
+      reload: () => {
+        leaveGuard?.release();
+        location.reload();
+      },
+    });
+  }
+
+  /** 只读结果缓存（shim 从父页面取用）：重启 PWA 后带 hash 询问，没变就不用重下设置和历史 */
+  const reads = new Map<string, { h: string; json: string }>();
+  const readsSignature = (map: Map<string, { h: string; json: string }>): string =>
+    [...map.entries()]
+      .map(([k, v]) => `${k}\0${v.h}`)
+      .sort()
+      .join('\n');
+  let savedReadsSig = '';
+  (window as Window & { __ensoRemoteReads?: unknown }).__ensoRemoteReads = reads;
 
   let link = initialDeskLink(device.label, localStorage.getItem(PHONE_PUSH_ENABLED_KEY) === 'on');
   const linkListeners = new Set<(status: ReturnType<typeof toRemoteLinkStatus>) => void>();
+  const deskWidget = new DeskWidgetTracker();
+  /** 画中画只在 iOS 原生壳里有：浏览器 / PWA 不建追踪器，事件流零额外开销 */
+  const deskPip = hasNativePip() ? new DeskPipTracker() : null;
+  const currentPipTheme = (): 'dark' | 'light' => {
+    const frameTheme = themeOfFrame(iframes.main);
+    if (frameTheme) return frameTheme.dark ? 'dark' : 'light';
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  };
+  const pipSync = createTrailingThrottle(() => {
+    if (!deskPip) return;
+    pushNativePipState(
+      deskPip.buildSnapshot({
+        deviceLabel: link.deviceLabel,
+        connectionState: link.state,
+        theme: currentPipTheme(),
+      })
+    );
+  });
+  const schedulePipSync = () => {
+    if (deskPip) pipSync.schedule();
+  };
+  const syncNativeDeskWidget = (ingestReads = false) => {
+    if (ingestReads) {
+      const settingsJson = reads.get(`${IPC_CHANNELS.SETTINGS_READ}\0[]`)?.json;
+      const authorityJson = reads.get(`${IPC_CHANNELS.SOURCE_AUTHORITY_READ}\0[]`)?.json;
+      const conversationsJson = reads.get(`${IPC_CHANNELS.CONVERSATIONS_READ}\0[]`)?.json;
+      for (const tracker of deskPip ? [deskWidget, deskPip] : [deskWidget]) {
+        tracker.ingestSettingsJson(settingsJson);
+        tracker.ingestSourceAuthorityJson(authorityJson);
+        tracker.ingestConversationsJson(conversationsJson);
+      }
+    }
+    pushNativeWidgetState(
+      deskWidget.buildSnapshot({
+        deviceLabel: link.deviceLabel,
+        connectionState: link.state,
+        transport: link.transport ?? '',
+        rttMs: link.rttMs,
+      })
+    );
+    schedulePipSync();
+  };
   const publishLink = (next: typeof link) => {
     if (next === link) return;
     link = next;
     const status = toRemoteLinkStatus(link, pushAvailability());
     for (const listener of linkListeners) listener(status);
+    syncNativeDeskWidget();
   };
+
+  let pipStatus: NativePipStatus = {
+    supported: true,
+    active: false,
+    auto: loadNativePipAuto(localStorage),
+    aspect: loadNativePipAspect(localStorage),
+  };
+  let pipFollow: NativePipFollowMode = loadNativePipFollow(localStorage);
+  const pipListeners = new Set<() => void>();
+  const publishPip = (next: NativePipStatus) => {
+    pipStatus = next;
+    for (const listener of pipListeners) listener();
+  };
+  if (deskPip) {
+    deskPip.setFollowMode(pipFollow);
+    setNativePipAuto(pipStatus.auto);
+    setNativePipAspect(pipStatus.aspect ?? 'portrait');
+    subscribeNativePipState(publishPip);
+  }
 
   let tunnel!: DeskTunnel;
   tunnel = new DeskTunnel(
@@ -284,8 +398,12 @@ async function main(): Promise<void> {
         location.reload();
         return true;
       },
+      getPrefetch: () => collectPrefetchItems(reads),
       onPushConfig: (key) => {
         publishLink(reduceDeskLink(link, { type: 'push-config', key }));
+        if (hasNativePush()) {
+          setNativePushGatewayResolver(() => resolveNativePushGatewayOrigin(device.relayUrl));
+        }
         if (localStorage.getItem(PHONE_PUSH_ENABLED_KEY) !== 'on') return;
         // 已经允许过：刷新订阅不需要再弹权限
         void subscribePush(key).then((result) => {
@@ -352,10 +470,47 @@ async function main(): Promise<void> {
         build: version,
         userAgent: navigator.userAgent,
         visibility: document.visibilityState,
-        link: toRemoteLinkStatus(link, pushAvailability()),
+        link: {
+          ...toRemoteLinkStatus(link, pushAvailability()),
+          ...tunnel.diagnostics(),
+        },
         trace: tunnel.trace,
       }),
     wide: () => matchMedia(DESKTOP_DRAWER_QUERY).matches,
+    pip: deskPip
+      ? {
+          state: () => ({ ...pipStatus, follow: pipFollow }),
+          onChange(listener: () => void) {
+            pipListeners.add(listener);
+            return () => pipListeners.delete(listener);
+          },
+          toggle() {
+            if (pipStatus.active) {
+              stopNativePip();
+              return;
+            }
+            // 先把最新对话推过去，浮窗一出来就有内容
+            pipSync.flush();
+            startNativePip();
+          },
+          setAuto(enabled: boolean) {
+            saveNativePipAuto(localStorage, enabled);
+            setNativePipAuto(enabled);
+            publishPip({ ...pipStatus, auto: enabled });
+          },
+          setAspect(aspect: NativePipAspect) {
+            saveNativePipAspect(localStorage, aspect);
+            setNativePipAspect(aspect);
+            publishPip({ ...pipStatus, aspect });
+          },
+          setFollow(mode: NativePipFollowMode) {
+            pipFollow = mode;
+            saveNativePipFollow(localStorage, mode);
+            if (deskPip.setFollowMode(mode)) pipSync.flush();
+            publishPip({ ...pipStatus });
+          },
+        }
+      : undefined,
   });
 
   const bridge: RemoteBridge = {
@@ -367,19 +522,57 @@ async function main(): Promise<void> {
         void (async () => {
           await keepSnapshot();
           settingsLoaded = false;
+          optimisticHydrated = false;
           await coverWithSnapshot();
           if (iframes.main === iframe) iframe?.contentWindow?.location.reload();
         })();
       });
       attached[kind] = frame;
+      if (kind === 'main') {
+        frame.on(IPC_CHANNELS.AGENT_EVENT, (payload) => {
+          if (deskWidget.applyAgentEventPayload(payload)) syncNativeDeskWidget();
+          if (deskPip?.applyAgentEventPayload(payload)) schedulePipSync();
+        });
+        frame.on(IPC_CHANNELS.CONVERSATIONS_PATCH, (payload) => {
+          if (deskWidget.applyConversationsPatchPayload(payload)) syncNativeDeskWidget();
+          if (deskPip?.applyConversationsPatchPayload(payload)) schedulePipSync();
+        });
+      }
       return {
         invoke: (channel, payload) => {
           const result = frame.invoke(channel, payload);
+          if (deskPip && kind === 'main') {
+            if (
+              channel === IPC_CHANNELS.AGENT_PROMPT ||
+              channel === IPC_CHANNELS.SOURCE_CONVERSATION_SELECT
+            ) {
+              const sessionId = parseInvokeSessionId(payload);
+              if (sessionId && deskPip.setFocusedSession(sessionId)) schedulePipSync();
+            } else if (channel === IPC_CHANNELS.AGENT_PARENT_HISTORY_TAIL) {
+              const conversationId = parseInvokeSessionId(payload);
+              if (conversationId) {
+                deskPip.setFocusedSession(conversationId);
+                schedulePipSync();
+                void result.then(
+                  (json) => {
+                    if (deskPip.ingestHistoryTail(conversationId, json)) schedulePipSync();
+                  },
+                  () => {}
+                );
+              }
+            }
+          }
           if (channel === IPC_CHANNELS.SETTINGS_READ)
             void result.then(() => {
               if (!settingsLoaded) void markReady(version);
               settingsLoaded = true;
+              syncNativeDeskWidget(true);
             });
+          if (
+            channel === IPC_CHANNELS.CONVERSATIONS_READ ||
+            channel === IPC_CHANNELS.SOURCE_AUTHORITY_READ
+          )
+            void result.then(() => syncNativeDeskWidget(true));
           return result;
         },
         send: frame.send,
@@ -391,6 +584,34 @@ async function main(): Promise<void> {
       };
     },
     leader: () => tunnel.leader,
+    prefetch: {
+      take: (key, expectedHash) => {
+        const pending = tunnel.takePrefetch(key, expectedHash);
+        if (pending && key === `${IPC_CHANNELS.SETTINGS_READ}\0[]`) {
+          void pending.then((hit) => {
+            if (hit !== null && hit !== undefined && !settingsLoaded) {
+              settingsLoaded = true;
+              void markReady(version);
+            }
+          });
+        }
+        return pending;
+      },
+    },
+    optimistic: {
+      enabled: true,
+      onHydrated: (channel) => {
+        if (channel === IPC_CHANNELS.SETTINGS_READ) optimisticHydrated = true;
+        syncNativeDeskWidget(true);
+      },
+      onVerified: (channel) => {
+        if (channel === IPC_CHANNELS.SETTINGS_READ && !settingsLoaded) {
+          settingsLoaded = true;
+          void markReady(version);
+        }
+        syncNativeDeskWidget(true);
+      },
+    },
     exitDesk() {
       leaveGuard?.release();
       location.href = PHONE_URL;
@@ -420,6 +641,9 @@ async function main(): Promise<void> {
       if (!parsed) return;
       publishLink(reduceDeskLink(link, { type: 'push', ...parsed }));
     },
+    setViewedSession(sessionId) {
+      if (deskPip?.setFocusedSession(sessionId)) schedulePipSync();
+    },
   };
   (window as Window & { __ensoRemote?: RemoteBridge }).__ensoRemote = bridge;
   // 后退先关抽屉，其余情况确认后才离开
@@ -437,6 +661,7 @@ async function main(): Promise<void> {
    */
   let focusGen = 0;
   const focusSession = (sessionId: string) => {
+    if (deskPip?.setFocusedSession(sessionId)) schedulePipSync();
     const gen = ++focusGen;
     const started = Date.now();
     let sent = 0;
@@ -469,44 +694,60 @@ async function main(): Promise<void> {
   };
 
   /** 按版本寻址的图取到过就留本地副本：冷启动不等桌面，桌面那边换了图地址会变 */
+  const cacheStorage = typeof caches === 'undefined' ? null : caches;
   const deskImageUrl = (path: string) =>
     `${location.origin}/desk/li/${encodeURIComponent(device.pairId)}/${path.slice(3)}`;
   const fetchDeskImage = async (path: string): Promise<DeskAsset> => {
     const url = deskImageUrl(path);
-    const hit = await withTimeout(
-      cachedRemoteImage(caches, url).catch(() => undefined),
-      STORAGE_TIMEOUT_MS,
-      undefined
-    );
+    const hit = cacheStorage
+      ? await withTimeout(
+          cachedRemoteImage(cacheStorage, url).catch(() => undefined),
+          STORAGE_TIMEOUT_MS,
+          undefined
+        )
+      : undefined;
     if (hit) {
       const mime = hit.headers.get('content-type') ?? 'application/octet-stream';
       return { status: 200, mime, body: new Uint8Array(await hit.arrayBuffer()) };
     }
     const asset = await fetchDeskAsset(path);
-    void storeRemoteImage(caches, url, asset).catch(() => {});
+    if (cacheStorage) void storeRemoteImage(cacheStorage, url, asset).catch(() => {});
     return asset;
   };
 
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    const data = event.data as { type?: unknown; path?: unknown; sessionId?: unknown } | null;
-    if (data?.type === 'open-session') {
-      const sessionId = parseSessionId(data.sessionId);
-      if (sessionId) focusSession(sessionId);
-      return;
-    }
-    const port = event.ports[0];
-    if (data?.type !== 'desk-fetch' || typeof data.path !== 'string' || !port) return;
-    const path = data.path;
-    void (path.startsWith('li/') ? fetchDeskImage(path) : fetchDeskAsset(path)).then((asset) => {
-      const body = asset.body.slice().buffer;
-      port.postMessage({ status: asset.status, mime: asset.mime, body }, [body]);
-    });
+  const fetchDeskResource = (path: string): Promise<DeskAsset> =>
+    path.startsWith('li/') ? fetchDeskImage(path) : fetchDeskAsset(path);
+
+  if (nativeDeskProxy) {
+    registerNativeDeskFetcher(fetchDeskResource);
+  }
+  window.addEventListener('enso:open-session', (event) => {
+    const detail = (event as CustomEvent<{ sessionId?: unknown }>).detail;
+    const sessionId = parseSessionId(detail?.sessionId);
+    if (sessionId) focusSession(sessionId);
   });
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      const data = event.data as { type?: unknown; path?: unknown; sessionId?: unknown } | null;
+      if (data?.type === 'open-session') {
+        const sessionId = parseSessionId(data.sessionId);
+        if (sessionId) focusSession(sessionId);
+        return;
+      }
+      const port = event.ports[0];
+      if (data?.type !== 'desk-fetch' || typeof data.path !== 'string' || !port) return;
+      void fetchDeskResource(data.path).then((asset) => {
+        const body = asset.body.slice().buffer;
+        port.postMessage({ status: asset.status, mime: asset.mime, body }, [body]);
+      });
+    });
+  }
 
   /** 某个构建曾完整起来过（资源都在 SW 缓存里）：可以不等宿主，直接起 renderer */
   const cachedBuild = async (meta: DeskMeta): Promise<boolean> => {
+    if (!cacheStorage) return false;
     try {
-      const ready = caches
+      const ready = cacheStorage
         .open(`${DESK_CACHE_PREFIX}${meta.version}`)
         .then((cache) => buildReady(cache, location.origin, deskBase(device.pairId, meta.version)));
       return await withTimeout(ready, STORAGE_TIMEOUT_MS, false);
@@ -516,9 +757,9 @@ async function main(): Promise<void> {
   };
 
   const markReady = async (build: string): Promise<void> => {
-    if (!build) return;
+    if (!build || !cacheStorage) return;
     try {
-      const cache = await caches.open(`${DESK_CACHE_PREFIX}${build}`);
+      const cache = await cacheStorage.open(`${DESK_CACHE_PREFIX}${build}`);
       await markBuildReady(cache, location.origin, deskBase(device.pairId, build));
     } catch {}
   };
@@ -557,7 +798,8 @@ async function main(): Promise<void> {
 
   /** 快照里的远程图换成本地副本；没有副本的去掉，不显示裂图（快照不跑脚本，也可能不经 SW） */
   const localSnapshotImage = async (src: string): Promise<string | null> => {
-    const hit = await snapshotImage(caches, new URL(src, location.origin).href);
+    if (!cacheStorage) return null;
+    const hit = await snapshotImage(cacheStorage, new URL(src, location.origin).href);
     if (!hit) return null;
     const url = URL.createObjectURL(await hit.blob());
     snapshotBlobs.push(url);
@@ -613,6 +855,7 @@ async function main(): Promise<void> {
         now: Date.now(),
         liveChars: liveChars(),
         settingsLoaded,
+        optimisticHydrated,
         liveLoading: Boolean(
           iframes.main?.contentDocument?.querySelector('[data-timeline-loading]')
         ),
@@ -621,18 +864,21 @@ async function main(): Promise<void> {
       });
       if (!ready) return;
       dropSnapshot();
-    }, 200);
+    }, 100);
   };
 
-  /** 只读结果缓存（shim 从父页面取用）：重启 PWA 后带 hash 询问，没变就不用重下设置和历史 */
-  const reads = new Map<string, { h: string; json: string }>();
-  (window as Window & { __ensoRemoteReads?: unknown }).__ensoRemoteReads = reads;
   (window as Window & { __deskTrace?: unknown }).__deskTrace = tunnel.trace;
 
   /** 切后台/离开时存一份当前界面和只读缓存，下次启动先显示它 */
   const keepSnapshot = async (): Promise<void> => {
     if (!version || leaving) return;
-    void saveReads(`${DESK_CACHE_PREFIX}${version}`, base, reads).catch(() => {});
+    const sig = readsSignature(reads);
+    if (sig !== savedReadsSig) {
+      savedReadsSig = sig;
+      void saveReads(`${DESK_CACHE_PREFIX}${version}`, base, reads).catch(() => {
+        savedReadsSig = '';
+      });
+    }
     const doc = iframes.main?.contentDocument;
     if (snapshot || !settingsLoaded || !doc) return;
     await saveSnapshot(`${DESK_CACHE_PREFIX}${version}`, base, doc).catch(() => {});
@@ -642,6 +888,8 @@ async function main(): Promise<void> {
     else clearBadge();
   });
   window.addEventListener('pagehide', () => void keepSnapshot());
+  window.addEventListener('enso:background', () => void keepSnapshot());
+  window.addEventListener('enso:foreground', () => clearBadge());
   clearBadge();
   setInterval(() => {
     if (document.visibilityState === 'visible') void keepSnapshot();
@@ -675,7 +923,6 @@ async function main(): Promise<void> {
     );
   };
 
-  tunnel.start();
   clearTimeout(bootWatchdog);
   const cached = loadDeskMeta(localStorage, device.pairId);
   if (cached) {
@@ -685,7 +932,10 @@ async function main(): Promise<void> {
       new Map<string, { h: string; json: string }>()
     );
     for (const [key, entry] of saved) reads.set(key, entry);
+    savedReadsSig = readsSignature(reads);
+    syncNativeDeskWidget(true);
   }
+  tunnel.start();
   const launched = cached !== null && (await cachedBuild(cached));
   if (launched) {
     use(cached);
@@ -722,29 +972,34 @@ async function main(): Promise<void> {
     `${DESK_CACHE_PREFIX}${current.version}`,
     devices.map((d) => d.pairId)
   );
-  void pruneRemoteImages(
-    caches,
-    devices.map((d) => d.pairId)
-  ).catch(() => {});
+  if (cacheStorage) {
+    void pruneRemoteImages(
+      cacheStorage,
+      devices.map((d) => d.pairId)
+    ).catch(() => {});
+  }
 
   // 上一次启动的构建保留到下次：升级时 SW 从中复用内容未变的带指纹文件
   const keep = new Set([current.version, cached?.version].map((v) => `${DESK_CACHE_PREFIX}${v}`));
-  void caches
-    .keys()
-    .then((keys) =>
-      Promise.all(
-        keys
-          .filter((k) => k.startsWith(DESK_CACHE_PREFIX) && !keep.has(k))
-          .map((k) => caches.delete(k))
+  if (cacheStorage) {
+    void cacheStorage
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((k) => k.startsWith(DESK_CACHE_PREFIX) && !keep.has(k))
+            .map((k) => cacheStorage.delete(k))
+        )
       )
-    )
-    .catch(() => {});
+      .catch(() => {});
+  }
 
   if (launched && cached.version === current.version) return;
   // 桌面已升级（或首次）：换到新构建，旧构建的快照也不再适用
   use(current);
   dropSnapshot();
   settingsLoaded = false;
+  optimisticHydrated = false;
   attached.main?.close();
   delete attached.main;
   iframes.main?.remove();

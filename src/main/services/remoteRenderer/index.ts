@@ -6,12 +6,21 @@ import {
   encodeBase64,
   encodeRemoteValue,
   type HostToRemote,
+  type RemotePrefetchItem,
+  type RemotePrefetchResultItem,
   type RemoteToHost,
 } from '@enso/pair';
-import { app, type IpcEvent, type IpcInvokeEvent, ipcMain } from '@platform';
-import { RemoteReadCache, takeRemoteMarks, writeSeedOf } from '@shared/remoteDelta';
+import { app, type IpcEvent, type IpcInvokeEvent, images, ipcMain } from '@platform';
+import {
+  PREFETCH_READ_CHANNELS,
+  RemoteReadCache,
+  takeRemoteMarks,
+  writeSeedOf,
+} from '@shared/remoteDelta';
+import { compactRemoteWireResult, expandRemoteWireResult } from '@shared/remoteWireCompact';
 import { IPC_CHANNELS } from '@shared/types/ipc';
-import { readSettings } from '../../ipc/settings';
+import { getSourceAuthorityRegistry } from '../../ipc/agent';
+import { readSettings, settingsRevision } from '../../ipc/settings';
 import { handleLocalImageRequest } from '../localImageProtocol';
 import { isPairHeadless, setPairHeadless } from '../pairSessionHost';
 import { localMainContents } from '../renderers';
@@ -20,6 +29,7 @@ import { bundleManifest, downloadEstimate, readRendererAsset, rendererBuildId } 
 import { isRemoteChannelAllowed } from './channels';
 import { withoutConversations } from './conversationSync';
 import { type RemoteLink, setRemoteHostHooks } from './hostHooks';
+import { shrinkRemoteAvatar } from './imageShrink';
 import { installIpcRegistry, registeredHandler, registeredListeners } from './ipcRegistry';
 import { resumeGrace } from './resumeGrace';
 import { trimSecretaryResult } from './secretaryTrim';
@@ -58,10 +68,43 @@ export type { RemoteLink };
 const graceTimers = new Map<number, NodeJS.Timeout>();
 const leaderSent = new Map<number, boolean>();
 
+const readHash = (json: string): string =>
+  createHash('sha1').update(json).digest('base64url').slice(0, 22);
+
 /** 只读结果按内容 hash 缓存（已脱敏），各远端共用 */
-const readCache = new RemoteReadCache((json) =>
-  createHash('sha1').update(json).digest('base64url').slice(0, 22)
-);
+const readCache = new RemoteReadCache(readHash);
+
+/** 按数据源 revision 复用已编码/序列化/哈希的大读包，跳过重复 JSON.stringify 与 sha1 */
+const prehashedReads = new Map<
+  string,
+  { rev: string; data: unknown; json: string; h: string; chars: number }
+>();
+
+function encodePrehashedRead(
+  channel: string,
+  rawResult: unknown
+): { data: unknown; json: string; h: string; chars: number } | null {
+  let rev: string | null = null;
+  if (channel === IPC_CHANNELS.SETTINGS_READ) {
+    rev = String(settingsRevision());
+  } else if (channel === IPC_CHANNELS.CONVERSATIONS_READ) {
+    rev =
+      rawResult && typeof rawResult === 'object'
+        ? `${settingsRevision()}:${(rawResult as { seq?: number }).seq ?? -1}`
+        : null;
+  } else if (channel === IPC_CHANNELS.SOURCE_AUTHORITY_READ) {
+    const registry = getSourceAuthorityRegistry();
+    rev = registry ? String(registry.revision) : null;
+  }
+  if (rev === null) return null;
+  const cached = prehashedReads.get(channel);
+  if (cached?.rev === rev) return cached;
+  const data = encodeRemoteValue(prepareResult(channel, rawResult));
+  const json = JSON.stringify(data ?? null);
+  const entry = { rev, data, json, h: readHash(json), chars: json.length };
+  prehashedReads.set(channel, entry);
+  return entry;
+}
 
 const rendererRoot = (): string => join(app.getAppPath(), 'out', 'renderer');
 
@@ -161,13 +204,31 @@ function prepareArgs(channel: string, args: unknown[]): unknown[] {
   }
 }
 
-function prepareResult(channel: string, result: unknown): unknown {
-  return channel === IPC_CHANNELS.SETTINGS_READ
-    ? redactSecrets(withoutConversations(result))
-    : trimSecretaryResult(channel, result);
+function prepareResult(channel: string, result: unknown, args: unknown[] = []): unknown {
+  if (channel === IPC_CHANNELS.SETTINGS_READ) {
+    return redactSecrets(withoutConversations(result));
+  }
+  if (
+    channel === IPC_CHANNELS.CONVERSATIONS_READ ||
+    channel === IPC_CHANNELS.SOURCE_AUTHORITY_READ
+  ) {
+    return compactRemoteWireResult(channel, result);
+  }
+  if (channel === IPC_CHANNELS.SECRETARY_GET_STATE) {
+    const opts = args[1];
+    const includeAllProposals =
+      typeof opts === 'object' &&
+      opts !== null &&
+      (opts as { includeAllProposals?: unknown }).includeAllProposals === true;
+    return trimSecretaryResult(channel, result, Date.now(), { includeAllProposals });
+  }
+  return trimSecretaryResult(channel, result);
 }
 
-const deliverer = (link: RemoteLink) => (frame: HostToRemote) => link.send(frame);
+const deliverer = (link: RemoteLink) =>
+  Object.assign((frame: HostToRemote) => link.send(frame), {
+    canBatch: () => link.v2 === true,
+  });
 
 function cancelGrace(sender: RemoteSender): void {
   const timer = graceTimers.get(sender.id);
@@ -181,13 +242,78 @@ function dispose(sender: RemoteSender): void {
   sender.destroy();
 }
 
+function formatReadReply(
+  sender: RemoteSender,
+  channel: string,
+  args: unknown[],
+  rawResult: unknown,
+  ifNone: string | undefined
+): unknown {
+  const expandedSeed = (encoded: unknown) =>
+    writeSeedOf(channel, expandRemoteWireResult(channel, encoded))?.value;
+  const prehashed = encodePrehashedRead(channel, rawResult);
+  if (prehashed) {
+    const seed = writeSeedOf(channel, prehashed.data);
+    if (seed) {
+      sender.writes.seedLazy(seed.name, () => expandedSeed(JSON.parse(prehashed.json)));
+    }
+    return ifNone === undefined
+      ? prehashed.data
+      : readCache.respondPrehashed(prehashed.data, prehashed.h, prehashed.chars, ifNone);
+  }
+  const data = encodeRemoteValue(prepareResult(channel, rawResult, args));
+  const seed = writeSeedOf(channel, data);
+  if (seed) {
+    const value = expandedSeed(data);
+    if (value !== undefined) sender.writes.seed(seed.name, value);
+  }
+  return ifNone === undefined ? data : readCache.respond(data, ifNone);
+}
+
+async function runPrefetch(
+  link: RemoteLink,
+  sender: RemoteSender,
+  requests: readonly RemotePrefetchItem[]
+): Promise<void> {
+  const seen = new Set<string>();
+  const leader = isLeader(sender);
+  const event = fakeEvent(sender);
+  const tasks: Promise<RemotePrefetchResultItem | null>[] = [];
+  for (const item of requests) {
+    const dedupeKey = `${item.ch}\0${JSON.stringify(item.args)}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    if (!PREFETCH_READ_CHANNELS.has(item.ch)) continue;
+    if (!isRemoteChannelAllowed(item.ch, leader, hostControl)) continue;
+    const handler = registeredHandler(item.ch);
+    if (!handler) continue;
+    tasks.push(
+      (async () => {
+        try {
+          const decoded = decodeRemoteValue<unknown>(item.args);
+          const args = prepareArgs(item.ch, Array.isArray(decoded) ? decoded : []);
+          const rawResult = await handler(event, ...args);
+          const data = formatReadReply(sender, item.ch, args, rawResult, item.h);
+          return { ch: item.ch, args: item.args, data };
+        } catch {
+          return null;
+        }
+      })()
+    );
+  }
+  const settled = await Promise.all(tasks);
+  if (!sender.online || sender.isDestroyed()) return;
+  const items = settled.filter((entry): entry is RemotePrefetchResultItem => entry !== null);
+  link.send({ type: 'rpc-prefetch', cid: sender.cid, items });
+}
+
 async function hello(link: RemoteLink, command: Extract<RemoteToHost, { type: 'rpc-hello' }>) {
   const version = await rendererBuildId(rendererRoot(), app.getVersion());
   if (!version) {
     link.send({ type: 'rpc-ready', cid: command.cid, ok: false, error: 'renderer-missing' });
     return;
   }
-  const ready = (sender: RemoteSender, resumed: boolean): void => {
+  const ready = (sender: RemoteSender, resumed: boolean, prefetch = false): void => {
     const leader = sender.kind === 'main' && isLeader(sender);
     if (sender.kind === 'main') leaderSent.set(sender.id, leader);
     link.send({
@@ -199,9 +325,10 @@ async function hello(link: RemoteLink, command: Extract<RemoteToHost, { type: 'r
       platform: process.platform,
       leader,
       replay: true,
+      ...(prefetch ? { prefetch: true as const } : {}),
     });
-    // 接入/续连后补发秘书重读通知：丢失过推送的远端借此自愈，提案卡不再停在占位行
-    primeSecretaryRereads(sender, secretaryIdProvider());
+    // 仅断线续连后补发秘书重读通知：丢失过推送的远端借此自愈；冷启动浏览器随即自己拉列表与状态
+    if (resumed) primeSecretaryRereads(sender, secretaryIdProvider());
   };
   const existing = getRemoteSender(link.pairId, command.cid);
   if (existing && existing.kind === command.kind) {
@@ -220,8 +347,10 @@ async function hello(link: RemoteLink, command: Extract<RemoteToHost, { type: 'r
   addRemoteSender(sender);
   sender.page = command.page;
   for (const stale of staleRemoteSenders(link.pairId, command.page)) dispose(stale);
-  ready(sender, false);
+  const prefetch = Array.isArray(command.prefetch) && command.prefetch.length > 0;
+  ready(sender, false, prefetch);
   refreshRemoteLeadership();
+  if (prefetch && command.prefetch) void runPrefetch(link, sender, command.prefetch);
 }
 
 async function invoke(link: RemoteLink, command: Extract<RemoteToHost, { type: 'rpc-invoke' }>) {
@@ -261,17 +390,14 @@ async function invoke(link: RemoteLink, command: Extract<RemoteToHost, { type: '
   }
   const args = prepareArgs(command.ch, raw);
   try {
-    const result = prepareResult(command.ch, await handler(fakeEvent(sender), ...args));
+    const rawResult = await handler(fakeEvent(sender), ...args);
     commit?.();
-    const data = encodeRemoteValue(result);
-    const seed = writeSeedOf(command.ch, data);
-    if (seed) sender.writes.seed(seed.name, seed.value);
     sender.post({
       type: 'rpc-result',
       cid: command.cid,
       id: command.id,
       ok: true,
-      data: marks.ifNone === undefined ? data : readCache.respond(data, marks.ifNone),
+      data: formatReadReply(sender, command.ch, args, rawResult, marks.ifNone),
     });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
@@ -296,11 +422,15 @@ function emit(link: RemoteLink, command: Extract<RemoteToHost, { type: 'rpc-send
 
 async function asset(link: RemoteLink, command: Extract<RemoteToHost, { type: 'asset-get' }>) {
   const reply = (status: number, mime: string, body: Uint8Array) =>
-    link.send({ type: 'asset', id: command.id, status, mime, data: encodeBase64(body) });
+    link.v2
+      ? link.send({ type: 'asset', id: command.id, status, mime, bin: body })
+      : link.send({ type: 'asset', id: command.id, status, mime, data: encodeBase64(body) });
   if (command.path === 'meta') {
     const root = rendererRoot();
     const version = await rendererBuildId(root, app.getVersion());
-    const download = version ? await downloadEstimate(root, link.gzip === true, version) : 0;
+    const download = version
+      ? await downloadEstimate(root, link.gzip === true, version, link.v2 === true)
+      : 0;
     const bundle = version ? (await bundleManifest(root, version))?.id : undefined;
     const body = JSON.stringify(
       version
@@ -334,11 +464,12 @@ async function asset(link: RemoteLink, command: Extract<RemoteToHost, { type: 'a
       reply(413, 'text/plain', new Uint8Array());
       return;
     }
-    reply(
-      response.status,
-      response.headers.get('content-type') ?? 'application/octet-stream',
-      body
-    );
+    const rawMime = response.headers.get('content-type') ?? 'application/octet-stream';
+    const out =
+      response.status === 200
+        ? shrinkRemoteAvatar(url, rawMime, body, images)
+        : { contentType: rawMime, body };
+    reply(response.status, out.contentType, out.body);
     return;
   }
   reply(404, 'text/plain', new Uint8Array());

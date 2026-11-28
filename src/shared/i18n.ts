@@ -29,6 +29,9 @@ export const zhTranslations: Record<string, string> = {
   'Mirror every reply': '同步镜像',
   'Off by default. Every reply in the secretary conversation is sent here, not just milestones.':
     '默认关闭。秘书会话里每一轮回复都发到这里，不只是里程碑。',
+  'Show progress': '显示处理过程',
+  'Off by default. When on, this channel shows the typing indicator, a "Working…" placeholder and tool steps while the secretary works, and the placeholder is replaced in place when the reply is ready. When off, only the final reply is sent and the typing indicator is hidden.':
+    '默认关闭。开启后处理期间会显示「正在输入」状态、处理中占位和工具步骤进度，回复就绪时原位替换；关闭后只发最终回复，并隐藏「正在输入」状态。',
   'Allow viewing memory titles': '允许查看记忆标题',
   'No buttons: questions and cards arrive as numbered text.':
     '没有按钮：提问和确认卡会变成编号文本。',
@@ -743,6 +746,7 @@ export const zhTranslations: Record<string, string> = {
   'Use full chat width': '铺满两侧',
   'Use reading width': '恢复两侧留白',
   'Toggle side panel': '折叠/展开右侧面板',
+  'Close side panel': '关闭右侧面板',
   'Toggle side panel fullscreen': '右侧面板全屏',
   'Toggle minimize to tray': '切换最小化到托盘',
   'Works while the app is in the tray': '应用在托盘时也能切换',
@@ -1189,6 +1193,7 @@ export const zhTranslations: Record<string, string> = {
   'Session choice overrides the project default.': '会话里手动选的模型优先于项目默认。',
   'Conversation title summary': '会话标题总结',
   'Git commit generation': 'Git Commit 生成',
+  'Not configured': '未配置',
   'Model and prompt used by the AI button in the Git commit panel.':
     'Git 提交面板「AI 生成」按钮使用的模型与提示词。',
   'Select provider': '选择服务商',
@@ -1217,7 +1222,6 @@ export const zhTranslations: Record<string, string> = {
   'Click to retry': '点击重试',
   'Selected model is unavailable — falls back to the default model.':
     '所选模型已不可用——将回退到默认模型。',
-  'No default model': '未设置默认模型',
   'No usable models': '没有可用模型',
   'Image generation': '生图模型',
   'Default image generation model': '默认生图模型',
@@ -1228,7 +1232,21 @@ export const zhTranslations: Record<string, string> = {
   'No image generation models available': '没有可用的图像生成模型',
   'Enable a model and configure valid provider credentials first.':
     '请先启用模型并配置有效的服务商凭证。',
-  'Default model changed: {{previous}} → {{next}}': '默认模型已更改：{{previous}} → {{next}}',
+  'Unavailable: {{model}} · {{reason}}': '不可用：{{model}} · {{reason}}',
+  'New conversations will not switch to another model. Pick a usable default model or fix its provider.':
+    '新会话不会改用其他模型。请重新选择可用的默认模型，或修复它的服务商配置。',
+  'Project default model': '项目默认模型',
+  'Group default model': '分组默认模型',
+  '{{scope}} "{{model}}" is unavailable: {{reason}}. No other model will be used. Fix it in Settings or choose a model for this conversation.':
+    '{{scope}}「{{model}}」不可用：{{reason}}。不会改用其他模型；请到设置里修复，或为本会话手动选择模型。',
+  'no model is selected': '未选择模型',
+  'its provider no longer exists': '所属服务商已不存在',
+  'its provider is disabled': '所属服务商已停用',
+  'its provider only serves approval classifiers': '所属服务商只能用于代审分类',
+  "the model is not in its provider's model list": '该模型已不在服务商的模型列表中',
+  'the model is disabled': '该模型已停用',
+  'its provider has no API key': '所属服务商未配置 API Key',
+  'its subscription account is not signed in': '所属订阅账号未登录',
   'Subscription credentials are loading. API-key models remain available.':
     '正在加载订阅凭证，API Key 模型仍可使用。',
   'Subscription credentials could not be loaded: {{error}}': '无法加载订阅凭证：{{error}}',
@@ -2470,6 +2488,50 @@ export const zhTranslations: Record<string, string> = {
   'When to use it, e.g. cheap and fast for simple subtasks':
     '什么时候用它，例如：便宜快，适合简单子任务',
   'Add model': '添加模型',
+  'Add model manually': '手动添加模型',
+  'Quick setup wizard': '快速配置向导',
+  'No subagent models yet': '还没有子代理模型',
+  'Preferred fallback': '首选兜底',
+  'Model unavailable': '模型不可用',
+  'The agent sees this entry with suffix #{{count}}': '主 agent 看到的名称带后缀 #{{count}}',
+  'Disabled ({{count}})': '已停用 ({{count}})',
+  'Pick models only for the roles you need; empty roles are skipped. Roles may share a model.':
+    '只给需要的角色选模型，留空的角色会跳过；不同角色可以选同一个模型。',
+  'Write mode': '写入方式',
+  Customized: '已自定义',
+  'Selection description': '选型描述',
+  'Click to add a description…': '点击编辑添加选型描述…',
+  'Existing models': '已有模型',
+  'Append to existing list': '追加到现有列表',
+  'Replace existing list': '替换现有列表',
+  'Skip this role': '跳过此角色',
+  'Will add {{count}} models (skipping {{skipped}} roles)':
+    '将添加 {{count}} 个模型（跳过 {{skipped}} 个角色）',
+  'Scout · Research': 'Scout · 调研探索',
+  'Read code, search docs, summarize findings.': '读代码、搜索、查文档并汇总结论。',
+  'scout research': 'scout 调研',
+  'Use for lookups and read-only exploration: reading code, searching the repo, checking docs, and summarizing findings. Fast and cheap; do not use it for architecture decisions.':
+    '用于查找和只读探索：读代码、搜索仓库、查文档、汇总结论。快且便宜；不要用它做架构决策。',
+  'Worker · Implementation': 'Worker · 编码实现',
+  'Main coding, bug fixes, scoped subtasks.': '主要编码、修 bug、可独立完成的编码子任务。',
+  'worker build': 'worker 实现',
+  'Use for the main coding work: implementing features, fixing bugs, and self-contained coding subtasks with a clear scope.':
+    '用于主要编码工作：实现功能、修复 bug，以及范围清晰、可独立完成的编码子任务。',
+  'Reviewer · Deep review & architecture': 'Reviewer · 深度评审/架构',
+  'Code review, architecture, hard debugging.': '代码评审、架构权衡、疑难排障。',
+  'reviewer review': 'reviewer 评审',
+  'Use for code review, architecture trade-offs, and hard debugging. Strongest reasoning but slower and pricier; do not use it for bulk scanning.':
+    '用于代码评审、架构权衡和疑难排障。推理最强但更慢更贵；不要用它做批量扫描。',
+  'Tester · Tests': 'Tester · 测试编写',
+  'Failing tests first (TDD), unit coverage.': 'TDD 先写失败的测试，补充单元测试覆盖。',
+  'tester tests': 'tester 测试',
+  'Use for writing tests: failing tests first for TDD, and adding unit test coverage to existing code.':
+    '用于编写测试：TDD 先写失败的测试，为已有代码补充单元测试覆盖。',
+  'Light · Mechanical edits & fallback': '轻量 · 机械改动/兜底',
+  'Bulk mechanical edits, formatting, errands.': '批量机械替换、格式化、高吞吐跑腿。',
+  'light errands': '轻量跑腿',
+  'Use for bulk mechanical replacements, formatting, and high-throughput errands, or as a fallback for exploration. Cheapest; not for tasks that need judgment.':
+    '用于批量机械替换、格式化等高吞吐跑腿，也可作为探索的兜底。最便宜；不用于需要判断的任务。',
   Delete: '删除',
   Archived: '已归档',
   'Clean up archived': '清理已归档',
@@ -4296,11 +4358,14 @@ export const zhTranslations: Record<string, string> = {
   'Edit here': '就地修改',
   'Profile saved': '配置已保存',
   'Saving the profile…': '正在保存配置…',
-  'Check a plugin to give the secretary its agent tools and skills. Tools that are not read-only ask for your approval on every call.':
-    '勾选插件，秘书就能用它的 Agent 工具与技能。不是只读的工具每次调用都要你确认。',
+  'Check a plugin to give the secretary its agent tools and skills. Tools that are not read-only ask for your approval on every call, unless you trust the plugin below.':
+    '勾选插件，秘书就能用它的 Agent 工具与技能。不是只读的工具每次调用都要你确认，除非你在下面信任了这个插件。',
   'No plugins enabled': '没有已启用的插件',
   '{{n}} tools': '{{n}} 个工具',
   'Sends messages': '会投递消息',
+  'Trust this plugin in Full access': '完全放行时信任这个插件',
+  'When on, the secretary calls this plugin’s tools (including sending messages as you) without asking first, every time. It applies only in Full access and only to turns started by you: typed in the app, sent from your paired phone or bound Telegram contact, or delivered by this or another trusted plugin as coming from you (such as Telegram Bot admins). Session reports, colleague messages, triggers and other plugins’ deliveries still ask. Protected action confirmation still applies. Off by default.':
+    '打开后，秘书调用这个插件的工具（包括以你的身份发消息）以后都不再逐次问你。只在「完全放行」档、且这一轮由你发起时生效：在应用里输入、从配对手机或绑定的 Telegram 联系方式发来，或由这个或另一个被信任的插件以你的身份投递（例如 Telegram Bot 的管理员）。会话回传、同事消息、触发器和其他插件投递进来的轮次仍然要确认。「受保护动作确认」照常生效。默认关闭。',
   'Skills the secretary may use. It proposes new ones in the chat; you confirm before anything is written.':
     '秘书可以用的技能。新技能由它在聊天里提案，你确认后才写盘。',
   'Secretary skills': '秘书自有技能',

@@ -108,9 +108,9 @@ describe('snapshotReady', () => {
     // 有请求在途：照旧等
     expect(step({ now: 1000, liveChars: 1000, ...ready, requestsIdle: false })).toBe(false);
     expect(step({ now: 1200, liveChars: 1100, ...ready, requestsIdle: true })).toBe(false);
-    // 会话还在流式输出、文字一直在变，也照样揭开
-    expect(step({ now: 1600, liveChars: 1300, ...ready, requestsIdle: true })).toBe(false);
-    expect(step({ now: 1800, liveChars: 1400, ...ready, requestsIdle: true })).toBe(true);
+    // 会话还在流式输出、文字一直在变，满 250ms 也照样揭开
+    expect(step({ now: 1350, liveChars: 1300, ...ready, requestsIdle: true })).toBe(false);
+    expect(step({ now: 1450, liveChars: 1400, ...ready, requestsIdle: true })).toBe(true);
   });
 
   it('空闲中途又有请求发出：空闲时长重新计', () => {
@@ -119,8 +119,123 @@ describe('snapshotReady', () => {
     expect(step({ now: 1000, liveChars: 1000, ...ready, requestsIdle: true })).toBe(false);
     expect(step({ now: 1400, liveChars: 1100, ...ready, requestsIdle: false })).toBe(false);
     expect(step({ now: 1600, liveChars: 1200, ...ready, requestsIdle: true })).toBe(false);
-    expect(step({ now: 2100, liveChars: 1300, ...ready, requestsIdle: true })).toBe(false);
-    expect(step({ now: 2200, liveChars: 1400, ...ready, requestsIdle: true })).toBe(true);
+    expect(step({ now: 1849, liveChars: 1300, ...ready, requestsIdle: true })).toBe(false);
+    expect(step({ now: 1850, liveChars: 1400, ...ready, requestsIdle: true })).toBe(true);
+  });
+
+  it('实时正文达到阈值后稳定 1.2s 即揭开；不足阈值仍等 2.5s', () => {
+    const enough = snapshotReady({
+      snapChars: 5000,
+      liveChars: 200,
+      stableFor: 1199,
+      elapsed: 2000,
+      settingsLoaded: true,
+      liveLoading: false,
+      hostOnline: true,
+    });
+    expect(enough).toBe(false);
+    expect(
+      snapshotReady({
+        snapChars: 5000,
+        liveChars: 200,
+        stableFor: 1200,
+        elapsed: 2000,
+        settingsLoaded: true,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(true);
+    expect(
+      snapshotReady({
+        snapChars: 5000,
+        liveChars: 199,
+        stableFor: 1200,
+        elapsed: 2000,
+        settingsLoaded: true,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(false);
+    expect(
+      snapshotReady({
+        snapChars: 5000,
+        liveChars: 199,
+        stableFor: 2500,
+        elapsed: 2000,
+        settingsLoaded: true,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(true);
+  });
+
+  it('乐观水合已就绪且正文达标时不必苦等网络完成即可提前揭开快照；正文不足仍继续盖着', () => {
+    expect(
+      snapshotReady({
+        ...base,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveChars: 4200,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(true);
+    // 离线时仍保持快照，给出离线时间提示，不提前暴露未连网的空操作态
+    expect(
+      snapshotReady({
+        ...base,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveChars: 4200,
+        liveLoading: false,
+        hostOnline: false,
+      })
+    ).toBe(false);
+    // 实时时间线仍在加载或文字不足：即使乐观水合完成也继续盖着
+    expect(
+      snapshotReady({
+        ...base,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveChars: 4200,
+        liveLoading: true,
+        hostOnline: true,
+      })
+    ).toBe(false);
+    expect(
+      snapshotReady({
+        ...base,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveChars: 150,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(false);
+  });
+
+  it('tracker 在 optimisticHydrated 提前放行时，文字达标立即揭开', () => {
+    const step = createSnapshotTracker(0, 5000);
+    expect(
+      step({
+        now: 100,
+        liveChars: 50,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(false);
+    expect(
+      step({
+        now: 200,
+        liveChars: 4200,
+        settingsLoaded: false,
+        optimisticHydrated: true,
+        liveLoading: false,
+        hostOnline: true,
+      })
+    ).toBe(true);
   });
 });
 

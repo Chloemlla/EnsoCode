@@ -1,15 +1,20 @@
 import {
+  createRemoteBinaryPartAssembler,
   createRemoteOrderedStream,
   createRemotePartAssembler,
   decodeBase64,
   gunzipRemoteFrame,
   type HostToRemote,
   isHostRemoteFrame,
+  isRemoteBinaryPart,
   isRemotePart,
   type PairedDevice,
   type PhoneToHost,
+  REMOTE_PART_CHARS,
   type RemoteKind,
+  type RemotePrefetchItem,
   type RemoteToHost,
+  splitRemoteBinaryFrame,
   splitRemoteFrame,
 } from '@enso/pair';
 import { IPC_CHANNELS } from '@shared/types/ipc';
@@ -25,6 +30,8 @@ export interface DeskLinkHooks {
   onResuming?(active: boolean): void;
   /** 握手报的桌面构建；返回 true 表示页面要换构建重载，这次握手不再处理 */
   onBuild?(version: string, platform: string): boolean;
+  /** 冷启动时收集可附带在 rpc-hello 里的只读预校验请求 */
+  getPrefetch?(): RemotePrefetchItem[];
 }
 
 export interface DeskAsset {
@@ -57,13 +64,15 @@ interface Slot {
   /** 最近发出的 rpc-send：链路可能在察觉前已断，续上后重发（宿主按 id 去重） */
   sends: Request[];
   /** 宿主帧按 seq 顺序应用；缺口久未补齐则重新 hello 让宿主补发 */
-  stream: ReturnType<typeof createRemoteOrderedStream<Sequenced>>;
+  stream: ReturnType<typeof createRemoteOrderedStream<Sequenced | null>>;
   gapTimer: ReturnType<typeof setTimeout> | null;
   /** 当前缺口从何时开始、开始时的位置（诊断） */
   gap?: { at: number; where: string };
   listeners: Map<string, Set<(payload: string) => void>>;
   /** 宿主已丢失该 renderer（重启/缓冲溢出/超时）：壳重载对应 iframe */
   onReset: () => void;
+  /** attach 早于 online 时预挂好的只读预校验清单，首次 hello 复用而不清空 */
+  armedPrefetch?: RemotePrefetchItem[];
 }
 
 export interface DeskFrame {
@@ -82,6 +91,14 @@ const encodedArgs = (args: unknown[]) => JSON.stringify(args);
 const ASSET_RETRY_MS = 10_000;
 const MAX_RECENT_SENDS = 200;
 const WATCH_MS = 2_000;
+/** 不阻塞首屏内容可读的低优后台通道：仍在途时不拖住快照遮罩揭开 */
+const BACKGROUND_IDLE_CHANNELS: ReadonlySet<string> = new Set([
+  'worktree:list',
+  'worktree:statuses',
+  'projects:get-icon',
+  'projects:get-icons',
+  'updater:getState',
+]);
 /** 每收这么多分片字节回报一次，宿主据此放行下一段（窗口 512KB） */
 const ACK_STEP = 128 * 1024;
 /** 请求超过这么久才回来记进诊断 */
@@ -89,6 +106,8 @@ const SLOW_INVOKE_MS = 1_000;
 /** 缺口超过这么久才补齐的记进诊断；短缺口是大帧走中继、小帧走直连的正常乱序 */
 const SLOW_GAP_MS = 300;
 const CAN_GUNZIP = typeof DecompressionStream === 'function';
+const PREFETCH_TIMEOUT_MS = 4_000;
+const PREFETCH_READY_TTL_MS = 30_000;
 
 /** 桌面模式不用手机版的会话缓存：连接前读 IndexedDB 里的全部会话正文只会拖慢启动 */
 const NO_CACHE: PhoneCacheStore = {
@@ -118,6 +137,8 @@ export class DeskTunnel {
     }
   >();
   private parts = createRemotePartAssembler();
+  private binaryParts = createRemoteBinaryPartAssembler();
+  private postTail: Promise<void> | null = null;
   /** 同一路径在途只请求一次（modulepreload 与 import 会同时向 SW 取同一个大文件） */
   private assetPaths = new Map<string, Promise<DeskAsset>>();
   /** 最近一次收到大帧（分片、资源）：小帧刷屏不代表缺失的那一帧还在路上 */
@@ -132,6 +153,22 @@ export class DeskTunnel {
   private resuming = false;
   leader = false;
   private readOnly = false;
+  private prefetchPending = new Map<
+    string,
+    Map<
+      string,
+      {
+        h: string;
+        promise: Promise<unknown>;
+        resolve: (data: unknown) => void;
+        settled: boolean;
+        taken: boolean;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >
+  >();
+  private prefetchReady = new Map<string, Map<string, { h: string; data: unknown; at: number }>>();
+  private prefetchHits = 0;
   /** 本次页面加载：宿主据此回收旧页面遗留的 renderer */
   private readonly page = crypto.randomUUID();
   /** 链路诊断：缺口、重新 hello、换链等关键时刻（壳挂到 window.__deskTrace，排查卡顿用） */
@@ -191,6 +228,13 @@ export class DeskTunnel {
     this.client.close();
   }
 
+  diagnostics(): Record<string, unknown> {
+    return {
+      ...this.client.diagnostics(),
+      prefetchHits: this.prefetchHits,
+    };
+  }
+
   start(): void {
     const client = this.client;
     client.connect();
@@ -216,6 +260,16 @@ export class DeskTunnel {
       // 真卸载（刷新/离开）尽力告别；进 bfcache 的页面可能回来，不发
       if (!event.persisted && this.online)
         for (const cid of this.slots.keys()) this.post({ type: 'rpc-bye', cid });
+    });
+    window.addEventListener('enso:background', () => {
+      this.note('native-bg');
+      client.conceal();
+      client.send({ type: 'presence', visible: false });
+    });
+    window.addEventListener('enso:foreground', () => {
+      this.note('native-fg');
+      client.nudge('visibility');
+      client.send({ type: 'presence', visible: true });
     });
   }
 
@@ -291,9 +345,43 @@ export class DeskTunnel {
   }
 
   private post(message: RemoteToHost): void {
+    if (this.postTail) {
+      const next = this.postTail.then(() => this.sendPost(message));
+      this.postTail = next.finally(() => {
+        if (this.postTail === next) this.postTail = null;
+      });
+      return;
+    }
+    const pending = this.sendPost(message);
+    if (pending) {
+      this.postTail = pending.finally(() => {
+        if (this.postTail === pending) this.postTail = null;
+      });
+    }
+  }
+
+  private sendPost(message: RemoteToHost): Promise<void> | undefined {
+    const hasBin = 'bin' in message && message.bin instanceof Uint8Array;
+    if (!hasBin) {
+      const text = JSON.stringify(message);
+      if (text.length <= REMOTE_PART_CHARS) {
+        this.client.send(message as PhoneToHost);
+        return undefined;
+      }
+    }
+    if (this.client.hostV2) {
+      return splitRemoteBinaryFrame(message, () => crypto.randomUUID())
+        .then((frames) => {
+          for (const frame of frames) {
+            this.client.send(frame as PhoneToHost, { bulk: frame.type === 'bpart' });
+          }
+        })
+        .catch(() => {});
+    }
     for (const frame of splitRemoteFrame(message, () => crypto.randomUUID())) {
       this.client.send(frame as PhoneToHost, { bulk: frame.type === 'part' });
     }
+    return undefined;
   }
 
   private ack(): void {
@@ -301,8 +389,52 @@ export class DeskTunnel {
     this.client.send({
       type: 'remote-ack',
       bytes: this.receivedBytes,
-      ...(CAN_GUNZIP ? { gzip: true as const } : {}),
+      ...(CAN_GUNZIP ? { gzip: true as const, v2: true as const } : {}),
     });
+  }
+
+  private armPrefetch(slot: Slot, armTimeoutMs: number): RemotePrefetchItem[] {
+    if (slot.everReady || slot.kind !== 'main') return [];
+    const prefetch = this.link.getPrefetch?.() ?? [];
+    this.clearPrefetch(slot.cid);
+    slot.armedPrefetch = undefined;
+    if (prefetch.length === 0) return [];
+    const map = new Map<
+      string,
+      {
+        h: string;
+        promise: Promise<unknown>;
+        resolve: (data: unknown) => void;
+        settled: boolean;
+        taken: boolean;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >();
+    for (const item of prefetch) {
+      const key = `${item.ch}\0${JSON.stringify(item.args)}`;
+      if (map.has(key)) continue;
+      let resolve!: (data: unknown) => void;
+      const promise = new Promise<unknown>((res) => {
+        resolve = res;
+      });
+      const entry = {
+        h: item.h,
+        promise,
+        resolve,
+        settled: false,
+        taken: false,
+        timer: setTimeout(() => {
+          if (entry.settled) return;
+          entry.settled = true;
+          map.delete(key);
+          resolve(null);
+        }, armTimeoutMs),
+      };
+      map.set(key, entry);
+    }
+    this.prefetchPending.set(slot.cid, map);
+    slot.armedPrefetch = prefetch;
+    return prefetch;
   }
 
   private hello(slot: Slot): void {
@@ -313,13 +445,81 @@ export class DeskTunnel {
       slot.gapTimer = null;
       this.watchGap(slot, slot.helloAt, false);
     }
+    let prefetch: RemotePrefetchItem[] = [];
+    if (!slot.everReady && slot.kind === 'main') {
+      const existingMap = this.prefetchPending.get(slot.cid);
+      if (slot.armedPrefetch && existingMap && existingMap.size > 0) {
+        // attach 早于 online 预挂好的 pending：保留已有 promise 让早到的 takePrefetch 直接命中，并重置超时
+        prefetch = slot.armedPrefetch;
+        slot.armedPrefetch = undefined;
+        for (const [key, entry] of existingMap) {
+          if (entry.settled) continue;
+          clearTimeout(entry.timer);
+          entry.timer = setTimeout(() => {
+            if (entry.settled) return;
+            entry.settled = true;
+            existingMap.delete(key);
+            entry.resolve(null);
+          }, PREFETCH_TIMEOUT_MS);
+        }
+      } else {
+        prefetch = this.armPrefetch(slot, PREFETCH_TIMEOUT_MS);
+        slot.armedPrefetch = undefined;
+      }
+    } else {
+      this.clearPrefetch(slot.cid);
+      slot.armedPrefetch = undefined;
+    }
     this.post({
       type: 'rpc-hello',
       cid: slot.cid,
       kind: slot.kind,
       seq: slot.stream.applied,
       page: this.page,
+      ...(prefetch.length > 0 ? { prefetch } : {}),
     });
+  }
+
+  /** 消费冷启动 rpc-hello 捎带的只读预校验结果；无匹配或已消费过时返回 null */
+  takePrefetch(key: string, expectedHash: string): Promise<unknown> | null {
+    const now = Date.now();
+    for (const [cid, readyMap] of this.prefetchReady) {
+      const hit = readyMap.get(key);
+      if (!hit) continue;
+      readyMap.delete(key);
+      if (readyMap.size === 0) this.prefetchReady.delete(cid);
+      if (hit.h === expectedHash && now - hit.at <= PREFETCH_READY_TTL_MS) {
+        this.prefetchHits += 1;
+        return Promise.resolve(hit.data);
+      }
+      return null;
+    }
+    for (const pendingMap of this.prefetchPending.values()) {
+      const entry = pendingMap.get(key);
+      if (!entry || entry.h !== expectedHash || entry.settled || entry.taken) continue;
+      entry.taken = true;
+      this.prefetchHits += 1;
+      return entry.promise;
+    }
+    return null;
+  }
+
+  private resolvePendingPrefetch(cid: string): void {
+    const pendingMap = this.prefetchPending.get(cid);
+    if (!pendingMap) return;
+    this.prefetchPending.delete(cid);
+    for (const entry of pendingMap.values()) {
+      clearTimeout(entry.timer);
+      if (!entry.settled) {
+        entry.settled = true;
+        entry.resolve(null);
+      }
+    }
+  }
+
+  private clearPrefetch(cid: string): void {
+    this.resolvePendingPrefetch(cid);
+    this.prefetchReady.delete(cid);
   }
 
   /** 续上后重发宿主可能没收到的请求：未决 invoke 与最近的 send，按发出顺序，排在离线队列之前 */
@@ -333,7 +533,14 @@ export class DeskTunnel {
 
   private ordered(slot: Slot, frame: Sequenced): void {
     const before = slot.stream.applied;
-    for (const ready of slot.stream.push(frame.seq, frame)) this.apply(slot, ready);
+    // rpc-result 按 req id 一一对应，不等前置 rpc-event 补齐即可先兑现 invoke，避开队头阻塞
+    if (frame.type === 'rpc-result' && frame.seq !== undefined && frame.seq > slot.stream.applied) {
+      this.apply(slot, frame);
+    }
+    const item = frame.type === 'rpc-result' ? null : frame;
+    for (const ready of slot.stream.push(frame.seq, item)) {
+      if (ready) this.apply(slot, ready);
+    }
     if (slot.stream.applied > before) slot.appliedAt = Date.now();
     if (slot.stream.overflowed) {
       this.reset(slot);
@@ -434,9 +641,29 @@ export class DeskTunnel {
   }
 
   private receive(frame: HostToRemote, nested = false): void {
+    if (isRemoteBinaryPart(frame)) {
+      this.lastBulk = Date.now();
+      if (!nested) {
+        this.downloadedBytes += frame.bin.byteLength;
+        this.receivedBytes += frame.bin.byteLength;
+        if (this.receivedBytes - this.ackedBytes >= ACK_STEP) this.ack();
+      }
+      void this.binaryParts.push(frame).then((assembled) => {
+        const type = (assembled as { type?: unknown } | null)?.type;
+        if (typeof type !== 'string' || type === 'gzip' || type === 'part' || type === 'bpart') {
+          return;
+        }
+        if (isHostRemoteFrame({ type })) this.receive(assembled as HostToRemote, true);
+      });
+      return;
+    }
     if (isRemotePart(frame) || frame.type === 'asset') this.lastBulk = Date.now();
-    if (!nested && (isRemotePart(frame) || frame.type === 'asset' || frame.type === 'gzip'))
-      this.downloadedBytes += frame.data.length;
+    if (!nested && (isRemotePart(frame) || frame.type === 'asset' || frame.type === 'gzip')) {
+      this.downloadedBytes +=
+        frame.type === 'asset'
+          ? (frame.bin?.byteLength ?? frame.data?.length ?? 0)
+          : frame.data.length;
+    }
     if (isRemotePart(frame)) {
       this.receivedBytes += frame.data.length;
       if (this.receivedBytes - this.ackedBytes >= ACK_STEP) this.ack();
@@ -446,7 +673,8 @@ export class DeskTunnel {
         typeof assembled === 'object' &&
         typeof (assembled as { type?: unknown }).type === 'string' &&
         isHostRemoteFrame(assembled as { type: string }) &&
-        !isRemotePart(assembled)
+        !isRemotePart(assembled) &&
+        !isRemoteBinaryPart(assembled)
       ) {
         this.receive(assembled as HostToRemote, true);
       }
@@ -456,7 +684,9 @@ export class DeskTunnel {
       case 'gzip':
         void gunzipRemoteFrame(frame).then((inner) => {
           const type = (inner as { type?: unknown } | null)?.type;
-          if (typeof type !== 'string' || type === 'gzip' || type === 'part') return;
+          if (typeof type !== 'string' || type === 'gzip' || type === 'part' || type === 'bpart') {
+            return;
+          }
           if (isHostRemoteFrame({ type })) this.receive(inner as HostToRemote, true);
         });
         return;
@@ -465,7 +695,8 @@ export class DeskTunnel {
         if (!pending) return;
         this.assets.delete(frame.id);
         clearInterval(pending.retry);
-        pending.resolve({ status: frame.status, mime: frame.mime, body: decodeBase64(frame.data) });
+        const body = frame.bin instanceof Uint8Array ? frame.bin : decodeBase64(frame.data ?? '');
+        pending.resolve({ status: frame.status, mime: frame.mime, body });
         return;
       }
       case 'rpc-ready': {
@@ -476,6 +707,7 @@ export class DeskTunnel {
           return;
         }
         if (this.link.onBuild?.(frame.version, frame.platform)) return;
+        if (frame.prefetch !== true) this.resolvePendingPrefetch(frame.cid);
         const lost = slot.everReady && !frame.resumed;
         const resumed = slot.everReady && frame.resumed;
         this.note(`ready ${slot.cid.slice(0, 4)} resumed=${frame.resumed}`);
@@ -502,10 +734,58 @@ export class DeskTunnel {
         if (slot) this.ordered(slot, frame);
         return;
       }
+      case 'rpc-batch': {
+        if (!Array.isArray(frame.frames)) return;
+        for (const item of frame.frames) {
+          if (!item || typeof item !== 'object') continue;
+          if (item.type !== 'rpc-result' && item.type !== 'rpc-event') continue;
+          const slot = this.slots.get(item.cid);
+          if (slot) this.ordered(slot, item);
+        }
+        return;
+      }
+      case 'rpc-prefetch': {
+        const slot = this.slots.get(frame.cid);
+        if (!slot || !Array.isArray(frame.items)) {
+          this.clearPrefetch(frame.cid);
+          return;
+        }
+        const pendingMap = this.prefetchPending.get(frame.cid);
+        let readyMap = this.prefetchReady.get(frame.cid);
+        const now = Date.now();
+        for (const item of frame.items) {
+          if (!item || typeof item.ch !== 'string' || !Array.isArray(item.args)) continue;
+          const key = `${item.ch}\0${JSON.stringify(item.args)}`;
+          const entry = pendingMap?.get(key);
+          if (!entry) continue;
+          clearTimeout(entry.timer);
+          pendingMap?.delete(key);
+          this.note(`prefetch ${item.ch}`);
+          if (entry.taken) {
+            if (!entry.settled) {
+              entry.settled = true;
+              entry.resolve(item.data);
+            }
+          } else {
+            if (!readyMap) {
+              readyMap = new Map();
+              this.prefetchReady.set(frame.cid, readyMap);
+            }
+            readyMap.set(key, { h: entry.h, data: item.data, at: now });
+            if (!entry.settled) {
+              entry.settled = true;
+              entry.resolve(null);
+            }
+          }
+        }
+        this.resolvePendingPrefetch(frame.cid);
+        return;
+      }
     }
   }
 
   private drop(slot: Slot, reason: string): void {
+    this.clearPrefetch(slot.cid);
     for (const pending of slot.pending.values()) pending.reject(new Error(reason));
     slot.pending.clear();
     slot.queue = [];
@@ -529,7 +809,7 @@ export class DeskTunnel {
       queue: [],
       pending: new Map(),
       sends: [],
-      stream: createRemoteOrderedStream<Sequenced>(),
+      stream: createRemoteOrderedStream<Sequenced | null>(),
       gapTimer: null,
       listeners: new Map(),
       onReset,
@@ -537,6 +817,7 @@ export class DeskTunnel {
     this.slots.set(slot.cid, slot);
     this.note(`attach ${kind} ${slot.cid.slice(0, 4)}`);
     if (this.online) this.hello(slot);
+    else this.armPrefetch(slot, PREFETCH_TIMEOUT_MS * 2);
     return {
       invoke: (channel, payload) =>
         new Promise<string>((resolve, reject) => {
@@ -582,12 +863,16 @@ export class DeskTunnel {
     };
   }
 
-  /** 该类 renderer 都已续上、没有在途请求、宿主帧没有缺口（启动遮罩据此判断数据到齐） */
+  /** 该类 renderer 都已续上、没有核心在途请求、宿主帧没有缺口（启动遮罩据此判断数据到齐） */
   idle(kind: RemoteKind): boolean {
     if (!this.online) return false;
-    for (const slot of this.slots.values())
-      if (slot.kind === kind && (!slot.ready || slot.pending.size > 0 || slot.stream.gap))
-        return false;
+    for (const slot of this.slots.values()) {
+      if (slot.kind !== kind) continue;
+      if (!slot.ready || slot.stream.gap) return false;
+      for (const entry of slot.pending.values()) {
+        if (!BACKGROUND_IDLE_CHANNELS.has(entry.message.ch)) return false;
+      }
+    }
     return true;
   }
 

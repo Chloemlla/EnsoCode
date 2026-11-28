@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -31,13 +32,15 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	store  *Store
-	hub    *hub
-	static fs.FS
-	desk   func() *deskBundle
-	shell  sync.Map
-	now    func() int64
-	log    *slog.Logger
+	store    *Store
+	hub      *hub
+	static   fs.FS
+	desk     func() *deskBundle
+	shell    sync.Map
+	now      func() int64
+	log      *slog.Logger
+	quicPort atomic.Int32
+	apns     *apnsGateway
 }
 
 func newServer(store *Store, static fs.FS, log *slog.Logger) *Server {
@@ -89,10 +92,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/v1/pair/claim" && r.Method == http.MethodPost:
 		s.handleClaim(w, r)
 	case p == "/healthz" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		body := map[string]any{"ok": true, "apns": s.apns != nil}
+		if qp := s.quicPort.Load(); qp > 0 {
+			body["quic"] = true
+			body["quicPort"] = int(qp)
+			body["alpn"] = quicALPN
+		}
+		writeJSON(w, http.StatusOK, body)
 	case strings.HasPrefix(p, "/"+deskBundleDir+"/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		s.desk().serve(w, r, strings.TrimPrefix(p, "/"+deskBundleDir+"/"))
 	default:
+		if envName, token, ok := parseAPNSPath(p); ok && r.Method == http.MethodPost {
+			s.handleAPNSPush(w, r, envName, token)
+			return
+		}
 		if pairID, ok := pairIDFromPath(p); ok {
 			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 				s.handleConnect(w, r, pairID)
@@ -251,6 +264,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, pairID st
 		return
 	}
 
+	relayEpoch := r.URL.Query().Get("relayEpoch")
+	if len(relayEpoch) > 64 {
+		relayEpoch = ""
+	}
+	sinceStr := r.URL.Query().Get("sinceRelaySeq")
+	sinceSeq, sinceErr := strconv.ParseUint(sinceStr, 10, 64)
+	hasSince := sinceStr != "" && sinceErr == nil
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -258,7 +279,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, pairID st
 	conn.SetReadLimit(maxFrameBytes)
 	p := newPeer(role, conn)
 	go p.writePump(conn)
-	s.hub.join(pairID, role, p)
+	s.hub.joinWithResume(pairID, role, p, relayEpoch, sinceSeq, hasSince)
 	s.readPump(conn, pairID, role, p)
 }
 
